@@ -2,7 +2,7 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @file instrument-for-browser.mjs
+ * @file bin/instrument-for-browser.mjs
  *
  * 对目标 JS 文件插桩，输出**单个自包含文件**：
  *   [Jalangi2 运行时 IIFE] + [插桩后的目标代码]
@@ -15,7 +15,7 @@
  * rollup 完全静态分析，无动态 import，无正则替换，无歧义。
  *
  * 用法：
- *   node scripts/instrument-for-browser.mjs [选项] <目标文件>
+ *   node bin/instrument-for-browser.mjs [选项] <目标文件>
  *
  * 选项：
  *   --output <file>    输出文件路径（默认：in-place 覆盖原文件）
@@ -122,7 +122,7 @@ function parseArgs(argv) {
 function printHelp() {
     console.log(`
 用法：
-  node scripts/instrument-for-browser.mjs [选项] <目标文件>
+  node bin/instrument-for-browser.mjs [选项] <目标文件>
 
 选项：
   --output <file>     输出文件路径（默认：in-place 覆盖原文件）
