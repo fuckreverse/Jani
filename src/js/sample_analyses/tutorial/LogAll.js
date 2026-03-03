@@ -1,176 +1,203 @@
-/*
- * Copyright 2016 Samsung Information Systems America, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *        http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-// Author: Koushik Sen
-
-// do not remove the following comment
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @file A Jalangi 2 analysis to log all callbacks
- * @author  Koushik Sen
+ * @file LogAll —— 记录所有运行时事件的示例分析插件。
  *
+ * 演示"新式"插件写法：
+ *  - 插件是一个普通的 class，不依赖任何框架全局变量
+ *  - 所有外部依赖（smemory）通过构造函数参数显式注入
+ *  - 通过 ESM export 导出，由调用方决定如何注册
+ *
+ * 用法示例：
+ *
+ *   import { AnalysisHost }             from '../../runtime/AnalysisHost.js';
+ *   import { SMemory, SMemoryPlugin }   from '../../runtime/SMemory.js';
+ *   import { LogAllAnalysis }           from './LogAll.js';
+ *
+ *   const smemory = new SMemory(J$.Constants);
+ *   J$.smemory  = smemory;
+ *   J$.analysis = new AnalysisHost()
+ *       .use(new SMemoryPlugin(smemory))
+ *       .use(new LogAllAnalysis(smemory));
  */
 
-(function (sandbox) {
-    function MyAnalysis() {
-
-        function getValue(v) {
-            var type = typeof v;
-            if ((type === 'object' || type ==='function') && v!== null) {
-                var shadowObj = sandbox.smemory.getShadowObjectOfObject(v);
-                return sandbox.smemory.getIDFromShadowObjectOrFrame(shadowObj);
-            } else {
-                return v;
-            }
-        }
-
-
-        this.invokeFunPre = function (iid, f, base, args, isConstructor, isMethod, functionIid) {
-            return {f: f, base: base, args: args, skip: false};
-        };
-
-        this.invokeFun = function (iid, f, base, args, result, isConstructor, isMethod, functionIid) {
-            return {result: result};
-        };
-
-        this.literal = function (iid, val, hasGetterSetter) {
-            return {result: val};
-        };
-
-        this.forinObject = function (iid, val) {
-            return {result: val};
-        };
-
-        this.declare = function (iid, name, val, isArgument, argumentIndex, isCatchParam) {
-            return {result: val};
-        };
-
-        this.getFieldPre = function (iid, base, offset, isComputed, isOpAssign, isMethodCall) {
-            return {base: base, offset: offset, skip: false};
-        };
-
-        this.getField = function (iid, base, offset, val, isComputed, isOpAssign, isMethodCall) {
-            var shadowObj = sandbox.smemory.getShadowObject(base, offset, true);
-            var args = {base: sandbox.smemory.getIDFromShadowObjectOrFrame(shadowObj.owner), offset: offset, val: getValue(val), isComputed: isComputed, isOpAssign: isOpAssign, isMethodCall: isMethodCall};
-            console.log("getField("+JSON.stringify(args)+") at " + J$.iidToLocation(J$.sid, iid));
-            return {result: val};
-        };
-
-        this.putFieldPre = function (iid, base, offset, val, isComputed, isOpAssign) {
-            return {base: base, offset: offset, val: val, skip: false};
-        };
-
-        this.putField = function (iid, base, offset, val, isComputed, isOpAssign) {
-            var shadowObj = sandbox.smemory.getShadowObject(base, offset, true);
-            var args = {base: sandbox.smemory.getIDFromShadowObjectOrFrame(shadowObj.owner), offset: offset, val: getValue(val), isComputed: isComputed, isOpAssign: isOpAssign};
-            console.log("putField("+JSON.stringify(args)+") at " + J$.iidToLocation(J$.sid, iid));
-            return {result: val};
-        };
-
-        this.read = function (iid, name, val, isGlobal, isScriptLocal) {
-            return {result: val};
-        };
-
-        this.write = function (iid, name, val, lhs, isGlobal, isScriptLocal) {
-            return {result: val};
-        };
-
-        this._return = function (iid, val) {
-            return {result: val};
-        };
-
-        this._throw = function (iid, val) {
-            return {result: val};
-        };
-
-        this._with = function (iid, val) {
-            return {result: val};
-        };
-
-        this.functionEnter = function (iid, f, dis, args) {
-        };
-
-        this.functionExit = function (iid, returnVal, wrappedExceptionVal) {
-            return {returnVal: returnVal, wrappedExceptionVal: wrappedExceptionVal, isBacktrack: false};
-        };
-
-        this.scriptEnter = function (iid, instrumentedFileName, originalFileName) {
-        };
-
-        this.scriptExit = function (iid, wrappedExceptionVal) {
-            return {wrappedExceptionVal: wrappedExceptionVal, isBacktrack: false};
-        };
-
-        this.binaryPre = function (iid, op, left, right, isOpAssign, isSwitchCaseComparison, isComputed) {
-            return {op: op, left: left, right: right, skip: false};
-        };
-
-        this.binary = function (iid, op, left, right, result, isOpAssign, isSwitchCaseComparison, isComputed) {
-            return {result: result};
-        };
-
-        this.unaryPre = function (iid, op, left) {
-            return {op: op, left: left, skip: false};
-        };
-
-        this.unary = function (iid, op, left, result) {
-            return {result: result};
-        };
-
-        this.conditional = function (iid, result) {
-            return {result: result};
-        };
-
-        this.instrumentCodePre = function (iid, code, isDirect) {
-            return {code: code, skip: false};
-        };
-
-        this.instrumentCode = function (iid, newCode, newAst, isDirect) {
-            return {result: newCode};
-        };
-
-        this.endExpression = function (iid) {
-        };
-
-        this.endExecution = function () {
-        };
-
-        this.runInstrumentedFunctionBody = function (iid, f, functionIid) {
-            return false;
-        };
-
-        /**
-         * onReady is useful if your analysis is running on node.js (i.e., via the direct.js or jalangi.js commands)
-         * and needs to complete some asynchronous initialization before the instrumented program starts.  In such a
-         * case, once the initialization is complete, invoke the cb function to start execution of the instrumented
-         * program.
-         *
-         * Note that this callback is not useful in the browser, as Jalangi has no control over when the
-         * instrumented program runs there.
-         * @param cb
-         */
-        this.onReady = function (cb) {
-            cb();
-        };
+/**
+ * LogAllAnalysis —— 记录所有运行时事件。
+ *
+ * @param {SMemory} [smemory] - 可选，不传则跳过影子内存相关日志
+ */
+class LogAllAnalysis {
+    constructor(smemory = null) {
+        this._mem = smemory;
     }
 
-    sandbox.analysis = new MyAnalysis();
-})(J$);
+    _getValue(v) {
+        if (!this._mem) return v;
+        const type = typeof v;
+        if ((type === 'object' || type === 'function') && v !== null) {
+            const shadowObj = this._mem.getShadowObjectOfObject(v);
+            return this._mem.getIDFromShadowObjectOrFrame(shadowObj);
+        }
+        return v;
+    }
 
+    _loc(iid) {
+        if (typeof J$ !== 'undefined' && J$.iidToLocation) {
+            return J$.iidToLocation(J$.sid, iid);
+        }
+        return String(iid);
+    }
 
-// node src/js/commands/jalangi.js --inlineIID --inlineSource --analysis src/js/sample_analyses/ChainedAnalyses.js --analysis src/js/runtime/SMemory.js --analysis src/js/sample_analyses/tutorial/LogAll.js tests/octane/deltablue.js
+    // ── 函数调用 ───────────────────────────────────────────────────────────────
 
+    invokeFunPre(iid, f, base, args, isConstructor, isMethod) {
+        return { f, base, args, skip: false };
+    }
+
+    invokeFun(iid, f, base, args, result, isConstructor, isMethod) {
+        return { result };
+    }
+
+    // ── 字面量 ─────────────────────────────────────────────────────────────────
+
+    literal(iid, val, hasGetterSetter) {
+        return { result: val };
+    }
+
+    // ── for-in ─────────────────────────────────────────────────────────────────
+
+    forinObject(iid, val) {
+        return { result: val };
+    }
+
+    // ── 变量声明 ────────────────────────────────────────────────────────────────
+
+    declare(iid, name, val, isArgument, argumentIndex, isCatchParam) {
+        return { result: val };
+    }
+
+    // ── 属性读取 ────────────────────────────────────────────────────────────────
+
+    getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall) {
+        return { base, offset, skip: false };
+    }
+
+    getField(iid, base, offset, val, isComputed, isOpAssign, isMethodCall) {
+        if (this._mem) {
+            const shadowObj = this._mem.getShadowObject(base, offset, true);
+            console.log('getField(' + JSON.stringify({
+                base:         this._mem.getIDFromShadowObjectOrFrame(shadowObj.owner),
+                offset,
+                val:          this._getValue(val),
+                isComputed,
+                isOpAssign,
+                isMethodCall,
+            }) + ') at ' + this._loc(iid));
+        }
+        return { result: val };
+    }
+
+    // ── 属性写入 ────────────────────────────────────────────────────────────────
+
+    putFieldPre(iid, base, offset, val, isComputed, isOpAssign) {
+        return { base, offset, val, skip: false };
+    }
+
+    putField(iid, base, offset, val, isComputed, isOpAssign) {
+        if (this._mem) {
+            const shadowObj = this._mem.getShadowObject(base, offset, true);
+            console.log('putField(' + JSON.stringify({
+                base:       this._mem.getIDFromShadowObjectOrFrame(shadowObj.owner),
+                offset,
+                val:        this._getValue(val),
+                isComputed,
+                isOpAssign,
+            }) + ') at ' + this._loc(iid));
+        }
+        return { result: val };
+    }
+
+    // ── 变量读写 ────────────────────────────────────────────────────────────────
+
+    read(iid, name, val, isGlobal, isScriptLocal) {
+        return { result: val };
+    }
+
+    write(iid, name, val, lhs, isGlobal, isScriptLocal) {
+        return { result: val };
+    }
+
+    // ── 控制流 ─────────────────────────────────────────────────────────────────
+
+    _return(iid, val)  { return { result: val }; }
+    _throw(iid, val)   { return { result: val }; }
+    _with(iid, val)    { return { result: val }; }
+
+    // ── 函数进出 ────────────────────────────────────────────────────────────────
+
+    functionEnter(iid, f, dis, args) {}
+
+    functionExit(iid, returnVal, wrappedExceptionVal) {
+        return { returnVal, wrappedExceptionVal, isBacktrack: false };
+    }
+
+    // ── 脚本进出 ────────────────────────────────────────────────────────────────
+
+    scriptEnter(iid, instrumentedFileName, originalFileName) {}
+
+    scriptExit(iid, wrappedExceptionVal) {
+        return { wrappedExceptionVal, isBacktrack: false };
+    }
+
+    // ── 运算 ───────────────────────────────────────────────────────────────────
+
+    binaryPre(iid, op, left, right, isOpAssign, isSwitchCaseComparison, isComputed) {
+        return { op, left, right, skip: false };
+    }
+
+    binary(iid, op, left, right, result, isOpAssign, isSwitchCaseComparison, isComputed) {
+        return { result };
+    }
+
+    unaryPre(iid, op, left) {
+        return { op, left, skip: false };
+    }
+
+    unary(iid, op, left, result) {
+        return { result };
+    }
+
+    conditional(iid, result) {
+        return { result };
+    }
+
+    // ── eval 插桩 ──────────────────────────────────────────────────────────────
+
+    instrumentCodePre(iid, code, isDirect) {
+        return { code, skip: false };
+    }
+
+    instrumentCode(iid, newCode, newAst, isDirect) {
+        return { result: newCode };
+    }
+
+    // ── 其他 ───────────────────────────────────────────────────────────────────
+
+    endExpression(iid) {}
+
+    endExecution() {}
+
+    runInstrumentedFunctionBody(iid, f, functionIid) {
+        return false;
+    }
+
+    /**
+     * onReady：Node.js 模式下，异步初始化完成后调用 cb 开始执行目标程序。
+     * 浏览器下此回调不生效。
+     */
+    onReady(cb) {
+        cb();
+    }
+}
+
+export { LogAllAnalysis };
