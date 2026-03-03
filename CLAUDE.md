@@ -35,13 +35,18 @@ esnstrument.js        ← 所有上述模块 + acorn + astring
                         （需 init(config, analysis?, sid?) 后才能调用 instrumentCode）
 ```
 
-### 尚未迁移的文件（仍为旧式 IIFE / CommonJS）
+### 运行时模块（`src/runtime/`）
+
+运行时系统已完成现代化重构，全部为 ESM class：
 
 | 文件 | 说明 |
 |------|------|
-| `src/runtime/analysis.js` | 运行时分析基类，含 Node.js 专有代码 |
-| `src/runtime/SMemory.js` | Shadow Memory，含 Node.js 专有代码 |
-| `src/commands/` | Node.js CLI 工具，可保留接口但待清理 |
+| `JalangiRuntime.js` | 所有 J$ 钩子函数核心实现（基类） |
+| `JalangiSandbox.js` | 完整沙盒对象，继承 `JalangiRuntime`（推荐使用） |
+| `AnalysisHost.js` | 多插件链式调度器，`.use()` 注册分析 |
+| `SMemory.js` | Shadow Memory 影子内存服务 |
+| `analysisCallbackTemplate.js` | 分析插件接口基类模板 `AnalysisTemplate` |
+| `logging/` | 可插拔日志后端（MemoryBackend / NodeStream / WsBackend / IdbWorker）|
 
 ---
 
@@ -152,3 +157,37 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 
 - `astring.generate(ast)` 不支持带 `loc`/`start`/`end` 以外的自定义字段（会忽略），行为正常
 - 插桩产生的 `// JALANGI DO NOT INSTRUMENT` 注释追加在输出代码末尾，防止二次插桩
+
+---
+
+## 文档维护规范
+
+项目文档统一存放在 `docs/` 目录下，共 7 个 Markdown 文件：
+
+| 文档 | 对应代码范围 |
+|------|------------|
+| `docs/README.md` | 项目入口、快速上手、目录结构 |
+| `docs/Overview.md` | 整体架构、钩子一览、使用方式 |
+| `docs/Instrumentation-Engine.md` | `src/instrument/` 全部模块 |
+| `docs/Runtime-System.md` | `src/runtime/` 全部模块 |
+| `docs/Analysis-Development.md` | 分析插件接口（`analysisCallbackTemplate.js`）|
+| `docs/Configuration.md` | `init(config)` 的 Config 对象 |
+| `docs/Sample-Analyses.md` | `src/plugins/` 全部示例插件 |
+
+### 何时需要同步更新文档
+
+**每当以下内容发生变化，必须同步更新对应文档**：
+
+1. **新增 / 删除 / 重命名模块文件** → 更新 `README.md` 目录结构 + 对应专题文档
+2. **`init()` / `instrumentCode()` 参数变化** → 更新 `Instrumentation-Engine.md`
+3. **新增 / 修改 Config 字段** → 更新 `Configuration.md` + `Instrumentation-Engine.md`
+4. **新增 / 修改分析钩子（hook）** → 更新 `Analysis-Development.md` + `Runtime-System.md`
+5. **`JalangiSandbox` / `AnalysisHost` / `SMemory` API 变化** → 更新 `Runtime-System.md`
+6. **新增 / 删除 `src/plugins/` 示例插件** → 更新 `Sample-Analyses.md`
+7. **架构层面的重大变化**（模块拆分/合并、依赖变更等）→ 更新 `Overview.md`
+
+### 更新原则
+
+- **精确**：只更新受影响的文档，不要整体重写
+- **同步**：代码 PR 与文档更新应在同一次提交中完成
+- **代码优先**：文档描述应与实际代码行为一致，如有冲突以代码为准

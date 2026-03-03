@@ -1,0 +1,161 @@
+# Config 配置参考
+
+## 概述
+
+`Config` 对象传入 `init(config)` 函数，控制插桩器对哪些 JavaScript 操作进行插桩，
+以及是否启用采样模式。
+
+## Config 字段完整参考
+
+### 插桩开关字段
+
+每个字段控制一类操作是否被插桩。字段值的含义：
+
+| 值 | 含义 |
+|----|------|
+| `null` / `undefined` | **全部插桩**该类型的操作（默认行为）|
+| `false` | **完全禁用**该类型的插桩 |
+| `(ast) => boolean` | **细粒度控制**：函数返回 `true` 时插桩，`false` 时跳过 |
+
+| 字段 | 控制范围 | 分析钩子 |
+|------|---------|---------|
+| `INSTR_READ` | 变量读取（`J$.R`）| `read` |
+| `INSTR_WRITE` | 变量写入（`J$.W`）| `write` |
+| `INSTR_GETFIELD` | 属性读取（`J$.G`）| `getFieldPre` / `getField` |
+| `INSTR_PUTFIELD` | 属性写入（`J$.P`）| `putFieldPre` / `putField` |
+| `INSTR_BINARY` | 二元运算（`J$.B`）| `binaryPre` / `binary` |
+| `INSTR_UNARY` | 一元运算（`J$.U`）| `unaryPre` / `unary` |
+| `INSTR_LITERAL` | 字面量（`J$.T`）| `literal` |
+| `INSTR_INIT` | 变量声明初始化（`J$.N`）| `declare` |
+| `INSTR_CONDITIONAL` | 条件表达式 / switch（`J$.C`）| `conditional` |
+| `INSTR_TRY_CATCH_ARGUMENTS` | 函数/脚本 try-catch 包裹 | `functionExit` / `scriptExit` |
+| `INSTR_END_EXPRESSION` | 表达式语句末尾标记（`J$.X1`）| `endExpression` |
+
+### 采样模式字段
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `ENABLE_SAMPLING` | `boolean` | `false` | 启用采样模式，每个函数可在插桩/非插桩版本间切换 |
+
+## 常用 Config 组合
+
+### 全量插桩（开发/调试）
+
+```js
+const Config = {
+    INSTR_READ:               null,
+    INSTR_WRITE:              null,
+    INSTR_GETFIELD:           null,
+    INSTR_PUTFIELD:           null,
+    INSTR_BINARY:             null,
+    INSTR_UNARY:              null,
+    INSTR_LITERAL:            null,
+    INSTR_INIT:               null,
+    INSTR_CONDITIONAL:        null,
+    INSTR_TRY_CATCH_ARGUMENTS: null,
+    INSTR_END_EXPRESSION:     null,
+    ENABLE_SAMPLING:          false,
+};
+```
+
+### 最小插桩（只关注函数调用）
+
+函数调用（`J$.F` / `J$.M`）没有独立的 Config 开关，始终插桩。
+以下配置关闭所有其他类型：
+
+```js
+const Config = {
+    INSTR_READ:               false,
+    INSTR_WRITE:              false,
+    INSTR_GETFIELD:           false,
+    INSTR_PUTFIELD:           false,
+    INSTR_BINARY:             false,
+    INSTR_UNARY:              false,
+    INSTR_LITERAL:            false,
+    INSTR_INIT:               false,
+    INSTR_CONDITIONAL:        false,
+    INSTR_TRY_CATCH_ARGUMENTS: false,
+    INSTR_END_EXPRESSION:     false,
+    ENABLE_SAMPLING:          false,
+};
+```
+
+### 只插桩属性访问
+
+```js
+const Config = {
+    INSTR_READ:               false,
+    INSTR_WRITE:              false,
+    INSTR_GETFIELD:           null,   // 开启属性读取
+    INSTR_PUTFIELD:           null,   // 开启属性写入
+    INSTR_BINARY:             false,
+    INSTR_UNARY:              false,
+    INSTR_LITERAL:            false,
+    INSTR_INIT:               false,
+    INSTR_CONDITIONAL:        false,
+    INSTR_TRY_CATCH_ARGUMENTS: false,
+    INSTR_END_EXPRESSION:     false,
+    ENABLE_SAMPLING:          false,
+};
+```
+
+### 细粒度控制示例
+
+```js
+const Config = {
+    // 只插桩算术运算，跳过逻辑运算
+    INSTR_BINARY: (ast) => {
+        const op = ast.operator;
+        return ['+', '-', '*', '/', '%'].includes(op);
+    },
+
+    // 只插桩计算属性读取（obj[key]），跳过点表达式（obj.prop）
+    INSTR_GETFIELD: (ast) => ast.computed,
+
+    // 其余全部插桩
+    INSTR_READ:   null,
+    INSTR_WRITE:  null,
+    INSTR_PUTFIELD: null,
+    ENABLE_SAMPLING: false,
+};
+```
+
+> **注意**：细粒度控制函数接收 AST 节点对象。
+> `acorn` 解析产生的节点含 `type`、`operator`、`computed`、`loc` 等字段，
+> 可据此做任意筛选。
+
+## 使用方式
+
+```js
+import { init, instrumentCode } from './src/instrument/esnstrument.js';
+
+const Config = {
+    INSTR_READ: null,
+    INSTR_WRITE: null,
+    // ... 其余字段
+    ENABLE_SAMPLING: false,
+};
+
+// init() 必须在第一次 instrumentCode() 调用前完成
+init(Config);
+
+const result = instrumentCode({
+    code: 'var x = 1 + 2;',
+    origCodeFileName: 'test.js',
+    instCodeFileName: 'test_inst.js',
+    inlineSourceMap:  false,
+    sourceType:       'script',
+});
+```
+
+## 与旧版 Config.js 的区别
+
+旧版（2013-2024 年版本）使用全局 `J$.Config` 对象，包含 `DEBUG`、`WARN`、
+`MAX_BUF_SIZE`、`LOG_ALL_READS_AND_BRANCHES` 等调试/缓冲字段，
+并通过全局 `J$` 对象暴露。
+
+**新版（当前）区别**：
+1. Config 通过 `init(config)` 参数注入，无全局状态
+2. 移除了 `DEBUG` / `WARN` / `MAX_BUF_SIZE` / `LOG_ALL_READS_AND_BRANCHES` 等非核心字段
+3. 新增 `INSTR_INIT`（对应 `J$.N` 声明钩子）和 `INSTR_END_EXPRESSION`（对应 `J$.X1`）
+4. 细粒度控制函数签名统一为 `(ast) => boolean`，旧版为 `(name/operator, ast) => boolean`

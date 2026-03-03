@@ -1,0 +1,76 @@
+# Jalangi2 文档
+
+Jalangi2 是一个面向 JavaScript 的**动态分析框架**，通过 AST 插桩在运行时收集程序行为数据，
+支持 bug 检测、覆盖率统计、污点分析等多种动态分析场景。
+
+## 文档目录
+
+| 文档 | 内容简介 |
+|------|---------|
+| [Overview.md](./Overview.md) | 项目概况、系统架构、快速上手 |
+| [Instrumentation-Engine.md](./Instrumentation-Engine.md) | 插桩器核心原理与 API 参考 |
+| [Runtime-System.md](./Runtime-System.md) | 运行时沙盒、J$ 对象与钩子函数 |
+| [Analysis-Development.md](./Analysis-Development.md) | 编写自定义分析插件的完整指南 |
+| [Configuration.md](./Configuration.md) | Config 配置字段参考 |
+| [Sample-Analyses.md](./Sample-Analyses.md) | 内置示例分析插件介绍 |
+
+## 快速开始
+
+### 安装依赖
+
+```bash
+npm install
+```
+
+### 运行测试
+
+```bash
+npm test
+# 或
+node test/instrument.test.mjs
+```
+
+### 以编程方式插桩
+
+```js
+import { init, instrumentCode } from './src/instrument/esnstrument.js';
+
+const Config = {
+    INSTR_READ: null, INSTR_WRITE: null, INSTR_GETFIELD: null, INSTR_PUTFIELD: null,
+    INSTR_BINARY: null, INSTR_UNARY: null, INSTR_LITERAL: null, INSTR_INIT: null,
+    INSTR_CONDITIONAL: null, INSTR_TRY_CATCH_ARGUMENTS: null, INSTR_END_EXPRESSION: null,
+    ENABLE_SAMPLING: false,
+};
+init(Config);
+
+const result = instrumentCode({
+    code: 'var x = 1 + 2;',
+    origCodeFileName: 'example.js',
+    instCodeFileName: 'example_inst.js',
+    inlineSourceMap: false,
+    sourceType: 'script',
+});
+console.log(result.code);
+```
+
+## 目录结构概览
+
+```
+src/
+  instrument/          ← 插桩器核心（纯 ESM，无平台依赖）
+    esnstrument.js     ← 主入口：init() + instrumentCode()
+    astUtil.js         ← AST 遍历与上下文枚举
+    scope.js           ← 词法作用域分析
+    iid.js             ← IID 计数器与源码位置映射
+    wrappers.js        ← AST 节点包装函数库
+  runtime/             ← 运行时系统（含 Node.js 专有代码）
+    JalangiRuntime.js  ← 运行时钩子实现（基类）
+    JalangiSandbox.js  ← 完整沙盒对象（推荐使用）
+    AnalysisHost.js    ← 多插件链式调度器
+    SMemory.js         ← Shadow Memory 影子内存服务
+    analysisCallbackTemplate.js ← 分析插件接口模板
+  plugins/             ← 示例分析插件
+  Constants.js         ← 全局常量
+test/
+  instrument.test.mjs  ← 插桩器端到端集成测试（56 个用例）
+```
