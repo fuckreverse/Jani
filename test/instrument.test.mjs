@@ -233,7 +233,15 @@ test('nullish coalescing (??) 注入条件钩子', () => {
     // wrapLogicalNullish 应注入 J$.C（条件钩子）记录分支
     const r = instr('var x = a ?? b;');
     assertIncludes(r.code, 'J$.C(', '?? 运算符应注入条件钩子 J$.C');
-    assertIncludes(r.code, 'J$._tm_p', '?? 应使用临时变量暂存左侧值');
+    // 临时变量现在是 J$.tmp_N（唯一化），不再共享单一的 J$._tm_p 槽
+    assertIncludes(r.code, 'J$.tmp_', '?? 应使用唯一临时属性暂存左侧值');
+});
+
+test('嵌套 ?? 各使用独立临时变量（无共享槽竞争）', () => {
+    // (a ?? b) ?? c 会生成 J$.tmp_0 和 J$.tmp_1 两个不同的临时槽
+    const r = instr('var x = (a ?? b) ?? c;');
+    assertIncludes(r.code, 'J$.tmp_0', '外层 ?? 应使用 J$.tmp_0');
+    assertIncludes(r.code, 'J$.tmp_1', '内层 ?? 应使用 J$.tmp_1（与外层独立）');
 });
 
 test('BigInt 字面量', () => {
@@ -305,7 +313,44 @@ test('sourceMapObject 存在且含 nBranches', () => {
 
 test('inlineSourceMap 模式：iids 内联到代码头部', () => {
     const r = instr('var x = 3;', { inlineSourceMap: true });
-    assertIncludes(r.code, 'J$.iids =', '应内联 iids 对象');
+    // 新格式：globalThis 初始化 + smap[key] + iids（向后兼容）
+    assertIncludes(r.code, 'J$.iids=', '应内联 iids 对象（向后兼容）');
+    assertIncludes(r.code, 'J$.smap=', '应初始化 smap 对象');
+    assertIncludes(r.code, 'J$.smap[', '应以 smap[key] 存储 source map');
+});
+
+test('IIFE 闭包包裹：script 模式输出应包含 IIFE 结构', () => {
+    // script 模式下插桩代码应被包裹在 (function(J$){...}(J$)) 中，
+    // J$ 作为闭包参数传入而非依赖全局访问，消除命名冲突风险
+    const r = instr('var x = 1;');
+    assertIncludes(r.code, '(function(J$)', 'script 模式应用 IIFE 包裹 J$ 为闭包参数');
+});
+
+test('module 模式：const J$ 局部绑定而非 IIFE', () => {
+    // module 模式下 ESM 已自带私有作用域，用 const 绑定即可
+    const r = instr('export const x = 1;', { sourceType: 'module' });
+    assertIncludes(r.code, 'const J$ = globalThis.J$', 'module 模式应用 const 局部绑定');
+    assert(!r.code.includes('(function(J$)'), 'module 模式不应再包一层 IIFE');
+});
+
+test('smap 多文件互不覆盖：不同文件名写入不同 smap key', () => {
+    // 模拟两个不同文件分别插桩，各自的 source map key 不同
+    const r1 = instrumentCode({
+        code: 'var a = 1;',
+        origCodeFileName: 'file1.js',
+        instCodeFileName: 'file1_inst.js',
+        inlineSourceMap: true,
+    });
+    const r2 = instrumentCode({
+        code: 'var b = 2;',
+        origCodeFileName: 'file2.js',
+        instCodeFileName: 'file2_inst.js',
+        inlineSourceMap: true,
+    });
+    assertIncludes(r1.code, 'smap["file1_inst.js"]', 'file1 应写入 smap["file1_inst.js"]');
+    assertIncludes(r2.code, 'smap["file2_inst.js"]', 'file2 应写入 smap["file2_inst.js"]');
+    // 两个 key 互不相同，并发加载不覆盖
+    assert(!r1.code.includes('smap["file2_inst.js"]'), 'file1 不应出现 file2 的 key');
 });
 
 test('sourceMapObject 包含文件名信息', () => {

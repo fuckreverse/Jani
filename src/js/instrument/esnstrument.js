@@ -399,7 +399,7 @@ function hoistFunctionDeclaration(ast, hoistedFunctions) {
             const first = ast.body[0];
             if (first.type === 'ExpressionStatement'
                     && first.expression.type === 'CallExpression'
-                    && first.expression.callee.object?.name === 'J$'
+                    && first.expression.callee.object?.name === JALANGI_VAR
                     && (first.expression.callee.property?.name === 'Se'
                         || first.expression.callee.property?.name === 'Fe')) {
                 newBody.push(first);
@@ -517,7 +517,14 @@ function instrumentCode(options) {
 
             // astring 支持 ES2022+，替代旧版 esotope
             const newCode = astringGenerate(newAst);
-            code = `${newCode}\n${NO_INSTR}\n`;
+            // 用 IIFE 将插桩代码包裹：J$ 作为闭包参数传入，而非依赖全局访问，
+            // 彻底消除插桩标识符与被分析代码自身变量名的冲突风险。
+            // module 模式下 ESM 已自带私有作用域，改用 const 局部绑定即可。
+            if (sourceType === 'module') {
+                code = `const ${JALANGI_VAR} = globalThis.${JALANGI_VAR};\n${newCode}\n${NO_INSTR}\n`;
+            } else {
+                code = `(function(${JALANGI_VAR}){\n${newCode}\n}(typeof ${JALANGI_VAR}!=='undefined'?${JALANGI_VAR}:{}));\n${NO_INSTR}\n`;
+            }
         } catch (ex) {
             const fileName = options.origCodeFileName ?? '(unknown)';
             const wrappedErr = new Error(
@@ -549,9 +556,12 @@ function instrumentCode(options) {
     if (url)    tmp.url = url;
     if (isEval) { tmp.evalSid = sourceInfo.evalSid; tmp.evalIid = thisIid; }
 
+    // 用 smap[sid] 存储各脚本的 source map，避免多脚本并发加载时互相覆盖。
+    // 旧的 J$.iids 保留为最近一次的快照（向后兼容）。
+    const smapKey = JSON.stringify(sourceInfo.instrumentedCodeFileName ?? 'unknown');
     let instCode = options.inlineSourceMap
-        ? `${JALANGI_VAR}.iids = ${sourceMapString};\n${code}`
-        : `${JALANGI_VAR}.iids = ${JSON.stringify(tmp)};\n${code}`;
+        ? `(globalThis.${JALANGI_VAR}=globalThis.${JALANGI_VAR}||{});${JALANGI_VAR}.smap=${JALANGI_VAR}.smap||{};${JALANGI_VAR}.smap[${smapKey}]=${sourceMapString};${JALANGI_VAR}.iids=${sourceMapString};\n${code}`
+        : `(globalThis.${JALANGI_VAR}=globalThis.${JALANGI_VAR}||{});${JALANGI_VAR}.smap=${JALANGI_VAR}.smap||{};${JALANGI_VAR}.smap[${smapKey}]=${JSON.stringify(tmp)};${JALANGI_VAR}.iids=${JSON.stringify(tmp)};\n${code}`;
 
     // post-hook
     if (isEval && _analysis?.instrumentCode) {

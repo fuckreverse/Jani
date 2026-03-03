@@ -474,8 +474,16 @@ function wrapLogicalOr(node, left, right) {
 function wrapLogicalNullish(node, left, right) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('??', node)) {
         IID.printCondIidToLoc(node);
+        // 每次使用唯一临时变量名，避免嵌套 ?? 运算符共享同一槽导致的互相覆盖。
+        // 例如 (a ?? b) ?? c 中外层的临时槽不会被内层覆盖。
+        //
+        // 命名使用 J$.tmp_N（成员属性访问）而非 J$_tN（裸标识符），
+        // 因为 RP = 'J$_' 是占位符前缀，以 J$_ 开头的裸标识符会被
+        // deepCloneAndReplace 误识别为占位符导致崩溃。
+        const tmpProp = `tmp_${tmpVarCounter++}`;
+        const uniqueTmp = `${JALANGI_VAR}.${tmpProp}`;
         const ret = replaceInExpr(
-            `(${logTmpVarName} = ${RP}2, ${logConditionalFunName}(${RP}1, ${logTmpVarName} != null && ${logTmpVarName} !== undefined) ? ${logLastFunName}() : ${RP}3)`,
+            `(${uniqueTmp} = ${RP}2, ${logConditionalFunName}(${RP}1, ${uniqueTmp} != null && ${uniqueTmp} !== undefined) ? ${logLastFunName}() : ${RP}3)`,
             IID.getCondIid(), left, right
         );
         transferLoc(ret, node);
@@ -657,6 +665,8 @@ function createCallAsScriptEnterStatement(node, instFile, origFile) {
 // ─── for-in / catch / try-catch 包装 ──────────────────────────────────────────
 
 let labelCounter = 0;
+/** 每次插桩新文件时重置，保证插桩幂等性 */
+let tmpVarCounter = 0;
 
 function wrapForIn(node, left, right, body) {
     IID.printIidToLoc(node);
@@ -890,6 +900,7 @@ function init(config) {
  */
 function resetPerFile() {
     labelCounter = 0;
+    tmpVarCounter = 0;
 }
 
 // ─── 导出 ──────────────────────────────────────────────────────────────────────
