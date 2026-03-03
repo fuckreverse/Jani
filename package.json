@@ -27,7 +27,8 @@
     "url": "https://github.com/Samsung/jalangi2.git"
   },
   "devDependencies": {
-    "mocha": "^10.0.0"
+    "mocha": "^10.0.0",
+    "rollup": "^4.59.0"
   },
   "main": "src/js/instrument/esnstrument.js",
   "bundleDependencies": [

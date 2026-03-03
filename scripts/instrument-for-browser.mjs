@@ -10,6 +10,10 @@
  * 直接替换网页中原始的 <script src="...">，无需加载任何其他文件。
  * trace 日志通过 IndexedDB 持久化（Web Worker 异步写入）。
  *
+ * 运行时 bundle 通过 **rollup** 打包生成，不再手工 inline + 正则替换。
+ * 使用一个虚拟入口模块，通过纯静态 import 把所有运行时模块拉入，
+ * rollup 完全静态分析，无动态 import，无正则替换，无歧义。
+ *
  * 用法：
  *   node scripts/instrument-for-browser.mjs [选项] <目标文件>
  *
@@ -28,8 +32,9 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
-import { resolve, dirname, basename, join } from 'path';
+import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { rollup } from 'rollup';
 
 // ── 路径常量 ──────────────────────────────────────────────────────────────────
 
@@ -47,7 +52,6 @@ function parseArgs(argv) {
         storeName:  'execution-trace',
         sourceType: 'script',
         useIdb:     true,
-        wsUrl:      undefined,
         dryRun:     false,
         file:       null,
     };
@@ -61,7 +65,6 @@ function parseArgs(argv) {
             case '--store-name':  opts.storeName  = argv[++i]; break;
             case '--source-type': opts.sourceType = argv[++i]; break;
             case '--no-idb':      opts.useIdb     = false;     break;
-            case '--ws-url':      opts.wsUrl      = argv[++i]; break;
             case '--dry-run':     opts.dryRun     = true;      break;
             default:
                 if (a.startsWith('--')) { console.error(`未知选项: ${a}`); process.exit(1); }
@@ -85,194 +88,66 @@ function printHelp() {
   --store-name <n>    ObjectStore 名（默认：execution-trace）
   --source-type <t>   'script'（默认）或 'module'
   --no-idb            不启用 IndexedDB（仅 console 输出）
-  --ws-url <url>      同时将 trace 推送到 WebSocket 服务（如 ws://localhost:9229/trace）
   --dry-run           只打印，不写文件
   --help / -h         显示此帮助
     `.trim());
 }
 
-// ── ESM → 内联代码转换 ────────────────────────────────────────────────────────
+// ── 运行时 Bundle 生成（Rollup）────────────────────────────────────────────────
 
 /**
- * 将一个 ESM 源文件转换为可直接内联到 IIFE 作用域中的代码片段：
- *  - 去掉 `// JALANGI DO NOT INSTRUMENT` 行
- *  - 去掉所有 `import ...` 语句（单行，依赖手动排序）
- *  - `export function foo` → `function foo`
- *  - `export class Foo`   → `class Foo`
- *  - `export const/let/var x` → `const/let/var x`
- *  - `export { ... }` 块 → 删除
- *  - `export default <expr>` → 删除（或转为具名变量）
- */
-function inlineEsm(src) {
-    return src
-        // 去掉 DO NOT INSTRUMENT 标记行
-        .replace(/^\/\/ JALANGI DO NOT INSTRUMENT\s*\n?/m, '')
-        // 去掉单行 import 语句（支持多种格式）
-        .replace(/^import\s[^;]+?['"][^'"]+['"]\s*;?\s*$/gm, '')
-        // export async function → async function
-        .replace(/^export\s+(async\s+function)/gm, '$1')
-        // export function → function
-        .replace(/^export\s+function\b/gm, 'function')
-        // export class → class
-        .replace(/^export\s+class\b/gm, 'class')
-        // export const/let/var → const/let/var
-        .replace(/^export\s+(const|let|var)\b/gm, '$1')
-        // 去掉 export { ... }; 块（单行或末尾）
-        .replace(/^export\s*\{[^}]*\}\s*;?\s*$/gm, '')
-        // 去掉 export default（保留表达式本身，不做转变量——如需可扩展）
-        .replace(/^export\s+default\s+/gm, '// (export default) ')
-        .trim();
-}
-
-// ── 运行时 Bundle 生成 ────────────────────────────────────────────────────────
-
-/**
- * 把所有运行时模块按依赖顺序内联到一个 IIFE 中。
+ * 用 rollup 将所有运行时 ESM 模块打包成一个自包含的 IIFE 字符串。
  *
- * 依赖顺序（从底层到顶层）：
- *   Constants → analysis → iidToLocation
- *   → RingBuffer → [IDB worker 作为 Blob] → IdbWorkerBackend → LogManager
- *   → TraceLogger → ExecutionTrace
- *   → Bootstrap（创建 J$、安装 analysis）
+ * 策略：用一个虚拟入口模块，把所有需要的模块用**静态 import** 直接引入，
+ * 完全避免动态 import（rollup 只做静态分析，没有 code-splitting 问题）。
+ *
+ * 对于 TraceLogger 中的动态 import，用 plugin 把它们重定向到真实模块路径，
+ * 等价于静态 import，rollup 会把它们内联到单个 chunk 中。
+ *
+ * idb-worker.js 以 JSON 字符串内联（它是 classic Worker，需要独立 URL）。
+ *
+ * @param {object} opts  parseArgs 返回的选项
+ * @returns {Promise<string>}  打包后的 IIFE 字符串
  */
-function buildRuntimeBundle(opts) {
-    const read = (p) => readFileSync(p, 'utf8');
+async function buildRuntimeBundle(opts) {
+    // idb-worker.js 内联为字符串（classic worker，不经过 rollup）
+    const idbWorkerSrc = readFileSync(
+        SRC('runtime', 'logging', 'workers', 'idb-worker.js'),
+        'utf8'
+    ).replace(/^\/\/ JALANGI DO NOT INSTRUMENT\s*\n?/m, '').trim();
 
-    // ── 1. Constants ──────────────────────────────────────────────────────────
-    const constantsCode = inlineEsm(read(SRC('Constants.js')));
+    // 虚拟入口 ID
+    const ENTRY_ID = '\0jalangi-entry';
 
-    // ── 2. analysis（createRuntime） ──────────────────────────────────────────
-    const analysisCode = inlineEsm(read(SRC('runtime', 'analysis.js')));
-
-    // ── 3. iidToLocation ──────────────────────────────────────────────────────
-    const iidToLocCode = inlineEsm(read(SRC('runtime', 'iidToLocation.js')));
-
-    // ── 4. RingBuffer ─────────────────────────────────────────────────────────
-    const ringBufCode = inlineEsm(read(SRC('runtime', 'logging', 'RingBuffer.js')));
-
-    // ── 5. IDB Worker（内联为 Blob，type:'classic' 兼容所有浏览器）─────────────
+    // 虚拟入口：纯静态 import，无动态 import，rollup 可完全分析
     //
-    // idb-worker.js 本身没有任何 import，可以直接作为 classic worker 使用。
-    let idbWorkerCode = read(SRC('runtime', 'logging', 'workers', 'idb-worker.js'))
-        .replace(/^\/\/ JALANGI DO NOT INSTRUMENT\s*\n?/m, '')
-        .trim();
+    // 关键：TraceLogger / LogManager 里有动态 import，
+    // 我们通过 plugin（resolveDynamicImport）把它们都重定向到真实路径，
+    // 这样 rollup 会把这些模块当成普通静态依赖内联进来。
+    // WsBackend / NodeStreamBackend / MemoryBackend 重定向到空 stub，
+    // 由 treeshake 消除（不在 bundle 里）。
+    const entryCode = `
+// 静态导入所有运行时依赖
+import { APPLY, CALL, HAS_OWN_PROPERTY, HAS_OWN_PROPERTY_CALL,
+         JALANGI_VAR, SPECIAL_PROP, SPECIAL_PROP2, SPECIAL_PROP3, SPECIAL_PROP4,
+         SPECIAL_PROP_SID, SPECIAL_PROP_IID, UNKNOWN, HOP, hasGetterSetter
+} from '${SRC('Constants.js')}';
+import { createRuntime    } from '${SRC('runtime', 'analysis.js')}';
+import { createIidToLocation } from '${SRC('runtime', 'iidToLocation.js')}';
+import { IdbWorkerBackend } from '${SRC('runtime', 'logging', 'backends', 'IdbWorkerBackend.js')}';
+import { RingBuffer       } from '${SRC('runtime', 'logging', 'RingBuffer.js')}';
+import { LogManager       } from '${SRC('runtime', 'logging', 'LogManager.js')}';
+import { TraceLogger      } from '${SRC('runtime', 'logging', 'TraceLogger.js')}';
+import { ExecutionTraceAnalysis } from '${SRC('sample_analyses', 'ExecutionTrace.js')}';
 
-    // ── 6. IdbWorkerBackend ───────────────────────────────────────────────────
-    //
-    // 原代码默认用 `new URL('../workers/idb-worker.js', import.meta.url)`
-    // bundle 里没有 import.meta.url，改为使用预先构造好的 __idbWorkerUrl。
-    let idbBackendCode = inlineEsm(read(SRC('runtime', 'logging', 'backends', 'IdbWorkerBackend.js')));
-    idbBackendCode = idbBackendCode
-        .replace(
-            /workerUrl\s*=\s*new URL\s*\([^)]+\)/,
-            'workerUrl = __idbWorkerUrl'
-        )
-        .replace(
-            /new Worker\(this\._workerUrl,\s*\{[^}]*\}\)/,
-            "new Worker(this._workerUrl)"
-        );
-
-    // ── 7. LogManager ─────────────────────────────────────────────────────────
-    // LogManager 里的两个工厂函数（createMemoryLogManager / createLogManager）
-    // 有动态 import，bundle 中用不到，替换掉
-    let logMgrCode = inlineEsm(read(SRC('runtime', 'logging', 'LogManager.js')));
-    logMgrCode = logMgrCode
-        .replace(
-            /async function createMemoryLogManager[\s\S]*?^}/m,
-            '// createMemoryLogManager (removed in bundle)'
-        )
-        .replace(
-            /async function createLogManager[\s\S]*?^}/m,
-            '// createLogManager (removed in bundle)'
-        );
-
-    // ── 8. TraceLogger ────────────────────────────────────────────────────────
-    //
-    // TraceLogger 里有动态 import（在 _doInit 中），bundle 里直接替换：
-    //   - 浏览器分支：IdbWorkerBackend / WsBackend 已在作用域里，直接用
-    //   - Node.js 分支：浏览器环境不会走，删掉即可
-    //   - LogManager：已在作用域里
-    let traceLoggerCode = inlineEsm(read(SRC('runtime', 'logging', 'TraceLogger.js')));
-    traceLoggerCode = traceLoggerCode
-        // 替换：const { IdbWorkerBackend } = await import(...)
-        .replace(
-            /const\s*\{\s*IdbWorkerBackend\s*\}\s*=\s*await\s+import\s*\([^)]+\)\s*;/g,
-            '// IdbWorkerBackend already in scope'
-        )
-        // 替换：const { WsBackend } = await import(...)
-        .replace(
-            /const\s*\{\s*WsBackend\s*\}\s*=\s*await\s+import\s*\([^)]+\)\s*;/g,
-            '// WsBackend not available in browser bundle'
-        )
-        // 替换：const { NodeStreamBackend } = await import(...)
-        .replace(
-            /const\s*\{\s*NodeStreamBackend\s*\}\s*=\s*await\s+import\s*\([^)]+\)\s*;/g,
-            '// NodeStreamBackend not available in browser bundle'
-        )
-        // 替换：const { LogManager } = await import(...)
-        .replace(
-            /const\s*\{\s*LogManager\s*\}\s*=\s*await\s+import\s*\([^)]+\)\s*;/g,
-            '// LogManager already in scope'
-        );
-
-    // ── 9. ExecutionTrace ─────────────────────────────────────────────────────
-    //
-    // ExecutionTrace 现在通过 TraceLogger（已在作用域）来管理日志，
-    // 只需去掉 `import { TraceLogger } from ...` 这一行即可，无需其他改动。
-    const execTraceCode = inlineEsm(read(SRC('sample_analyses', 'ExecutionTrace.js')));
-
-    // ── 拼装 IIFE ─────────────────────────────────────────────────────────────
-    return `\
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  Jalangi2 Runtime Bundle (auto-generated ${new Date().toISOString().slice(0,10)})  ║
-// ║  Do NOT edit this file manually.                                        ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-(function () {
-'use strict';
-
-// ─── IDB Worker: 内联为 Blob URL（classic worker，兼容所有浏览器）─────────────
-var __idbWorkerSrc  = ${JSON.stringify(idbWorkerCode)};
-var __idbWorkerBlob = (typeof Blob !== 'undefined')
-    ? new Blob([__idbWorkerSrc], { type: 'application/javascript' })
-    : null;
-var __idbWorkerUrl  = __idbWorkerBlob
-    ? URL.createObjectURL(__idbWorkerBlob)
-    : null;
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-${constantsCode}
-
-// ─── Runtime hooks (createRuntime) ────────────────────────────────────────────
-${analysisCode}
-
-// ─── iidToLocation ────────────────────────────────────────────────────────────
-${iidToLocCode}
-
-// ─── RingBuffer ───────────────────────────────────────────────────────────────
-${ringBufCode}
-
-// ─── IdbWorkerBackend ─────────────────────────────────────────────────────────
-${idbBackendCode}
-
-// ─── LogManager ───────────────────────────────────────────────────────────────
-${logMgrCode}
-
-// ─── TraceLogger ──────────────────────────────────────────────────────────────
-${traceLoggerCode}
-
-// ─── ExecutionTrace ───────────────────────────────────────────────────────────
-${execTraceCode}
-
-// ─── Bootstrap ────────────────────────────────────────────────────────────────
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
 var J$ = globalThis.J$ = globalThis.J$ || {};
 
-// Constants 模块的所有导出挂到 J$.Constants
 J$.Constants = {
     APPLY, CALL, HAS_OWN_PROPERTY, HAS_OWN_PROPERTY_CALL,
     JALANGI_VAR, SPECIAL_PROP, SPECIAL_PROP2, SPECIAL_PROP3, SPECIAL_PROP4,
     SPECIAL_PROP_SID, SPECIAL_PROP_IID, UNKNOWN, HOP, hasGetterSetter
 };
-
 J$.smap = J$.smap || {};
 J$.sid  = 0;
 
@@ -283,12 +158,94 @@ J$.analysis = new ExecutionTraceAnalysis(J$, null, {
     useIdb:    ${opts.useIdb},
     dbName:    ${JSON.stringify(opts.dbName)},
     storeName: ${JSON.stringify(opts.storeName)},
-    ${opts.wsUrl ? `wsUrl: ${JSON.stringify(opts.wsUrl)},` : '// wsUrl: undefined (disabled)'}
 });
-
-}());
-// ── End of Jalangi2 Runtime Bundle ────────────────────────────────────────────
 `;
+
+    // 模块路径 → 真实文件路径（用于动态 import 重定向）
+    const DYNAMIC_IMPORT_MAP = {
+        './backends/IdbWorkerBackend.js':  SRC('runtime', 'logging', 'backends', 'IdbWorkerBackend.js'),
+        './LogManager.js':                 SRC('runtime', 'logging', 'LogManager.js'),
+        // 下面三个不打进浏览器 bundle，用 stub 替代
+        './backends/WsBackend.js':         '\0stub:WsBackend',
+        './backends/NodeStreamBackend.js': '\0stub:NodeStreamBackend',
+        './backends/MemoryBackend.js':     '\0stub:MemoryBackend',
+    };
+
+    const plugins = [
+        // ── Plugin 1: 虚拟入口 ────────────────────────────────────────────────
+        {
+            name: 'jalangi-virtual-entry',
+            resolveId(id) { if (id === ENTRY_ID) return id; },
+            load(id)      { if (id === ENTRY_ID) return entryCode; },
+        },
+
+        // ── Plugin 2: import.meta.url → __idbWorkerUrl ────────────────────────
+        // IdbWorkerBackend 默认参数用 `new URL('...', import.meta.url)`，
+        // bundle 里改为 IIFE intro 中创建的 __idbWorkerUrl。
+        {
+            name: 'jalangi-patch-idb-worker-url',
+            transform(code, id) {
+                if (!id.includes('IdbWorkerBackend')) return null;
+                const patched = code.replace(
+                    /new URL\s*\(\s*['"][^'"]+['"]\s*,\s*import\.meta\.url\s*\)/g,
+                    '__idbWorkerUrl'
+                );
+                return patched !== code ? { code: patched, map: null } : null;
+            },
+        },
+
+        // ── Plugin 3: 动态 import() → 真实模块路径（静态内联） ───────────────
+        // TraceLogger._doInit / LogManager 工厂函数里有动态 import。
+        // resolveDynamicImport 钩子把它们重定向到真实路径，
+        // rollup 随后像处理普通静态依赖一样把它们打包进来。
+        {
+            name: 'jalangi-resolve-dynamic-imports',
+            resolveDynamicImport(specifier) {
+                if (typeof specifier !== 'string') return null;
+                const mapped = DYNAMIC_IMPORT_MAP[specifier];
+                return mapped ?? null;
+            },
+            load(id) {
+                // stub 模块：空导出，rollup 会 tree-shake 掉使用它们的代码
+                if (id === '\0stub:WsBackend')
+                    return 'export const WsBackend = undefined;';
+                if (id === '\0stub:NodeStreamBackend')
+                    return 'export const NodeStreamBackend = undefined;';
+                if (id === '\0stub:MemoryBackend')
+                    return 'export const MemoryBackend = undefined;';
+            },
+        },
+    ];
+
+    const bundle = await rollup({
+        input:    ENTRY_ID,
+        plugins,
+        external: [],   // 不外置任何模块
+        onwarn(warning) {
+            // 只显示未解析 import 的警告（其余静默）
+            if (warning.code === 'UNRESOLVED_IMPORT') {
+                console.warn('[rollup]', warning.message);
+            }
+        },
+    });
+
+    const { output } = await bundle.generate({
+        format:               'iife',
+        name:                 '__jalangi__',
+        inlineDynamicImports: true,   // 把所有动态 import 内联到单个 chunk
+        // IIFE 内最前面注入 Blob Worker URL（__idbWorkerUrl 被 IdbWorkerBackend 用到）
+        intro: [
+            '// ─── IDB Worker: 内联为 Blob URL（classic worker，兼容所有浏览器）',
+            `var __idbWorkerSrc  = ${JSON.stringify(idbWorkerSrc)};`,
+            `var __idbWorkerBlob = (typeof Blob !== 'undefined')`,
+            `    ? new Blob([__idbWorkerSrc], { type: 'application/javascript' })`,
+            `    : null;`,
+            `var __idbWorkerUrl  = __idbWorkerBlob ? URL.createObjectURL(__idbWorkerBlob) : null;`,
+        ].join('\n'),
+    });
+
+    await bundle.close();
+    return output[0].code;
 }
 
 // ── 主逻辑 ────────────────────────────────────────────────────────────────────
@@ -338,16 +295,24 @@ async function main() {
         isEval:           false,
     });
 
-    // ── 构建运行时 bundle ─────────────────────────────────────────────────────
-    const runtimeBundle = buildRuntimeBundle(opts);
+    // ── 用 rollup 构建运行时 bundle ───────────────────────────────────────────
+    console.log('正在用 rollup 打包运行时...');
+    const runtimeBundle = await buildRuntimeBundle(opts);
 
     // ── 拼接最终输出 ──────────────────────────────────────────────────────────
     //
     // 结构：
-    //   1. 运行时 IIFE（设置 globalThis.J$，安装所有钩子和 analysis）
-    //   2. 插桩后的目标代码（直接调用 J$.R / J$.W / ... 等）
+    //   1. 文件头注释
+    //   2. 运行时 IIFE（设置 globalThis.J$，安装所有钩子和 analysis）
+    //   3. 插桩后的目标代码（直接调用 J$.R / J$.W / ... 等）
     //
-    const finalCode = runtimeBundle + '\n' + result.code;
+    const header = `\
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  Jalangi2 Runtime Bundle (auto-generated ${new Date().toISOString().slice(0,10)})  ║
+// ║  Do NOT edit this file manually.                                        ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+`;
+    const finalCode = header + runtimeBundle + '\n' + result.code;
 
     // ── 写出 ──────────────────────────────────────────────────────────────────
     if (opts.dryRun) {
