@@ -39,9 +39,8 @@ esnstrument.js        ← 所有上述模块 + acorn + astring
 
 | 文件 | 说明 |
 |------|------|
-| `src/js/Config.js` | 配置默认值，仍用 IIFE + `J$` |
-| `src/js/runtime/analysis.js` | 运行时分析基类，混杂 Node.js 专有代码 |
-| `src/js/runtime/SMemory.js` | Shadow Memory，混杂 Node.js 专有代码 |
+| `src/js/runtime/analysis.js` | 运行时分析基类，含 Node.js 专有代码 |
+| `src/js/runtime/SMemory.js` | Shadow Memory，含 Node.js 专有代码 |
 | `src/js/commands/` | Node.js CLI 工具，可保留接口但待清理 |
 
 ---
@@ -56,7 +55,7 @@ node test/instrument.test.mjs
 npm test
 ```
 
-34 个用例全部通过后再提交。
+所有用例全部通过后再提交。
 
 ### 单测文件约定
 
@@ -64,7 +63,7 @@ npm test
 
 | 文件 | 状态 | 内容 |
 |------|------|------|
-| `test/instrument.test.mjs` | ✅ 当前主测试 | 插桩器端到端集成测试，覆盖 ES5～ES2022、source map、Config 禁用等 |
+| `test/instrument.test.mjs` | ✅ 当前主测试 | 插桩器端到端集成测试，覆盖 ES5～ES2022、source map、Config 禁用等（当前 56 个用例）|
 | `test/_legacy_astring.js` | ⚠️ 废弃（保留备查） | 重构前验证 astring 本身的临时脚本，用 CommonJS + 旧式全局加载 |
 | `test/_legacy_class_debug.js` | ⚠️ 废弃（保留备查） | 重构前调试 class 插桩的单次脚本，用 CommonJS |
 | `test/_legacy_modern_syntax.js` | ⚠️ 废弃（保留备查） | 重构前现代语法冒烟测试，已合并进主测试 |

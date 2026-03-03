@@ -31,7 +31,7 @@ const sandbox = global.J$;
     });
 
     var proxy = require("rewriting-proxy");
-    var instUtil = require("../instrument/instUtil");
+    var instUtil = require("./instUtil");
     instUtil.setHeaders();
     var fs = require('fs');
     var path = require('path');

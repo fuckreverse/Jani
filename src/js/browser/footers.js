@@ -21,5 +21,5 @@
  */
 
 export const footerSources = [
-    'src/js/mid.html',
+    'src/js/browser/mid.html',
 ];

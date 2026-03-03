@@ -48,7 +48,7 @@ let _headerCode   = '';
 export function setHeaders() {
     if (!_headersSet) {
         try {
-            const extra = require('../headers').headerSources;
+            const extra = require('../browser/headers').headerSources;
             headerSources = headerSources.concat(extra);
         } catch {
             // ../headers.js 不存在时跳过（核心测试场景不需要）
@@ -190,7 +190,7 @@ export function getInlinedScripts(analyses, initParams, extraAppScripts, EXTRA_S
 export function getFooterString(jalangiRoot) {
     let footerSources;
     try {
-        footerSources = require('../footers').footerSources;
+        footerSources = require('../browser/footers').footerSources;
     } catch {
         return '';
     }

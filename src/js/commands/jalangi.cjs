@@ -23,7 +23,7 @@
 /* global J$ */
 
 const argparse  = require('argparse');
-const instUtil  = require('../instrument/instUtil');
+const instUtil  = require('./instUtil');
 
 const parser = new argparse.ArgumentParser({
     addHelp:     true,

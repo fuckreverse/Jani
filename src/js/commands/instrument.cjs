@@ -32,7 +32,7 @@ if (typeof J$ === 'undefined') {
     });
 
     var proxy = require("rewriting-proxy");
-    var instUtil = require("../instrument/instUtil");
+    var instUtil = require("./instUtil");
     var fs = require('fs');
     var path = require("path");
     var mkdirp = require('mkdirp');
