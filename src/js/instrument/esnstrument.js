@@ -34,7 +34,7 @@ import * as acorn   from 'acorn';
 import { generate as astringGenerate } from 'astring';
 
 import { JALANGI_VAR }     from '../Constants.js';
-import { CONTEXT, transformAst } from './astUtil.js';
+import { CONTEXT, transformAst, setJalangiVar as setAstUtilJalangiVar } from './astUtil.js';
 import { addScopes }       from './scope.js';
 import * as IID            from './iid.js';
 import * as W              from './wrappers.js';
@@ -45,22 +45,29 @@ const { instrumentArrowFunctionBody } = W;
 let _config = null;
 let _analysis = null;   // 当前分析对象（J$.analysis 等价物）
 let _sid = null;        // 当前脚本 ID
+let _jalangiVar = JALANGI_VAR;  // 当前沙盒变量名（可自定义）
 
 /**
  * 初始化插桩器。必须在第一次调用 instrumentCode 之前调用。
  *
- * @param {object} config   - Jalangi Config 对象
- * @param {object} [analysis] - 当前 analysis 对象（可选，用于 pre/post hook）
- * @param {*}      [sid]    - 当前脚本 ID（用于 eval 的 source map）
+ * @param {object} config      - Jalangi Config 对象
+ * @param {object} [analysis]  - 当前 analysis 对象（可选，用于 pre/post hook）
+ * @param {*}      [sid]       - 当前脚本 ID（用于 eval 的 source map）
+ * @param {string} [jalangiVar] - 沙盒变量名（默认 'J$'）。
+ *                                指定其他名称可避免与被分析页面已有的 J$ 变量冲突。
  */
-function init(config, analysis, sid) {
+function init(config, analysis, sid, jalangiVar) {
     if (config == null || typeof config !== 'object') {
         throw new TypeError('[jalangi] init(): config must be a non-null object');
     }
-    _config  = config;
-    _analysis = analysis ?? null;
-    _sid      = sid ?? null;
-    W.init(config);
+    _config     = config;
+    _analysis   = analysis ?? null;
+    _sid        = sid ?? null;
+    _jalangiVar = (typeof jalangiVar === 'string' && /^[A-Za-z_$][\w$]*$/.test(jalangiVar))
+        ? jalangiVar
+        : JALANGI_VAR;
+    W.init(config, _jalangiVar);
+    setAstUtilJalangiVar(_jalangiVar);
 }
 
 // ─── 字面量类型常量（本地别名）────────────────────────────────────────────────
@@ -592,13 +599,14 @@ function instrumentCode(options) {
 
             // astring 支持 ES2022+，替代旧版 esotope
             const newCode = astringGenerate(newAst);
-            // 用 IIFE 将插桩代码包裹：J$ 作为闭包参数传入，而非依赖全局访问，
-            // 彻底消除插桩标识符与被分析代码自身变量名的冲突风险。
+            // 用 IIFE 将插桩代码包裹：沙盒变量（_jalangiVar，默认 'J$'）作为闭包参数传入，
+            // 而非依赖全局访问，彻底消除插桩标识符与被分析代码自身变量名的冲突风险。
             // module 模式下 ESM 已自带私有作用域，改用 const 局部绑定即可。
+            const jv = _jalangiVar;
             if (sourceType === 'module') {
-                code = `const ${JALANGI_VAR} = globalThis.${JALANGI_VAR};\n${newCode}\n${NO_INSTR}\n`;
+                code = `const ${jv} = globalThis.${jv};\n${newCode}\n${NO_INSTR}\n`;
             } else {
-                code = `(function(${JALANGI_VAR}){\n${newCode}\n}(typeof ${JALANGI_VAR}!=='undefined'?${JALANGI_VAR}:{}));\n${NO_INSTR}\n`;
+                code = `(function(${jv}){\n${newCode}\n}(typeof ${jv}!=='undefined'?${jv}:{}));\n${NO_INSTR}\n`;
             }
         } catch (ex) {
             const fileName = options.origCodeFileName ?? '(unknown)';
@@ -634,9 +642,10 @@ function instrumentCode(options) {
     // 用 smap[sid] 存储各脚本的 source map，避免多脚本并发加载时互相覆盖。
     // 旧的 J$.iids 保留为最近一次的快照（向后兼容）。
     const smapKey = JSON.stringify(sourceInfo.instrumentedCodeFileName ?? 'unknown');
+    const jv = _jalangiVar;
     let instCode = options.inlineSourceMap
-        ? `(globalThis.${JALANGI_VAR}=globalThis.${JALANGI_VAR}||{});${JALANGI_VAR}.smap=${JALANGI_VAR}.smap||{};${JALANGI_VAR}.smap[${smapKey}]=${sourceMapString};${JALANGI_VAR}.iids=${sourceMapString};\n${code}`
-        : `(globalThis.${JALANGI_VAR}=globalThis.${JALANGI_VAR}||{});${JALANGI_VAR}.smap=${JALANGI_VAR}.smap||{};${JALANGI_VAR}.smap[${smapKey}]=${JSON.stringify(tmp)};${JALANGI_VAR}.iids=${JSON.stringify(tmp)};\n${code}`;
+        ? `(globalThis.${jv}=globalThis.${jv}||{});${jv}.smap=${jv}.smap||{};${jv}.smap[${smapKey}]=${sourceMapString};${jv}.iids=${sourceMapString};\n${code}`
+        : `(globalThis.${jv}=globalThis.${jv}||{});${jv}.smap=${jv}.smap||{};${jv}.smap[${smapKey}]=${JSON.stringify(tmp)};${jv}.iids=${JSON.stringify(tmp)};\n${code}`;
 
     // post-hook
     if (isEval && _analysis?.instrumentCode) {

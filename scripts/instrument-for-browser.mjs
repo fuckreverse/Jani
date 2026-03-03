@@ -23,6 +23,9 @@
  *   --store-name <n>   IndexedDB ObjectStore 名（默认：execution-trace）
  *   --source-type <t>  'script'（默认）或 'module'（支持顶层 await）
  *   --no-idb           不启用 IndexedDB（仅 console 输出 trace）
+ *   --minify           压缩运行时 bundle（去注释、混淆变量名、压缩代码体积）
+ *   --sandbox-var <v>  自定义沙盒变量名（默认 J$），用于避免与页面已有同名变量冲突
+ *   --random-var       随机生成沙盒变量名（如 __jal_a3f2），等价于 --sandbox-var 的随机版
  *   --dry-run          只打印结果，不写文件
  *   --debug            输出详细构建日志（等价于 JALANGI_DEBUG=1）
  *   --help / -h        显示本帮助
@@ -30,6 +33,9 @@
  * 示例：
  *   npm run trace:instrument -- src/app.js
  *   npm run trace:instrument -- --output dist/app.traced.js src/app.js
+ *   npm run trace:instrument -- --minify src/app.js
+ *   npm run trace:instrument -- --sandbox-var myJalangi src/app.js
+ *   npm run trace:instrument -- --random-var src/app.js
  *   npm run trace:instrument -- --debug src/app.js
  */
 
@@ -37,6 +43,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { rollup } from 'rollup';
+import terser from '@rollup/plugin-terser';
 
 // ── 路径常量 ──────────────────────────────────────────────────────────────────
 
@@ -80,6 +87,8 @@ function parseArgs(argv) {
         storeName:  'execution-trace',
         sourceType: 'script',
         useIdb:     true,
+        minify:     false,
+        sandboxVar: null,    // null → 使用默认 'J$'；字符串 → 自定义或随机生成的名字
         dryRun:     false,
         debug:      false,
         file:       null,
@@ -94,6 +103,9 @@ function parseArgs(argv) {
             case '--store-name':  opts.storeName  = argv[++i]; break;
             case '--source-type': opts.sourceType = argv[++i]; break;
             case '--no-idb':      opts.useIdb     = false;     break;
+            case '--minify':      opts.minify     = true;      break;
+            case '--sandbox-var': opts.sandboxVar = argv[++i]; break;
+            case '--random-var':  opts.sandboxVar = _randomVarName(); break;
             case '--dry-run':     opts.dryRun     = true;      break;
             case '--debug':       opts.debug       = true;     break;
             default:
@@ -118,10 +130,26 @@ function printHelp() {
   --store-name <n>    ObjectStore 名（默认：execution-trace）
   --source-type <t>   'script'（默认）或 'module'
   --no-idb            不启用 IndexedDB（仅 console 输出）
+  --minify            压缩运行时 bundle（去注释、混淆变量名、压缩代码体积）
+  --sandbox-var <v>   自定义沙盒变量名（默认 J$），避免与页面变量冲突
+  --random-var        随机生成沙盒变量名（如 __jal_a3f2）
   --dry-run           只打印，不写文件
   --debug             输出详细构建日志（等价于 JALANGI_DEBUG=1）
   --help / -h         显示此帮助
     `.trim());
+}
+
+/**
+ * 生成一个安全的随机 JS 标识符：__jal_XXXXXX
+ * 用于 --random-var 模式，防止沙盒变量名与页面现有变量冲突。
+ */
+function _randomVarName() {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let suffix = '';
+    for (let i = 0; i < 6; i++) {
+        suffix += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return `__jal_${suffix}`;
 }
 
 // ── 运行时 Bundle 生成（Rollup）────────────────────────────────────────────────
@@ -159,15 +187,17 @@ async function buildRuntimeBundle(opts) {
     // 这样 rollup 会把这些模块当成普通静态依赖内联进来。
     // WsBackend / NodeStreamBackend / MemoryBackend 重定向到空 stub，
     // 由 treeshake 消除（不在 bundle 里）。
+    // 确定最终使用的沙盒变量名（命令行指定 > 随机生成 > 默认 J$）
+    const sandboxVar = opts.sandboxVar ?? 'J$';
     const entryCode = `
 import { JalangiSandbox } from '${SRC('runtime', 'JalangiSandbox.js')}';
 import { ExecutionTraceAnalysis } from '${SRC('sample_analyses', 'ExecutionTrace.js')}';
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
-var J$ = globalThis.J$ = new JalangiSandbox();
+var ${sandboxVar} = globalThis.${sandboxVar} = new JalangiSandbox();
 
 // 注册 ExecutionTrace 分析插件
-J$.analysis.use(new ExecutionTraceAnalysis(J$, null, {
+${sandboxVar}.analysis.use(new ExecutionTraceAnalysis(${sandboxVar}, null, {
     useIdb:    ${opts.useIdb},
     dbName:    ${JSON.stringify(opts.dbName)},
     storeName: ${JSON.stringify(opts.storeName)},
@@ -249,6 +279,13 @@ J$.analysis.use(new ExecutionTraceAnalysis(J$, null, {
                 }
             },
         },
+
+        // ── Plugin 4: 压缩（仅 --minify 时启用）─────────────────────────────
+        ...(opts.minify ? [terser({
+            compress: { passes: 2 },
+            mangle:   true,
+            format:   { comments: false },
+        })] : []),
     ];
 
     const doneRollupBuild = log.phase('rollup build');
@@ -314,6 +351,8 @@ async function main() {
     );
     doneLoadInstrumenter();
 
+    // 确定沙盒变量名（与 buildRuntimeBundle 保持一致）
+    const sandboxVar = opts.sandboxVar ?? 'J$';
     init({
         ENABLE_SAMPLING:           false,
         INSTR_READ:                null,
@@ -327,7 +366,7 @@ async function main() {
         INSTR_CONDITIONAL:         null,
         INSTR_TRY_CATCH_ARGUMENTS: null,
         INSTR_END_EXPRESSION:      null,
-    });
+    }, null, null, sandboxVar);
 
     const inputPath = opts.file;
     const outPath   = opts.output ? resolve(opts.output) : inputPath;
@@ -410,11 +449,15 @@ async function main() {
         console.log(`  源文件  : ${inputPath}`);
         console.log(`  输出    : ${outPath}`);
         console.log(`  IID 数量: ${iidCount}`);
-        console.log(`  总大小  : ${(finalCode.length / 1024).toFixed(1)} KB`);
+        console.log(`  沙盒变量: ${sandboxVar}${sandboxVar === 'J$' ? ' (默认)' : ''}`);
+        console.log(`  总大小  : ${(finalCode.length / 1024).toFixed(1)} KB${opts.minify ? ' (已压缩)' : ''}`);
         if (opts.useIdb) {
             console.log(`  IDB     : ${opts.dbName} / ${opts.storeName}`);
         }
         console.log(`\n直接替换网页中原始的 <script src="..."> 标签即可。`);
+        if (!opts.minify) {
+            console.log(`  提示: 使用 --minify 可压缩运行时 bundle，显著减小文件体积`);
+        }
         if (!opts.debug && !_debugEnabled) {
             console.log(`  提示: 使用 --debug 或 JALANGI_DEBUG=1 可查看详细构建日志`);
         }

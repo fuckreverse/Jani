@@ -734,6 +734,74 @@ test('Guard: wrapFunBodyWithTryCatch 的 generator/async 守卫能被 visitorOps
 });
 
 // ════════════════════════════════════════════════════════════════
+// 自定义沙盒变量名（--sandbox-var / jalangiVar 参数）
+// ════════════════════════════════════════════════════════════════
+
+console.log('\n── 自定义沙盒变量名 ─────────────────────────────────────');
+
+test('jalangiVar: 使用自定义变量名 __myJ 时，IIFE 包装使用该名称', () => {
+    init(ALL_CONFIG, null, null, '__myJ');
+    const r = instrumentCode({
+        code: 'var x = 1 + 2;',
+        origCodeFileName: 'custom.js',
+        instCodeFileName: 'custom_i.js',
+    });
+    assertIncludes(r.code, '__myJ', '插桩输出应包含自定义变量名 __myJ');
+    assert(!r.code.includes('(function(J$)') && !r.code.includes('typeof J$!=='),
+        '插桩输出不应包含旧变量名 J$ 的 IIFE 包装');
+    // 调用钩子应使用新名称
+    assertIncludes(r.code, '__myJ.', '钩子调用应使用 __myJ. 前缀');
+});
+
+test('jalangiVar: 自定义变量名不影响 source map 生成（iid 正常）', () => {
+    init(ALL_CONFIG, null, null, '__myJ');
+    const r = instrumentCode({
+        code: 'var a = 1;',
+        origCodeFileName: 'smap.js',
+        instCodeFileName: 'smap_i.js',
+        inlineSourceMap: true,
+    });
+    assert(r.sourceMapObject && Object.keys(r.sourceMapObject).length > 0,
+        '自定义变量名下 source map 应正常生成');
+});
+
+test('jalangiVar: 非法变量名（含空格）被忽略，回退到默认 J$', () => {
+    init(ALL_CONFIG, null, null, 'bad name!');
+    const r = instrumentCode({
+        code: 'var x = 1;',
+        origCodeFileName: 'fallback.js',
+        instCodeFileName: 'fallback_i.js',
+    });
+    assertIncludes(r.code, 'J$', '非法变量名应回退到默认 J$');
+});
+
+test('jalangiVar: 默认（不传）仍使用 J$', () => {
+    init(ALL_CONFIG);   // 不传第4个参数
+    const r = instrumentCode({
+        code: 'var x = 1;',
+        origCodeFileName: 'default.js',
+        instCodeFileName: 'default_i.js',
+    });
+    assertIncludes(r.code, 'J$', '不传 jalangiVar 时应使用默认 J$');
+});
+
+test('jalangiVar: 前缀 __jal_ 随机名格式插桩正确', () => {
+    // 模拟 --random-var 生成的名字
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let suffix = '';
+    for (let i = 0; i < 6; i++) suffix += chars[i % chars.length];  // 固定序列便于测试
+    const varName = `__jal_${suffix}`;
+    init(ALL_CONFIG, null, null, varName);
+    const r = instrumentCode({
+        code: 'var x = 1 + 2;',
+        origCodeFileName: 'random.js',
+        instCodeFileName: 'random_i.js',
+    });
+    assertIncludes(r.code, varName, `插桩输出应包含随机变量名 ${varName}`);
+    assertIncludes(r.code, `${varName}.`, `钩子调用应使用 ${varName}. 前缀`);
+});
+
+// ════════════════════════════════════════════════════════════════
 // 汇总
 // ════════════════════════════════════════════════════════════════
 console.log(`\n${'─'.repeat(52)}`);

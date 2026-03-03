@@ -18,6 +18,16 @@
 
 import { HOP, JALANGI_VAR } from '../Constants.js';
 
+// 当前沙盒变量名，由 esnstrument.js 的 init() 通过 setJalangiVar() 同步
+let _jalangiVar = JALANGI_VAR;
+
+/**
+ * 更新 astUtil 使用的沙盒变量名。
+ * 必须在插桩之前由 esnstrument.init() 调用。
+ * @param {string} v  新的变量名
+ */
+function setJalangiVar(v) { _jalangiVar = v; }
+
 /**
  * AST 遍历上下文枚举。
  * 用于告知 visitor 当前节点所处的语义环境。
@@ -41,7 +51,7 @@ function ignoreSubAst(node) {
     return node.type === 'CallExpression'
         && node.callee.type === 'MemberExpression'
         && node.callee.object.type === 'Identifier'
-        && node.callee.object.name === JALANGI_VAR
+        && node.callee.object.name === _jalangiVar
         && node.callee.property.type === 'Identifier'
         && node.callee.property.name === 'I';
 }
@@ -165,7 +175,7 @@ function serialize(root) {
     function canMakeSymbolic(node) {
         if (!node.callee.object) return false;
         const { callee } = node;
-        return callee.object.name === JALANGI_VAR
+        return callee.object.name === _jalangiVar
             && callee.property.name !== 'instrumentCode'
             && callee.property.name !== 'getConcrete'
             && callee.property.name !== 'I'
@@ -180,7 +190,7 @@ function serialize(root) {
     const visitorPost = {
         CallExpression(node) {
             try {
-                if (node.callee.object?.name === JALANGI_VAR &&
+                if (node.callee.object?.name === _jalangiVar &&
                     (node.callee.property.name === 'Se' || node.callee.property.name === 'Fe')) {
                     setSerializedAST(node.arguments[0].value, parentFunOrScript);
                     return node;
@@ -232,7 +242,7 @@ function computeTopLevelExpressions(ast) {
         CallExpression(node) {
             if (node.callee.type === 'MemberExpression' &&
                 node.callee.object.type === 'Identifier' &&
-                node.callee.object.name === JALANGI_VAR) {
+                node.callee.object.name === _jalangiVar) {
                 const name = node.callee.property.name;
                 if ((exprDepth === 0 && TOP_LEVEL_OPS.has(name)) ||
                     (exprDepth === 1 && (name === 'F' || name === 'M'))) {
@@ -242,7 +252,7 @@ function computeTopLevelExpressions(ast) {
             } else if (
                 node.callee.type === 'CallExpression' &&
                 node.callee.callee.type === 'MemberExpression' &&
-                node.callee.callee.object.name === JALANGI_VAR &&
+                node.callee.callee.object.name === _jalangiVar &&
                 (node.callee.callee.property.name === 'F' || node.callee.callee.property.name === 'M')
             ) {
                 exprDepth++;
@@ -255,12 +265,12 @@ function computeTopLevelExpressions(ast) {
     const visitorPost = {
         CallExpression(node) {
             if (node.callee.type === 'MemberExpression' &&
-                node.callee.object.name === JALANGI_VAR) {
+                node.callee.object.name === _jalangiVar) {
                 exprDepth--;
             } else if (
                 node.callee.type === 'CallExpression' &&
                 node.callee.callee.type === 'MemberExpression' &&
-                node.callee.callee.object.name === JALANGI_VAR &&
+                node.callee.callee.object.name === _jalangiVar &&
                 (node.callee.callee.property.name === 'F' || node.callee.callee.property.name === 'M')
             ) {
                 exprDepth--;
@@ -275,4 +285,4 @@ function computeTopLevelExpressions(ast) {
     return topLevelExprs;
 }
 
-export { CONTEXT, transformAst, serialize, deserialize, computeTopLevelExpressions };
+export { CONTEXT, transformAst, serialize, deserialize, computeTopLevelExpressions, setJalangiVar };

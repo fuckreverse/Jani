@@ -32,42 +32,85 @@ import * as IID from './iid.js';
 // Config 对象通过 init() 参数注入，避免模块间循环依赖。
 let Config;
 
-// ─── 常量 ─────────────────────────────────────────────────────────────────────
+// ─── 运行时变量名（由 init() 根据 jalangiVar 动态生成）────────────────────────
+// 默认值为 'J$'，可通过 init(config, jalangiVar) 覆盖。
+let _jalangiVar = JALANGI_VAR;  // 当前使用的沙盒变量名（如 'J$' 或 '__j123'）
 
-const RP = `${JALANGI_VAR}_`;   // 占位符前缀，如 J$_1
+/** 模板字符串 → 缓存的 AST body 数组（去掉 loc/start/end）。变量名改变时由 _rebuildNames 清空 */
+const _templateCache = new Map();
 
-// ─── 运行时函数名（插桩时注入到 AST 中的字符串常量）──────────────────────────
+let RP;                         // 占位符前缀，如 'J$_'
+let logFunctionEnterFunName;
+let logFunctionReturnFunName;
+let logFunCallFunName;
+let logMethodCallFunName;
+let logAssignFunName;
+let logPutFieldFunName;
+let logGetFieldFunName;
+let logScriptEntryFunName;
+let logScriptExitFunName;
+let logReadFunName;
+let logWriteFunName;
+let logIFunName;
+let logHashFunName;
+let logLitFunName;
+let logInitFunName;
+let logReturnFunName;
+let logThrowFunName;
+let logReturnAggrFunName;
+let logUncaughtExceptionFunName;
+let logLastComputedFunName;
+let logTmpVarName;
+let logWithFunName;
+let logBinaryOpFunName;
+let logUnaryOpFunName;
+let logConditionalFunName;
+let logSwitchLeftFunName;
+let logSwitchRightFunName;
+let logLastFunName;
+let logX1FunName;
+let instrumentCodeFunName;
 
-const logFunctionEnterFunName     = `${JALANGI_VAR}.Fe`;
-const logFunctionReturnFunName    = `${JALANGI_VAR}.Fr`;
-const logFunCallFunName           = `${JALANGI_VAR}.F`;
-const logMethodCallFunName        = `${JALANGI_VAR}.M`;
-const logAssignFunName            = `${JALANGI_VAR}.A`;
-const logPutFieldFunName          = `${JALANGI_VAR}.P`;
-const logGetFieldFunName          = `${JALANGI_VAR}.G`;
-const logScriptEntryFunName       = `${JALANGI_VAR}.Se`;
-const logScriptExitFunName        = `${JALANGI_VAR}.Sr`;
-const logReadFunName              = `${JALANGI_VAR}.R`;
-const logWriteFunName             = `${JALANGI_VAR}.W`;
-const logIFunName                 = `${JALANGI_VAR}.I`;
-const logHashFunName              = `${JALANGI_VAR}.H`;
-const logLitFunName               = `${JALANGI_VAR}.T`;
-const logInitFunName              = `${JALANGI_VAR}.N`;
-const logReturnFunName            = `${JALANGI_VAR}.Rt`;
-const logThrowFunName             = `${JALANGI_VAR}.Th`;
-const logReturnAggrFunName        = `${JALANGI_VAR}.Ra`;
-const logUncaughtExceptionFunName = `${JALANGI_VAR}.Ex`;
-const logLastComputedFunName      = `${JALANGI_VAR}.L`;
-const logTmpVarName               = `${JALANGI_VAR}._tm_p`;
-const logWithFunName              = `${JALANGI_VAR}.Wi`;
-const logBinaryOpFunName          = `${JALANGI_VAR}.B`;
-const logUnaryOpFunName           = `${JALANGI_VAR}.U`;
-const logConditionalFunName       = `${JALANGI_VAR}.C`;
-const logSwitchLeftFunName        = `${JALANGI_VAR}.C1`;
-const logSwitchRightFunName       = `${JALANGI_VAR}.C2`;
-const logLastFunName              = `${JALANGI_VAR}._`;
-const logX1FunName                = `${JALANGI_VAR}.X1`;
-const instrumentCodeFunName       = `${JALANGI_VAR}.instrumentEvalCode`;
+/** 用给定的沙盒变量名重新生成所有运行时函数名常量 */
+function _rebuildNames(v) {
+    _jalangiVar              = v;
+    RP                       = `${v}_`;
+    logFunctionEnterFunName  = `${v}.Fe`;
+    logFunctionReturnFunName = `${v}.Fr`;
+    logFunCallFunName        = `${v}.F`;
+    logMethodCallFunName     = `${v}.M`;
+    logAssignFunName         = `${v}.A`;
+    logPutFieldFunName       = `${v}.P`;
+    logGetFieldFunName       = `${v}.G`;
+    logScriptEntryFunName    = `${v}.Se`;
+    logScriptExitFunName     = `${v}.Sr`;
+    logReadFunName           = `${v}.R`;
+    logWriteFunName          = `${v}.W`;
+    logIFunName              = `${v}.I`;
+    logHashFunName           = `${v}.H`;
+    logLitFunName            = `${v}.T`;
+    logInitFunName           = `${v}.N`;
+    logReturnFunName         = `${v}.Rt`;
+    logThrowFunName          = `${v}.Th`;
+    logReturnAggrFunName     = `${v}.Ra`;
+    logUncaughtExceptionFunName = `${v}.Ex`;
+    logLastComputedFunName   = `${v}.L`;
+    logTmpVarName            = `${v}._tm_p`;
+    logWithFunName           = `${v}.Wi`;
+    logBinaryOpFunName       = `${v}.B`;
+    logUnaryOpFunName        = `${v}.U`;
+    logConditionalFunName    = `${v}.C`;
+    logSwitchLeftFunName     = `${v}.C1`;
+    logSwitchRightFunName    = `${v}.C2`;
+    logLastFunName           = `${v}._`;
+    logX1FunName             = `${v}.X1`;
+    instrumentCodeFunName    = `${v}.instrumentEvalCode`;
+    // 模板缓存依赖占位符前缀，变量名变化时必须清空
+    _templateCache.clear();
+}
+
+// 模块加载时用默认值初始化一次
+_rebuildNames(JALANGI_VAR);
 
 // ─── N_LOG_* 字面量类型常量 ────────────────────────────────────────────────────
 // 这些整数常量在运行时传给 J$.T（wrapLiteral），用于标识字面量的具体类型。
@@ -119,9 +162,7 @@ function createBitPattern(...flags) {
 // 其中的占位符 J$_1, J$_2, ... 会被真实 AST 节点替换。
 //
 // 第一次解析时缓存去掉 loc 的纯结构 AST，后续深拷贝复用，省去重复 parse。
-
-/** 模板字符串 → 缓存的 AST body 数组（去掉 loc/start/end） */
-const _templateCache = new Map();
+// _templateCache 已在模块顶部声明；变量名改变时由 _rebuildNames() 清空缓存。
 
 /**
  * 深拷贝并替换 AST 中的占位符。
@@ -495,7 +536,7 @@ function wrapLogicalNullish(node, left, right) {
         // 因为 RP = 'J$_' 是占位符前缀，以 J$_ 开头的裸标识符会被
         // deepCloneAndReplace 误识别为占位符导致崩溃。
         const tmpProp = `tmp_${tmpVarCounter++}`;
-        const uniqueTmp = `${JALANGI_VAR}.${tmpProp}`;
+        const uniqueTmp = `${_jalangiVar}.${tmpProp}`;
         // `!= null` 使用宽松比较，已同时排除 null 和 undefined（因为 null == undefined），
         // 无需再加 `!== undefined`，后者是冗余条件。
         const ret = replaceInExpr(
@@ -590,9 +631,9 @@ function ifObjectExpressionHasGetterSetter(node) {
 }
 
 /**
- * 从已插桩的函数 AST 中提取 J$.Fe 调用的 IID（internalFunId）。
- * 只适用于含有 J$.Fe 入口语句的 FunctionExpression / FunctionDeclaration。
- * ArrowFunctionExpression 没有 J$.Fe，应直接传 undefined。
+ * 从已插桩的函数 AST 中提取 <sandboxVar>.Fe 调用的 IID（internalFunId）。
+ * 只适用于含有 <sandboxVar>.Fe 入口语句的 FunctionExpression / FunctionDeclaration。
+ * ArrowFunctionExpression 没有 Fe，应直接传 undefined。
  */
 function getFnIdFromAst(ast) {
     const entryExpr = ast.body.body[0];
@@ -600,7 +641,7 @@ function getFnIdFromAst(ast) {
     const call = entryExpr.expression;
     if (call.type !== 'CallExpression') throw new Error('IllegalStateException');
     if (call.callee.type !== 'MemberExpression') throw new Error('IllegalStateException');
-    if (call.callee.object.name !== JALANGI_VAR) throw new Error('IllegalStateException');
+    if (call.callee.object.name !== _jalangiVar) throw new Error('IllegalStateException');  // 用动态变量名
     if (call.callee.property.name !== 'Fe') throw new Error('IllegalStateException');
     return call.arguments[0].value;
 }
@@ -773,7 +814,7 @@ function wrapScriptBodyWithTryCatch(node, body) {
         // BUG-4 fix: catch 块末尾必须 re-throw，否则脚本级未捕获异常被静默吞掉，
         // 导致 try 内部抛出的错误对外不可见，破坏程序的错误传播语义。
         const ret = replaceInStatement(
-            `function n() { jalangiLabel${l}: while(true) { try {${RP}1} catch(${JALANGI_VAR}e) { ${logUncaughtExceptionFunName}(${RP}2,${JALANGI_VAR}e); throw ${JALANGI_VAR}e; } finally { if (${logScriptExitFunName}(${RP}3)) { ${logLastComputedFunName}(); continue jalangiLabel${l};\n } else {\n  ${logLastComputedFunName}(); break jalangiLabel${l};\n }}\n }}`,
+            `function n() { jalangiLabel${l}: while(true) { try {${RP}1} catch(${_jalangiVar}e) { ${logUncaughtExceptionFunName}(${RP}2,${_jalangiVar}e); throw ${_jalangiVar}e; } finally { if (${logScriptExitFunName}(${RP}3)) { ${logLastComputedFunName}(); continue jalangiLabel${l};\n } else {\n  ${logLastComputedFunName}(); break jalangiLabel${l};\n }}\n }}`,
             body, iid1, IID.getIid()
         );
         const stmts = ret[0].body.body;
@@ -807,7 +848,7 @@ function wrapFunBodyWithTryCatch(node, body) {
         IID.printIidToLoc(node);
         const l = labelCounter++;
         const ret = replaceInStatement(
-            `function n() { jalangiLabel${l}: while(true) { try {${RP}1} catch(${JALANGI_VAR}e) { ${logUncaughtExceptionFunName}(${RP}2,${JALANGI_VAR}e); } finally { if (${logFunctionReturnFunName}(${RP}3)) continue jalangiLabel${l};\n else \n  return ${logReturnAggrFunName}();\n }\n }}`,
+            `function n() { jalangiLabel${l}: while(true) { try {${RP}1} catch(${_jalangiVar}e) { ${logUncaughtExceptionFunName}(${RP}2,${_jalangiVar}e); } finally { if (${logFunctionReturnFunName}(${RP}3)) continue jalangiLabel${l};\n else \n  return ${logReturnAggrFunName}();\n }\n }}`,
             body, iid1, IID.getIid()
         );
         const stmts = ret[0].body.body;
@@ -989,7 +1030,7 @@ function instrumentLoad(ast, isTypeof) {
     if (ast.type === 'Identifier') {
         if (ast.name === 'undefined') return wrapLiteral(ast, ast, N_LOG_UNDEFINED_LIT);
         if (ast.name === 'NaN' || ast.name === 'Infinity') return wrapLiteral(ast, ast, N_LOG_NUMBER_LIT);
-        if (ast.name === JALANGI_VAR) return ast;
+        if (ast.name === _jalangiVar) return ast;  // 沙盒变量自身不插桩
         if (_scope.hasVar(ast.name)) {
             return wrapRead(ast, createLiteralAst(ast.name), ast, false, false, _scope.isGlobal(ast.name));
         } else if (isTypeof) {
@@ -1048,10 +1089,18 @@ function instrumentCall(callAst, isCtor) {
 // ─── 初始化（注入 Config）────────────────────────────────────────────────────
 
 /**
- * 在使用任何 wrap 函数前，必须先调用 init(config) 注入配置对象。
+ * 在使用任何 wrap 函数前，必须先调用 init(config, jalangiVar?) 注入配置对象。
+ *
+ * @param {object} config      - Jalangi Config 对象
+ * @param {string} [jalangiVar] - 沙盒变量名（默认 'J$'）。
+ *                                指定其他名称可避免与被分析页面已有的 J$ 变量冲突。
  */
-function init(config) {
+function init(config, jalangiVar) {
     Config = config;
+    const v = (typeof jalangiVar === 'string' && /^[A-Za-z_$][\w$]*$/.test(jalangiVar))
+        ? jalangiVar
+        : JALANGI_VAR;
+    if (v !== _jalangiVar) _rebuildNames(v);
 }
 
 /**
