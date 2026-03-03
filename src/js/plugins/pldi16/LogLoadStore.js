@@ -6,9 +6,9 @@
  *
  * 需要配合 SMemory 使用：
  *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/sample_analyses/ChainedAnalyses.js \
+ *     --analysis src/js/plugins/ChainedAnalyses.js \
  *     --analysis src/js/runtime/SMemory.js \
- *     --analysis src/js/sample_analyses/pldi16/LogLoadStore.js \
+ *     --analysis src/js/plugins/pldi16/LogLoadStore.js \
  *     tests/pldi16/CountObjectsPerAllocationSiteTest.js
  */
 

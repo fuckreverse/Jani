@@ -10,7 +10,7 @@
 
 import { AnalysisHost, HOOKS }          from '../src/js/runtime/AnalysisHost.js';
 import { SMemory, SMemoryPlugin }        from '../src/js/runtime/SMemory.js';
-import { LogAllAnalysis }               from '../src/js/sample_analyses/tutorial/LogAll.js';
+import { LogAllAnalysis }               from '../src/js/plugins/tutorial/LogAll.js';
 
 // ─── 极简测试框架 ─────────────────────────────────────────────────────────────
 

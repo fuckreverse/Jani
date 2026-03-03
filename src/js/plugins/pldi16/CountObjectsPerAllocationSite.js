@@ -6,7 +6,7 @@
  *
  * 运行示例：
  *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/sample_analyses/pldi16/CountObjectsPerAllocationSite.js \
+ *     --analysis src/js/plugins/pldi16/CountObjectsPerAllocationSite.js \
  *     tests/pldi16/CountObjectsPerAllocationSiteTest.js
  */
 

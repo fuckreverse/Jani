@@ -22,9 +22,9 @@
  *
  * 运行示例：
  *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/sample_analyses/ChainedAnalyses.js \
+ *     --analysis src/js/plugins/ChainedAnalyses.js \
  *     --analysis src/js/runtime/SMemory.js \
- *     --analysis src/js/sample_analyses/pldi16/TraceAll.js \
+ *     --analysis src/js/plugins/pldi16/TraceAll.js \
  *     tests/pldi16/TraceAllTest.js
  */
 

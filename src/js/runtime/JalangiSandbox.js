@@ -145,7 +145,7 @@ export class JalangiSandbox extends JalangiRuntime {
     // ── 私有辅助 ─────────────────────────────────────────────────────────────
 
     async #registerExecutionTrace(options) {
-        const { ExecutionTraceAnalysis } = await import('../sample_analyses/ExecutionTrace.js');
+        const { ExecutionTraceAnalysis } = await import('../plugins/ExecutionTrace.js');
         this.analysis.use(new ExecutionTraceAnalysis(this, options.sourceCode ?? null, {
             useIdb:    options.useIdb    ?? false,
             dbName:    options.dbName,

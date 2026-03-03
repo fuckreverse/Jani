@@ -5,9 +5,9 @@
  *
  * 运行示例（需 SMemory）：
  *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/sample_analyses/ChainedAnalyses.js \
+ *     --analysis src/js/plugins/ChainedAnalyses.js \
  *     --analysis src/js/runtime/SMemory.js \
- *     --analysis src/js/sample_analyses/scratch/SmemTest.js \
+ *     --analysis src/js/plugins/scratch/SmemTest.js \
  *     tests/octane/deltablue.js
  */
 

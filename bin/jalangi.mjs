@@ -21,7 +21,7 @@
  *   --help / -h           显示帮助
  *
  * 示例：
- *   node bin/jalangi.mjs --analysis src/js/sample_analyses/TraceAll.js tests/unit/simple.js
+ *   node bin/jalangi.mjs --analysis src/js/plugins/TraceAll.js tests/unit/simple.js
  *   node bin/jalangi.mjs --analysis myAnalysis.js -- myScript.js arg1 arg2
  */
 

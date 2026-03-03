@@ -191,7 +191,7 @@ async function buildRuntimeBundle(opts) {
     const sandboxVar = opts.sandboxVar ?? 'J$';
     const entryCode = `
 import { JalangiSandbox } from '${SRC('runtime', 'JalangiSandbox.js')}';
-import { ExecutionTraceAnalysis } from '${SRC('sample_analyses', 'ExecutionTrace.js')}';
+import { ExecutionTraceAnalysis } from '${SRC('plugins', 'ExecutionTrace.js')}';
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 var ${sandboxVar} = globalThis.${sandboxVar} = new JalangiSandbox();
@@ -209,7 +209,7 @@ ${sandboxVar}.analysis.use(new ExecutionTraceAnalysis(${sandboxVar}, null, {
         './backends/IdbWorkerBackend.js':           SRC('runtime', 'logging', 'backends', 'IdbWorkerBackend.js'),
         './LogManager.js':                          SRC('runtime', 'logging', 'LogManager.js'),
         // JalangiSandbox.#registerExecutionTrace 中的动态 import（此处已在入口静态导入，stub 掉避免重复）
-        '../sample_analyses/ExecutionTrace.js':     '\0stub:ExecutionTrace',
+        '../plugins/ExecutionTrace.js':              '\0stub:ExecutionTrace',
         // 下面三个不打进浏览器 bundle，用 stub 替代
         './backends/WsBackend.js':                  '\0stub:WsBackend',
         './backends/NodeStreamBackend.js':           '\0stub:NodeStreamBackend',

@@ -5,10 +5,10 @@
  *
  * 需要配合 SMemory 和 TraceWriter 使用：
  *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/sample_analyses/ChainedAnalyses.js \
+ *     --analysis src/js/plugins/ChainedAnalyses.js \
  *     --analysis src/js/runtime/SMemory.js \
- *     --analysis src/js/sample_analyses/datatraces/TraceWriter.js \
- *     --analysis src/js/sample_analyses/datatraces/LogData.js \
+ *     --analysis src/js/plugins/datatraces/TraceWriter.js \
+ *     --analysis src/js/plugins/datatraces/LogData.js \
  *     tests/octane/deltablue.js
  */
 

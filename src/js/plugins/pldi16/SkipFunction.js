@@ -6,7 +6,7 @@
  *
  * 运行示例：
  *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/sample_analyses/pldi16/SkipFunction.js \
+ *     --analysis src/js/plugins/pldi16/SkipFunction.js \
  *     tests/pldi16/SkipFunctionTest.js
  */
 

@@ -4,7 +4,7 @@
  * @file ProcessCoverage —— 将多轮测试的 coverage*.json 汇总为 allcoverage.json。
  *
  * 独立运行：
- *   node src/js/sample_analyses/coverage/ProcessCoverage.js 1
+ *   node src/js/plugins/coverage/ProcessCoverage.js 1
  *   （参数 1 = 分支覆盖，2 = 语句覆盖）
  *
  * 使用流程（见文件末尾注释）：

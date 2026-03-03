@@ -6,13 +6,13 @@
  *
  * 运行示例：
  *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/sample_analyses/tutorial/BranchCoverage.js \
+ *     --analysis src/js/plugins/pldi16/BranchCoverage.js \
  *     tests/pldi16/BranchCoverageTest.js
  */
 
 export class BranchCoverageAnalysis {
     constructor(sandbox) {
-        this._sandbox = sandbox;
+        this._sandbox      = sandbox;
         this._trueBranches  = {};
         this._falseBranches = {};
     }
@@ -27,9 +27,7 @@ export class BranchCoverageAnalysis {
     }
 
     endExecution() {
-        const log = (str) => this._sandbox.log(str);
-        const iidToLocation = (id) => this._sandbox.iidToLocation(id);
-
+        const { log, iidToLocation } = this._sandbox;
         for (const id of Object.keys(this._trueBranches)) {
             log(`True branch taken at ${iidToLocation(id)} ${this._trueBranches[id]} times`);
         }

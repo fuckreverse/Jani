@@ -1,7 +1,7 @@
 # Shadow Memory System
 Relevant source files
 - [src/js/runtime/SMemory.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js)
-- [src/js/sample_analyses/scratch/SmemTest.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/scratch/SmemTest.js)
+- [src/js/plugins/scratch/SmemTest.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/scratch/SmemTest.js)
 - [tests/finally.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/finally.js)
 - [tests/unit/Smem1.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/unit/Smem1.js)
 - [tests/unit/getter-frame.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/unit/getter-frame.js)
@@ -306,7 +306,7 @@ var frameID = sandbox.smemory.getIDFromShadowObjectOrFrame(shadowFrame);
 console.log("READ " + frameID + "." + name);
 ```
 
-Sources: [src/js/sample_analyses/scratch/SmemTest.js20-40](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/scratch/SmemTest.js#L20-L40)
+Sources: [src/js/plugins/scratch/SmemTest.js20-40](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/scratch/SmemTest.js#L20-L40)
 
 ## Implementation Details
 

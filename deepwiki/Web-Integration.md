@@ -3,7 +3,7 @@ Relevant source files
 - [README.md](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md)
 - [scripts/mitmproxywrapper.py](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/mitmproxywrapper.py)
 - [scripts/proxy.py](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/proxy.py)
-- [src/js/sample_analyses/pldi16/TraceAll.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/pldi16/TraceAll.js)
+- [src/js/plugins/pldi16/TraceAll.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/TraceAll.js)
 
 This document explains Jalangi2's proxy-based instrumentation system for analyzing JavaScript code running in web browsers. This approach enables dynamic analysis of web applications by intercepting and instrumenting JavaScript files as they are served over HTTP/HTTPS connections.
 
@@ -191,7 +191,7 @@ Sources: [README.md107-119](https://github.com/Samsung/jalangi2/blob/28d2181c/RE
 #### Manual Proxy Setup
 
 ```
-mitmdump --quiet --anticache -s "scripts/proxy.py --inlineIID --inlineSource --analysis src/js/sample_analyses/ChainedAnalyses.js --analysis src/js/runtime/analysisCallbackTemplate.js"
+mitmdump --quiet --anticache -s "scripts/proxy.py --inlineIID --inlineSource --analysis src/js/plugins/ChainedAnalyses.js --analysis src/js/runtime/analysisCallbackTemplate.js"
 ```
 
 Browser proxy configuration: `127.0.0.1:8080`
@@ -199,7 +199,7 @@ Browser proxy configuration: `127.0.0.1:8080`
 #### macOS Automatic Setup
 
 ```
-./scripts/mitmproxywrapper.py --toggle --auto-disable --quiet --anticache -s "scripts/proxy.py --inlineIID --inlineSource --analysis src/js/sample_analyses/ChainedAnalyses.js --analysis src/js/runtime/analysisCallbackTemplate.js"
+./scripts/mitmproxywrapper.py --toggle --auto-disable --quiet --anticache -s "scripts/proxy.py --inlineIID --inlineSource --analysis src/js/plugins/ChainedAnalyses.js --analysis src/js/runtime/analysisCallbackTemplate.js"
 ```
 
 Sources: [README.md128-138](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L128-L138)
@@ -244,7 +244,7 @@ if (sandbox.Constants.isBrowser) {
 
 Results can be displayed in browser console or logged to analysis results system.
 
-Sources: [src/js/sample_analyses/pldi16/TraceAll.js29-31](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/pldi16/TraceAll.js#L29-L31)[src/js/sample_analyses/pldi16/TraceAll.js67-71](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/pldi16/TraceAll.js#L67-L71)
+Sources: [src/js/plugins/pldi16/TraceAll.js29-31](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/TraceAll.js#L29-L31)[src/js/plugins/pldi16/TraceAll.js67-71](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/TraceAll.js#L67-L71)
 
 ## Environment Integration
 

@@ -12,7 +12,7 @@
  *
  *   import { AnalysisHost } from './AnalysisHost.js';
  *   import { SMemoryPlugin, SMemory } from './SMemory.js';
- *   import { LogAllAnalysis } from '../sample_analyses/tutorial/LogAll.js';
+ *   import { LogAllAnalysis } from '../plugins/tutorial/LogAll.js';
  *
  *   const smemory = new SMemory();
  *   J$.analysis = new AnalysisHost()

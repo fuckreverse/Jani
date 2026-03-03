@@ -6,7 +6,7 @@ Relevant source files
 - [package.json](https://github.com/Samsung/jalangi2/blob/28d2181c/package.json)
 - [scripts/mitmproxywrapper.py](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/mitmproxywrapper.py)
 - [scripts/proxy.py](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/proxy.py)
-- [src/js/sample_analyses/pldi16/TraceAll.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/pldi16/TraceAll.js)
+- [src/js/plugins/pldi16/TraceAll.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/TraceAll.js)
 
 ## Purpose and Scope
 
@@ -102,13 +102,13 @@ Instrumentation Configuration
 
 Analysis Files
 
-src/js/sample_analyses/ChainedAnalyses.js
+src/js/plugins/ChainedAnalyses.js
 Analysis Chaining
 
-src/js/sample_analyses/pldi16/TraceAll.js
+src/js/plugins/pldi16/TraceAll.js
 Execution Tracer
 
-src/js/sample_analyses/AddCoverage.js
+src/js/plugins/AddCoverage.js
 Code Coverage
 
 Command Files
@@ -140,7 +140,7 @@ src/js/runtime/analysisCallbackTemplate.js
 Analysis Template
 ```
 
-Sources: [package.json37-38](https://github.com/Samsung/jalangi2/blob/28d2181c/package.json#L37-L38)[README.md63-91](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L63-L91)[scripts/proxy.py1](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/proxy.py#L1-L1)[src/js/sample_analyses/pldi16/TraceAll.js1](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/pldi16/TraceAll.js#L1-L1)
+Sources: [package.json37-38](https://github.com/Samsung/jalangi2/blob/28d2181c/package.json#L37-L38)[README.md63-91](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L63-L91)[scripts/proxy.py1](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/proxy.py#L1-L1)[src/js/plugins/pldi16/TraceAll.js1](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/TraceAll.js#L1-L1)
 
 ## Core Components
 
@@ -169,7 +169,7 @@ The runtime system provides the `J$` sandbox environment that executes instrumen
 - `sandbox.smemory` shadow memory system for object tracking
 - Callback dispatch mechanism routing runtime events to analysis methods
 
-Sources: [README.md75-77](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L75-L77)[src/js/sample_analyses/pldi16/TraceAll.js27-302](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/pldi16/TraceAll.js#L27-L302)
+Sources: [README.md75-77](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L75-L77)[src/js/plugins/pldi16/TraceAll.js27-302](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/TraceAll.js#L27-L302)
 
 ### Analysis Framework
 
@@ -183,7 +183,7 @@ The analysis framework provides a standardized interface for implementing dynami
 - Control flow: `conditional`, `_return`, `_throw`, `_with`
 - Literals and expressions: `literal`, `binary`, `unary`, `endExpression`
 
-Sources: [README.md75-77](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L75-L77)[src/js/sample_analyses/pldi16/TraceAll.js74-298](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/pldi16/TraceAll.js#L74-L298)
+Sources: [README.md75-77](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L75-L77)[src/js/plugins/pldi16/TraceAll.js74-298](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/TraceAll.js#L74-L298)
 
 ## Usage Modes
 

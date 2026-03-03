@@ -8,4 +8,4 @@ e("x = 2;");
 
 
 console.log(x);
-// node src/js/commands/jalangi.js --inlineIID --inlineSource --analysis src/js/runtime/SMemory.js --analysis src/js/sample_analyses/scratch/SmemTest.js tests/unit/indirectEval.js
+// node bin/jalangi.mjs --inline-iid --inline-source --analysis src/js/runtime/SMemory.js --analysis src/js/plugins/scratch/SmemTest.js tests/unit/indirectEval.js

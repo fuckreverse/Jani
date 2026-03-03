@@ -2,13 +2,13 @@
 Relevant source files
 - [scripts/instrument_folder_coverage.sh](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/instrument_folder_coverage.sh)
 - [src/js/commands/loadjalangi.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/loadjalangi.js)
-- [src/js/sample_analyses/coverage/AddCoverage.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js)
-- [src/js/sample_analyses/coverage/ProcessCoverage.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/ProcessCoverage.js)
-- [src/js/sample_analyses/coverage/SpecialCoverage.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/SpecialCoverage.js)
-- [src/js/sample_analyses/coverage/mocha_prefix.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/mocha_prefix.js)
-- [src/js/sample_analyses/coverage/tests/FeaturesMain.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/tests/FeaturesMain.js)
-- [src/js/sample_analyses/coverage/tests/FeaturesTest.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/tests/FeaturesTest.js)
-- [src/js/sample_analyses/coverage/tests/SetTest.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/tests/SetTest.js)
+- [src/js/plugins/coverage/AddCoverage.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js)
+- [src/js/plugins/coverage/ProcessCoverage.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/ProcessCoverage.js)
+- [src/js/plugins/coverage/SpecialCoverage.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/SpecialCoverage.js)
+- [src/js/plugins/coverage/mocha_prefix.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/mocha_prefix.js)
+- [src/js/plugins/coverage/tests/FeaturesMain.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/tests/FeaturesMain.js)
+- [src/js/plugins/coverage/tests/FeaturesTest.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/tests/FeaturesTest.js)
+- [src/js/plugins/coverage/tests/SetTest.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/tests/SetTest.js)
 - [tests/unit/branch.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/unit/branch.js)
 
 ## Purpose and Scope
@@ -63,7 +63,7 @@ loadjalangi.js
 Instrumentation Command
 ```
 
-Sources: [src/js/sample_analyses/coverage/AddCoverage.js1-573](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L1-L573)[src/js/sample_analyses/coverage/SpecialCoverage.js1-92](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/SpecialCoverage.js#L1-L92)[src/js/sample_analyses/coverage/ProcessCoverage.js1-92](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/ProcessCoverage.js#L1-L92)
+Sources: [src/js/plugins/coverage/AddCoverage.js1-573](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L1-L573)[src/js/plugins/coverage/SpecialCoverage.js1-92](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/SpecialCoverage.js#L1-L92)[src/js/plugins/coverage/ProcessCoverage.js1-92](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/ProcessCoverage.js#L1-L92)
 
 ### Coverage Data Flow
 
@@ -108,7 +108,7 @@ allcoverage.json
 Aggregated results
 ```
 
-Sources: [scripts/instrument_folder_coverage.sh1-16](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/instrument_folder_coverage.sh#L1-L16)[src/js/sample_analyses/coverage/SpecialCoverage.js55-67](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/SpecialCoverage.js#L55-L67)[src/js/sample_analyses/coverage/AddCoverage.js281-348](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L281-L348)
+Sources: [scripts/instrument_folder_coverage.sh1-16](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/instrument_folder_coverage.sh#L1-L16)[src/js/plugins/coverage/SpecialCoverage.js55-67](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/SpecialCoverage.js#L55-L67)[src/js/plugins/coverage/AddCoverage.js281-348](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L281-L348)
 
 ## Core Components
 
@@ -118,9 +118,9 @@ The `SpecialCoverage` class implements the Jalangi2 analysis interface to track 
 
 **Key Methods:**
 
-- `conditional(iid, result)` - Records branch coverage based on conditional evaluation [src/js/sample_analyses/coverage/SpecialCoverage.js55-62](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/SpecialCoverage.js#L55-L62)
-- `endExpression(iid)` - Records statement-level coverage [src/js/sample_analyses/coverage/SpecialCoverage.js64-67](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/SpecialCoverage.js#L64-L67)
-- `endExecution(noadd)` - Processes collected coverage data and invokes feature management [src/js/sample_analyses/coverage/SpecialCoverage.js69-83](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/SpecialCoverage.js#L69-L83)
+- `conditional(iid, result)` - Records branch coverage based on conditional evaluation [src/js/plugins/coverage/SpecialCoverage.js55-62](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/SpecialCoverage.js#L55-L62)
+- `endExpression(iid)` - Records statement-level coverage [src/js/plugins/coverage/SpecialCoverage.js64-67](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/SpecialCoverage.js#L64-L67)
+- `endExecution(noadd)` - Processes collected coverage data and invokes feature management [src/js/plugins/coverage/SpecialCoverage.js69-83](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/SpecialCoverage.js#L69-L83)
 
 **Coverage Data Structure:**
 
@@ -128,7 +128,7 @@ The `SpecialCoverage` class implements the Jalangi2 analysis interface to track 
 - `branchSidToFileName[]` - Maps script IDs to original file names
 - Coverage values: `1` for taken branches, `2` for executed statements
 
-Sources: [src/js/sample_analyses/coverage/SpecialCoverage.js28-87](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/SpecialCoverage.js#L28-L87)
+Sources: [src/js/plugins/coverage/SpecialCoverage.js28-87](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/SpecialCoverage.js#L28-L87)
 
 ### AddCoverage Feature Management
 
@@ -170,11 +170,11 @@ difference: Set
 
 **Key Methods:**
 
-- `add(...args)` - Adds multi-dimensional coverage elements [src/js/sample_analyses/coverage/AddCoverage.js24-52](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L24-L52)
-- `split(coverage)` - Partitions set based on coverage type matching [src/js/sample_analyses/coverage/AddCoverage.js175-187](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L175-L187)
-- `contains(...args)` - Tests membership of coverage elements [src/js/sample_analyses/coverage/AddCoverage.js54-71](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L54-L71)
+- `add(...args)` - Adds multi-dimensional coverage elements [src/js/plugins/coverage/AddCoverage.js24-52](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L24-L52)
+- `split(coverage)` - Partitions set based on coverage type matching [src/js/plugins/coverage/AddCoverage.js175-187](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L175-L187)
+- `contains(...args)` - Tests membership of coverage elements [src/js/plugins/coverage/AddCoverage.js54-71](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L54-L71)
 
-Sources: [src/js/sample_analyses/coverage/AddCoverage.js14-196](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L14-L196)
+Sources: [src/js/plugins/coverage/AddCoverage.js14-196](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L14-L196)
 
 #### Feature Graph Management
 
@@ -188,11 +188,11 @@ The system maintains a directed graph representing relationships between coverag
 
 **Key Functions:**
 
-- `addCoverage(testCode, coverage, forceAdd)` - Primary entry point for adding coverage data [src/js/sample_analyses/coverage/AddCoverage.js281-348](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L281-L348)
-- `addEdge(x, y)` - Adds dependency relationship between features [src/js/sample_analyses/coverage/AddCoverage.js201-208](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L201-L208)
-- `resetEdges(x, testIndex)` - Updates edges based on test coverage [src/js/sample_analyses/coverage/AddCoverage.js238-248](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L238-L248)
+- `addCoverage(testCode, coverage, forceAdd)` - Primary entry point for adding coverage data [src/js/plugins/coverage/AddCoverage.js281-348](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L281-L348)
+- `addEdge(x, y)` - Adds dependency relationship between features [src/js/plugins/coverage/AddCoverage.js201-208](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L201-L208)
+- `resetEdges(x, testIndex)` - Updates edges based on test coverage [src/js/plugins/coverage/AddCoverage.js238-248](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L238-L248)
 
-Sources: [src/js/sample_analyses/coverage/AddCoverage.js197-348](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L197-L348)
+Sources: [src/js/plugins/coverage/AddCoverage.js197-348](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L197-L348)
 
 ### Delta Debugging Integration
 
@@ -217,11 +217,11 @@ Write mintest*.js files
 
 **Delta Debugging Process:**
 
-- `getMinTestForEachFeature()` - Finds minimal test cases for each coverage feature [src/js/sample_analyses/coverage/AddCoverage.js488-556](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L488-L556)
-- `deltaDebug(str, pred)` - Implements delta debugging algorithm [src/js/sample_analyses/coverage/AddCoverage.js444-486](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L444-L486)
+- `getMinTestForEachFeature()` - Finds minimal test cases for each coverage feature [src/js/plugins/coverage/AddCoverage.js488-556](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L488-L556)
+- `deltaDebug(str, pred)` - Implements delta debugging algorithm [src/js/plugins/coverage/AddCoverage.js444-486](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L444-L486)
 - Predicate function executes test cases and validates coverage results
 
-Sources: [src/js/sample_analyses/coverage/AddCoverage.js422-556](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L422-L556)
+Sources: [src/js/plugins/coverage/AddCoverage.js422-556](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L422-L556)
 
 ## Coverage Types and Constants
 
@@ -229,7 +229,7 @@ The system uses specific coverage type constants:
 ConstantValuePurpose`coverageType`1Active coverage elements`unusedCoverageType`3Previously covered elements
 Coverage data maps file names to objects containing instruction ID (`iid`) to coverage type mappings.
 
-Sources: [src/js/sample_analyses/coverage/AddCoverage.js3-4](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L3-L4)[src/js/sample_analyses/coverage/AddCoverage.js179-181](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L179-L181)
+Sources: [src/js/plugins/coverage/AddCoverage.js3-4](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L3-L4)[src/js/plugins/coverage/AddCoverage.js179-181](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L179-L181)
 
 ## Integration and Usage
 
@@ -248,7 +248,7 @@ afterEach(function() {
 });
 ```
 
-Sources: [src/js/sample_analyses/coverage/mocha_prefix.js1-8](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/mocha_prefix.js#L1-L8)
+Sources: [src/js/plugins/coverage/mocha_prefix.js1-8](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/mocha_prefix.js#L1-L8)
 
 ### Batch Instrumentation
 
@@ -277,10 +277,10 @@ The `ProcessCoverage.js` utility aggregates coverage data from multiple test run
 
 **Usage:**`node ProcessCoverage.js 1|2` (1 for branch coverage, 2 for statement coverage)
 
-Sources: [src/js/sample_analyses/coverage/ProcessCoverage.js10-70](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/ProcessCoverage.js#L10-L70)
+Sources: [src/js/plugins/coverage/ProcessCoverage.js10-70](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/ProcessCoverage.js#L10-L70)
 
 ## API Interface
 
 The system exports a public API through `sandbox.Features`:
 MethodPurpose`Set`Access to Set constructor`addCoverage(testCode, coverage, forceAdd)`Add coverage data`getFeaturesFromTest(testIndex)`Get features covered by test`getTestsFromFeature(index)`Get tests covering feature`getTestCode(testIndex)`Retrieve test code string`loadFeatures()`Load persistent feature data`storeFeatures()`Save feature data to disk
-Sources: [src/js/sample_analyses/coverage/AddCoverage.js559-567](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/sample_analyses/coverage/AddCoverage.js#L559-L567)
+Sources: [src/js/plugins/coverage/AddCoverage.js559-567](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/coverage/AddCoverage.js#L559-L567)

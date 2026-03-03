@@ -332,7 +332,7 @@ jalangi.instrumentDir(options)
 
 ```
 var script = './instrumented/app.js';
-var analyses = ['./src/js/sample_analyses/ChainedAnalyses.js'];
+var analyses = ['./src/js/plugins/ChainedAnalyses.js'];
 var initParam = { analysis: 'coverage' };
  
 jalangi.analyze(script, analyses, initParam)
