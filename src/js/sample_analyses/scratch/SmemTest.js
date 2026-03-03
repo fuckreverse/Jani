@@ -1,49 +1,61 @@
-(function (sandbox) {
-    function MyAnalysis() {
+// JALANGI DO NOT INSTRUMENT
 
-        function getValue(v) {
-            var type = typeof v;
-            if ((type === 'object' || type ==='function') && v!== null) {
-                var shadowObj = sandbox.smemory.getShadowObjectOfObject(v);
-                return sandbox.smemory.getIDFromShadowObjectOrFrame(shadowObj);
-            } else {
-                return v;
-            }
-        }
+/**
+ * @file SmemTest —— 演示 SMemory API：打印每次属性访问和变量读写对应的 shadow ID。
+ *
+ * 运行示例（需 SMemory）：
+ *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/js/sample_analyses/ChainedAnalyses.js \
+ *     --analysis src/js/runtime/SMemory.js \
+ *     --analysis src/js/sample_analyses/scratch/SmemTest.js \
+ *     tests/octane/deltablue.js
+ */
 
-        this.literal = function (iid, val, hasGetterSetter) {
-            if (typeof val === 'function') {
-                console.log("Function id:" +getValue(val));
-            }
-        };
-
-        this.getFieldPre = function (iid, base, offset, isComputed, isOpAssign, isMethodCall) {
-            //access shadow memory
-            var shadowObj = sandbox.smemory.getShadowObject(base, offset, true);
-            console.log("GET_FIELD "+sandbox.smemory.getIDFromShadowObjectOrFrame(shadowObj.owner)+"." + offset +" at " + J$.iidToLocation(J$.sid, iid));
-        };
-
-        this.putFieldPre = function (iid, base, offset, val, isComputed, isOpAssign) {
-            //access shadow memory
-            var shadowObj = sandbox.smemory.getShadowObject(base, offset, false);
-            console.log("GET_FIELD "+sandbox.smemory.getIDFromShadowObjectOrFrame(shadowObj.owner)+"." + offset +" at " + J$.iidToLocation(J$.sid, iid));
-        };
-
-        this.read = function (iid, name, val, isGlobal, isScriptLocal) {
-            var shadowObj = sandbox.smemory.getShadowFrame(name);
-            console.log("READ "+sandbox.smemory.getIDFromShadowObjectOrFrame(shadowObj)+"." + name +" at " + J$.iidToLocation(J$.sid, iid));
-        };
-
-        this.write = function (iid, name, val, lhs, isGlobal, isScriptLocal) {
-            var shadowObj = sandbox.smemory.getShadowFrame(name);
-            console.log("WRITE "+sandbox.smemory.getIDFromShadowObjectOrFrame(shadowObj)+"." + name +" at " + J$.iidToLocation(J$.sid, iid));
-        };
-
+export class SmemTestAnalysis {
+    constructor(sandbox) {
+        this._sandbox = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
     }
 
-    sandbox.analysis = new MyAnalysis();
-})(J$);
+    _getValue(v) {
+        const type = typeof v;
+        if ((type === 'object' || type === 'function') && v !== null) {
+            const shadowObj = this._sandbox.smemory.getShadowObjectOfObject(v);
+            return this._sandbox.smemory.getIDFromShadowObjectOrFrame(shadowObj);
+        }
+        return v;
+    }
 
+    literal(iid, val, hasGetterSetter) {
+        if (typeof val === 'function') {
+            console.log(`Function id:${this._getValue(val)}`);
+        }
+    }
 
+    getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall) {
+        const mem       = this._sandbox.smemory;
+        const shadowObj = mem.getShadowObject(base, offset, true);
+        console.log(`GET_FIELD ${mem.getIDFromShadowObjectOrFrame(shadowObj.owner)}.${offset} at ${J$.iidToLocation(J$.sid, iid)}`);
+    }
 
-// node src/js/commands/jalangi.js --inlineIID --inlineSource --analysis src/js/sample_analyses/ChainedAnalyses.js --analysis src/js/runtime/SMemory.js --analysis src/js/sample_analyses/scratch/SmemTest.js tests/octane/deltablue.js
+    putFieldPre(iid, base, offset, val, isComputed, isOpAssign) {
+        const mem       = this._sandbox.smemory;
+        const shadowObj = mem.getShadowObject(base, offset, false);
+        console.log(`PUT_FIELD ${mem.getIDFromShadowObjectOrFrame(shadowObj.owner)}.${offset} at ${J$.iidToLocation(J$.sid, iid)}`);
+    }
+
+    read(iid, name, val, isGlobal, isScriptLocal) {
+        const mem       = this._sandbox.smemory;
+        const shadowObj = mem.getShadowFrame(name);
+        console.log(`READ ${mem.getIDFromShadowObjectOrFrame(shadowObj)}.${name} at ${J$.iidToLocation(J$.sid, iid)}`);
+    }
+
+    write(iid, name, val, lhs, isGlobal, isScriptLocal) {
+        const mem       = this._sandbox.smemory;
+        const shadowObj = mem.getShadowFrame(name);
+        console.log(`WRITE ${mem.getIDFromShadowObjectOrFrame(shadowObj)}.${name} at ${J$.iidToLocation(J$.sid, iid)}`);
+    }
+}
+
+if (typeof J$ !== 'undefined') {
+    J$.analysis = new SmemTestAnalysis(J$);
+}

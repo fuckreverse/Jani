@@ -1,3 +1,5 @@
+// JALANGI DO NOT INSTRUMENT
+
 /*
  * Copyright (c) 2014 Samsung Electronics Co., Ltd.
  *
@@ -13,21 +15,22 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// do not remove the following comment
-// JALANGI DO NOT INSTRUMENT
 
-// add relative path of this file in headers.js
+/**
+ * @file template —— 新分析模块模板。
+ *
+ * 使用方法：
+ *   1. 复制本文件到新位置。
+ *   2. 将 NameOfModule 替换为你的模块名。
+ *   3. 在 headers.js 中添加本文件路径（用于浏览器 bundle）。
+ *   4. 在 export 对象中添加你的功能。
+ *
+ * 在 J$ 环境下会自动挂载为 J$.NameOfModule。
+ */
 
-if (typeof J$ === 'undefined') {
-    J$ = {};
+export const NameOfModule = {};
+
+// 向后兼容
+if (typeof J$ !== 'undefined' && typeof J$.NameOfModule === 'undefined') {
+    J$.NameOfModule = NameOfModule;
 }
-
-(function (sandbox) {
-    if (typeof sandbox.NameOfModule !== 'undefined') {
-        return;
-    }
-    sandbox.NameOfModule = {};
-    // now add stuff to NameOfModule
-
-}(J$));
-

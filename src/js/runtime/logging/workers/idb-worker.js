@@ -1,7 +1,14 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * idb-worker.js — IndexedDB 写入 Worker。
+ * @module idb-worker
+ *
+ * idb-worker.js — IndexedDB 写入 Worker（ESM Module Worker）。
+ *
+ * 此文件以 `{ type: 'module' }` 方式被 IdbWorkerBackend 加载，
+ * 因此是一个 ES 模块（Module Worker）。不需要 `export` 导出，
+ * 因为 Worker 入口点本身不需要对外暴露任何接口——
+ * 所有通信通过 `self.onmessage` / `self.postMessage` 进行。
  *
  * 在独立线程中运行，接收主线程通过 postMessage 发来的事件批次，
  * 写入 IndexedDB。主线程不会被 IDB 操作阻塞。

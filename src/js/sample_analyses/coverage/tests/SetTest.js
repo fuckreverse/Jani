@@ -1,5 +1,6 @@
-var assert = require('assert');
-var Set = require('./../AddCoverage').Features.Set;
+import assert from 'assert';
+import { Features } from './../AddCoverage.js';
+const Set = Features.Set;
 
 describe("Set functionality", function () {
     describe("set creation", function () {

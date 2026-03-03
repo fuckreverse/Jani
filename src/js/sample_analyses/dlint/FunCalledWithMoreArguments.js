@@ -1,6 +1,7 @@
+// JALANGI DO NOT INSTRUMENT
 
 /*
- * Copyright 2014 Samsung Information Systems America, Inc.
+ * Copyright (c) 2014 Samsung Electronics Co., Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,53 +16,47 @@
  * limitations under the License.
  */
 
-// Author: Koushik Sen
+/**
+ * @file FunCalledWithMoreArguments —— 检测函数被传入的实参多于其形参数的情况。
+ *
+ * 用法：
+ *   import { FunCalledWithMoreArguments } from './FunCalledWithMoreArguments.js';
+ *   sandbox.analysis = new FunCalledWithMoreArguments(sandbox);
+ */
 
-// do not remove the following comment
-// JALANGI DO NOT INSTRUMENT
+import { printInfo } from './Utils.js';
 
-// In the following callbacks one can choose to not return anything.
-// If all of the callbacks return nothing, we get a passive analysis where the
-// concrete execution happens unmodified and callbacks are used to observe the execution.
-// Once can choose to return suitable objects with specified fields in some callbacks
-// to modify the behavior of the concrete execution.  For example, one could set the skip
-// field of an object returned from putFieldPre to true to skip the actual putField operation.
-// Similarly, one could set the result field of the object returned from a write callback
-// to modify the value that is actually written to a variable. The result field of the object
-// returned from a conditional callback can be suitably set to change the control-flow of the
-// program execution.  In functionExit and scriptExit,
-// one can set the isBacktrack field of the returned object to true to reexecute the body of
-// the function from the beginning.  This in conjunction with the ability to change the
-// control-flow of a program enables us to explore the different paths of a function in
-// symbolic execution.
-
-(function (sandbox) {
-    function MyAnalysis () {
-        var iidToLocation = sandbox.iidToLocation;
-
-        function isNative(f) {
-            return f.toString().indexOf('[native code]') > -1 || f.toString().indexOf('[object ') === 0;
-        }
-
-
-        var info = {};
-
-        this.invokeFunPre = function(iid, f, base, args, isConstructor, isMethod){
-            if (f.length < args.length && !isNative(f)) {
-                info[sandbox.getGlobalIID(iid)] = (info[sandbox.getGlobalIID(iid)]|0) + 1;
-            }
-        };
-
-
-        this.endExecution = function() {
-            sandbox.Utils.printInfo(info, function(x) {
-                sandbox.log("Function at "+iidToLocation(x.iid)+" called "+ x.count+" time(s) with more arguments that expected.");
-
-            });
-        };
+export class FunCalledWithMoreArguments {
+    constructor(sandbox) {
+        this._sandbox = sandbox;
+        this._info    = {};
     }
-    sandbox.analysis = new MyAnalysis();
-})(J$);
 
+    invokeFunPre(iid, f, base, args, isConstructor, isMethod) {
+        // 只检查有 length 属性的普通函数（排除内置/native 函数，其 length 可能不反映真实参数数）
+        if (
+            typeof f === 'function' &&
+            typeof f.length === 'number' &&
+            !isConstructor &&
+            args.length > f.length
+        ) {
+            const giid = this._sandbox.getGlobalIID(iid);
+            this._info[giid] = (this._info[giid] | 0) + 1;
+        }
+        return { f, base, args, skip: false };
+    }
 
+    endExecution() {
+        const sandbox = this._sandbox;
+        printInfo(this._info, x => {
+            sandbox.log(
+                `Function called with more arguments than the number of declared parameters at ` +
+                `${sandbox.iidToLocation(x.iid)} ${x.count} time(s).`
+            );
+        });
+    }
+}
 
+if (typeof J$ !== 'undefined') {
+    J$.analysis = new FunCalledWithMoreArguments(J$);
+}

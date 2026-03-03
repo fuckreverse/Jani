@@ -1,46 +1,44 @@
-// do not remove the following comment
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @author  Koushik Sen
+ * @file CountObjectsPerAllocationSite —— 统计每个分配点创建的对象数。
+ * @author Koushik Sen
  *
+ * 运行示例：
+ *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/js/sample_analyses/pldi16/CountObjectsPerAllocationSite.js \
+ *     tests/pldi16/CountObjectsPerAllocationSiteTest.js
  */
-(function (sandbox) {
-    var allocCount = {};
 
-    function MyAnalysis() {
-
-        this.literal = function (iid, val, hasGetterSetter) {
-            var id = J$.getGlobalIID(iid);
-            if (typeof val === 'object')
-                allocCount[id] = (allocCount[id] | 0) + 1;
-        };
-
-        this.invokeFunPre = function (iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
-            var id = J$.getGlobalIID(iid);
-            if (isConstructor)
-                allocCount[id] = (allocCount[id] | 0) + 1;
-        };
-
-        this.endExecution = function () {
-            print(allocCount);
-        };
+export class CountObjectsPerAllocationSiteAnalysis {
+    constructor(sandbox) {
+        this._sandbox    = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._allocCount = {};
     }
 
-    function print(map) {
-        for (var id in map)
-            if (map.hasOwnProperty(id)) {
-                sandbox.log("Object allocated at " + J$.iidToLocation(id)+" = "+map[id]);
-
-            }
+    literal(iid, val, hasGetterSetter) {
+        if (typeof val === 'object' && val !== null) {
+            const id = this._sandbox.getGlobalIID(iid);
+            this._allocCount[id] = (this._allocCount[id] | 0) + 1;
+        }
     }
 
-    sandbox.analysis = new MyAnalysis();
-}(J$));
+    invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
+        if (isConstructor) {
+            const id = this._sandbox.getGlobalIID(iid);
+            this._allocCount[id] = (this._allocCount[id] | 0) + 1;
+        }
+        return { f, base, args, skip: false };
+    }
 
-/*
- node src/js/commands/jalangi.js --inlineIID --inlineSource --analysis src/js/sample_analyses/pldi16/CountObjectsPerAllocationSite.js tests/pldi16/CountObjectsPerAllocationSiteTest.js
- node src/js/commands/esnstrument_cli.js --inlineIID --inlineSource --analysis src/js/sample_analyses/pldi16/CountObjectsPerAllocationSite.js --out /tmp/pldi16/CountObjectsPerAllocationSiteTest.html  tests/pldi16/CountObjectsPerAllocationSiteTest.html
- node src/js/commands/esnstrument_cli.js --inlineIID --inlineSource --analysis src/js/sample_analyses/pldi16/CountObjectsPerAllocationSite.js --out /tmp/pldi16/CountObjectsPerAllocationSiteTest.js  tests/pldi16/CountObjectsPerAllocationSiteTest.js
- open file:///tmp/pldi16/CountObjectsPerAllocationSiteTest.html
- */
+    endExecution() {
+        const { log, iidToLocation } = this._sandbox;
+        for (const [id, count] of Object.entries(this._allocCount)) {
+            log(`Object allocated at ${iidToLocation(id)} = ${count}`);
+        }
+    }
+}
+
+if (typeof J$ !== 'undefined') {
+    J$.analysis = new CountObjectsPerAllocationSiteAnalysis(J$);
+}

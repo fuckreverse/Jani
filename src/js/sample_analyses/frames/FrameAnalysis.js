@@ -1,87 +1,58 @@
-/**
- * Created by marija on 26.10.15.
- */
-/*
- * Copyright 2014 Samsung Information Systems America, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *        http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-// Author: Koushik Sen
-
-// do not remove the following comment
 // JALANGI DO NOT INSTRUMENT
 
-(function (sandbox) {
-    require('./Frames.js');
+/**
+ * @file FrameAnalysis —— Jalangi 分析插件：维护 shadow 帧栈，追踪变量所属函数帧。
+ *
+ * 依赖 Frames.js（自动 import）。
+ *
+ * @author Koushik Sen / Marija Selakovic
+ */
 
-    function MyAnalysis() {
+import { Frames } from './Frames.js';
 
-        var frames = new sandbox.Frames();
-        sandbox.frames = frames;
-
-
-        this.literal = function (iid, val, hasGetterSetter) {
-
-            if (typeof val === 'function') {
-                frames.defineFunction(val);
-            }
-
-        };
-
-        this.declare = function (iid, name, val, isArgument, argumentIndex, isCatchParam) {
-            frames.initialize(name);
-        };
-
-        this.functionEnter = function (iid, f, dis, args) {
-            frames.functionEnter(f);
-        };
-
-
-        this.functionExit = function (iid, returnVal, wrappedExceptionVal) {
-            frames.functionReturn();
-
-        };
-
-
-        this.scriptEnter = function (iid, instrumentedFileName, originalFileName) {
-            frames.scriptEnter();
-
-        };
-
-        this.scriptExit = function (iid, wrappedExceptionVal) {
-            frames.scriptReturn();
-
-        };
-
-
-        this.instrumentCodePre = function (iid, code) {
-            frames.evalBegin();
-
-        };
-
-
-        this.instrumentCode = function (iid, newCode, newAst) {
-            frames.evalEnd();
-
-
-        };
-
+export class FrameAnalysisPlugin {
+    constructor(sandbox) {
+        this._sandbox = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        const frames   = new Frames(this._sandbox);
+        this._frames   = frames;
+        this._sandbox.frames = frames;   // 向后兼容：其他分析可通过 J$.frames 访问
     }
 
-    sandbox.analysis = new MyAnalysis();
-})(J$);
+    literal(iid, val, hasGetterSetter) {
+        if (typeof val === 'function') {
+            this._frames.defineFunction(val);
+        }
+    }
 
+    declare(iid, name, val, isArgument, argumentIndex, isCatchParam) {
+        this._frames.initialize(name);
+    }
 
+    functionEnter(iid, f, dis, args) {
+        this._frames.functionEnter(f);
+    }
 
+    functionExit(iid, returnVal, wrappedExceptionVal) {
+        this._frames.functionReturn();
+    }
 
+    scriptEnter(iid, instrumentedFileName, originalFileName) {
+        this._frames.scriptEnter();
+    }
+
+    scriptExit(iid, wrappedExceptionVal) {
+        this._frames.scriptReturn();
+    }
+
+    instrumentCodePre(iid, code) {
+        this._frames.evalBegin();
+    }
+
+    instrumentCode(iid, newCode, newAst) {
+        this._frames.evalEnd();
+    }
+}
+
+if (typeof J$ !== 'undefined') {
+    J$.analysis = new FrameAnalysisPlugin(J$);
+}

@@ -1,3 +1,5 @@
+// JALANGI DO NOT INSTRUMENT
+
 /*
  * Copyright (c) 2014 Samsung Electronics Co., Ltd.
  *
@@ -13,13 +15,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// do not remove the following comment
-// JALANGI DO NOT INSTRUMENT
-module.exports.headerSources = [
-    "src/js/Constants.js",
-    "src/js/Config.js",
-    "src/js/instrument/astUtil.js",
-    "src/js/instrument/esnstrument.js",
-    "src/js/runtime/iidToLocation.js",
-    "src/js/runtime/analysis.js"
+
+/**
+ * @file headers —— 浏览器 bundle 头文件列表（按顺序拼接到 HTML 中）。
+ */
+
+export const headerSources = [
+    'src/js/Constants.js',
+    'src/js/Config.js',
+    'src/js/instrument/astUtil.js',
+    'src/js/instrument/esnstrument.js',
+    'src/js/runtime/iidToLocation.js',
+    'src/js/runtime/analysis.js',
 ];

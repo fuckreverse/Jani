@@ -16,18 +16,16 @@
 
 // Author: Koushik Sen
 
-/*jslint node: true browser: true */
-/*global astUtil acorn esotope J$ */
+'use strict';
 
-//var StatCollector = require('../utils/StatCollector');
-if (typeof J$ === 'undefined') {
-    J$ = {};
-}
+/* global J$ */
 
+if (typeof J$ === 'undefined') global.J$ = {};
+const sandbox = global.J$;
 
-(function (sandbox) {
-    acorn = require("acorn");
-    esotope = require("esotope");
+{
+    require("acorn");
+    require("esotope");
     require('../headers').headerSources.forEach(function (header) {
         require("./../../../" + header);
     });
@@ -37,7 +35,7 @@ if (typeof J$ === 'undefined') {
     instUtil.setHeaders();
     var fs = require('fs');
     var path = require('path');
-    var md5 = require('./md5');
+    var md5 = require('./md5.cjs');
 
     var instrumentCode = sandbox.instrumentCode;
     var FILESUFFIX1 = "_jalangi_";
@@ -162,10 +160,10 @@ if (typeof J$ === 'undefined') {
     }
 
 
-    if (typeof window === 'undefined' && (typeof require !== "undefined") && require.main === module) {
+    if (typeof window === 'undefined' && require.main === module) {
         instrumentFile();
     }
-}(J$));
+}
 
 
 // depends on J$.instrumentCode

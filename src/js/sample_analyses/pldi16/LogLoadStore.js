@@ -1,95 +1,81 @@
-// do not remove the following comment
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @author  Koushik Sen
+ * @file LogLoadStore —— 记录每次对象属性读写及变量读写，并打印 shadow ID。
+ * @author Koushik Sen
  *
+ * 需要配合 SMemory 使用：
+ *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/js/sample_analyses/ChainedAnalyses.js \
+ *     --analysis src/js/runtime/SMemory.js \
+ *     --analysis src/js/sample_analyses/pldi16/LogLoadStore.js \
+ *     tests/pldi16/CountObjectsPerAllocationSiteTest.js
  */
 
-(function (sandbox) {
-
-    if (sandbox.Constants.isBrowser) {
-        sandbox.Results = {};
+export class LogLoadStoreAnalysis {
+    constructor(sandbox) {
+        this._sandbox = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._indentation = 0;
+        this._cacheCount  = 0;
+        this._cacheStr    = '';
+        this._logs        = [];
     }
 
-    function MyAnalysis() {
-        var indentationCount = 0;
-        var cacheCount = 0;
-        var cacheIndentStr = "";
-
-        var logs = [];
-
-        function log(str) {
-            if (cacheCount !== indentationCount) {
-                cacheIndentStr = "";
-                for (var i = 0; i < indentationCount; i++) {
-                    cacheIndentStr += "    ";
-                }
-                cacheCount = indentationCount;
-            }
-            if (sandbox.Results) {
-                logs.push("<li>" + cacheIndentStr.replace(/ /g, '\u00a0') + str + " </li>");
-            } else {
-                console.log(cacheIndentStr + str)
-            }
+    _log(str) {
+        if (this._cacheCount !== this._indentation) {
+            this._cacheStr    = '    '.repeat(this._indentation);
+            this._cacheCount  = this._indentation;
         }
-
-        this.invokeFunPre = function (iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
-            indentationCount++;
-        };
-
-        this.invokeFun = function (iid, f, base, args, result, isConstructor, isMethod, functionIid, functionSid) {
-            indentationCount--;
-        };
-
-        this.getFieldPre = function (iid, base, offset, isComputed, isOpAssign, isMethodCall) {
-            var actualObjectId = sandbox.smemory.getIDFromShadowObjectOrFrame(sandbox.smemory.getShadowObject(base, offset, true).owner);
-            var ret = "Load of object(id=" + actualObjectId + ")." + offset;
-            ret += " at " + J$.iidToLocation(J$.sid, iid);
-            log(ret);
-        };
-
-        this.putFieldPre = function (iid, base, offset, val, isComputed, isOpAssign) {
-            var actualObjectId = sandbox.smemory.getIDFromShadowObjectOrFrame(sandbox.smemory.getShadowObject(base, offset, false).owner);
-            var ret = "Store of object(id=" + actualObjectId + ")." + offset;
-            ret += ") at " + J$.iidToLocation(J$.sid, iid);
-            log(ret);
-        };
-
-        this.read = function (iid, name, val, isGlobal, isScriptLocal) {
-            var frameId = sandbox.smemory.getIDFromShadowObjectOrFrame(sandbox.smemory.getShadowFrame(name));
-            var ret = "Load of frame(id=" + frameId + ")." + name;
-            ret += " at " + J$.iidToLocation(J$.sid, iid);
-            log(ret);
-            return {result: val};
-        };
-
-        this.write = function (iid, name, val, lhs, isGlobal, isScriptLocal) {
-            var frameId = sandbox.smemory.getIDFromShadowObjectOrFrame(sandbox.smemory.getShadowFrame(name));
-            var ret = "Store of frame(id=" + frameId + ")." + name;
-            ret += " at " + J$.iidToLocation(J$.sid, iid);
-            log(ret);
-            return {result: val};
-        };
-
-        this.endExecution = function () {
-            if (sandbox.Results) {
-                for (var i = 0; i < logs.length; i++) {
-                    sandbox.log(logs[i]);
-                }
-            }
-        };
+        if (this._sandbox.Results) {
+            this._logs.push(`<li>${this._cacheStr.replace(/ /g, '\u00a0')}${str} </li>`);
+        } else {
+            console.log(this._cacheStr + str);
+        }
     }
 
-    sandbox.analysis = new MyAnalysis();
+    invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
+        this._indentation++;
+        return { f, base, args, skip: false };
+    }
 
-}(J$));
+    invokeFun(iid, f, base, args, result, isConstructor, isMethod, functionIid, functionSid) {
+        this._indentation--;
+        return { result };
+    }
 
-/*
- node src/js/commands/jalangi.js --inlineIID --inlineSource --analysis src/js/sample_analyses/ChainedAnalyses.js --analysis src/js/runtime/SMemory.js --analysis src/js/sample_analyses/pldi16/LogLoadStore.js tests/pldi16/CountObjectsPerAllocationSiteTest.js
- node src/js/commands/esnstrument_cli.js --inlineIID --inlineSource --analysis src/js/sample_analyses/ChainedAnalyses.js --analysis src/js/runtime/SMemory.js --analysis src/js/sample_analyses/pldi16/LogLoadStore.js --out /tmp/pldi16/CountObjectsPerAllocationSiteTest.html  tests/pldi16/CountObjectsPerAllocationSiteTest.html
- node src/js/commands/esnstrument_cli.js --inlineIID --inlineSource --analysis src/js/sample_analyses/ChainedAnalyses.js --analysis src/js/runtime/SMemory.js --analysis src/js/sample_analyses/pldi16/LogLoadStore.js --out /tmp/pldi16/CountObjectsPerAllocationSiteTest.js  tests/pldi16/CountObjectsPerAllocationSiteTest.js
- open file:///tmp/pldi16/CountObjectsPerAllocationSiteTest.html
- */
+    getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall) {
+        const mem = this._sandbox.smemory;
+        const id  = mem.getIDFromShadowObjectOrFrame(mem.getShadowObject(base, offset, true).owner);
+        this._log(`Load of object(id=${id}).${offset} at ${J$.iidToLocation(J$.sid, iid)}`);
+    }
 
+    putFieldPre(iid, base, offset, val, isComputed, isOpAssign) {
+        const mem = this._sandbox.smemory;
+        const id  = mem.getIDFromShadowObjectOrFrame(mem.getShadowObject(base, offset, false).owner);
+        this._log(`Store of object(id=${id}).${offset}) at ${J$.iidToLocation(J$.sid, iid)}`);
+    }
 
+    read(iid, name, val, isGlobal, isScriptLocal) {
+        const mem     = this._sandbox.smemory;
+        const frameId = mem.getIDFromShadowObjectOrFrame(mem.getShadowFrame(name));
+        this._log(`Load of frame(id=${frameId}).${name} at ${J$.iidToLocation(J$.sid, iid)}`);
+        return { result: val };
+    }
+
+    write(iid, name, val, lhs, isGlobal, isScriptLocal) {
+        const mem     = this._sandbox.smemory;
+        const frameId = mem.getIDFromShadowObjectOrFrame(mem.getShadowFrame(name));
+        this._log(`Store of frame(id=${frameId}).${name} at ${J$.iidToLocation(J$.sid, iid)}`);
+        return { result: val };
+    }
+
+    endExecution() {
+        if (this._sandbox.Results) {
+            for (const entry of this._logs) this._sandbox.log(entry);
+        }
+    }
+}
+
+if (typeof J$ !== 'undefined') {
+    J$.analysis = new LogLoadStoreAnalysis(J$);
+}

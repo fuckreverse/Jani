@@ -1,90 +1,77 @@
-// do not remove the following comment
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @author  Koushik Sen
+ * @file LogLoadStoreAlloc —— 记录对象字段读写，并追踪每个对象的分配点。
+ * @author Koushik Sen
  *
+ * 需要配合 SMemory 使用：
+ *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/js/sample_analyses/ChainedAnalyses.js \
+ *     --analysis src/js/runtime/SMemory.js \
+ *     --analysis src/js/sample_analyses/pldi16/LogLoadStoreAlloc.js \
+ *     tests/pldi16/CountObjectsPerAllocationSiteTest.js
  */
 
-(function (sandbox) {
-
-    if (sandbox.Constants.isBrowser) {
-        sandbox.Results = {};
+export class LogLoadStoreAllocAnalysis {
+    constructor(sandbox) {
+        this._sandbox    = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._indentation = 0;
+        this._cacheCount  = 0;
+        this._cacheStr    = '';
+        this._logs        = [];
     }
 
-    function MyAnalysis() {
-        var indentationCount = 0;
-        var cacheCount = 0;
-        var cacheIndentStr = "";
-
-        var logs = [];
-
-        function log(str) {
-            if (cacheCount !== indentationCount) {
-                cacheIndentStr = "";
-                for (var i = 0; i < indentationCount; i++) {
-                    cacheIndentStr += "    ";
-                }
-                cacheCount = indentationCount;
-            }
-            if (sandbox.Results) {
-                logs.push("<li>" + cacheIndentStr.replace(/ /g, '\u00a0') + str + " </li>");
-            } else {
-                console.log(cacheIndentStr + str)
-            }
+    _log(str) {
+        if (this._cacheCount !== this._indentation) {
+            this._cacheStr   = '    '.repeat(this._indentation);
+            this._cacheCount = this._indentation;
         }
-
-        this.invokeFunPre = function (iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
-            indentationCount++;
-        };
-
-        this.literal = function (iid, val, hasGetterSetter) {
-            if (typeof val === "object" && val !== null) {
-                var sobj = sandbox.smemory.getShadowObjectOfObject(val);
-                sobj.allocSite = J$.iidToLocation(J$.sid, iid);
-            }
-        };
-
-        this.invokeFun = function (iid, f, base, args, val, isConstructor, isMethod, functionIid, functionSid) {
-            indentationCount--;
-            if (isConstructor && typeof val === "object" && val !== null) {
-                var sobj = sandbox.smemory.getShadowObjectOfObject(val);
-                sobj.allocSite = J$.iidToLocation(J$.sid, iid);
-            }
-        };
-
-        this.getFieldPre = function (iid, base, offset, isComputed, isOpAssign, isMethodCall) {
-            var sobj = sandbox.smemory.getShadowObject(base, offset, true).owner;
-            var ret = "Load '"+offset+ "' of object allocated at" + sobj.allocSite;
-            ret += " at " + J$.iidToLocation(J$.sid, iid);
-            log(ret);
-        };
-
-        this.putFieldPre = function (iid, base, offset, val, isComputed, isOpAssign) {
-            var sobj = sandbox.smemory.getShadowObject(base, offset, false).owner;
-            var ret = "Store '"+offset+ "' of object allocated at" + sobj.allocSite;
-            ret += ") at " + J$.iidToLocation(J$.sid, iid);
-            log(ret);
-        };
-
-        this.endExecution = function () {
-            if (sandbox.Results) {
-                for (var i = 0; i < logs.length; i++) {
-                    sandbox.log(logs[i]);
-                }
-            }
-        };
+        if (this._sandbox.Results) {
+            this._logs.push(`<li>${this._cacheStr.replace(/ /g, '\u00a0')}${str} </li>`);
+        } else {
+            console.log(this._cacheStr + str);
+        }
     }
 
-    sandbox.analysis = new MyAnalysis();
+    invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
+        this._indentation++;
+        return { f, base, args, skip: false };
+    }
 
-}(J$));
+    literal(iid, val, hasGetterSetter) {
+        if (typeof val === 'object' && val !== null) {
+            const sobj = this._sandbox.smemory.getShadowObjectOfObject(val);
+            if (sobj) sobj.allocSite = J$.iidToLocation(J$.sid, iid);
+        }
+        return { result: val };
+    }
 
-/*
- node src/js/commands/jalangi.js --inlineIID --inlineSource --analysis src/js/sample_analyses/ChainedAnalyses.js --analysis src/js/runtime/SMemory.js --analysis src/js/sample_analyses/pldi16/LogLoadStoreAlloc.js tests/pldi16/CountObjectsPerAllocationSiteTest.js
- node src/js/commands/esnstrument_cli.js --inlineIID --inlineSource --analysis src/js/sample_analyses/ChainedAnalyses.js --analysis src/js/runtime/SMemory.js --analysis src/js/sample_analyses/pldi16/LogLoadStoreAlloc.js --out /tmp/pldi16/CountObjectsPerAllocationSiteTest.html  tests/pldi16/CountObjectsPerAllocationSiteTest.html
- node src/js/commands/esnstrument_cli.js --inlineIID --inlineSource --analysis src/js/sample_analyses/ChainedAnalyses.js --analysis src/js/runtime/SMemory.js --analysis src/js/sample_analyses/pldi16/LogLoadStoreAlloc.js --out /tmp/pldi16/CountObjectsPerAllocationSiteTest.js  tests/pldi16/CountObjectsPerAllocationSiteTest.js
- open file:///tmp/pldi16/CountObjectsPerAllocationSiteTest.html
- */
+    invokeFun(iid, f, base, args, val, isConstructor, isMethod, functionIid, functionSid) {
+        this._indentation--;
+        if (isConstructor && typeof val === 'object' && val !== null) {
+            const sobj = this._sandbox.smemory.getShadowObjectOfObject(val);
+            if (sobj) sobj.allocSite = J$.iidToLocation(J$.sid, iid);
+        }
+        return { result: val };
+    }
 
+    getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall) {
+        const sobj = this._sandbox.smemory.getShadowObject(base, offset, true).owner;
+        this._log(`Load '${offset}' of object allocated at ${sobj?.allocSite} at ${J$.iidToLocation(J$.sid, iid)}`);
+    }
 
+    putFieldPre(iid, base, offset, val, isComputed, isOpAssign) {
+        const sobj = this._sandbox.smemory.getShadowObject(base, offset, false).owner;
+        this._log(`Store '${offset}' of object allocated at ${sobj?.allocSite}) at ${J$.iidToLocation(J$.sid, iid)}`);
+    }
+
+    endExecution() {
+        if (this._sandbox.Results) {
+            for (const entry of this._logs) this._sandbox.log(entry);
+        }
+    }
+}
+
+if (typeof J$ !== 'undefined') {
+    J$.analysis = new LogLoadStoreAllocAnalysis(J$);
+}

@@ -1,90 +1,20 @@
-/*
- * Copyright (c) 2014 Samsung Electronics Co., Ltd.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *        http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-// Author: Koushik Sen
-
-// do not remove the following comment
 // JALANGI DO NOT INSTRUMENT
 
-(function (sandbox) {
-    function ChainedAnalysesNoCheck() {
+/**
+ * @file ChainedAnalysesNoCheck —— 旧式链式分析容器（无运行时检查）。
+ *
+ * @deprecated 此文件已废弃。请直接使用 AnalysisHost：
+ *
+ *   import { AnalysisHost } from '../runtime/AnalysisHost.js';
+ *   const host = new AnalysisHost();
+ *   sandbox.analysis = host;
+ *
+ * 旧式 ChainedAnalysesNoCheck 不再有任何实际意义：
+ *  - 它与 ChainedAnalyses 的唯一区别是"不检查方法存在性"，
+ *    而 AnalysisHost 本身就跳过未实现的钩子，因此与 NoCheck 语义完全相同。
+ *  - 原先使用 arguments.callee 的模式已移除（严格模式不允许）。
+ *
+ * 本文件仅作别名保留，以免旧代码导入时报错。
+ */
 
-        var funList = ["_return", "_throw", "_with",
-            "binaryPre", "binary", "conditional",
-            "declare", "endExecution", "endExpression",
-            "forinObject", "functionEnter", "functionExit",
-            "getFieldPre", "getField", "instrumentCodePre",
-            "instrumentCode", "invokeFunPre", "invokeFun",
-            "literal", "onReady","putFieldPre",
-            "putField", "read", "runInstrumentedFunctionBody",
-            "scriptEnter", "scriptExit",  "unaryPre",
-            "unary", "write"];
-
-        this.globals = {};
-
-        this.addAnalysis = function (analysis) {
-            var self = this, tmp, length = funList.length;
-
-            for (var i = 0; i < length; i++) {
-                var field = funList[i];
-                if (tmp = analysis[field]) {
-                    var fun = self[field];
-                    if (!fun) {
-                        fun = self[field] = function () {
-                            var ret1;
-                            var thisFun = arguments.callee;
-                            var len = thisFun.afs.length;
-                            var args = [];
-                            for(var x=0;x<arguments.length;x++) {
-                                args[x] = arguments[x];
-                            }
-                            for (var i = 0; i < len; i++) {
-                                ret1 = thisFun.afs[i].apply(thisFun.afThis[i], args);
-                            }
-                            return ret1;
-
-                        };
-                        fun.afs = [];
-                        fun.afThis = [];
-                        fun.afName = field;
-                    }
-                    fun.afs.push(tmp);
-                    fun.afThis.push(analysis);
-                }
-            }
-        };
-    }
-
-    var thisAnalysis = new ChainedAnalysesNoCheck();
-    Object.defineProperty(sandbox, 'analysis', {
-        get:function () {
-            return thisAnalysis;
-        },
-        set:function (a) {
-            thisAnalysis.addAnalysis(a);
-        }
-    });
-
-    if (sandbox.Constants.isBrowser) {
-        window.addEventListener('keydown', function (e) {
-            // keyboard shortcut is Alt-Shift-T for now
-            if (e.altKey && e.shiftKey && e.keyCode === 84) {
-                sandbox.analysis.endExecution();
-            }
-        });
-    }
-
-}(J$));
-
+export { AnalysisHost as ChainedAnalysesNoCheck } from '../runtime/AnalysisHost.js';

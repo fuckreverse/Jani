@@ -1,118 +1,103 @@
-if (typeof J$ === 'undefined') {
-    J$ = {};
-}
+// JALANGI DO NOT INSTRUMENT
 
-(function (sandbox) {
-    sandbox.Frames = function () {
-        var Constants = sandbox.Constants;
+/**
+ * @file Frames —— 维护函数调用帧栈（shadow frame），可追踪变量所属帧。
+ *
+ * 导出：
+ *   export class Frames
+ *
+ * 向后兼容：
+ *   J$.Frames 被设置为本类。
+ */
 
-        var SPECIAL_PROP_FRAMES = Constants.SPECIAL_PROP3 + "FRAMES";
-        var scriptCount = 0;
-        var HOP = Constants.HOP;
+const SPECIAL_PROP_FRAMES = '*J$F*';
 
+export class Frames {
+    /**
+     * @param {object} [sandbox]  J$ 运行时（用于读取 Constants）
+     */
+    constructor(sandbox) {
+        this._constants  = sandbox?.Constants ?? {};
+        this._frameStack = [Object.create(null)];
+        this._frame      = this._frameStack[0];
+        this._scriptCount = 0;
+    }
 
-        var frame = Object.create(null);
-        var frameStack = [frame];
-        var evalFrames = [];
+    /** 初始化（声明）一个变量 */
+    initialize(name) {
+        this._frame[name] = undefined;
+    }
 
-        this.getFrameStack = function () {
-            return frameStack;
-        };
-
-
-        this.getFrame = function (name) {
-            var tmp = frame;
-            while (tmp && !HOP(tmp, name)) {
-                tmp = tmp[SPECIAL_PROP_FRAMES];
-            }
-
-            if (tmp) {
-                return tmp;
-            } else {
-                return frameStack[0]; // return global scope
-            }
-        };
-
-        this.getParentFrame = function (otherFrame) {
-            if (otherFrame) {
-                return otherFrame[SPECIAL_PROP_FRAMES];
-            } else {
-                return null;
-            }
-        };
-
-        this.getCurrentFrame = function () {
-            return frame;
-        };
-
-        this.getClosureFrame = function (fun) {
-            return fun[SPECIAL_PROP_FRAMES];
-        };
-
-
-        this.defineFunction = function (val) {
-
-            if (Object && Object.defineProperty && typeof Object.defineProperty === 'function') {
+    /**
+     * 将函数 val 的帧关联设置为当前帧
+     * （旧实现中通过 SPECIAL_PROP_FRAMES 记录定义时的帧）
+     */
+    defineFunction(val) {
+        if (Object.defineProperty) {
+            try {
                 Object.defineProperty(val, SPECIAL_PROP_FRAMES, {
                     enumerable: false,
-                    writable: true
+                    writable:   true,
+                    configurable: true,
                 });
-            }
-            val[SPECIAL_PROP_FRAMES] = frame;
+            } catch { /* 某些函数不可扩展，忽略 */ }
+        }
+        if (typeof val === 'object' || typeof val === 'function') {
+            val[SPECIAL_PROP_FRAMES] = this._frame;
+        }
+    }
 
-        };
-
-        this.evalBegin = function () {
-            evalFrames.push(frame);
-            frame = frameStack[0];
-        };
-
-        this.evalEnd = function () {
-            frame = evalFrames.pop();
-        };
-
-
-        this.initialize = function (name) {
-            frame[name] = undefined;
-
-        };
-
-        this.functionEnter = function (val) {
-            frameStack.push(frame = Object.create(null));
-            if (Object && Object.defineProperty && typeof Object.defineProperty === 'function') {
-                Object.defineProperty(frame, SPECIAL_PROP_FRAMES, {
+    /** 函数进入：创建新帧，并从函数定义时的帧继承 SPECIAL_PROP_FRAMES */
+    functionEnter(f) {
+        const newFrame = Object.create(null);
+        if (Object.defineProperty) {
+            try {
+                Object.defineProperty(newFrame, SPECIAL_PROP_FRAMES, {
                     enumerable: false,
-                    writable: true
+                    writable:   true,
+                    configurable: true,
                 });
-            }
-            frame[SPECIAL_PROP_FRAMES] = val[SPECIAL_PROP_FRAMES];
+            } catch { /* ignore */ }
+        }
+        newFrame[SPECIAL_PROP_FRAMES] = f?.[SPECIAL_PROP_FRAMES];
+        this._frameStack.push(newFrame);
+        this._frame = newFrame;
+    }
 
-        };
+    /** 函数返回：弹出当前帧 */
+    functionReturn() {
+        this._frameStack.pop();
+        this._frame = this._frameStack[this._frameStack.length - 1];
+    }
 
-        this.functionReturn = function () {
-            frameStack.pop();
-            frame = frameStack[frameStack.length - 1];
-        };
+    /** 脚本进入（eval 或顶层脚本） */
+    scriptEnter() {
+        this._scriptCount++;
+        if (this._scriptCount > 1) {
+            const newFrame = Object.create(null);
+            newFrame[SPECIAL_PROP_FRAMES] = this._frameStack[0];
+            this._frameStack.push(newFrame);
+            this._frame = newFrame;
+        }
+    }
 
-        this.scriptEnter = function () {
-            scriptCount++;
-            if (scriptCount > 1) {
-                frameStack.push(frame = Object.create(null));
-                frame[SPECIAL_PROP_FRAMES] = frameStack[0];
-            }
-        };
+    /** 脚本退出 */
+    scriptReturn() {
+        if (this._scriptCount > 1) {
+            this._frameStack.pop();
+            this._frame = this._frameStack[this._frameStack.length - 1];
+        }
+        this._scriptCount--;
+    }
 
-        this.scriptReturn = function () {
-            if (scriptCount > 1) {
-                frameStack.pop();
-                frame = frameStack[frameStack.length - 1];
-            }
-            scriptCount--;
-        };
+    /** eval 开始 */
+    evalBegin() { this.scriptEnter(); }
 
-    };
+    /** eval 结束 */
+    evalEnd() { this.scriptReturn(); }
+}
 
-}(J$));
-
-
-
+// 向后兼容
+if (typeof J$ !== 'undefined') {
+    J$.Frames = Frames;
+}

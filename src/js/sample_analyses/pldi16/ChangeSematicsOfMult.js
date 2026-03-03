@@ -1,30 +1,29 @@
-// do not remove the following comment
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @author  Koushik Sen
+ * @file ChangeSematicsOfMult —— 将乘法运算替换为加法（演示 skip + result 机制）。
+ * @author Koushik Sen
  *
+ * 运行示例：
+ *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/js/sample_analyses/pldi16/ChangeSematicsOfMult.js \
+ *     tests/pldi16/ChangeSematicsOfMultTest.js
  */
 
-(function (sandbox) {
-    function MyAnalysis() {
-
-        this.binaryPre = function (iid, op, left, right, isOpAssign, isSwitchCaseComparison, isComputed) {
-            if (op === "*")
-                return {op: op, left: left, right: right, skip: true};
-        };
-
-        this.binary = function (iid, op, left, right, result, isOpAssign, isSwitchCaseComparison, isComputed) {
-            if (op === "*")
-                return {result: left+right};
-        };
-
+export class ChangeSematicsOfMultAnalysis {
+    binaryPre(iid, op, left, right, isOpAssign, isSwitchCaseComparison, isComputed) {
+        if (op === '*') {
+            return { op, left, right, skip: true };
+        }
     }
 
-    sandbox.analysis = new MyAnalysis();
-}(J$));
+    binary(iid, op, left, right, result, isOpAssign, isSwitchCaseComparison, isComputed) {
+        if (op === '*') {
+            return { result: left + right };
+        }
+    }
+}
 
-/*
- node src/js/commands/jalangi.js --inlineIID --inlineSource --analysis src/js/sample_analyses/pldi16/ChangeSematicsOfMult.js tests/pldi16/ChangeSematicsOfMultTest.js
- */
-
+if (typeof J$ !== 'undefined') {
+    J$.analysis = new ChangeSematicsOfMultAnalysis();
+}

@@ -1,4 +1,4 @@
-
+// JALANGI DO NOT INSTRUMENT
 
 /*
  * Copyright 2014 Samsung Information Systems America, Inc.
@@ -16,53 +16,44 @@
  * limitations under the License.
  */
 
-// Author: Koushik Sen
+/**
+ * @file CheckNaN —— 检测 NaN 参与比较运算的情况。
+ *
+ * 用法：
+ *   import { CheckNaN } from './CheckNaN.js';
+ *   sandbox.analysis = new CheckNaN(sandbox);
+ *
+ * 向后兼容：检测到全局 J$ 时自动安装。
+ */
 
-// do not remove the following comment
-// JALANGI DO NOT INSTRUMENT
+import { printInfo } from './Utils.js';
 
-
-(function (sandbox) {
-    function MyAnalysis () {
-        var iidToLocation = sandbox.iidToLocation;
-        var Constants = sandbox.Constants;
-        var HOP = Constants.HOP;
-        var sort = Array.prototype.sort;
-
-        var info = {};
-
-        this.invokeFun = function(iid, f, base, args, result, isConstructor, isMethod){
-            if (result !== result) {
-                info[sandbox.getGlobalIID(iid)] = (info[sandbox.getGlobalIID(iid)]|0) + 1;
-            }
-        };
-
-        this.getField = function(iid, base, offset, val){
-            if (val !== val) {
-                info[sandbox.getGlobalIID(iid)] = (info[sandbox.getGlobalIID(iid)]|0) + 1;
-            }
-        };
-
-        this.binary = function(iid, op, left, right, result){
-            if (result !== result) {
-                info[sandbox.getGlobalIID(iid)] = (info[sandbox.getGlobalIID(iid)]|0) + 1;
-            }
-        };
-
-        this.unary = function(iid, op, left, result){
-            if (result !== result) {
-                info[sandbox.getGlobalIID(iid)] = (info[sandbox.getGlobalIID(iid)]|0) + 1;
-            }
-        };
-
-        this.endExecution = function() {
-            sandbox.Utils.printInfo(info, function(x) {
-                sandbox.log("Observed NaN at "+iidToLocation(x.iid)+" "+ x.count+" time(s).");
-            });
-        };
+export class CheckNaN {
+    constructor(sandbox) {
+        this._sandbox = sandbox;
+        this._info    = {};
     }
-    sandbox.analysis = new MyAnalysis();
-})(J$);
 
+    binary(iid, op, left, right, result) {
+        if (
+            op === '==' || op === '===' || op === '!=' || op === '!==' ||
+            op === '<'  || op === '>'   || op === '<=' || op === '>='
+        ) {
+            if (left !== left || right !== right) {   // NaN check (NaN !== NaN)
+                const giid = this._sandbox.getGlobalIID(iid);
+                this._info[giid] = (this._info[giid] | 0) + 1;
+            }
+        }
+    }
 
+    endExecution() {
+        const sandbox = this._sandbox;
+        printInfo(this._info, x => {
+            sandbox.log(`Comparison with NaN at ${sandbox.iidToLocation(x.iid)} ${x.count} time(s).`);
+        });
+    }
+}
 
+if (typeof J$ !== 'undefined') {
+    J$.analysis = new CheckNaN(J$);
+}

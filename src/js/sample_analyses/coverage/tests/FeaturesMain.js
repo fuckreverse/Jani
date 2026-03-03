@@ -1,4 +1,4 @@
-var Features = require('./../AddCoverage').Features;
+import { Features } from './../AddCoverage.js';
 
 Features.addCoverage("test0", {"file1": {0: 1, 1: 1, 5: 1, 7: 1, 2: 1}}, true);
 Features.addCoverage("test1", {"file1": {0: 1, 1: 1, 5: 1, 3: 1, 13: 1}}, true);

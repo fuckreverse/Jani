@@ -13,19 +13,22 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-var http = require('http');
-var fs = require('fs');
 
-var file = fs.createWriteStream(process.argv[2]);
-var request = http.get(process.argv[3], function(response) {
+'use strict';
+
+const http   = require('http');
+const fs     = require('fs');
+const [, , outFile, url] = process.argv;
+
+const file    = fs.createWriteStream(outFile);
+http.get(url, (response) => {
     if (response.statusCode >= 300) {
-        console.log("Got error while downloading " + process.argv[3]);
+        console.error(`Got error while downloading ${url}`);
         process.exit(1);
     } else {
         response.pipe(file);
     }
-}).on('error', function(e) {
-        console.log("Got error while downloading " + process.argv[3] + ":"+ e.message);
-        process.exit(1);
-    });
-
+}).on('error', (e) => {
+    console.error(`Got error while downloading ${url}: ${e.message}`);
+    process.exit(1);
+});

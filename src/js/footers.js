@@ -1,3 +1,5 @@
+// JALANGI DO NOT INSTRUMENT
+
 /*
  * Copyright (c) 2014 Samsung Electronics Co., Ltd.
  *
@@ -13,8 +15,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// do not remove the following comment
-// JALANGI DO NOT INSTRUMENT
-module.exports.footerSources = [
-    "src/js/mid.html"
+
+/**
+ * @file footers —— 浏览器 bundle 尾文件列表。
+ */
+
+export const footerSources = [
+    'src/js/mid.html',
 ];

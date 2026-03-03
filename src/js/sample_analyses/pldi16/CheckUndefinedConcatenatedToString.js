@@ -1,34 +1,35 @@
-// do not remove the following comment
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @author  Koushik Sen
+ * @file CheckUndefinedConcatenatedToString —— 检测 undefined 与字符串拼接。
+ * @author Koushik Sen
  *
+ * 运行示例：
+ *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/js/sample_analyses/pldi16/CheckUndefinedConcatenatedToString.js \
+ *     tests/pldi16/CheckUndefinedConcatenatedToStringTest.js
  */
-(function (sandbox) {
-    function MyAnalysis() {
-        var logs = [];
 
-        this.binary = function (iid, op, left, right, result, isOpAssign, isSwitchCaseComparison, isComputed) {
-            if (op === '+' && typeof result === 'string' && (left === undefined || right === undefined))
-                logs.push(J$.getGlobalIID(iid));
-        };
-
-        this.endExecution = function () {
-            for (var i = 0; i < logs.length; i++)
-                sandbox.log("Concatenated undefined with string at  " + J$.iidToLocation(logs[i]));
-        };
-
+export class CheckUndefinedConcatenatedToStringAnalysis {
+    constructor(sandbox) {
+        this._sandbox = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._logs    = [];
     }
 
+    binary(iid, op, left, right, result, isOpAssign, isSwitchCaseComparison, isComputed) {
+        if (op === '+' && typeof result === 'string' && (left === undefined || right === undefined)) {
+            this._logs.push(this._sandbox.getGlobalIID(iid));
+        }
+    }
 
-    sandbox.analysis = new MyAnalysis();
-}(J$));
+    endExecution() {
+        const { log, iidToLocation } = this._sandbox;
+        for (const giid of this._logs) {
+            log(`Concatenated undefined with string at ${iidToLocation(giid)}`);
+        }
+    }
+}
 
-
-/*
- node src/js/commands/jalangi.js --inlineIID --inlineSource --analysis src/js/sample_analyses/pldi16/CheckUndefinedConcatenatedToString.js tests/pldi16/CheckUndefinedConcatenatedToStringTest.js
- node src/js/commands/esnstrument_cli.js --inlineIID --inlineSource --analysis src/js/sample_analyses/pldi16/CheckUndefinedConcatenatedToString.js --out /tmp/pldi16/CheckUndefinedConcatenatedToStringTest.html  tests/pldi16/CheckUndefinedConcatenatedToStringTest.html
- node src/js/commands/esnstrument_cli.js --inlineIID --inlineSource --analysis src/js/sample_analyses/pldi16/CheckUndefinedConcatenatedToString.js --out /tmp/pldi16/CheckUndefinedConcatenatedToStringTest.js  tests/pldi16/CheckUndefinedConcatenatedToStringTest.js
- open file:///tmp/pldi16/CheckUndefinedConcatenatedToStringTest.html
- */
+if (typeof J$ !== 'undefined') {
+    J$.analysis = new CheckUndefinedConcatenatedToStringAnalysis(J$);
+}

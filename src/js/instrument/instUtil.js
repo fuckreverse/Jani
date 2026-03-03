@@ -1,3 +1,5 @@
+// JALANGI DO NOT INSTRUMENT
+
 /*
  * Copyright 2013 Samsung Information Systems America, Inc.
  *
@@ -14,195 +16,221 @@
  * limitations under the License.
  */
 
-// Author: Manu Sridharan
+/**
+ * @file instUtil —— 浏览器注入辅助工具（Node.js-only）。
+ *
+ * 提供将 Jalangi 运行时脚本拼成 HTML `<script>` 标签字符串的工具函数，
+ * 供 HTTP 代理服务器（rewriting-proxy）或 CLI 命令 instrument.js 使用。
+ *
+ * 注意：本文件强依赖 Node.js 内置模块（fs/path/url），不能在浏览器中使用。
+ */
 
-// do not remove the following comment
-// JALANGI DO NOT INSTRUMENT
+// 动态 import Node.js 内置模块（ESM 方式）
+import { readFileSync } from 'fs';
+import { join, resolve, basename } from 'path';
+import { parse as urlParse } from 'url';
+import { createRequire } from 'module';
 
-/*jslint node: true */
-var fs = require('fs');
-var path = require('path');
-var urlParser = require('url');
+// 仍需 CJS require 的遗留模块（headers/footers 尚未迁移到 ESM）
+const require = createRequire(import.meta.url);
 
+// 默认 header 源文件列表（浏览器注入用）
+export let headerSources = [
+    'node_modules/acorn/dist/acorn.js',
+];
 
-var headerSources = ["node_modules/esotope/esotope.js",
-    "node_modules/acorn/dist/acorn.js"];
-
-var headersSet = false;
+let _headersSet   = false;
+let _headerCode   = '';
 
 /**
- * concatenates required scripts for Jalangi to run in the browser into a single string
+ * 追加 analysis-specific 的 headerSources（来自 ../headers.js），只执行一次。
  */
-var headerCode = "";
-
-function setHeaders() {
-    if (!headersSet) {
-        headerSources = headerSources.concat(require("../headers").headerSources);
-        exports.headerSources = headerSources;
-        headersSet = true;
+export function setHeaders() {
+    if (!_headersSet) {
+        try {
+            const extra = require('../headers').headerSources;
+            headerSources = headerSources.concat(extra);
+        } catch {
+            // ../headers.js 不存在时跳过（核心测试场景不需要）
+        }
+        _headersSet = true;
     }
 }
 
-
-function getInlinedScripts(analyses, initParams, extraAppScripts, EXTRA_SCRIPTS_DIR, jalangiRoot, cdn) {
-    if (!headerCode) {
-        if (cdn) {
-            headerCode += "<script type=\"text/javascript\" src=\"" + cdn + "/jalangi.js\"></script>";
-        } else {
-            headerSources.forEach(function (src) {
-                if (jalangiRoot) {
-                    src = path.join(jalangiRoot, src);
-                }
-                headerCode += "<script type=\"text/javascript\">";
-                headerCode += fs.readFileSync(src);
-                headerCode += "</script>";
-            });
-        }
-
-        if (analyses) {
-            var initParamsCode = genInitParamsCode(initParams);
-            if (initParamsCode) {
-                headerCode += initParamsCode;
-            }
-            if (cdn) {
-                headerCode += "<script type=\"text/javascript\" src=\"" + cdn + "/analyses.js\"></script>";
-            } else {
-                analyses.forEach(function (src) {
-                    src = path.resolve(src);
-                    headerCode += "<script type=\"text/javascript\">";
-                    headerCode += fs.readFileSync(src);
-                    headerCode += "</script>";
-                });
-            }
-        }
-
-        if (extraAppScripts.length > 0) {
-            // we need to inject script tags for the extra app scripts,
-            // which have been copied into the app directory
-            if (cdn) {
-                headerCode += "<script type=\"text/javascript\" src=\"" + cdn + "/extras.js\"></script>";
-            } else {
-                extraAppScripts.forEach(function (script) {
-                    var scriptSrc = path.join(EXTRA_SCRIPTS_DIR, path.basename(script));
-                    headerCode += "<script type=\"text/javascript\">";
-                    headerCode += fs.readFileSync(scriptSrc);
-                    headerCode += "</script>";
-                });
-            }
-        }
-    }
-    return headerCode;
-}
-
-function endsWith(str, suffix) {
-    return str.indexOf(suffix, str.length - suffix.length) !== -1;
-};
-
-function getFooterString(jalangiRoot) {
-    var footerSources = require("../footers").footerSources;
-    var footerCode = "";
-    footerSources.forEach(function (src) {
-        if (jalangiRoot) {
-            src = path.join(jalangiRoot, src);
-        }
-        if (endsWith(src, ".js")) {
-            footerCode += "<script type=\"text/javascript\">";
-            footerCode += fs.readFileSync(src);
-            footerCode += "</script>";
-        } else {
-            footerCode += fs.readFileSync(src);
-        }
-    });
-
-    return footerCode;
-}
-
-function genInitParamsCode(initParams) {
-    var initParamsObj = {};
+/**
+ * 生成 initParams 的内联 `<script>` 代码。
+ *
+ * @param {string[]} [initParams] - 形如 "key:value" 的字符串数组
+ * @returns {string}
+ */
+export function genInitParamsCode(initParams) {
+    const obj = {};
     if (initParams) {
-        initParams.forEach(function (keyVal) {
-            var split = keyVal.split(':');
-            if (split.length !== 2) {
-                throw new Error("invalid initParam " + keyVal);
-            }
-            initParamsObj[split[0]] = split[1];
-        });
+        for (const keyVal of initParams) {
+            const idx = keyVal.indexOf(':');
+            if (idx < 0) throw new Error(`invalid initParam "${keyVal}"`);
+            obj[keyVal.slice(0, idx)] = keyVal.slice(idx + 1);
+        }
     }
-    return "<script>J$.initParams = " + JSON.stringify(initParamsObj) + ";</script>";
+    return `<script>J$.initParams = ${JSON.stringify(obj)};</script>`;
 }
 
-function applyASTHandler(instResult, astHandler, sandbox) {
+/**
+ * 将 AST handler 的结果追加到插桩结果代码头部。
+ *
+ * @param {{ code: string, instAST?: object }} instResult
+ * @param {Function|null} astHandler
+ * @param {{ Constants: { JALANGI_VAR: string } }} sandbox
+ * @returns {string}
+ */
+export function applyASTHandler(instResult, astHandler, sandbox) {
     if (astHandler && instResult.instAST) {
-        var info = astHandler(instResult.instAST);
+        const info = astHandler(instResult.instAST);
         if (info) {
-            instResult.code = sandbox.Constants.JALANGI_VAR + ".ast_info = " + JSON.stringify(info) + ";\n" + instResult.code;
+            instResult.code = `${sandbox.Constants.JALANGI_VAR}.ast_info = ${JSON.stringify(info)};\n${instResult.code}`;
         }
     }
     return instResult.code;
 }
 
-function headerCodeInit(root) {
-    headerSources.forEach(function (src) {
-        if (root) {
-            src = path.join(root, src);
+/**
+ * 读取所有 headerSources 的文件内容，拼成一个字符串（Node.js 内联用）。
+ *
+ * @param {string} [root] - 可选的根路径前缀
+ * @returns {string}
+ */
+export function getHeaderCode(root) {
+    if (!_headerCode) {
+        for (let src of headerSources) {
+            if (root) src = join(root, src);
+            _headerCode += readFileSync(src, 'utf8');
         }
-        headerCode += fs.readFileSync(src);
-    });
-}
-
-function getHeaderCode(root) {
-    if (!headerCode) {
-        headerCodeInit(root);
     }
-    return headerCode;
+    return _headerCode;
 }
 
 /**
- * returns an HTML string of <script> tags, one of each header file, with the
- * absolute path of the header file
+ * 生成 headerSources 的 `<script src="...">` 标签字符串。
+ *
+ * @param {string} [root]
+ * @returns {string}
  */
-function getHeaderCodeAsScriptTags(root) {
-    var ret = "";
-    headerSources.forEach(function (src) {
-        if (root) {
-            src = path.join(root, src);
-        }
-        src = path.resolve(src);
-        ret += "<script src=\"" + src + "\"></script>";
-    });
+export function getHeaderCodeAsScriptTags(root) {
+    let ret = '';
+    for (let src of headerSources) {
+        if (root) src = join(root, src);
+        src = resolve(src);
+        ret += `<script src="${src}"></script>`;
+    }
     return ret;
 }
 
-var inlineRegexp = /#(inline|event-handler|js-url)/;
-
 /**
- * Does the url (obtained from rewriting-proxy) represent an inline script?
+ * 生成用于浏览器内联注入的完整 `<script>` 标签字符串。
+ *
+ * @param {string[]|null} analyses        - 分析插件路径列表
+ * @param {string[]|null} initParams      - initParams（"key:value" 数组）
+ * @param {string[]}      extraAppScripts - 额外脚本路径列表
+ * @param {string}        EXTRA_SCRIPTS_DIR
+ * @param {string|null}   jalangiRoot
+ * @param {string|null}   cdn             - CDN 地址（使用 CDN 时跳过本地文件读取）
+ * @returns {string}
  */
-function isInlineScript(url) {
-    return inlineRegexp.test(url);
-}
+export function getInlinedScripts(analyses, initParams, extraAppScripts, EXTRA_SCRIPTS_DIR, jalangiRoot, cdn) {
+    if (!_headerCode) {
+        if (cdn) {
+            _headerCode += `<script type="text/javascript" src="${cdn}/jalangi.js"></script>`;
+        } else {
+            for (let src of headerSources) {
+                if (jalangiRoot) src = join(jalangiRoot, src);
+                _headerCode += `<script type="text/javascript">`;
+                _headerCode += readFileSync(src, 'utf8');
+                _headerCode += `</script>`;
+            }
+        }
 
-/**
- * generate a filename for a script with the given url
- */
-function createFilenameForScript(url) {
-    // TODO make this much more robust
-    console.log("url:" + url);
-    var parsed = urlParser.parse(url);
-    if (inlineRegexp.test(url)) {
-        return parsed.hash.substring(1) + ".js";
-    } else {
-        return parsed.pathname.substring(parsed.pathname.lastIndexOf("/") + 1);
+        if (analyses) {
+            const initParamsCode = genInitParamsCode(initParams);
+            if (initParamsCode) _headerCode += initParamsCode;
+
+            if (cdn) {
+                _headerCode += `<script type="text/javascript" src="${cdn}/analyses.js"></script>`;
+            } else {
+                for (let src of analyses) {
+                    src = resolve(src);
+                    _headerCode += `<script type="text/javascript">`;
+                    _headerCode += readFileSync(src, 'utf8');
+                    _headerCode += `</script>`;
+                }
+            }
+        }
+
+        if (extraAppScripts.length > 0) {
+            if (cdn) {
+                _headerCode += `<script type="text/javascript" src="${cdn}/extras.js"></script>`;
+            } else {
+                for (const script of extraAppScripts) {
+                    const scriptSrc = join(EXTRA_SCRIPTS_DIR, basename(script));
+                    _headerCode += `<script type="text/javascript">`;
+                    _headerCode += readFileSync(scriptSrc, 'utf8');
+                    _headerCode += `</script>`;
+                }
+            }
+        }
     }
+    return _headerCode;
 }
 
-exports.setHeaders = setHeaders;
-exports.getHeaderCode = getHeaderCode;
-exports.getHeaderCodeAsScriptTags = getHeaderCodeAsScriptTags;
-exports.genInitParamsCode = genInitParamsCode;
-exports.applyASTHandler = applyASTHandler;
-exports.isInlineScript = isInlineScript;
-exports.headerSources = headerSources;
-exports.createFilenameForScript = createFilenameForScript;
-exports.getInlinedScripts = getInlinedScripts;
-exports.getFooterString = getFooterString;
+/**
+ * 生成 footer 脚本的 `<script>` 标签字符串。
+ *
+ * @param {string|null} jalangiRoot
+ * @returns {string}
+ */
+export function getFooterString(jalangiRoot) {
+    let footerSources;
+    try {
+        footerSources = require('../footers').footerSources;
+    } catch {
+        return '';
+    }
+
+    let code = '';
+    for (let src of footerSources) {
+        if (jalangiRoot) src = join(jalangiRoot, src);
+        if (src.endsWith('.js')) {
+            code += `<script type="text/javascript">`;
+            code += readFileSync(src, 'utf8');
+            code += `</script>`;
+        } else {
+            code += readFileSync(src, 'utf8');
+        }
+    }
+    return code;
+}
+
+const INLINE_REGEXP = /#(inline|event-handler|js-url)/;
+
+/**
+ * URL 是否代表内联脚本（来自 rewriting-proxy 的标记）。
+ * @param {string} url
+ * @returns {boolean}
+ */
+export function isInlineScript(url) {
+    return INLINE_REGEXP.test(url);
+}
+
+/**
+ * 根据 URL 生成一个脚本文件名。
+ * @param {string} url
+ * @returns {string}
+ */
+export function createFilenameForScript(url) {
+    console.log(`url: ${url}`);
+    const parsed = urlParse(url);
+    if (INLINE_REGEXP.test(url)) {
+        return parsed.hash.slice(1) + '.js';
+    }
+    const pathname = parsed.pathname ?? '';
+    return pathname.slice(pathname.lastIndexOf('/') + 1);
+}

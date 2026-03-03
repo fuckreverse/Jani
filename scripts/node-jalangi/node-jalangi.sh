@@ -18,4 +18,4 @@
 # set -e
 # set -x
 
-${NJ_REAL_NODE} ${NJ_JALANGI}/src/js/commands/jalangi.js ${NJ_JALANGI_ARGUMENTS} $*
+${NJ_REAL_NODE} ${NJ_JALANGI}/src/js/commands/jalangi.cjs ${NJ_JALANGI_ARGUMENTS} $*

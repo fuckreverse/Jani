@@ -13,105 +13,129 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-(function (sandbox) {
 
-    var timers = {};
-    var counters = {};
-    var accumulators = {};
-    var StatCollector = {};
-    var STATS_FILE_NAME = "jalangi_stats";
+/**
+ * @file StatCollector —— 轻量级性能统计（计时器、计数器、累加器）。
+ *
+ * 可在 Node.js 中直接运行（打印已保存的统计数据）：
+ *   node src/js/utils/StatCollector.js
+ */
 
+import { readFileSync, writeFileSync } from 'fs';
 
-    StatCollector.STAT_FLAG = true;
+const STATS_FILE_NAME = 'jalangi_stats';
 
-    StatCollector.resumeTimer = function (timerName) {
-        var timer;
-        if (!(timer = timers[timerName])) {
-            timer = timers[timerName] = {begin:-1, total:0, count:0};
-        }
-        if (timer.begin >= 0) {
-            console.log("Trying to resume active timer " + timerName);
-            throw new Error("Trying to resume active timer " + timerName);
-        }
-        timer.begin = Date.now();
-        timer.count++;
-    };
+let timers       = {};
+let counters     = {};
+let accumulators = {};
 
-    StatCollector.suspendTimer = function (timerName) {
-        var timer, now = Date.now();
-        if (!(timer = timers[timerName])) {
-            throw new Error("Trying to suspend a non-existent timer " + timerName);
-        }
-        if (timer.begin === -1) {
-            console.log("Trying to suspend inactive timer " + timerName)
-            throw new Error("Trying to resume inactive timer " + timerName);
-        }
-        timer.total += (now - timer.begin);
-        timer.begin = -1;
-    };
+/** @type {boolean} 可在外部设置为 false 以禁用所有统计 */
+export const STAT_FLAG = true;
 
-    StatCollector.addToAccumulator = function (accumulatorName, val) {
-        var accumulator;
-        if (!(accumulator = accumulators[accumulatorName])) {
-            accumulator = accumulators[accumulatorName] = {count:0, sum:0, max:undefined, min:undefined};
-        }
-        accumulator.count++;
-        accumulator.sum += val;
-        if (accumulator.max === undefined) {
-            accumulator.max = val;
-        } else if (val > accumulator.max) {
-            accumulator.max = val;
-        }
-        if (accumulator.min === undefined) {
-            accumulator.min = val;
-        } else if (val < accumulator.min) {
-            accumulator.min = val;
-        }
-    };
+/**
+ * 启动（或恢复）命名计时器。
+ * @param {string} timerName
+ */
+export function resumeTimer(timerName) {
+    let timer = timers[timerName];
+    if (!timer) {
+        timer = timers[timerName] = { begin: -1, total: 0, count: 0 };
+    }
+    if (timer.begin >= 0) {
+        throw new Error(`Trying to resume active timer ${timerName}`);
+    }
+    timer.begin = Date.now();
+    timer.count++;
+}
 
-    StatCollector.addToCounter = function (counterName) {
-        counters[counterName] = (counters[counterName] | 0) + 1;
-    };
+/**
+ * 暂停命名计时器，累积耗时。
+ * @param {string} timerName
+ */
+export function suspendTimer(timerName) {
+    const now   = Date.now();
+    const timer = timers[timerName];
+    if (!timer) throw new Error(`Trying to suspend a non-existent timer ${timerName}`);
+    if (timer.begin === -1) throw new Error(`Trying to suspend inactive timer ${timerName}`);
+    timer.total += (now - timer.begin);
+    timer.begin  = -1;
+}
 
-    StatCollector.loadStats = function () {
-        try {
-            var tmp = JSON.parse(require('fs').readFileSync(STATS_FILE_NAME, "utf8"));
-            timers = tmp.timers;
-            counters = tmp.counters;
-            accumulators = tmp.accumulators;
-        } catch (e) {
-        }
-    };
+/**
+ * 向累加器添加一个数值样本。
+ * @param {string} accumulatorName
+ * @param {number} val
+ */
+export function addToAccumulator(accumulatorName, val) {
+    let acc = accumulators[accumulatorName];
+    if (!acc) {
+        acc = accumulators[accumulatorName] = { count: 0, sum: 0, max: undefined, min: undefined };
+    }
+    acc.count++;
+    acc.sum += val;
+    if (acc.max === undefined || val > acc.max) acc.max = val;
+    if (acc.min === undefined || val < acc.min) acc.min = val;
+}
 
-    StatCollector.storeStats = function () {
-        require('fs').writeFileSync(STATS_FILE_NAME, JSON.stringify({timers:timers, counters:counters, accumulators:accumulators}), "utf8");
-    };
+/**
+ * 计数器自增。
+ * @param {string} counterName
+ */
+export function addToCounter(counterName) {
+    counters[counterName] = (counters[counterName] | 0) + 1;
+}
 
-    StatCollector.printStats = function() {
-        for(var timer in timers) {
-            if (timers.hasOwnProperty(timer)) {
-                console.log("Time spent in "+timer+" = "+timers[timer].total+" ms (count = "+timers[timer].count+")");
-            }
-        }
-        for (var counter in counters) {
-            if (counters.hasOwnProperty(counter)) {
-                console.log("Number of "+counter+" = "+counters[counter]);
-            }
-        }
-        for (var accumulator in accumulators) {
-            if (accumulators.hasOwnProperty(accumulator)) {
-                var val = accumulators[accumulator];
-                console.log(accumulator+": average = "+(val.sum/val.count)+" max = "+val.max+" min = "+val.min);
-            }
-        }
-    };
+/** 从磁盘加载已保存的统计数据。 */
+export function loadStats() {
+    try {
+        const tmp = JSON.parse(readFileSync(STATS_FILE_NAME, 'utf8'));
+        timers       = tmp.timers;
+        counters     = tmp.counters;
+        accumulators = tmp.accumulators;
+    } catch { /* 文件不存在时静默忽略 */ }
+}
 
-    sandbox.exports = StatCollector;
-}(module));
+/** 将当前统计数据持久化到磁盘。 */
+export function storeStats() {
+    writeFileSync(STATS_FILE_NAME, JSON.stringify({ timers, counters, accumulators }), 'utf8');
+}
 
-if (require.main === module) {
-    var stats = module.exports;
-    stats.loadStats();
-    stats.printStats();
+/** 打印所有统计数据到控制台。 */
+export function printStats() {
+    for (const timer of Object.keys(timers)) {
+        const t = timers[timer];
+        console.log(`Time spent in ${timer} = ${t.total} ms (count = ${t.count})`);
+    }
+    for (const counter of Object.keys(counters)) {
+        console.log(`Number of ${counter} = ${counters[counter]}`);
+    }
+    for (const name of Object.keys(accumulators)) {
+        const a = accumulators[name];
+        console.log(`${name}: average = ${a.sum / a.count} max = ${a.max} min = ${a.min}`);
+    }
+}
 
+/**
+ * 向后兼容对象（供旧代码通过 StatCollector.xxx 调用）
+ */
+export const StatCollector = {
+    STAT_FLAG,
+    resumeTimer,
+    suspendTimer,
+    addToAccumulator,
+    addToCounter,
+    loadStats,
+    storeStats,
+    printStats,
+};
+
+// ─── 独立运行模式 ────────────────────────────────────────────────────────────
+
+const isMain = (typeof process !== 'undefined') &&
+    process.argv[1] &&
+    (new URL(import.meta.url)).pathname === process.argv[1];
+
+if (isMain) {
+    loadStats();
+    printStats();
 }

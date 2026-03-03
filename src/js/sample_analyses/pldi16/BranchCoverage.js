@@ -1,44 +1,42 @@
-// do not remove the following comment
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @author  Koushik Sen
+ * @file BranchCoverage —— 统计每个条件表达式分支被执行的次数。
+ * @author Koushik Sen
  *
+ * 运行示例：
+ *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/js/sample_analyses/pldi16/BranchCoverage.js \
+ *     tests/pldi16/BranchCoverageTest.js
  */
 
-(function (sandbox) {
-    var trueBranches = {};
-    var falseBranches = {};
-
-    function MyAnalysis() {
-
-        this.conditional = function (iid, result) {
-            var id = J$.getGlobalIID(iid);
-            if (result)
-                trueBranches[id] = (trueBranches[id]|0) + 1;
-            else
-                falseBranches[id] = (falseBranches[id]|0) + 1;
-        };
-
-        this.endExecution = function () {
-            print(trueBranches, "True");
-            print(falseBranches, "False");
-        };
+export class BranchCoverageAnalysis {
+    constructor(sandbox) {
+        this._sandbox      = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._trueBranches  = {};
+        this._falseBranches = {};
     }
 
-    function print(map, str) {
-        for (var id in map)
-            if (map.hasOwnProperty(id)) {
-                sandbox.log(str + " branch taken at " + J$.iidToLocation(id) + " " + map[id] + " times");
-            }
+    conditional(iid, result) {
+        const id = this._sandbox.getGlobalIID(iid);
+        if (result) {
+            this._trueBranches[id]  = (this._trueBranches[id]  | 0) + 1;
+        } else {
+            this._falseBranches[id] = (this._falseBranches[id] | 0) + 1;
+        }
     }
 
-    sandbox.analysis = new MyAnalysis();
-}(J$));
+    endExecution() {
+        const { log, iidToLocation } = this._sandbox;
+        for (const id of Object.keys(this._trueBranches)) {
+            log(`True branch taken at ${iidToLocation(id)} ${this._trueBranches[id]} times`);
+        }
+        for (const id of Object.keys(this._falseBranches)) {
+            log(`False branch taken at ${iidToLocation(id)} ${this._falseBranches[id]} times`);
+        }
+    }
+}
 
-/*
-node src/js/commands/jalangi.js --inlineIID --inlineSource --analysis src/js/sample_analyses/pldi16/BranchCoverage.js tests/pldi16/BranchCoverageTest.js
-node src/js/commands/esnstrument_cli.js --inlineIID --inlineSource --analysis src/js/sample_analyses/pldi16/BranchCoverage.js --out /tmp/pldi16/BranchCoverageTest.html  tests/pldi16/BranchCoverageTest.html
-node src/js/commands/esnstrument_cli.js --inlineIID --inlineSource --analysis src/js/sample_analyses/pldi16/BranchCoverage.js --out /tmp/pldi16/BranchCoverageTest.js  tests/pldi16/BranchCoverageTest.js
-open file:///tmp/pldi16/BranchCoverageTest.html
-*/
+if (typeof J$ !== 'undefined') {
+    J$.analysis = new BranchCoverageAnalysis(J$);
+}

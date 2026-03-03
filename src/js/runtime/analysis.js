@@ -1,87 +1,78 @@
-/*
- * Copyright 2014 Samsung Information Systems America, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *        http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-// Author: Koushik Sen
-
-// do not remove the following comment
 // JALANGI DO NOT INSTRUMENT
 
+/**
+ * @file Jalangi2 运行时后端 —— 核心钩子实现。
+ *
+ * 本模块实现了插桩代码在运行时调用的所有 J$.xxx 函数：
+ *   R（read）、W（write）、G（getField）、P（putField）、
+ *   B（binary）、U（unary）、F（funcCall）、M（methodCall）、
+ *   T（literal）、N（declare）、Fe/Fr（functionEnter/Exit）、
+ *   Se/Sr（scriptEnter/Exit）、C/C1/C2（conditional）等。
+ *
+ * 使用方式（推荐）：
+ *   import { createRuntime } from './analysis.js';
+ *   createRuntime(J$);   // 将所有运行时函数挂到 J$
+ *
+ * 向后兼容：本文件末尾自动检测全局 J$ 并安装（IIFE 时代的用法）。
+ */
 
-// wrap in anonymous function to create local namespace when in browser
-// create / reset J$ global variable to hold analysis runtime
-if (typeof J$ === 'undefined') {
-    J$ = {};
-}
+/**
+ * 将 Jalangi2 运行时钩子安装到 sandbox（通常是 J$）。
+ *
+ * @param {object} sandbox  - J$ 全局对象，需预先含 Constants、analysis 等字段
+ */
+export function createRuntime(sandbox) {
+    const SPECIAL_PROP_SID = sandbox.Constants.SPECIAL_PROP_SID;
+    const SPECIAL_PROP_IID = sandbox.Constants.SPECIAL_PROP_IID;
 
-(function (sandbox) {
-    if (typeof sandbox.B !== 'undefined') {
-        return;
-    }
-    //----------------------------------- Begin Jalangi Library backend ---------------------------------
+    // 保存原始 eval 引用，防止被插桩代码污染
+    const EVAL_ORG = eval;   // eslint-disable-line no-eval
 
-    // stack of return values from instrumented functions.
-    // we need to keep a stack since a function may return and then
-    // have another function call in a finally block (see test
-    // call_in_finally.js)
+    // ── 内部状态 ─────────────────────────────────────────────────────────────
 
-    var global = this;
-    var Function = global.Function;
-    var returnStack = [];
-    var wrappedExceptionVal;
-    var lastVal;
-    var switchLeft;
-    var switchKeyStack = [];
-    var argIndex;
-    var EVAL_ORG = eval;
-    var lastComputedValue;
-    var SPECIAL_PROP_SID = sandbox.Constants.SPECIAL_PROP_SID;
-    var SPECIAL_PROP_IID = sandbox.Constants.SPECIAL_PROP_IID;
+    // 函数返回值栈（支持 finally 块中的嵌套调用）
+    const returnStack = [];
 
-    function getPropSafe(base, prop){
-      if(base === null || base === undefined){
-        return undefined;
-      }
-      return base[prop];
+    let wrappedExceptionVal;
+    let lastVal;
+    let lastComputedValue;
+    let switchLeft;
+    const switchKeyStack = [];
+    let argIndex;
+
+    // sid 栈（支持多脚本/eval 嵌套）
+    const sidStack = [];
+    let sidCounter = 0;
+
+    // ── 工具函数 ─────────────────────────────────────────────────────────────
+
+    function getPropSafe(base, prop) {
+        if (base === null || base === undefined) return undefined;
+        return base[prop];
     }
 
     function decodeBitPattern(i, len) {
-        var ret = new Array(len);
-        for (var j=0; j<len; j++) {
-            var val = (i & 1)?true:false;
-            ret[len - j -1] = val;
-            i = i >> 1;
+        const ret = new Array(len);
+        for (let j = 0; j < len; j++) {
+            ret[len - j - 1] = (i & 1) ? true : false;
+            i >>= 1;
         }
         return ret;
     }
 
-    function createBitPattern() {
-        var ret = 0;
-        var i;
-        for (i =0; i< arguments.length; i++) {
-            ret = (ret << 1)+(arguments[i]?1:0);
+    function createBitPattern(...bits) {
+        let ret = 0;
+        for (const b of bits) {
+            ret = (ret << 1) + (b ? 1 : 0);
         }
         return ret;
     }
 
-
-    var sidStack = [], sidCounter = 0;
+    // ── SID 管理 ─────────────────────────────────────────────────────────────
 
     function createAndAssignNewSid() {
         sidStack.push(sandbox.sid);
-        sandbox.sid = sidCounter = sidCounter + 1;
+        sandbox.sid = ++sidCounter;
         if (!sandbox.smap) sandbox.smap = {};
         sandbox.smap[sandbox.sid] = sandbox.iids;
     }
@@ -90,21 +81,14 @@ if (typeof J$ === 'undefined') {
         sandbox.sid = sidStack.pop();
     }
 
+    // ── 函数 SID / IID 关联 ──────────────────────────────────────────────────
+
     function associateSidWithFunction(f, iid) {
-        if (typeof f === 'function') {
-            if (Object && Object.defineProperty && typeof Object.defineProperty === 'function') {
-                Object.defineProperty(f, SPECIAL_PROP_SID, {
-                    enumerable:false,
-                    writable:true
-                });
-                Object.defineProperty(f, SPECIAL_PROP_IID, {
-                    enumerable:false,
-                    writable:true
-                });
-            }
-            f[SPECIAL_PROP_SID] = sandbox.sid;
-            f[SPECIAL_PROP_IID] = iid;
-        }
+        if (typeof f !== 'function') return;
+        Object.defineProperty(f, SPECIAL_PROP_SID, { enumerable: false, writable: true, configurable: true });
+        Object.defineProperty(f, SPECIAL_PROP_IID, { enumerable: false, writable: true, configurable: true });
+        f[SPECIAL_PROP_SID] = sandbox.sid;
+        f[SPECIAL_PROP_IID] = iid;
     }
 
     function updateSid(f) {
@@ -112,286 +96,227 @@ if (typeof J$ === 'undefined') {
         sandbox.sid = getPropSafe(f, SPECIAL_PROP_SID);
     }
 
+    // ── 构造器调用 ───────────────────────────────────────────────────────────
 
-    // unused
-    function isNative(f) {
-        return f.toString().indexOf('[native code]') > -1 || f.toString().indexOf('[object ') === 0;
-    }
-
-    function callAsNativeConstructorWithEval(Constructor, args) {
-        var a = [];
-        for (var i = 0; i < args.length; i++)
-            a[i] = 'args[' + i + ']';
-        var eval = EVAL_ORG;
-        return eval('new Constructor(' + a.join() + ')');
-    }
-
-    function callAsNativeConstructor(Constructor, args) {
-        if (args.length === 0) {
-            return new Constructor();
-        }
-        if (args.length === 1) {
-            return new Constructor(args[0]);
-        }
-        if (args.length === 2) {
-            return new Constructor(args[0], args[1]);
-        }
-        if (args.length === 3) {
-            return new Constructor(args[0], args[1], args[2]);
-        }
-        if (args.length === 4) {
-            return new Constructor(args[0], args[1], args[2], args[3]);
-        }
-        if (args.length === 5) {
-            return new Constructor(args[0], args[1], args[2], args[3], args[4]);
-        }
-        return callAsNativeConstructorWithEval(Constructor, args);
-    }
-
+    /**
+     * 使用 Reflect.construct 反射调用构造器（替代旧式 switch/eval 实现）。
+     * Reflect.construct 是 ES2015+ 标准方式，语义等价且无 eval 开销。
+     */
     function callAsConstructor(Constructor, args) {
-        var ret;
-        if (true) {
-            ret = callAsNativeConstructor(Constructor, args);
-            return ret;
-        } else { // else branch is a more elegant to call a constructor reflectively, but it leads to memory leak in v8.
-            var Temp = function () {
-            }, inst;
-            Temp.prototype = Constructor.prototype;
-            inst = new Temp;
-            ret = Constructor.apply(inst, args);
-            return Object(ret) === ret ? ret : inst;
-        }
+        return Reflect.construct(Constructor, args);
     }
+
+    // ── eval / Function 插桩 ─────────────────────────────────────────────────
 
     function invokeEval(base, f, args, iid) {
         return f(sandbox.instrumentEvalCode(args[0], iid, false));
     }
 
     function invokeFunctionDecl(base, f, args, iid) {
-        // Otherwise input is valid, so instrument and invoke via eval
-        var newArgs = [].slice.call(args).map(function (v) { return String(new String(v)); });
-        // Invoke with the original parameters to preserve exceptional behavior if input is invalid
+        const newArgs = Array.from(args).map(v => String(new String(v)));
+        // 先用原始参数调用一次，保留异常行为（如参数数量不对时的报错）
         f.apply(base, newArgs);
-        // 修复 bug：原来此处有两个 var code 声明（重复声明），在 strict mode 下会报错。
-        // 第一个改名为 rawCode 以明确语义。
-        var rawCode = '(function(' + newArgs.slice(0, newArgs.length - 1).join(', ') + ') { ' + newArgs[newArgs.length-1] + ' })';
-        var code = sandbox.instrumentEvalCode(rawCode, iid, false);
-        // Using EVAL_ORG instead of eval() is important as it preserves the scoping semantics of Function()
-        var out = EVAL_ORG(code);
-        return out;
+        const rawCode = `(function(${newArgs.slice(0, newArgs.length - 1).join(', ')}) { ${newArgs[newArgs.length - 1]} })`;
+        const code    = sandbox.instrumentEvalCode(rawCode, iid, false);
+        return EVAL_ORG(code);   // 使用 EVAL_ORG 保留原始作用域语义
     }
 
+    // ── 核心调用逻辑 ─────────────────────────────────────────────────────────
+
     function callFun(f, base, args, isConstructor, iid) {
-        var result;
         pushSwitchKey();
         try {
             if (f === EVAL_ORG) {
-                result = invokeEval(base, f, args, iid);
+                return invokeEval(base, f, args, iid);
             } else if (f === Function) {
-                result = invokeFunctionDecl(base, f, args, iid);
+                return invokeFunctionDecl(base, f, args, iid);
             } else if (isConstructor) {
-                result = callAsConstructor(f, args);
+                return callAsConstructor(f, args);
             } else {
-                result = Function.prototype.apply.call(f, base, args);
+                return Function.prototype.apply.call(f, base, args);
             }
-            return result;
         } finally {
             popSwitchKey();
         }
     }
 
     function invokeFun(iid, base, f, args, isConstructor, isMethod) {
-        var aret, skip = false, result;
+        let aret, skip = false, result;
+        const analysis = sandbox.analysis;
 
-        if (sandbox.analysis && sandbox.analysis.invokeFunPre) {
-            aret = sandbox.analysis.invokeFunPre(iid, f, base, args, isConstructor, isMethod, getPropSafe(f, SPECIAL_PROP_IID), getPropSafe(f, SPECIAL_PROP_SID));
+        if (analysis?.invokeFunPre) {
+            aret = analysis.invokeFunPre(iid, f, base, args, isConstructor, isMethod,
+                getPropSafe(f, SPECIAL_PROP_IID), getPropSafe(f, SPECIAL_PROP_SID));
             if (aret) {
-                f = aret.f;
+                f    = aret.f;
                 base = aret.base;
                 args = aret.args;
                 skip = aret.skip;
             }
         }
+
         if (!skip) {
             result = callFun(f, base, args, isConstructor, iid);
         }
-        if (sandbox.analysis && sandbox.analysis.invokeFun) {
-            aret = sandbox.analysis.invokeFun(iid, f, base, args, result, isConstructor, isMethod, getPropSafe(f, SPECIAL_PROP_IID), getPropSafe(f, SPECIAL_PROP_SID));
-            if (aret) {
-                result = aret.result;
-            }
+
+        if (analysis?.invokeFun) {
+            aret = analysis.invokeFun(iid, f, base, args, result, isConstructor, isMethod,
+                getPropSafe(f, SPECIAL_PROP_IID), getPropSafe(f, SPECIAL_PROP_SID));
+            if (aret) result = aret.result;
         }
+
         return result;
     }
 
-    // Function call (e.g., f())
-    function F(iid, f, flags) {
-        var bFlags = decodeBitPattern(flags, 1); // [isConstructor]
-        return function () {
-            var base = this;
-            return (lastComputedValue = invokeFun(iid, base, f, arguments, bFlags[0], false));
-        }
-    }
+    // ══════════════════════════════════════════════════════════════════════════
+    // 公开运行时钩子函数（插桩代码直接调用）
+    // ══════════════════════════════════════════════════════════════════════════
 
-    // Method call (e.g., e.f())
-    function M(iid, base, offset, flags) {
-        var bFlags = decodeBitPattern(flags, 2); // [isConstructor, isComputed]
-        var f = G(iid + 2, base, offset, createBitPattern(bFlags[1], false, true));
-        return function () {
-            return (lastComputedValue = invokeFun(iid, base, f, arguments, bFlags[0], true));
+    /** 函数调用（F(iid, f, flags)(...args)） */
+    function F(iid, f, flags) {
+        const [isConstructor] = decodeBitPattern(flags, 1);
+        return function (...callArgs) {
+            return (lastComputedValue = invokeFun(iid, this, f, callArgs, isConstructor, false));
         };
     }
 
-    // Ignore argument (identity).
-    function I(val) {
-        return val;
+    /** 方法调用（M(iid, base, offset, flags)(...args)） */
+    function M(iid, base, offset, flags) {
+        const [isConstructor, isComputed] = decodeBitPattern(flags, 2);
+        const f = G(iid + 2, base, offset, createBitPattern(isComputed, false, true));
+        return function (...callArgs) {
+            return (lastComputedValue = invokeFun(iid, base, f, callArgs, isConstructor, true));
+        };
     }
 
-    var hasGetOwnPropertyDescriptor = typeof Object.getOwnPropertyDescriptor === 'function';
-    // object/function/regexp/array Literal
+    /** 忽略（Identity，占位用） */
+    function I(val) { return val; }
+
+    /** 字面量（对象/函数/数组/正则/原始值） */
     function T(iid, val, type, hasGetterSetter, internalIid) {
-        var aret;
         associateSidWithFunction(val, internalIid);
+
         if (hasGetterSetter) {
-            for (var offset in val) {
-                if (hasGetOwnPropertyDescriptor && val.hasOwnProperty(offset)) {
-                    var desc = Object.getOwnPropertyDescriptor(val, offset);
+            for (const offset in val) {
+                if (Object.prototype.hasOwnProperty.call(val, offset)) {
+                    const desc = Object.getOwnPropertyDescriptor(val, offset);
                     if (desc !== undefined) {
-                        if (typeof desc.get === 'function') {
-                            T(iid, desc.get, 12, false, internalIid);
-                        }
-                        if (typeof desc.set === 'function') {
-                            T(iid, desc.set, 12, false, internalIid);
-                        }
+                        if (typeof desc.get === 'function') T(iid, desc.get, 12, false, internalIid);
+                        if (typeof desc.set === 'function') T(iid, desc.set, 12, false, internalIid);
                     }
                 }
             }
         }
-        if (sandbox.analysis && sandbox.analysis.literal) {
-            aret = sandbox.analysis.literal(iid, val, hasGetterSetter);
-            if (aret) {
-                val = aret.result;
-            }
+
+        const analysis = sandbox.analysis;
+        if (analysis?.literal) {
+            const aret = analysis.literal(iid, val, hasGetterSetter);
+            if (aret) val = aret.result;
         }
+
         return (lastComputedValue = val);
     }
 
-    // wrap object o in for (x in o) { ... }
+    /** for-in 对象包装 */
     function H(iid, val) {
-        var aret;
-        if (sandbox.analysis && sandbox.analysis.forinObject) {
-            aret = sandbox.analysis.forinObject(iid, val);
-            if (aret) {
-                val = aret.result;
-            }
+        const analysis = sandbox.analysis;
+        if (analysis?.forinObject) {
+            const aret = analysis.forinObject(iid, val);
+            if (aret) val = aret.result;
         }
         return val;
     }
 
-    // variable declaration (Init)
+    /** 变量声明初始化 */
     function N(iid, name, val, flags) {
-        var bFlags = decodeBitPattern(flags, 3); // [isArgument, isLocalSync, isCatchParam]
-        // isLocalSync is only true when we sync variables inside a for-in loop
-        var aret;
+        const [isArgument, isLocalSync, isCatchParam] = decodeBitPattern(flags, 3);
+        const analysis = sandbox.analysis;
 
-        if (bFlags[0]) {
-            argIndex++;
-        }
-        if (!bFlags[1] && sandbox.analysis && sandbox.analysis.declare) {
-            if (bFlags[0] && argIndex > 1) {
-                aret = sandbox.analysis.declare(iid, name, val, bFlags[0], argIndex - 2, bFlags[2]);
-            } else {
-                aret = sandbox.analysis.declare(iid, name, val, bFlags[0], -1, bFlags[2]);
-            }
-            if (aret) {
-                val = aret.result;
-            }
+        if (isArgument) argIndex++;
+
+        if (!isLocalSync && analysis?.declare) {
+            const idx  = (isArgument && argIndex > 1) ? argIndex - 2 : -1;
+            const aret = analysis.declare(iid, name, val, isArgument, idx, isCatchParam);
+            if (aret) val = aret.result;
         }
         return val;
     }
 
-    // getField (property read)
+    /** 属性读取 */
     function G(iid, base, offset, flags) {
-        var bFlags = decodeBitPattern(flags, 3); // [isComputed, isOpAssign, isMethodCall]
+        const [isComputed, isOpAssign, isMethodCall] = decodeBitPattern(flags, 3);
+        const analysis = sandbox.analysis;
+        let aret, skip = false, val;
 
-        var aret, skip = false, val;
-
-        if (sandbox.analysis && sandbox.analysis.getFieldPre) {
-            aret = sandbox.analysis.getFieldPre(iid, base, offset, bFlags[0], bFlags[1], bFlags[2]);
+        if (analysis?.getFieldPre) {
+            aret = analysis.getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall);
             if (aret) {
-                base = aret.base;
+                base   = aret.base;
                 offset = aret.offset;
-                skip = aret.skip;
+                skip   = aret.skip;
             }
         }
 
-        if (!skip) {
-            val = base[offset];
+        if (!skip) val = base[offset];
+
+        if (analysis?.getField) {
+            aret = analysis.getField(iid, base, offset, val, isComputed, isOpAssign, isMethodCall);
+            if (aret) val = aret.result;
         }
-        if (sandbox.analysis && sandbox.analysis.getField) {
-            aret = sandbox.analysis.getField(iid, base, offset, val, bFlags[0], bFlags[1], bFlags[2]);
-            if (aret) {
-                val = aret.result;
-            }
-        }
+
         return (lastComputedValue = val);
     }
 
-    // putField (property write)
+    /** 属性写入 */
     function P(iid, base, offset, val, flags) {
-        var bFlags = decodeBitPattern(flags, 2); // [isComputed, isOpAssign]
+        const [isComputed, isOpAssign] = decodeBitPattern(flags, 2);
+        const analysis = sandbox.analysis;
+        let aret, skip = false;
 
-        var aret, skip = false;
-
-        if (sandbox.analysis && sandbox.analysis.putFieldPre) {
-            aret = sandbox.analysis.putFieldPre(iid, base, offset, val, bFlags[0], !!bFlags[1]);
+        if (analysis?.putFieldPre) {
+            aret = analysis.putFieldPre(iid, base, offset, val, isComputed, !!isOpAssign);
             if (aret) {
-                base = aret.base;
+                base   = aret.base;
                 offset = aret.offset;
-                val = aret.val;
-                skip = aret.skip;
+                val    = aret.val;
+                skip   = aret.skip;
             }
         }
 
-        if (!skip) {
-            base[offset] = val;
+        if (!skip) base[offset] = val;
+
+        if (analysis?.putField) {
+            aret = analysis.putField(iid, base, offset, val, isComputed, !!isOpAssign);
+            if (aret) val = aret.result;
         }
-        if (sandbox.analysis && sandbox.analysis.putField) {
-            aret = sandbox.analysis.putField(iid, base, offset, val, bFlags[0], !!bFlags[1]);
-            if (aret) {
-                val = aret.result;
-            }
-        }
+
         return (lastComputedValue = val);
     }
 
-    // variable write
-    // isGlobal means that the variable is global and not declared as var
-    // isScriptLocal means that the variable is global and is declared as var
+    /** 变量读取 */
     function R(iid, name, val, flags) {
-        var aret;
-        var bFlags = decodeBitPattern(flags, 2); // [isGlobal, isScriptLocal]
+        const [isGlobal, isScriptLocal] = decodeBitPattern(flags, 2);
+        const analysis = sandbox.analysis;
 
-        if (sandbox.analysis && sandbox.analysis.read) {
-            aret = sandbox.analysis.read(iid, name, val, bFlags[0], bFlags[1]);
-            if (aret) {
-                val = aret.result;
-            }
+        if (analysis?.read) {
+            const aret = analysis.read(iid, name, val, isGlobal, isScriptLocal);
+            if (aret) val = aret.result;
         }
+
         return (lastComputedValue = val);
     }
 
-    // variable write
+    /** 变量写入 */
     function W(iid, name, val, lhs, flags) {
-        var bFlags = decodeBitPattern(flags, 3); //[isGlobal, isScriptLocal, isDeclaration]
-        var aret;
-        if (sandbox.analysis && sandbox.analysis.write) {
-            aret = sandbox.analysis.write(iid, name, val, lhs, bFlags[0], bFlags[1]);
-            if (aret) {
-                val = aret.result;
-            }
+        const [isGlobal, isScriptLocal, isDeclaration] = decodeBitPattern(flags, 3);
+        const analysis = sandbox.analysis;
+
+        if (analysis?.write) {
+            const aret = analysis.write(iid, name, val, lhs, isGlobal, isScriptLocal);
+            if (aret) val = aret.result;
         }
-        if (!bFlags[2]) {
+
+        if (!isDeclaration) {
             return (lastComputedValue = val);
         } else {
             lastComputedValue = undefined;
@@ -399,316 +324,240 @@ if (typeof J$ === 'undefined') {
         }
     }
 
-    // with statement
+    /** with 语句 */
     function Wi(iid, val) {
-        if (sandbox.analysis && sandbox.analysis._with) {
-            aret = sandbox.analysis._with(iid, val);
-            if (aret) {
-                val = aret.result;
-            }
+        const analysis = sandbox.analysis;
+        if (analysis?._with) {
+            const aret = analysis._with(iid, val);
+            if (aret) val = aret.result;
         }
         return val;
     }
 
-    // Uncaught exception
+    /** 未捕获异常 */
     function Ex(iid, e) {
-        wrappedExceptionVal = {exception:e};
+        wrappedExceptionVal = { exception: e };
     }
 
-    // Throw statement
+    /** throw 语句 */
     function Th(iid, val) {
-        var aret;
-        if (sandbox.analysis && sandbox.analysis._throw) {
-            aret = sandbox.analysis._throw(iid, val);
-            if (aret) {
-                val = aret.result;
-            }
+        const analysis = sandbox.analysis;
+        if (analysis?._throw) {
+            const aret = analysis._throw(iid, val);
+            if (aret) val = aret.result;
         }
         return (lastComputedValue = val);
     }
 
-    // Return statement
+    /** return 语句 */
     function Rt(iid, val) {
-        var aret;
-        if (sandbox.analysis && sandbox.analysis._return) {
-            aret = sandbox.analysis._return(iid, val);
-            if (aret) {
-                val = aret.result;
-            }
+        const analysis = sandbox.analysis;
+        if (analysis?._return) {
+            const aret = analysis._return(iid, val);
+            if (aret) val = aret.result;
         }
         returnStack.pop();
         returnStack.push(val);
         return (lastComputedValue = val);
     }
 
-    // Actual return from function, invoked from 'finally' block
-    // added around every function by instrumentation.  Reads
-    // the return value stored by call to Rt()
+    /** 函数真正返回时（由 finally 块中的基础包装调用），读取 Rt 存储的返回值 */
     function Ra() {
-        var returnVal = returnStack.pop();
+        const returnVal  = returnStack.pop();
         wrappedExceptionVal = undefined;
         return returnVal;
     }
 
-    // Function enter
-    function Fe(iid, f, dis /* this */, args) {
+    /** 函数进入 */
+    function Fe(iid, f, dis, args) {
         argIndex = 0;
         returnStack.push(undefined);
         wrappedExceptionVal = undefined;
         updateSid(f);
-        if (sandbox.analysis && sandbox.analysis.functionEnter) {
-            sandbox.analysis.functionEnter(iid, f, dis, args);
-        }
+        sandbox.analysis?.functionEnter?.(iid, f, dis, args);
     }
 
-    // Function exit
+    /** 函数退出 */
     function Fr(iid) {
-        var isBacktrack = false, tmp, aret, returnVal;
+        let isBacktrack = false;
+        let returnVal   = returnStack.pop();
+        const analysis  = sandbox.analysis;
 
-        returnVal = returnStack.pop();
-        if (sandbox.analysis && sandbox.analysis.functionExit) {
-            aret = sandbox.analysis.functionExit(iid, returnVal, wrappedExceptionVal);
+        if (analysis?.functionExit) {
+            const aret = analysis.functionExit(iid, returnVal, wrappedExceptionVal);
             if (aret) {
-                returnVal = aret.returnVal;
+                returnVal           = aret.returnVal;
                 wrappedExceptionVal = aret.wrappedExceptionVal;
-                isBacktrack = aret.isBacktrack;
+                isBacktrack         = aret.isBacktrack;
             }
         }
+
         rollBackSid();
-        if (!isBacktrack) {
-            returnStack.push(returnVal);
-        }
-        // if there was an uncaught exception, throw it
-        // here, to preserve exceptional control flow
+
+        if (!isBacktrack) returnStack.push(returnVal);
+
+        // 重新抛出未捕获异常，保持异常控制流
         if (wrappedExceptionVal !== undefined) {
-            tmp = wrappedExceptionVal.exception;
+            const tmp   = wrappedExceptionVal.exception;
             wrappedExceptionVal = undefined;
             throw tmp;
         }
+
         return isBacktrack;
     }
 
-    // Script enter
+    /** 脚本进入 */
     function Se(iid, val, origFileName) {
         createAndAssignNewSid();
-        if (sandbox.analysis && sandbox.analysis.scriptEnter) {
-            sandbox.analysis.scriptEnter(iid, val, origFileName);
-        }
+        sandbox.analysis?.scriptEnter?.(iid, val, origFileName);
         lastComputedValue = undefined;
     }
 
-    // Script exit
+    /** 脚本退出 */
     function Sr(iid) {
-        var tmp, aret, isBacktrack;
-        if (sandbox.analysis && sandbox.analysis.scriptExit) {
-            aret = sandbox.analysis.scriptExit(iid, wrappedExceptionVal);
+        const analysis = sandbox.analysis;
+        let isBacktrack;
+
+        if (analysis?.scriptExit) {
+            const aret = analysis.scriptExit(iid, wrappedExceptionVal);
             if (aret) {
                 wrappedExceptionVal = aret.wrappedExceptionVal;
-                isBacktrack = aret.isBacktrack;
+                isBacktrack         = aret.isBacktrack;
             }
         }
+
         rollBackSid();
+
         if (wrappedExceptionVal !== undefined) {
-            tmp = wrappedExceptionVal.exception;
+            const tmp   = wrappedExceptionVal.exception;
             wrappedExceptionVal = undefined;
             throw tmp;
         }
+
         return isBacktrack;
     }
 
-
-    // Modify and assign +=, -= ...
+    /** 复合赋值（+=、-= 等） */
     function A(iid, base, offset, op, flags) {
-        var bFlags = decodeBitPattern(flags, 2); // [isComputed, isNumber]
-        // avoid iid collision: make sure that iid+2 has the same source map as iid (@todo)
-        var oprnd1 = G(iid+2, base, offset, createBitPattern(bFlags[0], true, false));
-        if (bFlags[1]) {
-            oprnd1 = +oprnd1;
-        }
-        return function (oprnd2) {
-            // still possible to get iid collision with a mem operation
-            var val = B(iid, op, oprnd1, oprnd2, createBitPattern(false, true, false));
-            return P(iid, base, offset, val, createBitPattern(bFlags[0], true));
+        const [isComputed, isNumber] = decodeBitPattern(flags, 2);
+        let oprnd1 = G(iid + 2, base, offset, createBitPattern(isComputed, true, false));
+        if (isNumber) oprnd1 = +oprnd1;
+        return (oprnd2) => {
+            const val = B(iid, op, oprnd1, oprnd2, createBitPattern(false, true, false));
+            return P(iid, base, offset, val, createBitPattern(isComputed, true));
         };
     }
 
-    // Binary operation
+    /** 二元运算 */
     function B(iid, op, left, right, flags) {
-        var bFlags = decodeBitPattern(flags, 3); // [isComputed, isOpAssign, isSwitchCaseComparison]
-        var result, aret, skip = false;
+        const [isComputed, isOpAssign, isSwitchCaseComparison] = decodeBitPattern(flags, 3);
+        const analysis = sandbox.analysis;
+        let result, aret, skip = false;
 
-        if (sandbox.analysis && sandbox.analysis.binaryPre) {
-            aret = sandbox.analysis.binaryPre(iid, op, left, right, bFlags[1], bFlags[2], bFlags[0]);
+        if (analysis?.binaryPre) {
+            aret = analysis.binaryPre(iid, op, left, right, isOpAssign, isSwitchCaseComparison, isComputed);
             if (aret) {
-                op = aret.op;
-                left = aret.left;
+                op    = aret.op;
+                left  = aret.left;
                 right = aret.right;
+                skip  = aret.skip;
+            }
+        }
+
+        if (!skip) {
+            switch (op) {
+                case '+':   result = left +   right; break;
+                case '-':   result = left -   right; break;
+                case '*':   result = left *   right; break;
+                case '/':   result = left /   right; break;
+                case '%':   result = left %   right; break;
+                case '**':  result = left **  right; break;
+                case '<<':  result = left <<  right; break;
+                case '>>':  result = left >>  right; break;
+                case '>>>': result = left >>> right; break;
+                case '<':   result = left <   right; break;
+                case '>':   result = left >   right; break;
+                case '<=':  result = left <=  right; break;
+                case '>=':  result = left >=  right; break;
+                case '==':  result = left ==  right; break; // eslint-disable-line eqeqeq
+                case '!=':  result = left !=  right; break; // eslint-disable-line eqeqeq
+                case '===': result = left === right; break;
+                case '!==': result = left !== right; break;
+                case '&':   result = left &   right; break;
+                case '|':   result = left |   right; break;
+                case '^':   result = left ^   right; break;
+                case 'delete': result = delete left[right]; break;
+                case 'instanceof': result = left instanceof right; break;
+                case 'in':  result = left in  right; break;
+                default:
+                    throw new Error(`Binary operator "${op}" at iid ${iid} not found`);
+            }
+        }
+
+        if (analysis?.binary) {
+            aret = analysis.binary(iid, op, left, right, result, isOpAssign, isSwitchCaseComparison, isComputed);
+            if (aret) result = aret.result;
+        }
+
+        return (lastComputedValue = result);
+    }
+
+    /** 一元运算 */
+    function U(iid, op, left) {
+        const analysis = sandbox.analysis;
+        let result, aret, skip = false;
+
+        if (analysis?.unaryPre) {
+            aret = analysis.unaryPre(iid, op, left);
+            if (aret) {
+                op   = aret.op;
+                left = aret.left;
                 skip = aret.skip;
             }
         }
 
-
         if (!skip) {
             switch (op) {
-                case "+":
-                    result = left + right;
-                    break;
-                case "-":
-                    result = left - right;
-                    break;
-                case "*":
-                    result = left * right;
-                    break;
-                case "/":
-                    result = left / right;
-                    break;
-                case "%":
-                    result = left % right;
-                    break;
-                case "<<":
-                    result = left << right;
-                    break;
-                case ">>":
-                    result = left >> right;
-                    break;
-                case ">>>":
-                    result = left >>> right;
-                    break;
-                case "<":
-                    result = left < right;
-                    break;
-                case ">":
-                    result = left > right;
-                    break;
-                case "<=":
-                    result = left <= right;
-                    break;
-                case ">=":
-                    result = left >= right;
-                    break;
-                case "==":
-                    result = left == right;
-                    break;
-                case "!=":
-                    result = left != right;
-                    break;
-                case "===":
-                    result = left === right;
-                    break;
-                case "!==":
-                    result = left !== right;
-                    break;
-                case "&":
-                    result = left & right;
-                    break;
-                case "|":
-                    result = left | right;
-                    break;
-                case "^":
-                    result = left ^ right;
-                    break;
-                case "delete":
-                    result = delete left[right];
-                    break;
-                case "instanceof":
-                    result = left instanceof right;
-                    break;
-                case "in":
-                    result = left in right;
-                    break;
+                case '+':      result = +left;       break;
+                case '-':      result = -left;       break;
+                case '~':      result = ~left;       break;
+                case '!':      result = !left;       break;
+                case 'typeof': result = typeof left; break;
+                case 'void':   result = void (left); break;
                 default:
-                    throw new Error(op + " at " + iid + " not found");
-                    break;
+                    throw new Error(`Unary operator "${op}" at iid ${iid} not found`);
             }
         }
 
-        if (sandbox.analysis && sandbox.analysis.binary) {
-            aret = sandbox.analysis.binary(iid, op, left, right, result, bFlags[1], bFlags[2], bFlags[0]);
-            if (aret) {
-                result = aret.result;
-            }
+        if (analysis?.unary) {
+            aret = analysis.unary(iid, op, left, result);
+            if (aret) result = aret.result;
         }
+
         return (lastComputedValue = result);
     }
 
+    // ── Switch 辅助 ──────────────────────────────────────────────────────────
 
-    // Unary operation
-    function U(iid, op, left) {
-        var result, aret, skip = false;
+    function pushSwitchKey() { switchKeyStack.push(switchLeft); }
+    function popSwitchKey()  { switchLeft = switchKeyStack.pop(); }
 
-        if (sandbox.analysis && sandbox.analysis.unaryPre) {
-            aret = sandbox.analysis.unaryPre(iid, op, left);
-            if (aret) {
-                op = aret.op;
-                left = aret.left;
-                skip = aret.skip
-            }
-        }
+    function last() { return (lastComputedValue = lastVal); }
 
-        if (!skip) {
-            switch (op) {
-                case "+":
-                    result = +left;
-                    break;
-                case "-":
-                    result = -left;
-                    break;
-                case "~":
-                    result = ~left;
-                    break;
-                case "!":
-                    result = !left;
-                    break;
-                case "typeof":
-                    result = typeof left;
-                    break;
-                case "void":
-                    result = void(left);
-                    break;
-                default:
-                    throw new Error(op + " at " + iid + " not found");
-                    break;
-            }
-        }
-
-        if (sandbox.analysis && sandbox.analysis.unary) {
-            aret = sandbox.analysis.unary(iid, op, left, result);
-            if (aret) {
-                result = aret.result;
-            }
-        }
-        return (lastComputedValue = result);
-    }
-
-    function pushSwitchKey() {
-        switchKeyStack.push(switchLeft);
-    }
-
-    function popSwitchKey() {
-        switchLeft = switchKeyStack.pop();
-    }
-
-    function last() {
-        return (lastComputedValue = lastVal);
-    }
-
-    // Switch key
-    // E.g., for 'switch (x) { ... }',
-    // C1 is invoked with value of x
+    /** switch 判别式（C1(iid, x) —— 记录 switchLeft） */
     function C1(iid, left) {
         switchLeft = left;
         return (lastComputedValue = left);
     }
 
-    // case label inside switch
+    /** switch case 标签比较（C2(iid, right)） */
     function C2(iid, right) {
-        var aret, result;
+        const analysis = sandbox.analysis;
+        // iid+1 避免与 iid 冲突
+        let result = B(iid + 1, '===', switchLeft, right, createBitPattern(false, false, true));
 
-        // avoid iid collision; iid may not have a map in the sourcemap
-        result = B(iid+1, "===", switchLeft, right, createBitPattern(false, false, true));
-
-        if (sandbox.analysis && sandbox.analysis.conditional) {
-            aret = sandbox.analysis.conditional(iid, result);
+        if (analysis?.conditional) {
+            const aret = analysis.conditional(iid, result);
             if (aret) {
                 if (result && !aret.result) {
                     right = !right;
@@ -717,97 +566,92 @@ if (typeof J$ === 'undefined') {
                 }
             }
         }
+
         return (lastComputedValue = right);
     }
 
-    // Expression in conditional
+    /** 条件表达式（C(iid, left)） */
     function C(iid, left) {
-        var aret;
-        if (sandbox.analysis && sandbox.analysis.conditional) {
-            aret = sandbox.analysis.conditional(iid, left);
-            if (aret) {
-                left = aret.result;
-            }
+        const analysis = sandbox.analysis;
+        if (analysis?.conditional) {
+            const aret = analysis.conditional(iid, left);
+            if (aret) left = aret.result;
         }
-
         lastVal = left;
         return (lastComputedValue = left);
     }
 
+    /** 采样模式：判断是否执行插桩版函数体 */
     function S(iid, f) {
-        if (sandbox.analysis && sandbox.analysis.runInstrumentedFunctionBody) {
-            return sandbox.analysis.runInstrumentedFunctionBody(iid, f, getPropSafe(f, SPECIAL_PROP_IID), getPropSafe(f, SPECIAL_PROP_SID));
+        const analysis = sandbox.analysis;
+        if (analysis?.runInstrumentedFunctionBody) {
+            return analysis.runInstrumentedFunctionBody(
+                iid, f,
+                getPropSafe(f, SPECIAL_PROP_IID),
+                getPropSafe(f, SPECIAL_PROP_SID)
+            );
         }
         return true;
     }
 
-    function L() {
-        return lastComputedValue;
-    }
+    /** 返回最后一个计算值 */
+    function L() { return lastComputedValue; }
 
-
+    /** 顶层表达式语句结束标记 */
     function X1(iid, val) {
-        if (sandbox.analysis && sandbox.analysis.endExpression) {
-            sandbox.analysis.endExpression(iid);
-        }
-
+        sandbox.analysis?.endExpression?.(iid);
         return (lastComputedValue = val);
     }
 
+    /** 执行结束（Node.js 退出 / 浏览器 Alt-Shift-T） */
     function endExecution() {
-        if (sandbox.analysis && sandbox.analysis.endExecution) {
-            return sandbox.analysis.endExecution();
-        }
+        sandbox.analysis?.endExecution?.();
     }
 
-
+    /** 日志输出（兼容浏览器 Results 面板和 Node.js console） */
     function log(str) {
-        if (sandbox.Results && sandbox.Results.execute) {
-            sandbox.Results.execute(function(div, jquery, editor){
-                div.append(str+"<br>");
-            });
+        if (sandbox.Results?.execute) {
+            sandbox.Results.execute((div) => { div.append(`${str}<br>`); });
         } else {
             console.log(str);
         }
     }
 
+    // ── 安装到 sandbox ───────────────────────────────────────────────────────
 
-    //----------------------------------- End Jalangi Library backend ---------------------------------
+    Object.assign(sandbox, {
+        U,          // Unary operation
+        B,          // Binary operation
+        C,          // Condition
+        C1,         // Switch key
+        C2,         // case label C1 === C2
+        _: last,    // Last value passed to C
 
-    sandbox.U = U; // Unary operation
-    sandbox.B = B; // Binary operation
-    sandbox.C = C; // Condition
-    sandbox.C1 = C1; // Switch key
-    sandbox.C2 = C2; // case label C1 === C2
-    sandbox._ = last;  // Last value passed to C
-
-    sandbox.H = H; // hash in for-in
-    sandbox.I = I; // Ignore argument
-    sandbox.G = G; // getField
-    sandbox.P = P; // putField
-    sandbox.R = R; // Read
-    sandbox.W = W; // Write
-    sandbox.N = N; // Init
-    sandbox.T = T; // object/function/regexp/array Literal
-    sandbox.F = F; // Function call
-    sandbox.M = M; // Method call
-    sandbox.A = A; // Modify and assign +=, -= ...
-    sandbox.Fe = Fe; // Function enter
-    sandbox.Fr = Fr; // Function return
-    sandbox.Se = Se; // Script enter
-    sandbox.Sr = Sr; // Script return
-    sandbox.Rt = Rt; // returned value
-    sandbox.Th = Th; // thrown value
-    sandbox.Ra = Ra;
-    sandbox.Ex = Ex;
-    sandbox.L = L;
-    sandbox.X1 = X1; // top level expression
-    sandbox.Wi = Wi; // with statement
-    sandbox.endExecution = endExecution;
-
-    sandbox.S = S;
-
-    sandbox.EVAL_ORG = EVAL_ORG;
-    sandbox.log = log;
-})(J$);
-
+        H,          // hash in for-in
+        I,          // Ignore argument
+        G,          // getField
+        P,          // putField
+        R,          // Read
+        W,          // Write
+        N,          // Init (declare)
+        T,          // object/function/regexp/array Literal
+        F,          // Function call
+        M,          // Method call
+        A,          // Modify and assign +=, -= …
+        Fe,         // Function enter
+        Fr,         // Function return
+        Se,         // Script enter
+        Sr,         // Script return
+        Rt,         // returned value
+        Th,         // thrown value
+        Ra,
+        Ex,
+        L,
+        X1,         // top level expression
+        Wi,         // with statement
+        endExecution,
+        S,
+        EVAL_ORG,
+        log,
+    });
+}

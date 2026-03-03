@@ -1,3 +1,5 @@
+// JALANGI DO NOT INSTRUMENT
+
 /*
  * Copyright 2014 Samsung Information Systems America, Inc.
  *
@@ -14,35 +16,36 @@
  * limitations under the License.
  */
 
-// Author: Koushik Sen
+/**
+ * @file dlint 通用工具函数。
+ *
+ * 用法：
+ *   import { printInfo } from './Utils.js';
+ *
+ * 或通过 sandbox.Utils 访问（向后兼容）：
+ *   sandbox.Utils.printInfo(info, printer);
+ */
 
-// do not remove the following comment
-// JALANGI DO NOT INSTRUMENT
+/**
+ * 将 iid→count 的统计对象按 count 排序后，逐项调用 printer。
+ * 只打印 count > 0 的项。
+ *
+ * @param {object}   info                  - 形如 { giid: count } 的计数对象
+ * @param {Function} printer               - 打印回调，接收 { iid, count } 对象
+ * @param {Function} [iidToLocation]       - 可选，将 giid 转为可读位置字符串
+ */
+export function printInfo(info, printer, iidToLocation) {
+    const items = Object.keys(info)
+        .map(giid => ({ iid: iidToLocation ? iidToLocation(giid) : giid, count: info[giid] }))
+        .filter(x => x.count > 0)
+        .sort((a, b) => b.count - a.count);
 
-(function (sandbox) {
-    function Utils () {
-        var Constants = sandbox.Constants;
-        var HOP = Constants.HOP;
-        var sort = Array.prototype.sort;
-
-        this.printInfo = function(info, f) {
-            var tmp = [];
-            for (var iid in info) {
-                if (HOP(info, iid)) {
-                    tmp.push({iid:iid, count:info[iid]});
-                }
-            }
-            sort.call(tmp, function(a,b) {
-                return b.count - a.count;
-            });
-            for (var x in tmp) {
-                if (HOP(tmp, x)) {
-                    x = tmp[x];
-                    f(x);
-                }
-            }
-        };
+    for (const item of items) {
+        printer(item);
     }
-    sandbox.Utils = new Utils();
-})(J$);
+}
 
+// 向后兼容：挂到 sandbox.Utils
+if (typeof J$ !== 'undefined') {
+    J$.Utils = { printInfo: (info, printer) => printInfo(info, printer, J$.iidToLocation?.bind(J$)) };
+}

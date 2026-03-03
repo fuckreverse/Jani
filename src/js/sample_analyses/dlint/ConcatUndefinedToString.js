@@ -1,3 +1,5 @@
+// JALANGI DO NOT INSTRUMENT
+
 /*
  * Copyright (c) 2014 Samsung Electronics Co., Ltd.
  *
@@ -13,36 +15,46 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// Author: Koushik Sen
 
-// do not remove the following comment
-// JALANGI DO NOT INSTRUMENT
+/**
+ * @file ConcatUndefinedToString —— 检测 undefined/null 与字符串拼接的情况。
+ *
+ * 用法：
+ *   import { ConcatUndefinedToString } from './ConcatUndefinedToString.js';
+ *   sandbox.analysis = new ConcatUndefinedToString(sandbox);
+ */
 
+import { printInfo } from './Utils.js';
 
-(function (sandbox) {
-    function MyAnalysis () {
-        var iidToLocation = sandbox.iidToLocation;
-        var Constants = sandbox.Constants;
-        var HOP = Constants.HOP;
-        var sort = Array.prototype.sort;
-
-        var info = {};
-
-        this.binary = function(iid, op, left, right, result){
-            if (op === '+' && typeof result==='string' && (left===undefined || right===undefined)) {
-                info[sandbox.getGlobalIID(iid)] = (info[sandbox.getGlobalIID(iid)]|0) + 1;
-            }
-        };
-
-        this.endExecution = function() {
-            sandbox.Utils.printInfo(info, function(x){
-                sandbox.log("Concatenated undefined to a string at "+iidToLocation(x.iid)+" "+ x.count+" time(s).");
-
-            });
-        };
+export class ConcatUndefinedToString {
+    constructor(sandbox) {
+        this._sandbox = sandbox;
+        this._info    = {};
     }
-    sandbox.analysis = new MyAnalysis();
-})(J$);
 
+    binary(iid, op, left, right, result) {
+        if (op === '+') {
+            if ((left === undefined || left === null) && typeof right === 'string') {
+                const giid = this._sandbox.getGlobalIID(iid);
+                this._info[giid] = (this._info[giid] | 0) + 1;
+            } else if ((right === undefined || right === null) && typeof left === 'string') {
+                const giid = this._sandbox.getGlobalIID(iid);
+                this._info[giid] = (this._info[giid] | 0) + 1;
+            }
+        }
+    }
 
+    endExecution() {
+        const sandbox = this._sandbox;
+        printInfo(this._info, x => {
+            sandbox.log(
+                `Concatenating undefined or null to a string at ` +
+                `${sandbox.iidToLocation(x.iid)} ${x.count} time(s).`
+            );
+        });
+    }
+}
 
+if (typeof J$ !== 'undefined') {
+    J$.analysis = new ConcatUndefinedToString(J$);
+}
