@@ -20,12 +20,12 @@
  * @file SpecialCoverage —— 记录每轮测试的分支覆盖并调用 Features.addCoverage。
  * @author Koushik Sen
  *
- * 依赖 J$.Features（由 AddCoverage.js 安装）。
+ * 依赖 sandbox.Features（由 AddCoverage.js 安装）。
  */
 
 export class SpecialCoverageAnalysis {
     constructor(sandbox) {
-        this._sandbox           = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._sandbox           = sandbox;
         this._branches          = [];
         this._branchSidToFileName = [];
         this._testCode          = null;
@@ -76,8 +76,4 @@ export class SpecialCoverageAnalysis {
         const stat = this._sandbox.Features.addCoverage(this._testCode, ret, !noadd);
         console.log(`Modified feature graph ${stat.modified}`);
     }
-}
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new SpecialCoverageAnalysis(J$);
 }

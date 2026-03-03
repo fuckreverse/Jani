@@ -14,7 +14,7 @@
 
 export class LogLoadStoreAnalysis {
     constructor(sandbox) {
-        this._sandbox = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._sandbox = sandbox;
         this._indentation = 0;
         this._cacheCount  = 0;
         this._cacheStr    = '';
@@ -46,26 +46,26 @@ export class LogLoadStoreAnalysis {
     getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall) {
         const mem = this._sandbox.smemory;
         const id  = mem.getIDFromShadowObjectOrFrame(mem.getShadowObject(base, offset, true).owner);
-        this._log(`Load of object(id=${id}).${offset} at ${J$.iidToLocation(J$.sid, iid)}`);
+        this._log(`Load of object(id=${id}).${offset} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 
     putFieldPre(iid, base, offset, val, isComputed, isOpAssign) {
         const mem = this._sandbox.smemory;
         const id  = mem.getIDFromShadowObjectOrFrame(mem.getShadowObject(base, offset, false).owner);
-        this._log(`Store of object(id=${id}).${offset}) at ${J$.iidToLocation(J$.sid, iid)}`);
+        this._log(`Store of object(id=${id}).${offset}) at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 
     read(iid, name, val, isGlobal, isScriptLocal) {
         const mem     = this._sandbox.smemory;
         const frameId = mem.getIDFromShadowObjectOrFrame(mem.getShadowFrame(name));
-        this._log(`Load of frame(id=${frameId}).${name} at ${J$.iidToLocation(J$.sid, iid)}`);
+        this._log(`Load of frame(id=${frameId}).${name} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
         return { result: val };
     }
 
     write(iid, name, val, lhs, isGlobal, isScriptLocal) {
         const mem     = this._sandbox.smemory;
         const frameId = mem.getIDFromShadowObjectOrFrame(mem.getShadowFrame(name));
-        this._log(`Store of frame(id=${frameId}).${name} at ${J$.iidToLocation(J$.sid, iid)}`);
+        this._log(`Store of frame(id=${frameId}).${name} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
         return { result: val };
     }
 
@@ -74,8 +74,4 @@ export class LogLoadStoreAnalysis {
             for (const entry of this._logs) this._sandbox.log(entry);
         }
     }
-}
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new LogLoadStoreAnalysis(J$);
 }

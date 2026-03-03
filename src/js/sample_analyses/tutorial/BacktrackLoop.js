@@ -14,7 +14,3 @@ export class BacktrackLoopAnalysis {
         };
     }
 }
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new BacktrackLoopAnalysis();
-}

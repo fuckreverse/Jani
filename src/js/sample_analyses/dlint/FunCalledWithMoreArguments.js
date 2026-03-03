@@ -56,7 +56,3 @@ export class FunCalledWithMoreArguments {
         });
     }
 }
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new FunCalledWithMoreArguments(J$);
-}

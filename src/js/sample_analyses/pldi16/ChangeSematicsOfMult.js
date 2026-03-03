@@ -23,7 +23,3 @@ export class ChangeSematicsOfMultAnalysis {
         }
     }
 }
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new ChangeSematicsOfMultAnalysis();
-}

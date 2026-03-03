@@ -59,7 +59,3 @@ export class CompareFunctionWithPrimitives {
         });
     }
 }
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new CompareFunctionWithPrimitives(J$);
-}

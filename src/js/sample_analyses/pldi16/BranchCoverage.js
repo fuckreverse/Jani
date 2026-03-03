@@ -12,7 +12,7 @@
 
 export class BranchCoverageAnalysis {
     constructor(sandbox) {
-        this._sandbox      = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._sandbox      = sandbox;
         this._trueBranches  = {};
         this._falseBranches = {};
     }
@@ -35,8 +35,4 @@ export class BranchCoverageAnalysis {
             log(`False branch taken at ${iidToLocation(id)} ${this._falseBranches[id]} times`);
         }
     }
-}
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new BranchCoverageAnalysis(J$);
 }

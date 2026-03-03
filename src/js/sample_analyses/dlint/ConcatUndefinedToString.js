@@ -54,7 +54,3 @@ export class ConcatUndefinedToString {
         });
     }
 }
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new ConcatUndefinedToString(J$);
-}

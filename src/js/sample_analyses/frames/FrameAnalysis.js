@@ -12,10 +12,10 @@ import { Frames } from './Frames.js';
 
 export class FrameAnalysisPlugin {
     constructor(sandbox) {
-        this._sandbox = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._sandbox = sandbox;
         const frames   = new Frames(this._sandbox);
         this._frames   = frames;
-        this._sandbox.frames = frames;   // 向后兼容：其他分析可通过 J$.frames 访问
+        this._sandbox.frames = frames;   // 其他分析可通过 sandbox.frames 访问
     }
 
     literal(iid, val, hasGetterSetter) {
@@ -51,8 +51,4 @@ export class FrameAnalysisPlugin {
     instrumentCode(iid, newCode, newAst) {
         this._frames.evalEnd();
     }
-}
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new FrameAnalysisPlugin(J$);
 }

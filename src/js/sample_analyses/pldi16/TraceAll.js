@@ -32,7 +32,7 @@ const MAX_STRING_LENGTH = 20;
 
 export class TraceAllAnalysis {
     constructor(sandbox) {
-        this._sandbox    = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._sandbox    = sandbox;
         this._indentation = 0;
         this._cacheCount  = 0;
         this._cacheStr    = '';
@@ -68,11 +68,11 @@ export class TraceAllAnalysis {
         }
     }
 
-    _loc(iid) { return J$.iidToLocation(J$.sid, iid); }
+    _loc(iid) { return this._sandbox.iidToLocation(this._sandbox.sid, iid); }
 
     invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
         const argsStr = args.map((a, i) => `, args[${i}]=${this._getValue(a)}`).join('');
-        this._log(`invokeFunPre(iid=${iid}, f=${this._getValue(f)}, base=${this._getValue(base)}${argsStr}, isConstructor=${isConstructor}, isMethod=${isMethod}, functionIid=${functionIid}, functionSid=${functionSid}) of function created at ${J$.iidToLocation(functionSid, functionIid)} at ${this._loc(iid)}`);
+        this._log(`invokeFunPre(iid=${iid}, f=${this._getValue(f)}, base=${this._getValue(base)}${argsStr}, isConstructor=${isConstructor}, isMethod=${isMethod}, functionIid=${functionIid}, functionSid=${functionSid}) of function created at ${this._sandbox.iidToLocation(functionSid, functionIid)} at ${this._loc(iid)}`);
         this._indentation++;
         return { f, base, args, skip: false };
     }
@@ -80,7 +80,7 @@ export class TraceAllAnalysis {
     invokeFun(iid, f, base, args, result, isConstructor, isMethod, functionIid, functionSid) {
         this._indentation--;
         const argsStr = args.map((a, i) => `, args[${i}]=${this._getValue(a)}`).join('');
-        this._log(`invokeFun(iid=${iid}, f=${this._getValue(f)}, base=${this._getValue(base)}, result=${this._getValue(result)}${argsStr}, isConstructor=${isConstructor}, isMethod=${isMethod}, functionIid=${functionIid}, functionSid=${functionSid}) of function created at ${J$.iidToLocation(functionSid, functionIid)} at ${this._loc(iid)}`);
+        this._log(`invokeFun(iid=${iid}, f=${this._getValue(f)}, base=${this._getValue(base)}, result=${this._getValue(result)}${argsStr}, isConstructor=${isConstructor}, isMethod=${isMethod}, functionIid=${functionIid}, functionSid=${functionSid}) of function created at ${this._sandbox.iidToLocation(functionSid, functionIid)} at ${this._loc(iid)}`);
         return { result };
     }
 
@@ -216,13 +216,9 @@ export class TraceAllAnalysis {
     }
 
     runInstrumentedFunctionBody(iid, f, functionIid, functionSid) {
-        this._log(`runInstrumentedFunctionBody(iid=${iid}, f=${this._getValue(f)}, functionIid=${functionIid}, functionSid=${functionSid}) of function created at ${J$.iidToLocation(functionSid, functionIid)} at ${this._loc(iid)}`);
+        this._log(`runInstrumentedFunctionBody(iid=${iid}, f=${this._getValue(f)}, functionIid=${functionIid}, functionSid=${functionSid}) of function created at ${this._sandbox.iidToLocation(functionSid, functionIid)} at ${this._loc(iid)}`);
         return false;
     }
 
     onReady(cb) { cb(); }
-}
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new TraceAllAnalysis(J$);
 }

@@ -12,7 +12,7 @@
 
 export class CheckUndefinedConcatenatedToStringAnalysis {
     constructor(sandbox) {
-        this._sandbox = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._sandbox = sandbox;
         this._logs    = [];
     }
 
@@ -28,8 +28,4 @@ export class CheckUndefinedConcatenatedToStringAnalysis {
             log(`Concatenated undefined with string at ${iidToLocation(giid)}`);
         }
     }
-}
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new CheckUndefinedConcatenatedToStringAnalysis(J$);
 }

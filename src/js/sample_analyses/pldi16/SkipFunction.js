@@ -19,7 +19,3 @@ export class SkipFunctionAnalysis {
         return { f, base, args, skip: false };
     }
 }
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new SkipFunctionAnalysis();
-}

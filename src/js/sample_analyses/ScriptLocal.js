@@ -6,9 +6,6 @@
  * 用法：
  *   import { ScriptLocalAnalysis } from './ScriptLocal.js';
  *   sandbox.analysis = new ScriptLocalAnalysis();
- *
- * 向后兼容（全局环境）：
- *   如果检测到全局 J$，自动安装为当前分析。
  */
 
 export class ScriptLocalAnalysis {
@@ -32,9 +29,4 @@ export class ScriptLocalAnalysis {
     write(iid, name, val, lhs, isGlobal, isScriptLocal) {
         console.log(`Writing to ${name} (${ScriptLocalAnalysis._writeFlags(isGlobal, isScriptLocal)})`);
     }
-}
-
-// 向后兼容：当本文件被全局加载时，自动安装为分析
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new ScriptLocalAnalysis();
 }

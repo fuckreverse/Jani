@@ -18,17 +18,19 @@
  *   J$.smemory  = smemory;
  *   J$.analysis = new AnalysisHost()
  *       .use(new SMemoryPlugin(smemory))
- *       .use(new LogAllAnalysis(smemory));
+ *       .use(new LogAllAnalysis(smemory, J$));
  */
 
 /**
  * LogAllAnalysis —— 记录所有运行时事件。
  *
- * @param {SMemory} [smemory] - 可选，不传则跳过影子内存相关日志
+ * @param {SMemory} [smemory]  - 可选，不传则跳过影子内存相关日志
+ * @param {object}  [sandbox]  - 可选，J$ 运行时对象，用于 iidToLocation；不传则降级为纯 iid 字符串
  */
 class LogAllAnalysis {
-    constructor(smemory = null) {
-        this._mem = smemory;
+    constructor(smemory = null, sandbox = null) {
+        this._mem     = smemory;
+        this._sandbox = sandbox;
     }
 
     _getValue(v) {
@@ -42,8 +44,8 @@ class LogAllAnalysis {
     }
 
     _loc(iid) {
-        if (typeof J$ !== 'undefined' && J$.iidToLocation) {
-            return J$.iidToLocation(J$.sid, iid);
+        if (this._sandbox?.iidToLocation) {
+            return this._sandbox.iidToLocation(this._sandbox.sid, iid);
         }
         return String(iid);
     }

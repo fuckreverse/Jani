@@ -53,7 +53,7 @@ function isNormalNumber(num) {
 
 export class DsjsAnalysis {
     constructor(sandbox) {
-        this._sandbox        = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._sandbox        = sandbox;
         const C              = this._sandbox.Constants;
         this._SPECIAL_PROP   = C.SPECIAL_PROP + 'M';
         this._HOP            = C.HOP;
@@ -332,8 +332,4 @@ export class DsjsAnalysis {
         else output.size = 2000;
         return output;
     }
-}
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new DsjsAnalysis(J$);
 }

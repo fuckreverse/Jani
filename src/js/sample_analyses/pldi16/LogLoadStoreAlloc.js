@@ -14,7 +14,7 @@
 
 export class LogLoadStoreAllocAnalysis {
     constructor(sandbox) {
-        this._sandbox    = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._sandbox    = sandbox;
         this._indentation = 0;
         this._cacheCount  = 0;
         this._cacheStr    = '';
@@ -41,7 +41,7 @@ export class LogLoadStoreAllocAnalysis {
     literal(iid, val, hasGetterSetter) {
         if (typeof val === 'object' && val !== null) {
             const sobj = this._sandbox.smemory.getShadowObjectOfObject(val);
-            if (sobj) sobj.allocSite = J$.iidToLocation(J$.sid, iid);
+            if (sobj) sobj.allocSite = this._sandbox.iidToLocation(this._sandbox.sid, iid);
         }
         return { result: val };
     }
@@ -50,19 +50,19 @@ export class LogLoadStoreAllocAnalysis {
         this._indentation--;
         if (isConstructor && typeof val === 'object' && val !== null) {
             const sobj = this._sandbox.smemory.getShadowObjectOfObject(val);
-            if (sobj) sobj.allocSite = J$.iidToLocation(J$.sid, iid);
+            if (sobj) sobj.allocSite = this._sandbox.iidToLocation(this._sandbox.sid, iid);
         }
         return { result: val };
     }
 
     getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall) {
         const sobj = this._sandbox.smemory.getShadowObject(base, offset, true).owner;
-        this._log(`Load '${offset}' of object allocated at ${sobj?.allocSite} at ${J$.iidToLocation(J$.sid, iid)}`);
+        this._log(`Load '${offset}' of object allocated at ${sobj?.allocSite} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 
     putFieldPre(iid, base, offset, val, isComputed, isOpAssign) {
         const sobj = this._sandbox.smemory.getShadowObject(base, offset, false).owner;
-        this._log(`Store '${offset}' of object allocated at ${sobj?.allocSite}) at ${J$.iidToLocation(J$.sid, iid)}`);
+        this._log(`Store '${offset}' of object allocated at ${sobj?.allocSite}) at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 
     endExecution() {
@@ -70,8 +70,4 @@ export class LogLoadStoreAllocAnalysis {
             for (const entry of this._logs) this._sandbox.log(entry);
         }
     }
-}
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new LogLoadStoreAllocAnalysis(J$);
 }

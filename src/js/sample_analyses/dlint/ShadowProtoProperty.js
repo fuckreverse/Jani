@@ -59,7 +59,3 @@ export class ShadowProtoProperty {
         });
     }
 }
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new ShadowProtoProperty(J$);
-}

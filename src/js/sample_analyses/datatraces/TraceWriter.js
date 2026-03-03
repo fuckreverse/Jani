@@ -7,9 +7,6 @@
  *   const tw = new TraceWriter(sandbox, 'trace.log');
  *   tw.logToFile('some line\n');
  *   tw.stopTracing();
- *
- * 向后兼容：
- *   在 J$ 环境下 J$.TraceWriter 被设置为本类。
  */
 
 export class TraceWriter {
@@ -140,12 +137,4 @@ export class TraceWriter {
             this._socket.send(this._remoteBuffer[0]);
         }
     }
-}
-
-// 向后兼容
-if (typeof J$ !== 'undefined') {
-    // 旧代码用 new sandbox.TraceWriter(fileName)，因此包装一下
-    J$.TraceWriter = function (traceFileName) {
-        return new TraceWriter(J$, traceFileName);
-    };
 }

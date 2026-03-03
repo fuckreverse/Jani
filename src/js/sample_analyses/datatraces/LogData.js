@@ -14,7 +14,7 @@
 
 export class LogDataAnalysis {
     constructor(sandbox) {
-        this._sandbox     = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._sandbox     = sandbox;
         this._stringMap   = {};
         this._stringList  = [];
         this._stringCount = 0;
@@ -129,8 +129,4 @@ export class LogDataAnalysis {
     runInstrumentedFunctionBody(iid, f, functionIid) { return false; }
 
     onReady(cb) { cb(); }
-}
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new LogDataAnalysis(J$);
 }

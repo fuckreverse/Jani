@@ -165,7 +165,7 @@ function serialize(root) {
     function canMakeSymbolic(node) {
         if (!node.callee.object) return false;
         const { callee } = node;
-        return callee.object.name === 'J$'
+        return callee.object.name === JALANGI_VAR
             && callee.property.name !== 'instrumentCode'
             && callee.property.name !== 'getConcrete'
             && callee.property.name !== 'I'
@@ -180,7 +180,7 @@ function serialize(root) {
     const visitorPost = {
         CallExpression(node) {
             try {
-                if (node.callee.object?.name === 'J$' &&
+                if (node.callee.object?.name === JALANGI_VAR &&
                     (node.callee.property.name === 'Se' || node.callee.property.name === 'Fe')) {
                     setSerializedAST(node.arguments[0].value, parentFunOrScript);
                     return node;

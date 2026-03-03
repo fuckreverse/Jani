@@ -19,7 +19,3 @@ export class BackTrackLoopAnalysis {
         };
     }
 }
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new BackTrackLoopAnalysis();
-}

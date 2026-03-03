@@ -23,7 +23,6 @@
  *   import { CheckNaN } from './CheckNaN.js';
  *   sandbox.analysis = new CheckNaN(sandbox);
  *
- * 向后兼容：检测到全局 J$ 时自动安装。
  */
 
 import { printInfo } from './Utils.js';
@@ -52,8 +51,4 @@ export class CheckNaN {
             sandbox.log(`Comparison with NaN at ${sandbox.iidToLocation(x.iid)} ${x.count} time(s).`);
         });
     }
-}
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new CheckNaN(J$);
 }

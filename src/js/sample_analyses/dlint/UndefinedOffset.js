@@ -56,7 +56,3 @@ export class UndefinedOffset {
         });
     }
 }
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new UndefinedOffset(J$);
-}

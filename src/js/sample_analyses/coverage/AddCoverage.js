@@ -24,9 +24,6 @@
  *
  * 导出：
  *   export const Features   — 静态方法集合
- *
- * 向后兼容：
- *   J$.Features.addCoverage(...)
  */
 
 import { readFileSync, writeFileSync } from 'fs';
@@ -423,11 +420,6 @@ export const Features = {
     loadFeatures: _readData,
     storeFeatures: _saveData,
 };
-
-// 向后兼容：挂到 J$
-if (typeof J$ !== 'undefined') {
-    J$.Features = Features;
-}
 
 // 独立运行模式
 const isMain = (typeof process !== 'undefined') &&

@@ -12,7 +12,7 @@
 
 export class CountObjectsPerAllocationSiteAnalysis {
     constructor(sandbox) {
-        this._sandbox    = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._sandbox    = sandbox;
         this._allocCount = {};
     }
 
@@ -37,8 +37,4 @@ export class CountObjectsPerAllocationSiteAnalysis {
             log(`Object allocated at ${iidToLocation(id)} = ${count}`);
         }
     }
-}
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new CountObjectsPerAllocationSiteAnalysis(J$);
 }

@@ -158,7 +158,7 @@ export class ExecutionTraceAnalysis {
      * @param {string} [sourceCode]  - 原始源码文本
      */
     constructor(sandbox, sourceCode) {
-        this._sb    = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._sb    = sandbox;
         this._seq   = 0;
         this._lines = sourceCode ? sourceCode.split(/\r\n|\r|\n/) : null;
         this._stack = [];   // Frame 栈
@@ -359,9 +359,4 @@ export class ExecutionTraceAnalysis {
     }
 
     onReady(cb) { cb(); }
-}
-
-// 向后兼容
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new ExecutionTraceAnalysis(J$);
 }

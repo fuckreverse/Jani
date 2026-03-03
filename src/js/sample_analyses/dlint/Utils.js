@@ -22,7 +22,7 @@
  * 用法：
  *   import { printInfo } from './Utils.js';
  *
- * 或通过 sandbox.Utils 访问（向后兼容）：
+ * 或通过 sandbox.Utils 访问：
  *   sandbox.Utils.printInfo(info, printer);
  */
 
@@ -43,9 +43,4 @@ export function printInfo(info, printer, iidToLocation) {
     for (const item of items) {
         printer(item);
     }
-}
-
-// 向后兼容：挂到 sandbox.Utils
-if (typeof J$ !== 'undefined') {
-    J$.Utils = { printInfo: (info, printer) => printInfo(info, printer, J$.iidToLocation?.bind(J$)) };
 }

@@ -13,7 +13,7 @@
 
 export class SmemTestAnalysis {
     constructor(sandbox) {
-        this._sandbox = sandbox ?? (typeof J$ !== 'undefined' ? J$ : null);
+        this._sandbox = sandbox;
     }
 
     _getValue(v) {
@@ -34,28 +34,24 @@ export class SmemTestAnalysis {
     getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall) {
         const mem       = this._sandbox.smemory;
         const shadowObj = mem.getShadowObject(base, offset, true);
-        console.log(`GET_FIELD ${mem.getIDFromShadowObjectOrFrame(shadowObj.owner)}.${offset} at ${J$.iidToLocation(J$.sid, iid)}`);
+        console.log(`GET_FIELD ${mem.getIDFromShadowObjectOrFrame(shadowObj.owner)}.${offset} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 
     putFieldPre(iid, base, offset, val, isComputed, isOpAssign) {
         const mem       = this._sandbox.smemory;
         const shadowObj = mem.getShadowObject(base, offset, false);
-        console.log(`PUT_FIELD ${mem.getIDFromShadowObjectOrFrame(shadowObj.owner)}.${offset} at ${J$.iidToLocation(J$.sid, iid)}`);
+        console.log(`PUT_FIELD ${mem.getIDFromShadowObjectOrFrame(shadowObj.owner)}.${offset} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 
     read(iid, name, val, isGlobal, isScriptLocal) {
         const mem       = this._sandbox.smemory;
         const shadowObj = mem.getShadowFrame(name);
-        console.log(`READ ${mem.getIDFromShadowObjectOrFrame(shadowObj)}.${name} at ${J$.iidToLocation(J$.sid, iid)}`);
+        console.log(`READ ${mem.getIDFromShadowObjectOrFrame(shadowObj)}.${name} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 
     write(iid, name, val, lhs, isGlobal, isScriptLocal) {
         const mem       = this._sandbox.smemory;
         const shadowObj = mem.getShadowFrame(name);
-        console.log(`WRITE ${mem.getIDFromShadowObjectOrFrame(shadowObj)}.${name} at ${J$.iidToLocation(J$.sid, iid)}`);
+        console.log(`WRITE ${mem.getIDFromShadowObjectOrFrame(shadowObj)}.${name} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
-}
-
-if (typeof J$ !== 'undefined') {
-    J$.analysis = new SmemTestAnalysis(J$);
 }

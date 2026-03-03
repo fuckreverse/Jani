@@ -5,9 +5,6 @@
  *
  * 导出：
  *   export class Frames
- *
- * 向后兼容：
- *   J$.Frames 被设置为本类。
  */
 
 const SPECIAL_PROP_FRAMES = '*J$F*';
@@ -95,9 +92,4 @@ export class Frames {
 
     /** eval 结束 */
     evalEnd() { this.scriptReturn(); }
-}
-
-// 向后兼容
-if (typeof J$ !== 'undefined') {
-    J$.Frames = Frames;
 }
