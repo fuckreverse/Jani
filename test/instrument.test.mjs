@@ -578,6 +578,91 @@ test('BUG3b: 嵌套箭头函数各自独立作用域不相互污染', () => {
     assertEqual(parseInt(yMatch[1]), 0, '内层箭头参数 y 应为局部变量（bitPattern=0）');
 });
 
+test('BUG4: strict mode 函数中 arguments 初始化不应产生赋值语句', () => {
+    // BUG-1 修复前：syncDefuns 为 arguments 生成 "arguments = J$.N(...)" 语句，
+    // 在严格模式函数体内会触发 SyntaxError: Unexpected eval or arguments in strict mode。
+    // 修复后：改用 isAssign=false，只调用 J$.N(...)，不对 arguments 赋值。
+    const r = instr('"use strict"; function f(a) { return a; }');
+    // 确保插桩后代码中不含 "arguments =" 赋值形式
+    assert(!r.code.match(/\barguments\s*=/), '严格模式下不应出现 arguments = ... 赋值语句');
+    // 但应仍有 J$.N 对 arguments 的通知调用
+    assertIncludes(r.code, 'J$.N(', '应存在 J$.N 调用以通知运行时 arguments 初始化');
+});
+
+test('BUG5: generator 函数的 yield 不应被 while(true)try/finally 破坏', () => {
+    // BUG-2 修复前：visitorOps 对所有 FunctionExpression / FunctionDeclaration 都调
+    // wrapFunBodyWithTryCatch，包括 generator 函数，导致 yield 被嵌入 try/finally 后
+    // 每次 yield 会立即触发 finally，打乱生成器暂停/恢复语义。
+    // 修复后：node.generator=true 时直接跳过，不插入 while/try/finally 包裹。
+    const r = instr('function* gen() { yield 1; yield 2; }');
+    // 插桩后代码应保留 yield 关键字
+    assertIncludes(r.code, 'yield', '插桩后代码应保留 yield 关键字');
+    // AST 层面验证：在 instAST 中找到 generator FunctionDeclaration，
+    // 检查其函数体的第一条语句是 ExpressionStatement（J$.Fe 调用），而不是 LabeledStatement（jalangiLabel while...）。
+    // wrapFunBodyWithTryCatch 包裹后，body[0] 会是 LabeledStatement { label: jalangiLabelN, body: WhileStatement }。
+    function findGeneratorFn(node) {
+        if (!node || typeof node !== 'object') return null;
+        if (node.type === 'FunctionDeclaration' && node.generator) return node;
+        for (const key of Object.keys(node)) {
+            if (key === 'scope') continue;
+            const child = node[key];
+            if (Array.isArray(child)) {
+                for (const c of child) {
+                    const found = findGeneratorFn(c);
+                    if (found) return found;
+                }
+            } else {
+                const found = findGeneratorFn(child);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+    const genFn = findGeneratorFn(r.instAST);
+    assert(genFn !== null, 'instAST 中应存在 generator FunctionDeclaration');
+    const firstStmt = genFn.body.body[0];
+    assertEqual(firstStmt.type, 'ExpressionStatement',
+        `generator 函数体第一条语句应是 ExpressionStatement（J$.Fe 调用），实际是 ${firstStmt.type}（若为 LabeledStatement 则说明被 wrapFunBodyWithTryCatch 错误包裹）`);
+});
+
+test('BUG6: async 函数的 await 不应被 while(true)try/finally 破坏', () => {
+    // BUG-3：与 generator 同理，async 函数的 await 被包裹后
+    // finally 会在 await 解析前执行，导致提前 return。
+    // 修复后：node.async=true 时跳过 wrapFunBodyWithTryCatch。
+    const r = instr('async function fetchData() { return await Promise.resolve(42); }');
+    assertIncludes(r.code, 'await', '插桩后代码应保留 await 关键字');
+    // 结构检查：async 函数体内不应出现函数返回路径包裹（J$.Fr + while 循环）
+    // 通过检查输出中 async function 关键字后的第一个 { 到 } 之间是否含有
+    // "jalangiLabel" + "J$.Fr" 的组合来判断（二者同时存在才说明被 wrapFunBodyWithTryCatch 包裹）
+    // 具体：提取 async function fetchData 函数体文本
+    const bodyMatch = r.code.match(/async function fetchData\s*\(\s*\)\s*\{([\s\S]*?)\n\s*\}/);
+    if (bodyMatch) {
+        const body = bodyMatch[1];
+        assert(!(body.includes('jalangiLabel') && body.includes('J$.Fr')),
+            'async 函数体不应同时含有 jalangiLabel 和 J$.Fr（被 wrapFunBodyWithTryCatch 包裹的标志）');
+    }
+});
+
+test('BUG7: script 级未捕获异常应向外传播（不被 catch 块静默吞掉）', () => {
+    // BUG-4 修复前：wrapScriptBodyWithTryCatch 的 catch 块只调 J$.Ex(iid, e)，
+    // 没有 re-throw，导致脚本中抛出的异常被完全吞掉，对外不可见。
+    // 修复后：catch 块末尾加 throw J$e。
+    const r = instr('throw new Error("test");');
+    // 验证 catch 块模板中含有 throw J$e（JALANGI_VAR = "J$"）
+    assertIncludes(r.code, 'throw J$e', 'script-level catch 块应包含 re-throw 语句');
+});
+
+test('BUG8: 解构 var 声明不应错误地插入名称为 undefined 的写入钩子', () => {
+    // BUG-5 修复前：VariableDeclaration visitor 直接取 def.id.name，
+    // 对 ObjectPattern/ArrayPattern 会得到 undefined，
+    // 导致生成 J$.W(iid, undefined, ...) 这样的错误钩子。
+    // 修复后：只对 def.id.type === 'Identifier' 时插桩写入。
+    const r = instr('var { a, b } = obj; var [x, y] = arr;');
+    // 不应出现 name 为 undefined 的写入钩子（即 J$.W(iid, undefined, ...)）
+    assert(!r.code.includes('J$.W(') || !r.code.match(/J\$\.W\(\s*\d+\s*,\s*undefined\s*/),
+        '解构声明不应产生 J$.W(iid, undefined, ...) 形式的写入钩子');
+});
+
 // ════════════════════════════════════════════════════════════════
 // 汇总
 // ════════════════════════════════════════════════════════════════

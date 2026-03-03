@@ -213,7 +213,10 @@ const visitorRRPost = {
 
     VariableDeclaration(node) {
         node.declarations = node.declarations.map((def) => {
-            if (def.init !== null) {
+            // BUG-5 fix: 解构声明（ObjectPattern / ArrayPattern）的 def.id 不是 Identifier，
+            // 直接访问 def.id.name 会得到 undefined，导致错误地插入 J$.W(iid, undefined, ...)。
+            // 对非 Identifier 的解构模式暂不插桩写入（解构赋值已由 AssignmentExpression 处理）。
+            if (def.init !== null && def.id.type === 'Identifier') {
                 let init = W.wrapWrite(def.init, W.createLiteralAst(def.id.name), def.init, def.id,
                     false, W.getScope().isGlobal(def.id.name), true);
                 init = W.wrapWithX1(def.init, init);

@@ -731,8 +731,10 @@ function wrapScriptBodyWithTryCatch(node, body) {
         const iid1 = IID.getIid();
         IID.printIidToLoc(node);
         const l = labelCounter++;
+        // BUG-4 fix: catch 块末尾必须 re-throw，否则脚本级未捕获异常被静默吞掉，
+        // 导致 try 内部抛出的错误对外不可见，破坏程序的错误传播语义。
         const ret = replaceInStatement(
-            `function n() { jalangiLabel${l}: while(true) { try {${RP}1} catch(${JALANGI_VAR}e) { ${logUncaughtExceptionFunName}(${RP}2,${JALANGI_VAR}e); } finally { if (${logScriptExitFunName}(${RP}3)) { ${logLastComputedFunName}(); continue jalangiLabel${l};\n } else {\n  ${logLastComputedFunName}(); break jalangiLabel${l};\n }}\n }}`,
+            `function n() { jalangiLabel${l}: while(true) { try {${RP}1} catch(${JALANGI_VAR}e) { ${logUncaughtExceptionFunName}(${RP}2,${JALANGI_VAR}e); throw ${JALANGI_VAR}e; } finally { if (${logScriptExitFunName}(${RP}3)) { ${logLastComputedFunName}(); continue jalangiLabel${l};\n } else {\n  ${logLastComputedFunName}(); break jalangiLabel${l};\n }}\n }}`,
             body, iid1, IID.getIid()
         );
         const stmts = ret[0].body.body;
@@ -743,6 +745,15 @@ function wrapScriptBodyWithTryCatch(node, body) {
 }
 
 function wrapFunBodyWithTryCatch(node, body) {
+    // BUG-2/3 fix: generator 函数（function*）和 async 函数的 yield/await
+    // 在被 while(true){try/finally} 包裹后语义会被破坏：
+    //  - generator: yield 在 try/finally 中时，finally 在每次 yield 后立即执行，
+    //    打乱了生成器的暂停/恢复语义；continue jalangiLabelN 也无法实现预期的重入。
+    //  - async: await 同理，finally 会在 await 解析前执行，导致提前 return。
+    // 修复：对这两类函数直接返回原始 body，不做 try/finally 包裹。
+    if (node.generator || node.async) {
+        return body;
+    }
     if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
         IID.printIidToLoc(node);
         const iid1 = IID.getIid();
@@ -766,9 +777,11 @@ function syncDefuns(node, scopeArg, isScript) {
     if (!isScript) {
         if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
             if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+                // BUG-1 fix: 不对 arguments 直接赋值（严格模式下赋值 arguments 为语法错误）。
+                // 改用 isAssign=false，只调用 J$.N 通知运行时，不写回 arguments 本身。
                 const ident = createIdentifierAst('arguments');
                 ret = ret.concat(createCallInitAsStatement(node,
-                    createLiteralAst('arguments'), ident, true, ident, false, true));
+                    createLiteralAst('arguments'), ident, true, undefined, false, false));
             }
         }
     }
