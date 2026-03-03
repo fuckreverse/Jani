@@ -5,10 +5,10 @@
  * @author Koushik Sen
  *
  * 需要配合 SMemory 使用：
- *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/plugins/ChainedAnalyses.js \
- *     --analysis src/js/runtime/SMemory.js \
- *     --analysis src/js/plugins/pldi16/LogLoadStore.js \
+ *   node src/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/plugins/ChainedAnalyses.js \
+ *     --analysis src/runtime/SMemory.js \
+ *     --analysis src/plugins/pldi16/LogLoadStore.js \
  *     tests/pldi16/CountObjectsPerAllocationSiteTest.js
  */
 

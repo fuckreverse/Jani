@@ -2,7 +2,7 @@
 
 Command-line utility to perform Jalangi2's instrumentation and analysis
 
-    node src/js/commands/jalangi.js -h
+    node src/commands/jalangi.js -h
     usage: jalangi.js [-h] [--analysis ANALYSIS] [--initParam INITPARAM]
                   [--inlineIID] [--inlineSource]
                   [--astHandlerModule ASTHANDLERMODULE]
@@ -32,7 +32,7 @@ Optional arguments:
 
 Command-line utility to perform instrumentation
 
-    node src/js/commands/esnstrument_cli.js -h
+    node src/commands/esnstrument_cli.js -h
     usage: esnstrument_cli.js [-h] [--inlineIID] [--inlineSource]
                           [--initParam INITPARAM] [--noResultsGUI]
                           [--astHandlerModule ASTHANDLERMODULE]
@@ -75,7 +75,7 @@ Optional arguments:
 
 Utility to apply Jalangi instrumentation to files or a folder.
 
-    node src/js/commands/instrument.js -h
+    node src/commands/instrument.js -h
     usage: instrument.js [-h] [-x EXCLUDE] [--only_include ONLY_INCLUDE] [-i]
                      [--inlineIID] [--inlineSource] [--inlineJalangi]
                      [--analysis ANALYSIS] [--initParam INITPARAM] [-d] [-c]
@@ -133,7 +133,7 @@ Optional arguments:
 
 Command-line utility to perform Jalangi2's analysis
 
-    node src/js/commands/direct.js -h
+    node src/commands/direct.js -h
     usage: direct.js [-h] [--analysis ANALYSIS] [--initParam INITPARAM] ...
 
 

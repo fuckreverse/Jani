@@ -1,7 +1,7 @@
 # Core Architecture
 Relevant source files
-- [src/js/instrument/esnstrument.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js)
-- [src/js/runtime/analysis.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js)
+- [src/instrument/esnstrument.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js)
+- [src/runtime/analysis.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js)
 - [tests/test47.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/test47.js)
 - [tests/unit/fun_exp.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/unit/fun_exp.js)
 
@@ -48,7 +48,7 @@ Custom Analysis Objects
 Analysis Callbacks
 ```
 
-**Sources:**[src/js/instrument/esnstrument.js1-50](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1-L50)[src/js/runtime/analysis.js1-50](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L1-L50)
+**Sources:**[src/instrument/esnstrument.js1-50](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1-L50)[src/runtime/analysis.js1-50](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L1-L50)
 
 ## Instrumentation Engine
 
@@ -86,7 +86,7 @@ esotope.generate()
 Instrumented JavaScript
 ```
 
-**Sources:**[src/js/instrument/esnstrument.js73-106](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L73-L106)[src/js/instrument/esnstrument.js333-441](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L333-L441)
+**Sources:**[src/instrument/esnstrument.js73-106](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L73-L106)[src/instrument/esnstrument.js333-441](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L333-L441)
 
 ## Runtime System
 
@@ -144,7 +144,7 @@ Analysis Callback Methods
 Analysis Results
 ```
 
-**Sources:**[src/js/runtime/analysis.js228-244](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L228-L244)[src/js/runtime/analysis.js454-518](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L454-L518)[src/js/runtime/analysis.js29-52](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L29-L52)
+**Sources:**[src/runtime/analysis.js228-244](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L228-L244)[src/runtime/analysis.js454-518](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L454-L518)[src/runtime/analysis.js29-52](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L29-L52)
 
 ## Shadow Memory System
 
@@ -191,7 +191,7 @@ Record execution metadata
 Analysis results
 ```
 
-**Sources:**[src/js/instrument/esnstrument.js280-350](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L280-L350)[src/js/runtime/analysis.js204-226](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L204-L226)[src/js/runtime/analysis.js315-339](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L315-L339)
+**Sources:**[src/instrument/esnstrument.js280-350](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L280-L350)[src/runtime/analysis.js204-226](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L204-L226)[src/runtime/analysis.js315-339](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L315-L339)
 
 ## Data Flow Architecture
 
@@ -231,4 +231,4 @@ Shadow Memory
 Analysis Results
 ```
 
-**Sources:**[src/js/instrument/esnstrument.js206-288](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L206-L288)[src/js/runtime/analysis.js80-114](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L80-L114)[src/js/runtime/analysis.js755-810](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L755-L810)
+**Sources:**[src/instrument/esnstrument.js206-288](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L206-L288)[src/runtime/analysis.js80-114](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L80-L114)[src/runtime/analysis.js755-810](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L755-L810)

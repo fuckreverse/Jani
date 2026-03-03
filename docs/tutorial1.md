@@ -128,7 +128,7 @@ To do this, create a directory named "experiments" in the  top-level jalangi2 di
 Then, copy the example program into a file example.js, and copy the above analysis into a file
 analysis.js.   Having done that, try running the following command:
 
-    node ../src/js/commands/jalangi.js --inlineIID --inlineSource --analysis analysis.js example.js
+    node ../src/commands/jalangi.js --inlineIID --inlineSource --analysis analysis.js example.js
 
 If all goes well, this should produce output that looks roughly as follows:
 

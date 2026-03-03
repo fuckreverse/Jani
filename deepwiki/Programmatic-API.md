@@ -1,7 +1,7 @@
 # Programmatic API
 Relevant source files
 - [node_test/apiTests.js](https://github.com/Samsung/jalangi2/blob/28d2181c/node_test/apiTests.js)
-- [src/js/utils/api.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/utils/api.js)
+- [src/utils/api.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/utils/api.js)
 
 The Programmatic API provides a Node.js interface for programmatically instrumenting JavaScript code and running dynamic analyses from within Node.js applications. This API allows developers to integrate Jalangi2's instrumentation and analysis capabilities into custom tooling, build systems, and automated workflows.
 
@@ -59,7 +59,7 @@ direct.js
 
 **Main API Functions**
 FunctionPurposeInputOutput`instrumentString()`Instrument JavaScript code stringCode string + optionsInstrumented code object`instrumentDir()`Instrument entire directoryDirectory path + optionsPromise resolving to output directory`analyze()`Execute analysis on instrumented codeScript path + analysesPromise resolving to analysis results
-Sources: [src/js/utils/api.js1-251](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/utils/api.js#L1-L251)
+Sources: [src/utils/api.js1-251](https://github.com/Samsung/jalangi2/blob/28d2181c/src/utils/api.js#L1-L251)
 
 ## String Instrumentation
 
@@ -146,7 +146,7 @@ J$.Config properties
 
 The `setupConfig()` function maps handler properties to corresponding `J$.Config` properties, while `clearConfig()` resets them after instrumentation.
 
-Sources: [src/js/utils/api.js49-76](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/utils/api.js#L49-L76)[src/js/utils/api.js105-129](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/utils/api.js#L105-L129)
+Sources: [src/utils/api.js49-76](https://github.com/Samsung/jalangi2/blob/28d2181c/src/utils/api.js#L49-L76)[src/utils/api.js105-129](https://github.com/Samsung/jalangi2/blob/28d2181c/src/utils/api.js#L105-L129)
 
 ## Directory Instrumentation
 
@@ -187,9 +187,9 @@ instrumented directory
 - Creates temporary output directory if none specified
 - Uses promise-based asynchronous API
 - Supports same `instHandler` configuration as string instrumentation
-- Delegates to `src/js/commands/instrument.js` for actual processing
+- Delegates to `src/commands/instrument.js` for actual processing
 
-Sources: [src/js/utils/api.js138-155](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/utils/api.js#L138-L155)
+Sources: [src/utils/api.js138-155](https://github.com/Samsung/jalangi2/blob/28d2181c/src/utils/api.js#L138-L155)
 
 ## Analysis Execution
 
@@ -246,7 +246,7 @@ The `runChildAndCaptureOutput()` function handles child process execution:
 - `initParam` object keys become `--initParam key:value` pairs
 - Script path is passed as final positional argument
 
-Sources: [src/js/utils/api.js224-246](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/utils/api.js#L224-L246)[src/js/utils/api.js180-210](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/utils/api.js#L180-L210)
+Sources: [src/utils/api.js224-246](https://github.com/Samsung/jalangi2/blob/28d2181c/src/utils/api.js#L224-L246)[src/utils/api.js180-210](https://github.com/Samsung/jalangi2/blob/28d2181c/src/utils/api.js#L180-L210)
 
 ## Configuration Integration
 
@@ -286,14 +286,14 @@ INSTR_CONDITIONAL
 
 This configuration mechanism allows fine-grained control over which JavaScript language constructs get instrumented with analysis callbacks.
 
-Sources: [src/js/utils/api.js49-76](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/utils/api.js#L49-L76)
+Sources: [src/utils/api.js49-76](https://github.com/Samsung/jalangi2/blob/28d2181c/src/utils/api.js#L49-L76)
 
 ## Usage Examples
 
 ### Basic String Instrumentation
 
 ```
-var jalangi = require('./src/js/utils/api');
+var jalangi = require('./src/utils/api');
  
 var testCode = "var x = 3; console.log(x);";
 var options = {
@@ -332,7 +332,7 @@ jalangi.instrumentDir(options)
 
 ```
 var script = './instrumented/app.js';
-var analyses = ['./src/js/plugins/ChainedAnalyses.js'];
+var analyses = ['./src/plugins/ChainedAnalyses.js'];
 var initParam = { analysis: 'coverage' };
  
 jalangi.analyze(script, analyses, initParam)

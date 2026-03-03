@@ -18,7 +18,7 @@
 
 /*global describe */
 /*global it */
-var jalangi = require('./../src/js/utils/api');
+var jalangi = require('./../src/utils/api');
 var fs = require('fs');
 var assert = require('assert');
 

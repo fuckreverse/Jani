@@ -5,8 +5,8 @@ Relevant source files
 - [docs/index.html](https://github.com/Samsung/jalangi2/blob/28d2181c/docs/index.html)
 - [generatedocs.sh](https://github.com/Samsung/jalangi2/blob/28d2181c/generatedocs.sh)
 - [scripts/test.traceall.py](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/test.traceall.py)
-- [src/js/plugins/frames/FrameAnalysis.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/frames/FrameAnalysis.js)
-- [src/js/plugins/frames/Frames.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/frames/Frames.js)
+- [src/plugins/frames/FrameAnalysis.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/frames/FrameAnalysis.js)
+- [src/plugins/frames/Frames.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/frames/Frames.js)
 
 This document covers advanced capabilities of Jalangi2 that extend beyond basic analysis development. These features include sophisticated frame management for tracking execution contexts, detailed shadow memory mechanisms, automated documentation generation, and advanced testing infrastructure. For basic analysis development, see [Analysis Development](/Samsung/jalangi2/4-analysis-development). For shadow memory fundamentals, see [Shadow Memory System](/Samsung/jalangi2/2.3-shadow-memory-system).
 
@@ -67,7 +67,7 @@ Function closure
 
 **Frame Stack Management**
 
-The `Frames` class in [src/js/plugins/frames/Frames.js14-17](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/frames/Frames.js#L14-L17) maintains three core data structures:
+The `Frames` class in [src/plugins/frames/Frames.js14-17](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/frames/Frames.js#L14-L17) maintains three core data structures:
 
 - `frame`: Current active execution frame
 - `frameStack`: Stack of all active frames
@@ -77,7 +77,7 @@ The `Frames` class in [src/js/plugins/frames/Frames.js14-17](https://github.com/
 
 Function calls create new frames with proper closure chain linking:
 OperationMethodFrame Stack EffectFunction Entry`functionEnter(val)`Push new frame, link to closureFunction Exit`functionReturn()`Pop current frameScript Entry`scriptEnter()`Create script-level frameScript Exit`scriptReturn()`Remove script frame
-Sources: [src/js/plugins/frames/Frames.js80-95](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/frames/Frames.js#L80-L95)[src/js/plugins/frames/Frames.js97-111](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/frames/Frames.js#L97-L111)
+Sources: [src/plugins/frames/Frames.js80-95](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/frames/Frames.js#L80-L95)[src/plugins/frames/Frames.js97-111](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/frames/Frames.js#L97-L111)
 
 ### Closure Chain Tracking
 
@@ -107,13 +107,13 @@ getClosureFrame(fun)
 Get closure frame
 ```
 
-The `defineFunction` method [src/js/plugins/frames/Frames.js53-63](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/frames/Frames.js#L53-L63) establishes closure relationships by setting the `SPECIAL_PROP_FRAMES` property on function objects to point to their lexical scope frame.
+The `defineFunction` method [src/plugins/frames/Frames.js53-63](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/frames/Frames.js#L53-L63) establishes closure relationships by setting the `SPECIAL_PROP_FRAMES` property on function objects to point to their lexical scope frame.
 
 **Variable Resolution**
 
-The `getFrame(name)` method [src/js/plugins/frames/Frames.js23-34](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/frames/Frames.js#L23-L34) implements JavaScript's variable resolution algorithm by traversing the closure chain until finding a frame containing the variable.
+The `getFrame(name)` method [src/plugins/frames/Frames.js23-34](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/frames/Frames.js#L23-L34) implements JavaScript's variable resolution algorithm by traversing the closure chain until finding a frame containing the variable.
 
-Sources: [src/js/plugins/frames/Frames.js48-50](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/frames/Frames.js#L48-L50)[src/js/plugins/frames/Frames.js23-34](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/frames/Frames.js#L23-L34)
+Sources: [src/plugins/frames/Frames.js48-50](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/frames/Frames.js#L48-L50)[src/plugins/frames/Frames.js23-34](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/frames/Frames.js#L23-L34)
 
 ### Frame Analysis Integration
 
@@ -165,9 +165,9 @@ frames.evalBegin()
 frames.evalEnd()
 ```
 
-The frame analysis registers itself as `sandbox.frames`[src/js/plugins/frames/FrameAnalysis.js31](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/frames/FrameAnalysis.js#L31-L31) making the frame management system available to other analyses.
+The frame analysis registers itself as `sandbox.frames`[src/plugins/frames/FrameAnalysis.js31](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/frames/FrameAnalysis.js#L31-L31) making the frame management system available to other analyses.
 
-Sources: [src/js/plugins/frames/FrameAnalysis.js28-82](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/frames/FrameAnalysis.js#L28-L82)
+Sources: [src/plugins/frames/FrameAnalysis.js28-82](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/frames/FrameAnalysis.js#L28-L82)
 
 ## Documentation System
 

@@ -65,7 +65,7 @@ function isValidQuery (str)
 }
 
 
-require('../../src/js/analyses/concolic/jtest');
+require('../../src/analyses/concolic/jtest');
 test(isValidQuery, "");
 
 

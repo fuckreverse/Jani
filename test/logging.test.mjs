@@ -23,16 +23,16 @@ import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 
 // 被测模块
-import { RingBuffer }           from '../src/js/runtime/logging/RingBuffer.js';
+import { RingBuffer }           from '../src/runtime/logging/RingBuffer.js';
 import {
     EVENT_TYPE, EVENT_TYPE_NAME,
     serializeEventToJSON, serializeBatchToNDJSON,
     serializeEventToBinary, serializeBatchToBinary,
     deserializeEventFromBinary, deserializeBatchFromBinary,
-} from '../src/js/runtime/logging/EventSerializer.js';
-import { MemoryBackend }        from '../src/js/runtime/logging/backends/MemoryBackend.js';
-import { LogManager, createMemoryLogManager } from '../src/js/runtime/logging/LogManager.js';
-import { NodeStreamBackend }    from '../src/js/runtime/logging/backends/NodeStreamBackend.js';
+} from '../src/runtime/logging/EventSerializer.js';
+import { MemoryBackend }        from '../src/runtime/logging/backends/MemoryBackend.js';
+import { LogManager, createMemoryLogManager } from '../src/runtime/logging/LogManager.js';
+import { NodeStreamBackend }    from '../src/runtime/logging/backends/NodeStreamBackend.js';
 
 // ─── 测试框架（极简） ─────────────────────────────────────────────────────────
 
@@ -491,7 +491,7 @@ await test('WsBackend 成功连接并发送批次，收到 ack', async () => {
     const server = await startMockServer(WS_PORT);
     try {
         // 动态导入（避免在 Node 环境没有 WebSocket 时提前失败）
-        const { WsBackend } = await import('../src/js/runtime/logging/backends/WsBackend.js');
+        const { WsBackend } = await import('../src/runtime/logging/backends/WsBackend.js');
 
         const backend = new WsBackend({
             url:          `ws://127.0.0.1:${WS_PORT}`,
@@ -524,7 +524,7 @@ await test('WsBackend + LogManager 端到端：10 条事件正确到达服务端
     // 改写 server 以收集事件（解析二进制）
     // 此处直接检查 batchId 数量即可（事件内容在前面 serializer 测试中已覆盖）
     try {
-        const { WsBackend } = await import('../src/js/runtime/logging/backends/WsBackend.js');
+        const { WsBackend } = await import('../src/runtime/logging/backends/WsBackend.js');
 
         const backend = new WsBackend({
             url:         `ws://127.0.0.1:${WS_PORT + 1}`,

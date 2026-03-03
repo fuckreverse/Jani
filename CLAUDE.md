@@ -6,12 +6,12 @@ Jalangi2 是一个 **JavaScript 动态分析框架**，核心功能是对 JS 源
 在每个关键操作（读写变量、属性访问、函数调用、运算符、字面量等）前后注入分析钩子（`J$.R`、`J$.W`、`J$.G` 等），
 从而在运行时收集程序行为数据（用于 bug 检测、覆盖率、污点分析等）。
 
-**目标环境**：浏览器 + Node.js 均支持。插桩器核心（`src/js/instrument/`）为纯 ESM，
+**目标环境**：浏览器 + Node.js 均支持。插桩器核心（`src/instrument/`）为纯 ESM，
 不依赖任何平台 API，可在两种环境中直接使用。
 
 ### 当前重构状态（2026-03）
 
-插桩器核心（`src/js/instrument/`）已完成**全面现代化重构**：
+插桩器核心（`src/instrument/`）已完成**全面现代化重构**：
 
 - **模块系统**：从旧式 IIFE + 全局 `J$` 对象迁移到标准 **ESM**（`import` / `export`）
 - **语法**：全部使用 `const` / `let`，箭头函数，模板字符串，`class`，可选链 `?.`，空值合并 `??`，rest/spread
@@ -39,9 +39,9 @@ esnstrument.js        ← 所有上述模块 + acorn + astring
 
 | 文件 | 说明 |
 |------|------|
-| `src/js/runtime/analysis.js` | 运行时分析基类，含 Node.js 专有代码 |
-| `src/js/runtime/SMemory.js` | Shadow Memory，含 Node.js 专有代码 |
-| `src/js/commands/` | Node.js CLI 工具，可保留接口但待清理 |
+| `src/runtime/analysis.js` | 运行时分析基类，含 Node.js 专有代码 |
+| `src/runtime/SMemory.js` | Shadow Memory，含 Node.js 专有代码 |
+| `src/commands/` | Node.js CLI 工具，可保留接口但待清理 |
 
 ---
 
@@ -67,8 +67,8 @@ npm test
 | `test/_legacy_astring.js` | ⚠️ 废弃（保留备查） | 重构前验证 astring 本身的临时脚本，用 CommonJS + 旧式全局加载 |
 | `test/_legacy_class_debug.js` | ⚠️ 废弃（保留备查） | 重构前调试 class 插桩的单次脚本，用 CommonJS |
 | `test/_legacy_modern_syntax.js` | ⚠️ 废弃（保留备查） | 重构前现代语法冒烟测试，已合并进主测试 |
-| `test/_legacy_apiTests.js` | ⚠️ 废弃（保留备查） | 依赖 `src/js/utils/api.js`（尚未 ESM 化） |
-| `test/_legacy_instDirTests.js` | ⚠️ 废弃（保留备查） | 依赖 `src/js/commands/instrument`（尚未 ESM 化） |
+| `test/_legacy_apiTests.js` | ⚠️ 废弃（保留备查） | 依赖 `src/utils/api.js`（尚未 ESM 化） |
+| `test/_legacy_instDirTests.js` | ⚠️ 废弃（保留备查） | 依赖 `src/commands/instrument`（尚未 ESM 化） |
 
 **原则**：
 1. **优先修改 `test/instrument.test.mjs`**，不要为每个小改动新建文件
@@ -80,7 +80,7 @@ npm test
 ### 插桩器使用方式（快速参考）
 
 ```js
-import { init, instrumentCode } from '../src/js/instrument/esnstrument.js';
+import { init, instrumentCode } from '../src/instrument/esnstrument.js';
 // 在测试文件 test/ 目录下路径前缀为 ../src/
 // 在项目根目录脚本中路径前缀为 ./src/
 

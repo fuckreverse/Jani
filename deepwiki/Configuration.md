@@ -1,6 +1,6 @@
 # Configuration
 Relevant source files
-- [src/js/Config.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/Config.js)
+- [src/Config.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/Config.js)
 - [tests/Esequence1.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/Esequence1.js)
 - [tests/unit/throw-undefined.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/unit/throw-undefined.js)
 
@@ -54,7 +54,7 @@ Config.INSTR_CONDITIONAL
 
 *Configuration Object Structure and Main Categories*
 
-Sources: [src/js/Config.js18-55](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/Config.js#L18-L55)
+Sources: [src/Config.js18-55](https://github.com/Samsung/jalangi2/blob/28d2181c/src/Config.js#L18-L55)
 
 ## Core Configuration Options
 
@@ -64,7 +64,7 @@ The configuration system provides several categories of settings that control Ja
 SettingDefaultPurpose`Config.DEBUG``false`Enables debug output during instrumentation and runtime`Config.WARN``false`Controls warning message display`Config.SERIOUS_WARN``false`Controls display of serious warning messages`Config.LOG_ALL_READS_AND_BRANCHES``false`Enables comprehensive logging of memory accesses and control flow
 ### Buffer and Performance Settings
 SettingDefaultPurpose`Config.MAX_BUF_SIZE``64000`Maximum buffer size for instrumentation data, set below 2^16 for overhead management`Config.ENABLE_SAMPLING``false`Controls whether sampling-based instrumentation is enabled
-Sources: [src/js/Config.js29-42](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/Config.js#L29-L42)
+Sources: [src/Config.js29-42](https://github.com/Samsung/jalangi2/blob/28d2181c/src/Config.js#L29-L42)
 
 ## Selective Instrumentation System
 
@@ -104,7 +104,7 @@ Original JavaScript (unchanged)
 
 ### Available Instrumentation Controls
 FunctionParametersPurpose`INSTR_INIT``(name, ast)`Controls initialization instrumentation`INSTR_READ``(name, ast)`Controls variable read instrumentation`INSTR_WRITE``(name, ast)`Controls variable write instrumentation`INSTR_GETFIELD``(offset, ast)`Controls property read instrumentation (offset null for computed properties)`INSTR_PUTFIELD``(offset, ast)`Controls property write instrumentation (offset null for computed properties)`INSTR_BINARY``(operator, ast)`Controls binary operation instrumentation`INSTR_PROPERTY_BINARY_ASSIGNMENT``(operator, offset, ast)`Controls compound property assignments like `a.x += e``INSTR_UNARY``(operator, ast)`Controls unary operation instrumentation`INSTR_LITERAL``(literal, ast)`Controls literal value instrumentation`INSTR_CONDITIONAL``(type, ast)`Controls conditional instrumentation (`&&`, ``INSTR_END_EXPRESSION``(ast)`Controls top-level expression markers
-Sources: [src/js/Config.js39-54](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/Config.js#L39-L54)
+Sources: [src/Config.js39-54](https://github.com/Samsung/jalangi2/blob/28d2181c/src/Config.js#L39-L54)
 
 ## Configuration Integration with Instrumentation Pipeline
 
@@ -142,7 +142,7 @@ Instrumented JavaScript Output
 
 *Configuration Integration in Instrumentation Pipeline*
 
-Sources: [src/js/Config.js39-41](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/Config.js#L39-L41)
+Sources: [src/Config.js39-41](https://github.com/Samsung/jalangi2/blob/28d2181c/src/Config.js#L39-L41)
 
 ## Customization Examples
 
@@ -181,7 +181,7 @@ Config.INSTR_BINARY = function(operator, ast) {
 };
 ```
 
-Sources: [src/js/Config.js43-52](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/Config.js#L43-L52)
+Sources: [src/Config.js43-52](https://github.com/Samsung/jalangi2/blob/28d2181c/src/Config.js#L43-L52)
 
 ## Configuration Loading and Initialization
 
@@ -219,4 +219,4 @@ Available to User Code
 
 The configuration system includes a safety check to prevent multiple initialization and ensures the `JALANGI DO NOT INSTRUMENT` comment prevents the configuration code itself from being instrumented.
 
-Sources: [src/js/Config.js16-27](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/Config.js#L16-L27)
+Sources: [src/Config.js16-27](https://github.com/Samsung/jalangi2/blob/28d2181c/src/Config.js#L16-L27)

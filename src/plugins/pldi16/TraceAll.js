@@ -21,10 +21,10 @@
  * @author Koushik Sen
  *
  * 运行示例：
- *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/plugins/ChainedAnalyses.js \
- *     --analysis src/js/runtime/SMemory.js \
- *     --analysis src/js/plugins/pldi16/TraceAll.js \
+ *   node src/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/plugins/ChainedAnalyses.js \
+ *     --analysis src/runtime/SMemory.js \
+ *     --analysis src/plugins/pldi16/TraceAll.js \
  *     tests/pldi16/TraceAllTest.js
  */
 

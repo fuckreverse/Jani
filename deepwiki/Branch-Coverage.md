@@ -1,6 +1,6 @@
 # Branch Coverage
 Relevant source files
-- [src/js/plugins/pldi16/BranchCoverage.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/BranchCoverage.js)
+- [src/plugins/pldi16/BranchCoverage.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/BranchCoverage.js)
 - [tests/pldi16/BranchCoverageTest.html](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/pldi16/BranchCoverageTest.html)
 - [tests/pldi16/BranchCoverageTest.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/pldi16/BranchCoverageTest.js)
 
@@ -12,9 +12,9 @@ For general coverage analysis concepts and other coverage types, see [Coverage A
 
 ## Implementation Overview
 
-The branch coverage analysis is implemented as a Jalangi2 analysis class in [src/js/plugins/pldi16/BranchCoverage.js13-27](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/BranchCoverage.js#L13-L27) It extends the standard analysis template by implementing the `conditional` callback to track branch execution patterns.
+The branch coverage analysis is implemented as a Jalangi2 analysis class in [src/plugins/pldi16/BranchCoverage.js13-27](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/BranchCoverage.js#L13-L27) It extends the standard analysis template by implementing the `conditional` callback to track branch execution patterns.
 ComponentPurposeKey Data Structures`MyAnalysis` classMain analysis implementationN/A`trueBranches` objectTracks true branch executions`{iid: count}` mapping`falseBranches` objectTracks false branch executions`{iid: count}` mapping`conditional` callbackIntercepts branch evaluationsN/A`endExecution` callbackReports final resultsN/A
-Sources: [src/js/plugins/pldi16/BranchCoverage.js10-27](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/BranchCoverage.js#L10-L27)
+Sources: [src/plugins/pldi16/BranchCoverage.js10-27](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/BranchCoverage.js#L10-L27)
 
 ## Branch Tracking Mechanism
 
@@ -52,7 +52,7 @@ print(falseBranches, 'False')
 sandbox.log() output
 ```
 
-Sources: [src/js/plugins/pldi16/BranchCoverage.js15-26](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/BranchCoverage.js#L15-L26)
+Sources: [src/plugins/pldi16/BranchCoverage.js15-26](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/BranchCoverage.js#L15-L26)
 
 ## Core Implementation Details
 
@@ -72,7 +72,7 @@ this.conditional = function (iid, result) {
 
 The implementation uses `J$.getGlobalIID(iid)` to convert local instruction identifiers to globally unique identifiers, enabling consistent tracking across different execution contexts.
 
-Sources: [src/js/plugins/pldi16/BranchCoverage.js15-21](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/BranchCoverage.js#L15-L21)
+Sources: [src/plugins/pldi16/BranchCoverage.js15-21](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/BranchCoverage.js#L15-L21)
 
 ### Results Reporting System
 
@@ -98,7 +98,7 @@ J$.iidToLocation(id)
 J$.iidToLocation(id)
 ```
 
-Sources: [src/js/plugins/pldi16/BranchCoverage.js23-34](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/BranchCoverage.js#L23-L34)
+Sources: [src/plugins/pldi16/BranchCoverage.js23-34](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/BranchCoverage.js#L23-L34)
 
 ## Usage Examples
 
@@ -106,7 +106,7 @@ Sources: [src/js/plugins/pldi16/BranchCoverage.js23-34](https://github.com/Samsu
 
 The analysis can be executed in multiple modes as demonstrated in the source comments:
 ModeCommandPurposeOn-the-fly`jalangi.js --inlineIID --inlineSource --analysis BranchCoverage.js`Direct execution with analysisOffline HTML`esnstrument_cli.js --analysis BranchCoverage.js --out file.html`Browser executionOffline JS`esnstrument_cli.js --analysis BranchCoverage.js --out file.js`Node.js execution
-Sources: [src/js/plugins/pldi16/BranchCoverage.js40-43](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/BranchCoverage.js#L40-L43)
+Sources: [src/plugins/pldi16/BranchCoverage.js40-43](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/BranchCoverage.js#L40-L43)
 
 ### Test Case Analysis
 
@@ -153,7 +153,7 @@ Each output line includes:
 
 The location information is provided by Jalangi2's source mapping system when `--inlineIID` and `--inlineSource` options are used.
 
-Sources: [src/js/plugins/pldi16/BranchCoverage.js29-34](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/BranchCoverage.js#L29-L34)
+Sources: [src/plugins/pldi16/BranchCoverage.js29-34](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/BranchCoverage.js#L29-L34)
 
 ## Integration with Jalangi2 Runtime
 
@@ -167,7 +167,7 @@ sandbox.analysis = new MyAnalysis();
 
 This integration allows the analysis to receive runtime callbacks from the instrumented code execution.
 
-Sources: [src/js/plugins/pldi16/BranchCoverage.js36](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/BranchCoverage.js#L36-L36)
+Sources: [src/plugins/pldi16/BranchCoverage.js36](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/BranchCoverage.js#L36-L36)
 
 ### Runtime Callback Flow
 
@@ -192,4 +192,4 @@ Sources: [src/js/plugins/pldi16/BranchCoverage.js36](https://github.com/Samsung/
 "sandbox.log(results)"
 ```
 
-Sources: [src/js/plugins/pldi16/BranchCoverage.js15-34](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/BranchCoverage.js#L15-L34)
+Sources: [src/plugins/pldi16/BranchCoverage.js15-34](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/BranchCoverage.js#L15-L34)

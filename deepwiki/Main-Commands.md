@@ -1,7 +1,7 @@
 # Main Commands
 Relevant source files
-- [src/js/commands/direct.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/direct.js)
-- [src/js/commands/jalangi.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/jalangi.js)
+- [src/commands/direct.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/direct.js)
+- [src/commands/jalangi.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/jalangi.js)
 
 This section documents the two primary entry points for running dynamic analysis with Jalangi2: `jalangi.js` and `direct.js`. These commands provide different approaches to executing JavaScript code under analysis - one with on-the-fly instrumentation and one with pre-instrumented code.
 
@@ -57,7 +57,7 @@ J$ Runtime Callbacks
 Analysis Hooks
 ```
 
-Sources: [src/js/commands/jalangi.js1-129](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/jalangi.js#L1-L129)[src/js/commands/direct.js1-93](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/direct.js#L1-L93)
+Sources: [src/commands/jalangi.js1-129](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/jalangi.js#L1-L129)[src/commands/direct.js1-93](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/direct.js#L1-L93)
 
 ## jalangi.js - On-the-fly Analysis
 
@@ -105,9 +105,9 @@ filename_jalangi_.json
 filename_jalangi_.js
 ```
 
-Sources: [src/js/commands/jalangi.js94-111](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/jalangi.js#L94-L111)[src/js/commands/jalangi.js62-68](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/jalangi.js#L62-L68)
+Sources: [src/commands/jalangi.js94-111](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/jalangi.js#L94-L111)[src/commands/jalangi.js62-68](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/jalangi.js#L62-L68)
 
-The instrumentation process overrides Node.js's module loading mechanism at [src/js/commands/jalangi.js94](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/jalangi.js#L94-L94) to intercept `.js` file loads. For each file, it:
+The instrumentation process overrides Node.js's module loading mechanism at [src/commands/jalangi.js94](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/jalangi.js#L94-L94) to intercept `.js` file loads. For each file, it:
 
 1. Reads the original source code
 2. Calls `J$.instrumentCode()` with configuration options
@@ -128,7 +128,7 @@ if (args.analysis) {
 }
 ```
 
-Sources: [src/js/commands/jalangi.js88-92](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/jalangi.js#L88-L92)
+Sources: [src/commands/jalangi.js88-92](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/jalangi.js#L88-L92)
 
 ## direct.js - Pre-instrumented Analysis
 
@@ -179,7 +179,7 @@ Module.runMain()
 Execute Pre-instrumented Code
 ```
 
-Sources: [src/js/commands/direct.js37-78](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/direct.js#L37-L78)
+Sources: [src/commands/direct.js37-78](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/direct.js#L37-L78)
 
 ### Key Differences from jalangi.js
 
@@ -216,7 +216,7 @@ Analysis Callback Methods
 J$.endExecution() on exit
 ```
 
-Sources: [src/js/commands/jalangi.js112-128](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/jalangi.js#L112-L128)[src/js/commands/direct.js60-77](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/direct.js#L60-L77)
+Sources: [src/commands/jalangi.js112-128](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/jalangi.js#L112-L128)[src/commands/direct.js60-77](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/direct.js#L60-L77)
 
 Both commands manipulate `process.argv` to make the target script appear as if it was invoked directly, and register an exit handler to ensure `J$.endExecution()` is called when the program terminates.
 
@@ -242,4 +242,4 @@ Both commands support the same analysis integration patterns:
 - If present, script execution waits for analysis readiness
 - Enables asynchronous analysis initialization
 
-Sources: [src/js/commands/jalangi.js76-92](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/jalangi.js#L76-L92)[src/js/commands/direct.js37-78](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/direct.js#L37-L78)[src/js/commands/jalangi.js124-128](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/jalangi.js#L124-L128)[src/js/commands/direct.js73-77](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/direct.js#L73-L77)
+Sources: [src/commands/jalangi.js76-92](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/jalangi.js#L76-L92)[src/commands/direct.js37-78](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/direct.js#L37-L78)[src/commands/jalangi.js124-128](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/jalangi.js#L124-L128)[src/commands/direct.js73-77](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/direct.js#L73-L77)

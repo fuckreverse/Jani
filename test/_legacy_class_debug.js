@@ -1,12 +1,12 @@
 global.acorn = require('acorn');
 global.astring = require('astring');
-require('./src/js/Constants.js');
-require('./src/js/Config.js');
-require('./src/js/instrument/astUtil.js');
-require('./src/js/instrument/iid.js');
-require('./src/js/instrument/scope.js');
-require('./src/js/instrument/wrappers.js');
-require('./src/js/instrument/esnstrument.js');
+require('./src/Constants.js');
+require('./src/Config.js');
+require('./src/instrument/astUtil.js');
+require('./src/instrument/iid.js');
+require('./src/instrument/scope.js');
+require('./src/instrument/wrappers.js');
+require('./src/instrument/esnstrument.js');
 
 try {
     var result = J$.instrumentCode({

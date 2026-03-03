@@ -7,13 +7,13 @@ Jalangi1 is still available at https://github.com/SRA-SiliconValley/jalangi, but
 Jalangi2 does not support the record/replay feature of Jalangi1.
 In the Jalangi2 distribution you will find several analyses:
 
-  * an analysis to [track NaNs](src/js/plugins/dlint/CheckNaN.js).
-  * an analysis to [check if an undefined is concatenated to a string](src/js/plugins/dlint/ConcatUndefinedToString.js).
+  * an analysis to [track NaNs](src/plugins/dlint/CheckNaN.js).
+  * an analysis to [check if an undefined is concatenated to a string](src/plugins/dlint/ConcatUndefinedToString.js).
   * [Memory analysis](https://github.com/Samsung/meminsight): a memory-profiler for JavaScript and HTML5.
   * [DLint](https://github.com/ksen007/jalangi2analyses): a dynamic checker for JavaScript bad coding practices.
   * [JITProf](https://github.com/ksen007/jalangi2analyses): a dynamic JIT-unfriendly code snippet detection tool.
-  * [analysisCallbackTemplate.js](src/js/runtime/analysisCallbackTemplate.js): a template for writing a dynamic analysis.
-  * and [more ...](src/js/plugins/)
+  * [analysisCallbackTemplate.js](src/runtime/analysisCallbackTemplate.js): a template for writing a dynamic analysis.
+  * and [more ...](src/plugins/)
 
 See [our tutorial slides](http://manu.sridharan.net/files/JalangiTutorial.pdf) for a detailed overview of Jalangi and some client analyses.
 
@@ -60,43 +60,43 @@ Clone the repository, and then run:
 
 An analysis can be performed on a JavaScript file in node.js by issuing the following commands:
 
-    node src/js/commands/jalangi.js --inlineIID --inlineSource --analysis src/js/plugins/ChainedAnalyses.js --analysis src/js/plugins/dlint/Utils.js --analysis src/js/plugins/dlint/CheckNaN.js --analysis src/js/plugins/dlint/FunCalledWithMoreArguments.js --analysis src/js/plugins/dlint/CompareFunctionWithPrimitives.js --analysis src/js/plugins/dlint/ShadowProtoProperty.js --analysis src/js/plugins/dlint/ConcatUndefinedToString.js --analysis src/js/plugins/dlint/UndefinedOffset.js tests/octane/deltablue.js
+    node src/commands/jalangi.js --inlineIID --inlineSource --analysis src/plugins/ChainedAnalyses.js --analysis src/plugins/dlint/Utils.js --analysis src/plugins/dlint/CheckNaN.js --analysis src/plugins/dlint/FunCalledWithMoreArguments.js --analysis src/plugins/dlint/CompareFunctionWithPrimitives.js --analysis src/plugins/dlint/ShadowProtoProperty.js --analysis src/plugins/dlint/ConcatUndefinedToString.js --analysis src/plugins/dlint/UndefinedOffset.js tests/octane/deltablue.js
 
-In the above analysis, we chained several analyses by including *--analysis src/js/analyses/ChainedAnalyses.js* as the first analysis.
+In the above analysis, we chained several analyses by including *--analysis src/analyses/ChainedAnalyses.js* as the first analysis.
 The command runs the following analyses
 
-    src/js/plugins/dlint/CheckNaN.js
-    src/js/plugins/dlint/FunCalledWithMoreArguments.js
-    src/js/plugins/dlint/CompareFunctionWithPrimitives.js
-    src/js/plugins/dlint/ShadowProtoProperty.js
-    src/js/plugins/dlint/ConcatUndefinedToString.js
-    src/js/plugins/dlint/UndefinedOffset.js
+    src/plugins/dlint/CheckNaN.js
+    src/plugins/dlint/FunCalledWithMoreArguments.js
+    src/plugins/dlint/CompareFunctionWithPrimitives.js
+    src/plugins/dlint/ShadowProtoProperty.js
+    src/plugins/dlint/ConcatUndefinedToString.js
+    src/plugins/dlint/UndefinedOffset.js
 
 The implementation of an analysis requires the implementation of several callback functions. One can start writing
-an writing analysis using the template file [src/js/runtime/analysisCallbackTemplate.js](src/js/runtime/analysisCallbackTemplate.js).
+an writing analysis using the template file [src/runtime/analysisCallbackTemplate.js](src/runtime/analysisCallbackTemplate.js).
 A documentation of these call back functions can be found at [docs/MyAnalysis.html](docs/MyAnalysis.html).
 A tutorial on writing a Jalangi analysis can be found at [docs/tutorial1.md](docs/tutorial1.md). While writing 
-an analysis one could run [src/js/plugins/pldi16/TraceAll.js](src/js/plugins/pldi16/TraceAll.js) 
+an analysis one could run [src/plugins/pldi16/TraceAll.js](src/plugins/pldi16/TraceAll.js) 
 analysis on a JavaScript file to print all the callback functions that got 
 called during the execution of the file.  Such a trace is useful to see what callbacks get called during an 
 execution.  The following command runs the TraceAll.js analysis on the file [tests/octane/deltablue.js](tests/octane/deltablue.js).
 
-    node src/js/commands/jalangi.js --inlineIID --inlineSource --analysis src/js/plugins/ChainedAnalyses.js --analysis src/js/runtime/SMemory.js --analysis src/js/plugins/pldi16/TraceAll.js tests/octane/deltablue.js
+    node src/commands/jalangi.js --inlineIID --inlineSource --analysis src/plugins/ChainedAnalyses.js --analysis src/runtime/SMemory.js --analysis src/plugins/pldi16/TraceAll.js tests/octane/deltablue.js
 
 **Analysis in node.js with explicit one-file-at-a-time offline instrumentation**
 
 An analysis can be performed on a JavaScript file in node.js by issuing the following commands:
 
-    node src/js/commands/esnstrument_cli.js --inlineIID --inlineSource tests/octane/deltablue.js
-    node src/js/commands/direct.js --analysis src/js/plugins/ChainedAnalyses.js --analysis src/js/plugins/dlint/Utils.js --analysis src/js/plugins/dlint/CheckNaN.js --analysis src/js/plugins/dlint/FunCalledWithMoreArguments.js --analysis src/js/plugins/dlint/CompareFunctionWithPrimitives.js --analysis src/js/plugins/dlint/ShadowProtoProperty.js --analysis src/js/plugins/dlint/ConcatUndefinedToString.js --analysis src/js/plugins/dlint/UndefinedOffset.js tests/octane/deltablue_jalangi_.js
+    node src/commands/esnstrument_cli.js --inlineIID --inlineSource tests/octane/deltablue.js
+    node src/commands/direct.js --analysis src/plugins/ChainedAnalyses.js --analysis src/plugins/dlint/Utils.js --analysis src/plugins/dlint/CheckNaN.js --analysis src/plugins/dlint/FunCalledWithMoreArguments.js --analysis src/plugins/dlint/CompareFunctionWithPrimitives.js --analysis src/plugins/dlint/ShadowProtoProperty.js --analysis src/plugins/dlint/ConcatUndefinedToString.js --analysis src/plugins/dlint/UndefinedOffset.js tests/octane/deltablue_jalangi_.js
 
-In the above analysis, we chained several analyses by including *--analysis src/js/analyses/ChainedAnalyses.js*.
+In the above analysis, we chained several analyses by including *--analysis src/analyses/ChainedAnalyses.js*.
 
 **Analysis in a browser using offline instrumentation**
 
 An analysis can be performed on a web app using the Chrome browser by issuing the following commands:
 
-    node src/js/commands/instrument.js --inlineIID --inlineSource -i --inlineJalangi --analysis src/js/plugins/ChainedAnalyses.js --analysis src/js/plugins/dlint/Utils.js --analysis src/js/plugins/dlint/CheckNaN.js --analysis src/js/plugins/dlint/FunCalledWithMoreArguments.js --analysis src/js/plugins/dlint/CompareFunctionWithPrimitives.js --analysis src/js/plugins/dlint/ShadowProtoProperty.js --analysis src/js/plugins/dlint/ConcatUndefinedToString.js --analysis src/js/plugins/dlint/UndefinedOffset.js --outputDir /tmp tests/tizen/annex
+    node src/commands/instrument.js --inlineIID --inlineSource -i --inlineJalangi --analysis src/plugins/ChainedAnalyses.js --analysis src/plugins/dlint/Utils.js --analysis src/plugins/dlint/CheckNaN.js --analysis src/plugins/dlint/FunCalledWithMoreArguments.js --analysis src/plugins/dlint/CompareFunctionWithPrimitives.js --analysis src/plugins/dlint/ShadowProtoProperty.js --analysis src/plugins/dlint/ConcatUndefinedToString.js --analysis src/plugins/dlint/UndefinedOffset.js --outputDir /tmp tests/tizen/annex
     open file:///tmp/annex/index.html
 
 While performing analysis in a browser, one needs to press Alt-Shift-T to end the analysis and to print the analysis results in the console.
@@ -126,13 +126,13 @@ or [this document](https://github.com/ksen007/jalangi2analyses/blob/master/doc/m
 After installation, you can run the Jalangi instrumentation proxy by
 issuing the following command:
 
-    mitmdump --quiet --anticache -s "scripts/proxy.py --inlineIID --inlineSource --analysis src/js/plugins/ChainedAnalyses.js --analysis src/js/runtime/analysisCallbackTemplate.js"
+    mitmdump --quiet --anticache -s "scripts/proxy.py --inlineIID --inlineSource --analysis src/plugins/ChainedAnalyses.js --analysis src/runtime/analysisCallbackTemplate.js"
 
 In your browser, the http and https proxy should be set to 127.0.0.1:8080.  Now if you load a website in your browser, all JavaScript files associated with the website will get instrumented on-the-fly.
 
 On a Mac, the proxy can be set and launched automatically by issuing the following command:
 
-    ./scripts/mitmproxywrapper.py --toggle --auto-disable --quiet --anticache -s "scripts/proxy.py --inlineIID --inlineSource --analysis src/js/plugins/ChainedAnalyses.js --analysis src/js/runtime/analysisCallbackTemplate.js"
+    ./scripts/mitmproxywrapper.py --toggle --auto-disable --quiet --anticache -s "scripts/proxy.py --inlineIID --inlineSource --analysis src/plugins/ChainedAnalyses.js --analysis src/runtime/analysisCallbackTemplate.js"
 
 The command starts mitmproxy if the proxy is not currently enabled, and disables it otherwise.
 The `--auto-disable` option will automatically disable the proxy when the script is interrupted.

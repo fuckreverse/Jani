@@ -2,8 +2,8 @@
 Relevant source files
 - [scripts/test.analysis.py](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/test.analysis.py)
 - [scripts/test.dlint.py](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/test.dlint.py)
-- [src/js/runtime/iidToLocation.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/iidToLocation.js)
-- [src/js/plugins/dlint/CheckNaN.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/dlint/CheckNaN.js)
+- [src/runtime/iidToLocation.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/iidToLocation.js)
+- [src/plugins/dlint/CheckNaN.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/dlint/CheckNaN.js)
 
 ## Purpose and Scope
 
@@ -70,7 +70,7 @@ Error location mapping
 Error reporting system
 ```
 
-Sources: [scripts/test.dlint.py6-13](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/test.dlint.py#L6-L13)[src/js/plugins/dlint/CheckNaN.js25-65](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/dlint/CheckNaN.js#L25-L65)
+Sources: [scripts/test.dlint.py6-13](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/test.dlint.py#L6-L13)[src/plugins/dlint/CheckNaN.js25-65](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/dlint/CheckNaN.js#L25-L65)
 
 ## dlint Analysis Architecture
 
@@ -116,7 +116,7 @@ Console output
 Error summaries
 ```
 
-Sources: [src/js/plugins/dlint/CheckNaN.js26-64](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/dlint/CheckNaN.js#L26-L64)[src/js/runtime/iidToLocation.js29-57](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/iidToLocation.js#L29-L57)
+Sources: [src/plugins/dlint/CheckNaN.js26-64](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/dlint/CheckNaN.js#L26-L64)[src/runtime/iidToLocation.js29-57](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/iidToLocation.js#L29-L57)
 
 ## Available Code Quality Analyses
 
@@ -162,12 +162,12 @@ Observed NaN at location
 
 The NaN detection uses JavaScript's property that `NaN !== NaN` to identify when operations produce NaN values:
 
-- **Function calls**: [src/js/plugins/dlint/CheckNaN.js34-38](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/dlint/CheckNaN.js#L34-L38)
-- **Property access**: [src/js/plugins/dlint/CheckNaN.js40-44](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/dlint/CheckNaN.js#L40-L44)
-- **Binary operations**: [src/js/plugins/dlint/CheckNaN.js46-50](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/dlint/CheckNaN.js#L46-L50)
-- **Unary operations**: [src/js/plugins/dlint/CheckNaN.js52-56](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/dlint/CheckNaN.js#L52-L56)
+- **Function calls**: [src/plugins/dlint/CheckNaN.js34-38](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/dlint/CheckNaN.js#L34-L38)
+- **Property access**: [src/plugins/dlint/CheckNaN.js40-44](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/dlint/CheckNaN.js#L40-L44)
+- **Binary operations**: [src/plugins/dlint/CheckNaN.js46-50](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/dlint/CheckNaN.js#L46-L50)
+- **Unary operations**: [src/plugins/dlint/CheckNaN.js52-56](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/dlint/CheckNaN.js#L52-L56)
 
-Sources: [src/js/plugins/dlint/CheckNaN.js34-56](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/dlint/CheckNaN.js#L34-L56)
+Sources: [src/plugins/dlint/CheckNaN.js34-56](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/dlint/CheckNaN.js#L34-L56)
 
 ## Testing Framework
 
@@ -249,11 +249,11 @@ The location system produces formatted strings like:
 
 **Key functions:**
 
-- **Global IID generation**: [src/js/runtime/iidToLocation.js59-61](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/iidToLocation.js#L59-L61)
-- **Location resolution**: [src/js/runtime/iidToLocation.js29-57](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/iidToLocation.js#L29-L57)
-- **Format generation**: [src/js/runtime/iidToLocation.js46-52](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/iidToLocation.js#L46-L52)
+- **Global IID generation**: [src/runtime/iidToLocation.js59-61](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/iidToLocation.js#L59-L61)
+- **Location resolution**: [src/runtime/iidToLocation.js29-57](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/iidToLocation.js#L29-L57)
+- **Format generation**: [src/runtime/iidToLocation.js46-52](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/iidToLocation.js#L46-L52)
 
-Sources: [src/js/runtime/iidToLocation.js29-61](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/iidToLocation.js#L29-L61)
+Sources: [src/runtime/iidToLocation.js29-61](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/iidToLocation.js#L29-L61)
 
 ## Integration with Analysis Framework
 
@@ -266,9 +266,9 @@ The test framework demonstrates running all dlint analyses together:
 ```
 // Analysis chain from test.dlint.py
 analyses = [
-    '../src/js/plugins/ChainedAnalyses.js',
-    '../src/js/plugins/dlint/Utils.js',
-    '../src/js/plugins/dlint/FunCalledWithMoreArguments.js',
+    '../src/plugins/ChainedAnalyses.js',
+    '../src/plugins/dlint/Utils.js',
+    '../src/plugins/dlint/FunCalledWithMoreArguments.js',
     // ... other dlint analyses
 ]
 ```

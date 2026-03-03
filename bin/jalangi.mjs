@@ -21,7 +21,7 @@
  *   --help / -h           显示帮助
  *
  * 示例：
- *   node bin/jalangi.mjs --analysis src/js/plugins/TraceAll.js tests/unit/simple.js
+ *   node bin/jalangi.mjs --analysis src/plugins/TraceAll.js tests/unit/simple.js
  *   node bin/jalangi.mjs --analysis myAnalysis.js -- myScript.js arg1 arg2
  */
 
@@ -130,7 +130,7 @@ async function main() {
 
     // 加载插桩器
     const { init, instrumentCode } = await import(
-        `${ROOT_DIR}/src/js/instrument/esnstrument.js`
+        `${ROOT_DIR}/src/instrument/esnstrument.js`
     );
     init({
         ENABLE_SAMPLING:           false,
@@ -169,8 +169,8 @@ async function main() {
         if (
             filename.includes('node_modules') ||
             filename.includes(FILESUFFIX) ||
-            filename.startsWith(ROOT_DIR + '/src/js/instrument/') ||
-            filename.startsWith(ROOT_DIR + '/src/js/runtime/') ||
+            filename.startsWith(ROOT_DIR + '/src/instrument/') ||
+            filename.startsWith(ROOT_DIR + '/src/runtime/') ||
             filename.startsWith(ROOT_DIR + '/bin/')
         ) {
             return _origExtension(mod, filename);

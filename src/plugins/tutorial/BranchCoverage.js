@@ -5,8 +5,8 @@
  * @author Koushik Sen
  *
  * 运行示例：
- *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/plugins/tutorial/BranchCoverage.js \
+ *   node src/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/plugins/tutorial/BranchCoverage.js \
  *     tests/pldi16/BranchCoverageTest.js
  */
 

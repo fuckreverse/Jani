@@ -1,6 +1,6 @@
 //Copyright Thomas Stjernegaard Jeppesen. All Rights Reserved.
 if (typeof window === "undefined") {
-    require('../../src/js/InputManager');
+    require('../../src/InputManager');
     require(process.cwd()+'/inputs');
 }
 

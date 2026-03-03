@@ -1,8 +1,8 @@
 # Results and UI
 Relevant source files
-- [src/js/frame.html](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/frame.html)
-- [src/js/mid.html](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/mid.html)
-- [src/js/pre.html](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/pre.html)
+- [src/frame.html](https://github.com/Samsung/jalangi2/blob/28d2181c/src/frame.html)
+- [src/mid.html](https://github.com/Samsung/jalangi2/blob/28d2181c/src/mid.html)
+- [src/pre.html](https://github.com/Samsung/jalangi2/blob/28d2181c/src/pre.html)
 
 The Results and UI system provides a browser-based interface for displaying dynamic analysis results when analyzing web applications. This system creates an overlay interface that appears on instrumented web pages, allowing users to view analysis results without leaving the browser context.
 
@@ -44,7 +44,7 @@ J$.smap (Source Maps)
 J$.endExecution
 ```
 
-**Sources**: [src/js/pre.html1-53](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/pre.html#L1-L53)[src/js/frame.html1-100](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/frame.html#L1-L100)
+**Sources**: [src/pre.html1-53](https://github.com/Samsung/jalangi2/blob/28d2181c/src/pre.html#L1-L53)[src/frame.html1-100](https://github.com/Samsung/jalangi2/blob/28d2181c/src/frame.html#L1-L100)
 
 ## UI Components
 
@@ -88,13 +88,13 @@ The button is styled with CSS properties that ensure it remains visible and acce
 - Semi-transparent background with high z-index
 - Light blue styling for visibility
 
-**Sources**: [src/js/pre.html2-19](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/pre.html#L2-L19)[src/js/pre.html39-47](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/pre.html#L39-L47)
+**Sources**: [src/pre.html2-19](https://github.com/Samsung/jalangi2/blob/28d2181c/src/pre.html#L2-L19)[src/pre.html39-47](https://github.com/Samsung/jalangi2/blob/28d2181c/src/pre.html#L39-L47)
 
 ### Results Frame Structure
 
 The results are displayed in a full-screen iframe that contains the actual analysis interface:
 ComponentPurposeStyling`jalangi_results_frame`Container iframe`position: fixed, width: 100%, height: 100%``jalangi_results_window`Results display area`width: 50%, float: left, overflow: scroll``code` textareaCode display`width: 48%, float: right`Close buttonUI control`float: right, vertical-align: top`
-**Sources**: [src/js/pre.html21-23](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/pre.html#L21-L23)[src/js/frame.html47-56](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/frame.html#L47-L56)
+**Sources**: [src/pre.html21-23](https://github.com/Samsung/jalangi2/blob/28d2181c/src/pre.html#L21-L23)[src/frame.html47-56](https://github.com/Samsung/jalangi2/blob/28d2181c/src/frame.html#L47-L56)
 
 ## Code Display System
 
@@ -141,7 +141,7 @@ The `iidToDisplayCodeLocation` function processes global identifiers in the form
 - Highlights the relevant code section using `markText` with background styling
 - Automatically scrolls the editor to show the highlighted location
 
-**Sources**: [src/js/frame.html58-96](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/frame.html#L58-L96)
+**Sources**: [src/frame.html58-96](https://github.com/Samsung/jalangi2/blob/28d2181c/src/frame.html#L58-L96)
 
 ## Library Dependencies
 
@@ -181,7 +181,7 @@ All dependencies are embedded using the `fileExpand` function, which inlines the
 - **DataTables**: Enables tabular data presentation with sorting and filtering
 - **CodeMirror**: Provides syntax-highlighted code editing/viewing
 
-**Sources**: [src/js/frame.html3-44](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/frame.html#L3-L44)
+**Sources**: [src/frame.html3-44](https://github.com/Samsung/jalangi2/blob/28d2181c/src/frame.html#L3-L44)
 
 ## Integration with Analysis Framework
 
@@ -221,4 +221,4 @@ Code Location Display
 FunctionPurposeUsage`J$.Results.log(str)`Append text to results displayCalled by analyses to display messages`J$.Results.execute(f)`Execute function with UI contextProvides access to jQuery, editor, and results div`J$.Results.showHideResults()`Toggle results displayTriggered by button click`J$.endExecution()`Signal analysis completionCalled when results panel is opened
 The UI system provides a bridge between analysis results and user presentation, allowing analyses to display their findings in a structured, interactive format within the browser context.
 
-**Sources**: [src/js/pre.html26-48](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/pre.html#L26-L48)[src/js/frame.html67-73](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/frame.html#L67-L73)
+**Sources**: [src/pre.html26-48](https://github.com/Samsung/jalangi2/blob/28d2181c/src/pre.html#L26-L48)[src/frame.html67-73](https://github.com/Samsung/jalangi2/blob/28d2181c/src/frame.html#L67-L73)

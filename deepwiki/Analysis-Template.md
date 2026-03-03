@@ -1,6 +1,6 @@
 # Analysis Template
 Relevant source files
-- [src/js/runtime/analysisCallbackTemplate.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js)
+- [src/runtime/analysisCallbackTemplate.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js)
 - [tests/test45.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/test45.js)
 
 This page explains the `MyAnalysis` callback template that serves as the foundation for developing custom analyses in Jalangi2. The template defines a standardized interface of callback methods that are invoked during JavaScript execution to enable observation and modification of program behavior.
@@ -9,7 +9,7 @@ For information about combining multiple analyses, see [Chained Analyses](/Samsu
 
 ## Template Overview
 
-The analysis template is implemented as the `MyAnalysis` class in [src/js/runtime/analysisCallbackTemplate.js101-640](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L101-L640) This template provides a complete interface specification with documentation and example implementations for all available callback methods.
+The analysis template is implemented as the `MyAnalysis` class in [src/runtime/analysisCallbackTemplate.js101-640](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L101-L640) This template provides a complete interface specification with documentation and example implementations for all available callback methods.
 
 ```
 Instrumented Code
@@ -43,7 +43,7 @@ Code Execution
 
 The template establishes the contract between custom analyses and the Jalangi2 runtime system. Each callback method corresponds to a specific type of JavaScript operation that can be intercepted during execution.
 
-Sources: [src/js/runtime/analysisCallbackTemplate.js28-100](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L28-L100)
+Sources: [src/runtime/analysisCallbackTemplate.js28-100](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L28-L100)
 
 ## Callback Categories
 
@@ -105,7 +105,7 @@ conditional()
 
 **JavaScript Operation to Callback Mapping**
 
-Sources: [src/js/runtime/analysisCallbackTemplate.js142-625](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L142-L625)
+Sources: [src/runtime/analysisCallbackTemplate.js142-625](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L142-L625)
 
 ## Core Callback Patterns
 
@@ -115,13 +115,13 @@ Many operations use paired callbacks that execute before and after the operation
 
 **Function Invocation Pattern:**
 
-- `invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid)`[src/js/runtime/analysisCallbackTemplate.js142-144](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L142-L144)
-- `invokeFun(iid, f, base, args, result, isConstructor, isMethod, functionIid, functionSid)`[src/js/runtime/analysisCallbackTemplate.js190-192](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L190-L192)
+- `invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid)`[src/runtime/analysisCallbackTemplate.js142-144](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L142-L144)
+- `invokeFun(iid, f, base, args, result, isConstructor, isMethod, functionIid, functionSid)`[src/runtime/analysisCallbackTemplate.js190-192](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L190-L192)
 
 **Property Access Pattern:**
 
-- `getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall)`[src/js/runtime/analysisCallbackTemplate.js288-290](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L288-L290)
-- `getField(iid, base, offset, val, isComputed, isOpAssign, isMethodCall)`[src/js/runtime/analysisCallbackTemplate.js307-309](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L307-L309)
+- `getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall)`[src/runtime/analysisCallbackTemplate.js288-290](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L288-L290)
+- `getField(iid, base, offset, val, isComputed, isOpAssign, isMethodCall)`[src/runtime/analysisCallbackTemplate.js307-309](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L307-L309)
 
 ### Return Object Specifications
 
@@ -155,7 +155,7 @@ Re-execution
 
 **Callback Return Value Effects**
 
-Sources: [src/js/runtime/analysisCallbackTemplate.js36-49](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L36-L49)
+Sources: [src/runtime/analysisCallbackTemplate.js36-49](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L36-L49)
 
 ## Key Callback Methods
 
@@ -163,29 +163,29 @@ Sources: [src/js/runtime/analysisCallbackTemplate.js36-49](https://github.com/Sa
 
 The function-related callbacks provide comprehensive monitoring of JavaScript function execution:
 
-**`invokeFunPre`** - Called before function invocation with the ability to modify or skip the call [src/js/runtime/analysisCallbackTemplate.js142-144](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L142-L144)
+**`invokeFunPre`** - Called before function invocation with the ability to modify or skip the call [src/runtime/analysisCallbackTemplate.js142-144](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L142-L144)
 
-**`functionEnter`** - Called when entering a function body, useful for tracking execution context [src/js/runtime/analysisCallbackTemplate.js424-425](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L424-L425)
+**`functionEnter`** - Called when entering a function body, useful for tracking execution context [src/runtime/analysisCallbackTemplate.js424-425](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L424-L425)
 
-**`functionExit`** - Called when exiting a function, supports backtracking for symbolic execution [src/js/runtime/analysisCallbackTemplate.js442-444](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L442-L444)
+**`functionExit`** - Called when exiting a function, supports backtracking for symbolic execution [src/runtime/analysisCallbackTemplate.js442-444](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L442-L444)
 
 ### Property Access Monitoring
 
 Property access callbacks enable tracking of object property interactions:
 
-**`getFieldPre`/`getField`** - Monitor property reads, including method calls [src/js/runtime/analysisCallbackTemplate.js288-309](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L288-L309)
+**`getFieldPre`/`getField`** - Monitor property reads, including method calls [src/runtime/analysisCallbackTemplate.js288-309](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L288-L309)
 
-**`putFieldPre`/`putField`** - Monitor property writes and assignments [src/js/runtime/analysisCallbackTemplate.js326-346](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L326-L346)
+**`putFieldPre`/`putField`** - Monitor property writes and assignments [src/runtime/analysisCallbackTemplate.js326-346](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L326-L346)
 
 ### Variable Access Monitoring
 
 Variable callbacks track all variable operations in the program:
 
-**`declare`** - Called for variable declarations, parameters, and function definitions [src/js/runtime/analysisCallbackTemplate.js268-270](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L268-L270)
+**`declare`** - Called for variable declarations, parameters, and function definitions [src/runtime/analysisCallbackTemplate.js268-270](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L268-L270)
 
-**`read`** - Called when reading variable values [src/js/runtime/analysisCallbackTemplate.js359-361](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L359-L361)
+**`read`** - Called when reading variable values [src/runtime/analysisCallbackTemplate.js359-361](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L359-L361)
 
-**`write`** - Called when writing to variables [src/js/runtime/analysisCallbackTemplate.js375-377](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L375-L377)
+**`write`** - Called when writing to variables [src/runtime/analysisCallbackTemplate.js375-377](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L375-L377)
 
 ## Source Map Integration
 
@@ -197,7 +197,7 @@ The analysis template provides access to source mapping information through the 
 - `J$.getGlobalIID(iid)` - Creates global instruction identifier
 - `J$.iidToLocation(giid)` - Maps global IID to source location
 
-Key properties available in source map objects [src/js/runtime/analysisCallbackTemplate.js58-78](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L58-L78):
+Key properties available in source map objects [src/runtime/analysisCallbackTemplate.js58-78](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L58-L78):
 
 - `originalCodeFileName` - Original script file path
 - `instrumentedCodeFileName` - Instrumented script file path
@@ -205,19 +205,19 @@ Key properties available in source map objects [src/js/runtime/analysisCallbackT
 - `nBranches` - Number of conditional statements
 - `code` - Original source code (with --inlineSource)
 
-Sources: [src/js/runtime/analysisCallbackTemplate.js58-89](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L58-L89)
+Sources: [src/runtime/analysisCallbackTemplate.js58-89](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L58-L89)
 
 ## Implementation Guidelines
 
 ### Passive vs. Active Analysis
 
-**Passive Analysis:** Return nothing from callbacks to observe execution without modification [src/js/runtime/analysisCallbackTemplate.js36-39](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L36-L39)
+**Passive Analysis:** Return nothing from callbacks to observe execution without modification [src/runtime/analysisCallbackTemplate.js36-39](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L36-L39)
 
-**Active Analysis:** Return objects with appropriate properties to modify execution behavior [src/js/runtime/analysisCallbackTemplate.js39-49](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L39-L49)
+**Active Analysis:** Return objects with appropriate properties to modify execution behavior [src/runtime/analysisCallbackTemplate.js39-49](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L39-L49)
 
 ### Asynchronous Initialization
 
-The `onReady` callback supports asynchronous initialization for Node.js environments [src/js/runtime/analysisCallbackTemplate.js637-639](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L637-L639):
+The `onReady` callback supports asynchronous initialization for Node.js environments [src/runtime/analysisCallbackTemplate.js637-639](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L637-L639):
 
 ```
 this.onReady = function (cb) {
@@ -228,6 +228,6 @@ this.onReady = function (cb) {
 
 ### Sampling Support
 
-The `runInstrumentedFunctionBody` callback enables selective instrumentation when `J$.Config.ENABLE_SAMPLING = true`[src/js/runtime/analysisCallbackTemplate.js623-625](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L623-L625)
+The `runInstrumentedFunctionBody` callback enables selective instrumentation when `J$.Config.ENABLE_SAMPLING = true`[src/runtime/analysisCallbackTemplate.js623-625](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L623-L625)
 
-Sources: [src/js/runtime/analysisCallbackTemplate.js627-640](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L627-L640)
+Sources: [src/runtime/analysisCallbackTemplate.js627-640](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L627-L640)

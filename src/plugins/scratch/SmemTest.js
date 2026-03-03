@@ -4,10 +4,10 @@
  * @file SmemTest —— 演示 SMemory API：打印每次属性访问和变量读写对应的 shadow ID。
  *
  * 运行示例（需 SMemory）：
- *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/plugins/ChainedAnalyses.js \
- *     --analysis src/js/runtime/SMemory.js \
- *     --analysis src/js/plugins/scratch/SmemTest.js \
+ *   node src/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/plugins/ChainedAnalyses.js \
+ *     --analysis src/runtime/SMemory.js \
+ *     --analysis src/plugins/scratch/SmemTest.js \
  *     tests/octane/deltablue.js
  */
 

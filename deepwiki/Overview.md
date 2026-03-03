@@ -6,7 +6,7 @@ Relevant source files
 - [package.json](https://github.com/Samsung/jalangi2/blob/28d2181c/package.json)
 - [scripts/mitmproxywrapper.py](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/mitmproxywrapper.py)
 - [scripts/proxy.py](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/proxy.py)
-- [src/js/plugins/pldi16/TraceAll.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/TraceAll.js)
+- [src/plugins/pldi16/TraceAll.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/TraceAll.js)
 
 ## Purpose and Scope
 
@@ -97,50 +97,50 @@ Web Proxy Server
 scripts/sj.py
 Node.js Utilities
 
-src/js/Config.js
+src/Config.js
 Instrumentation Configuration
 
 Analysis Files
 
-src/js/plugins/ChainedAnalyses.js
+src/plugins/ChainedAnalyses.js
 Analysis Chaining
 
-src/js/plugins/pldi16/TraceAll.js
+src/plugins/pldi16/TraceAll.js
 Execution Tracer
 
-src/js/plugins/AddCoverage.js
+src/plugins/AddCoverage.js
 Code Coverage
 
 Command Files
 
-src/js/commands/jalangi.js
+src/commands/jalangi.js
 Dynamic Analysis CLI
 
-src/js/commands/instrument.js
+src/commands/instrument.js
 Batch Processing CLI
 
-src/js/commands/direct.js
+src/commands/direct.js
 Pre-instrumented Execution
 
-src/js/utils/api.js
+src/utils/api.js
 Programmatic Interface
 
 Core Files
 
-src/js/commands/esnstrument.js
+src/commands/esnstrument.js
 Instrumentation Engine
 
-src/js/runtime/analysis.js
+src/runtime/analysis.js
 Runtime Sandbox
 
-src/js/runtime/SMemory.js
+src/runtime/SMemory.js
 Shadow Memory
 
-src/js/runtime/analysisCallbackTemplate.js
+src/runtime/analysisCallbackTemplate.js
 Analysis Template
 ```
 
-Sources: [package.json37-38](https://github.com/Samsung/jalangi2/blob/28d2181c/package.json#L37-L38)[README.md63-91](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L63-L91)[scripts/proxy.py1](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/proxy.py#L1-L1)[src/js/plugins/pldi16/TraceAll.js1](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/TraceAll.js#L1-L1)
+Sources: [package.json37-38](https://github.com/Samsung/jalangi2/blob/28d2181c/package.json#L37-L38)[README.md63-91](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L63-L91)[scripts/proxy.py1](https://github.com/Samsung/jalangi2/blob/28d2181c/scripts/proxy.py#L1-L1)[src/plugins/pldi16/TraceAll.js1](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/TraceAll.js#L1-L1)
 
 ## Core Components
 
@@ -169,7 +169,7 @@ The runtime system provides the `J$` sandbox environment that executes instrumen
 - `sandbox.smemory` shadow memory system for object tracking
 - Callback dispatch mechanism routing runtime events to analysis methods
 
-Sources: [README.md75-77](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L75-L77)[src/js/plugins/pldi16/TraceAll.js27-302](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/TraceAll.js#L27-L302)
+Sources: [README.md75-77](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L75-L77)[src/plugins/pldi16/TraceAll.js27-302](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/TraceAll.js#L27-L302)
 
 ### Analysis Framework
 
@@ -183,7 +183,7 @@ The analysis framework provides a standardized interface for implementing dynami
 - Control flow: `conditional`, `_return`, `_throw`, `_with`
 - Literals and expressions: `literal`, `binary`, `unary`, `endExpression`
 
-Sources: [README.md75-77](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L75-L77)[src/js/plugins/pldi16/TraceAll.js74-298](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/pldi16/TraceAll.js#L74-L298)
+Sources: [README.md75-77](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L75-L77)[src/plugins/pldi16/TraceAll.js74-298](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/pldi16/TraceAll.js#L74-L298)
 
 ## Usage Modes
 
@@ -196,7 +196,7 @@ ModeCommandUse CaseInstrumentationTargetOn-the-fly`jalangi.js`Development, Testi
 Direct analysis execution with runtime instrumentation using `jalangi.js`. Code is instrumented and analyzed in a single step.
 
 ```
-node src/js/commands/jalangi.js --analysis MyAnalysis.js target.js
+node src/commands/jalangi.js --analysis MyAnalysis.js target.js
 ```
 
 Sources: [README.md59-84](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L59-L84)
@@ -206,8 +206,8 @@ Sources: [README.md59-84](https://github.com/Samsung/jalangi2/blob/28d2181c/READ
 Two-step process where code is first instrumented using `instrument.js` or `esnstrument_cli.js`, then executed with `direct.js`.
 
 ```
-node src/js/commands/esnstrument_cli.js --inlineIID target.js
-node src/js/commands/direct.js --analysis MyAnalysis.js target_jalangi_.js
+node src/commands/esnstrument_cli.js --inlineIID target.js
+node src/commands/direct.js --analysis MyAnalysis.js target_jalangi_.js
 ```
 
 Sources: [README.md86-93](https://github.com/Samsung/jalangi2/blob/28d2181c/README.md#L86-L93)

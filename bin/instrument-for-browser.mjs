@@ -347,7 +347,7 @@ async function main() {
     // 动态导入插桩器
     const doneLoadInstrumenter = log.phase('加载插桩器 esnstrument.js');
     const { init, instrumentCode } = await import(
-        `${ROOT_DIR}/src/js/instrument/esnstrument.js`
+        `${ROOT_DIR}/src/instrument/esnstrument.js`
     );
     doneLoadInstrumenter();
 

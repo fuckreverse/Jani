@@ -5,8 +5,8 @@
  * @author Koushik Sen
  *
  * 运行示例：
- *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/plugins/pldi16/CountObjectsPerAllocationSite.js \
+ *   node src/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/plugins/pldi16/CountObjectsPerAllocationSite.js \
  *     tests/pldi16/CountObjectsPerAllocationSiteTest.js
  */
 

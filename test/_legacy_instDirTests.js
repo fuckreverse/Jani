@@ -20,7 +20,7 @@
 /*global describe */
 /*global it */
 
-var inst = require('./../src/js/commands/instrument');
+var inst = require('./../src/commands/instrument');
 var assert = require('assert');
 var fs = require('fs');
 var path = require('path');

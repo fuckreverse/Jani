@@ -5,8 +5,8 @@
  * @author Koushik Sen
  *
  * 运行示例：
- *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/plugins/pldi16/BackTrackLoop.js \
+ *   node src/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/plugins/pldi16/BackTrackLoop.js \
  *     tests/pldi16/BackTrackLoopTest.js
  */
 

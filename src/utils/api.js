@@ -136,9 +136,9 @@ function instrumentString(code, options) {
 
 
 /**
- * instruments a directory.  see src/js/commands/instrument.js for details.
+ * instruments a directory.  see src/commands/instrument.js for details.
  * creates a temporary output directory if none specified.
- * @param options instrument options.  see src/js/commands/instrument.js
+ * @param options instrument options.  see src/commands/instrument.js
  * @return promise|Q.promise promise that gets resolved at the end of instrumentation
  */
 function instrumentDir(options) {

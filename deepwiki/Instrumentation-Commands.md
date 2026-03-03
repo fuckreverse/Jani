@@ -1,9 +1,9 @@
 # Instrumentation Commands
 Relevant source files
 - [node_test/instDirTests.js](https://github.com/Samsung/jalangi2/blob/28d2181c/node_test/instDirTests.js)
-- [src/js/commands/esnstrument_cli.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/esnstrument_cli.js)
-- [src/js/commands/instrument.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/instrument.js)
-- [src/js/instrument/instUtil.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/instUtil.js)
+- [src/commands/esnstrument_cli.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/esnstrument_cli.js)
+- [src/commands/instrument.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/instrument.js)
+- [src/instrument/instUtil.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/instUtil.js)
 - [tests/rewriteHTML.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/rewriteHTML.js)
 
 This document covers the offline instrumentation commands provided by Jalangi2 for pre-processing JavaScript and HTML files before analysis. These commands transform source code by injecting callback hooks that enable dynamic analysis during execution.
@@ -70,7 +70,7 @@ Inject Jalangi Runtime
 Write Instrumented HTML
 ```
 
-Sources: [src/js/commands/instrument.js68-455](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/instrument.js#L68-L455)[src/js/commands/instrument.js337-363](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/instrument.js#L337-L363)[src/js/commands/instrument.js250-317](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/instrument.js#L250-L317)
+Sources: [src/commands/instrument.js68-455](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/instrument.js#L68-L455)[src/commands/instrument.js337-363](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/instrument.js#L337-L363)[src/commands/instrument.js250-317](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/instrument.js#L250-L317)
 
 ### Core Directory Instrumentation Functions
 
@@ -106,13 +106,13 @@ rewriteHtml()
 readStream.pipe(writeStream)
 ```
 
-Sources: [src/js/commands/instrument.js68-455](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/instrument.js#L68-L455)[src/js/commands/instrument.js369-386](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/instrument.js#L369-L386)[src/js/commands/instrument.js426-440](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/instrument.js#L426-L440)
+Sources: [src/commands/instrument.js68-455](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/instrument.js#L68-L455)[src/commands/instrument.js369-386](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/instrument.js#L369-L386)[src/commands/instrument.js426-440](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/instrument.js#L426-L440)
 
 ### Command Line Interface
 
 The `instrument.js` command supports extensive command-line options for controlling instrumentation behavior:
 OptionPurposeDefault`--exclude`Exclude files containing substringNone`--only_include`Include only specified path prefixesNone`--instrumentInline`Instrument inline HTML scriptsfalse`--analysis`Analysis scripts to injectNone`--copy_runtime`Copy Jalangi runtime to outputfalse`--extra_app_scripts`Additional scripts to injectNone
-Sources: [src/js/commands/instrument.js458-498](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/instrument.js#L458-L498)
+Sources: [src/commands/instrument.js458-498](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/instrument.js#L458-L498)
 
 ## Single File Instrumentation
 
@@ -156,7 +156,7 @@ Inject Runtime Scripts
 Write Instrumented HTML
 ```
 
-Sources: [src/js/commands/esnstrument_cli.js114-255](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/esnstrument_cli.js#L114-L255)[src/js/commands/esnstrument_cli.js190-204](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/esnstrument_cli.js#L190-L204)[src/js/commands/esnstrument_cli.js206-254](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/esnstrument_cli.js#L206-L254)
+Sources: [src/commands/esnstrument_cli.js114-255](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/esnstrument_cli.js#L114-L255)[src/commands/esnstrument_cli.js190-204](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/esnstrument_cli.js#L190-L204)[src/commands/esnstrument_cli.js206-254](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/esnstrument_cli.js#L206-L254)
 
 ### HTML Processing Pipeline
 
@@ -198,7 +198,7 @@ instrumentCode() on inline script
 Write original, instrumented, sourcemap
 ```
 
-Sources: [src/js/commands/esnstrument_cli.js218-244](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/esnstrument_cli.js#L218-L244)[src/js/commands/esnstrument_cli.js78-108](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/esnstrument_cli.js#L78-L108)[src/js/commands/esnstrument_cli.js83-84](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/esnstrument_cli.js#L83-L84)
+Sources: [src/commands/esnstrument_cli.js218-244](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/esnstrument_cli.js#L218-L244)[src/commands/esnstrument_cli.js78-108](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/esnstrument_cli.js#L78-L108)[src/commands/esnstrument_cli.js83-84](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/esnstrument_cli.js#L83-L84)
 
 ## Common Instrumentation Features
 
@@ -208,7 +208,7 @@ Both instrumentation commands share common functionality through the `instUtil` 
 
 The instrumentation commands inject necessary runtime scripts into HTML files using several strategies:
 StrategyDescriptionUse CaseInline ScriptsEmbed script content directlyDefault for offline instrumentationCDN LinksReference scripts from CDN URLWhen `--cdn` option specifiedLocal File ReferencesReference local copies of runtime filesWhen `--copy_runtime` specified
-Sources: [src/js/instrument/instUtil.js47-95](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/instUtil.js#L47-L95)[src/js/instrument/instUtil.js164-174](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/instUtil.js#L164-L174)
+Sources: [src/instrument/instUtil.js47-95](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/instUtil.js#L47-L95)[src/instrument/instUtil.js164-174](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/instUtil.js#L164-L174)
 
 ### AST Handler Integration
 
@@ -226,7 +226,7 @@ Inject J$.ast_info into code
 Final instrumented code
 ```
 
-Sources: [src/js/instrument/instUtil.js134-142](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/instUtil.js#L134-L142)[src/js/commands/instrument.js502-504](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/instrument.js#L502-L504)[src/js/commands/esnstrument_cli.js158-161](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/esnstrument_cli.js#L158-L161)
+Sources: [src/instrument/instUtil.js134-142](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/instUtil.js#L134-L142)[src/commands/instrument.js502-504](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/instrument.js#L502-L504)[src/commands/esnstrument_cli.js158-161](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/esnstrument_cli.js#L158-L161)
 
 ### Source Map Generation
 
@@ -236,4 +236,4 @@ Both commands generate source maps to maintain debugging capabilities after inst
 - Inline scripts: Source maps written to output directory with MD5-based naming
 - Source map options: `--inlineIID` and `--inlineSource` control embedded metadata
 
-Sources: [src/js/commands/instrument.js304](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/instrument.js#L304-L304)[src/js/commands/esnstrument_cli.js202](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/esnstrument_cli.js#L202-L202)[src/js/commands/esnstrument_cli.js104](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/commands/esnstrument_cli.js#L104-L104)
+Sources: [src/commands/instrument.js304](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/instrument.js#L304-L304)[src/commands/esnstrument_cli.js202](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/esnstrument_cli.js#L202-L202)[src/commands/esnstrument_cli.js104](https://github.com/Samsung/jalangi2/blob/28d2181c/src/commands/esnstrument_cli.js#L104-L104)

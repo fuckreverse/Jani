@@ -1,6 +1,6 @@
 # Instrumentation Engine
 Relevant source files
-- [src/js/instrument/esnstrument.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js)
+- [src/instrument/esnstrument.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js)
 - [tests/unit/fun_exp.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/unit/fun_exp.js)
 
 The Instrumentation Engine is the core component of Jalangi2 responsible for transforming JavaScript code by injecting runtime analysis callbacks. This system converts ordinary JavaScript into instrumented code that can be dynamically analyzed during execution. The engine performs Abstract Syntax Tree (AST) transformations to wrap JavaScript constructs with logging calls that trigger analysis hooks.
@@ -43,7 +43,7 @@ Instrumented JavaScript
 Source Map Information
 ```
 
-Sources: [src/js/instrument/esnstrument.js31-35](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L31-L35)[src/js/instrument/esnstrument.js1859-1876](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1859-L1876)[src/js/instrument/esnstrument.js1916-1988](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1916-L1988)
+Sources: [src/instrument/esnstrument.js31-35](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L31-L35)[src/instrument/esnstrument.js1859-1876](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1859-L1876)[src/instrument/esnstrument.js1916-1988](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1916-L1988)
 
 ## Instrumentation Pipeline
 
@@ -83,13 +83,13 @@ iidSourceInfo
 Source Map Object
 ```
 
-Sources: [src/js/instrument/esnstrument.js1859-1876](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1859-L1876)[src/js/instrument/esnstrument.js1940-1949](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1940-L1949)[src/js/instrument/esnstrument.js1972-1978](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1972-L1978)
+Sources: [src/instrument/esnstrument.js1859-1876](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1859-L1876)[src/instrument/esnstrument.js1940-1949](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1940-L1949)[src/instrument/esnstrument.js1972-1978](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1972-L1978)
 
 ### AST Visitor System
 
 The engine uses multiple visitor patterns to traverse and transform the AST:
 VisitorPurposeKey Functions`visitorRRPre`Scope setup`setScope()``visitorRRPost`Core instrumentation`wrapLiteral()`, `instrumentStore()`, `instrumentLoad()``visitorOps`Operations & control flow`wrapBinaryOp()`, `wrapConditional()`
-Sources: [src/js/instrument/esnstrument.js1371-1376](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1371-L1376)[src/js/instrument/esnstrument.js1378-1553](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1378-L1553)[src/js/instrument/esnstrument.js1565-1633](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1565-L1633)
+Sources: [src/instrument/esnstrument.js1371-1376](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1371-L1376)[src/instrument/esnstrument.js1378-1553](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1378-L1553)[src/instrument/esnstrument.js1565-1633](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1565-L1633)
 
 ## Instrumentation Types
 
@@ -111,13 +111,13 @@ J$.M(iid, obj, 'method')(args)
 J$.F(iid, func)(args)
 ```
 
-Sources: [src/js/instrument/esnstrument.js387-398](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L387-L398)[src/js/instrument/esnstrument.js400-409](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L400-L409)[src/js/instrument/esnstrument.js1106-1120](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1106-L1120)
+Sources: [src/instrument/esnstrument.js387-398](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L387-L398)[src/instrument/esnstrument.js400-409](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L400-L409)[src/instrument/esnstrument.js1106-1120](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1106-L1120)
 
 ### Property Access and Assignment
 
 The engine distinguishes between property reads (`J$.G`) and writes (`J$.P`), with special handling for computed properties:
 OperationCallbackWrapper FunctionProperty Get`J$.G``wrapGetField()`Property Put`J$.P``wrapPutField()`Variable Read`J$.R``wrapRead()`Variable Write`J$.W``wrapWrite()`
-Sources: [src/js/instrument/esnstrument.js411-425](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L411-L425)[src/js/instrument/esnstrument.js351-367](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L351-L367)[src/js/instrument/esnstrument.js427-441](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L427-L441)[src/js/instrument/esnstrument.js476-491](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L476-L491)
+Sources: [src/instrument/esnstrument.js411-425](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L411-L425)[src/instrument/esnstrument.js351-367](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L351-L367)[src/instrument/esnstrument.js427-441](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L427-L441)[src/instrument/esnstrument.js476-491](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L476-L491)
 
 ### Literal Values and Expressions
 
@@ -147,7 +147,7 @@ J$.T(iid, [], N_LOG_ARRAY_LIT)
 J$.T(iid, function(){}, N_LOG_FUNCTION_LIT)
 ```
 
-Sources: [src/js/instrument/esnstrument.js599-635](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L599-L635)[src/js/instrument/esnstrument.js1379-1404](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1379-L1404)[src/js/instrument/esnstrument.js56-71](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L56-L71)
+Sources: [src/instrument/esnstrument.js599-635](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L599-L635)[src/instrument/esnstrument.js1379-1404](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1379-L1404)[src/instrument/esnstrument.js56-71](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L56-L71)
 
 ## IID Management and Source Mapping
 
@@ -179,7 +179,7 @@ iidSourceInfo{}
 Line/Column Mapping
 ```
 
-Sources: [src/js/instrument/esnstrument.js195-226](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L195-L226)[src/js/instrument/esnstrument.js229-257](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L229-L257)[src/js/instrument/esnstrument.js1883-1888](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1883-L1888)
+Sources: [src/instrument/esnstrument.js195-226](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L195-L226)[src/instrument/esnstrument.js229-257](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L229-L257)[src/instrument/esnstrument.js1883-1888](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1883-L1888)
 
 ## Scope Management and Variable Tracking
 
@@ -213,7 +213,7 @@ isGlobal(name)
 addVar(name, type)
 ```
 
-Sources: [src/js/instrument/esnstrument.js1637-1713](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1637-L1713)[src/js/instrument/esnstrument.js1721-1796](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1721-L1796)
+Sources: [src/instrument/esnstrument.js1637-1713](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1637-L1713)[src/instrument/esnstrument.js1721-1796](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1721-L1796)
 
 ## Configuration and Selective Instrumentation
 
@@ -221,7 +221,7 @@ The engine supports selective instrumentation through `Config` settings that all
 
 ### Configuration Options
 Config FlagPurposeDefault`INSTR_GETFIELD`Property access instrumentation`true``INSTR_PUTFIELD`Property assignment instrumentation`true``INSTR_READ`Variable read instrumentation`true``INSTR_WRITE`Variable write instrumentation`true``INSTR_LITERAL`Literal value instrumentation`true``INSTR_BINARY`Binary operation instrumentation`true``INSTR_CONDITIONAL`Conditional expression instrumentation`true`
-Sources: [src/js/instrument/esnstrument.js324-331](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L324-L331)[src/js/instrument/esnstrument.js352](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L352-L352)[src/js/instrument/esnstrument.js412](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L412-L412)[src/js/instrument/esnstrument.js428](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L428-L428)[src/js/instrument/esnstrument.js477](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L477-L477)
+Sources: [src/instrument/esnstrument.js324-331](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L324-L331)[src/instrument/esnstrument.js352](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L352-L352)[src/instrument/esnstrument.js412](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L412-L412)[src/instrument/esnstrument.js428](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L428-L428)[src/instrument/esnstrument.js477](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L477-L477)
 
 ## Code Generation and Output
 
@@ -249,4 +249,4 @@ Line/Column Mappings
 nBranches
 ```
 
-Sources: [src/js/instrument/esnstrument.js1972-1978](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1972-L1978)[src/js/instrument/esnstrument.js1958-1971](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1958-L1971)[src/js/instrument/esnstrument.js1881](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/instrument/esnstrument.js#L1881-L1881)
+Sources: [src/instrument/esnstrument.js1972-1978](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1972-L1978)[src/instrument/esnstrument.js1958-1971](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1958-L1971)[src/instrument/esnstrument.js1881](https://github.com/Samsung/jalangi2/blob/28d2181c/src/instrument/esnstrument.js#L1881-L1881)

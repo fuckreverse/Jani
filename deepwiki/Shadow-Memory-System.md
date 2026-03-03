@@ -1,7 +1,7 @@
 # Shadow Memory System
 Relevant source files
-- [src/js/runtime/SMemory.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js)
-- [src/js/plugins/scratch/SmemTest.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/scratch/SmemTest.js)
+- [src/runtime/SMemory.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js)
+- [src/plugins/scratch/SmemTest.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/scratch/SmemTest.js)
 - [tests/finally.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/finally.js)
 - [tests/unit/Smem1.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/unit/Smem1.js)
 - [tests/unit/getter-frame.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/unit/getter-frame.js)
@@ -26,7 +26,7 @@ Each function activation frame (execution context) has an associated shadow fram
 
 Every shadow object and frame receives a unique numeric identifier that serves as a logical address. These IDs enable analyses to create persistent references to objects and frames across the entire execution.
 
-Sources: [src/js/runtime/SMemory.js2-28](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L2-L28)
+Sources: [src/runtime/SMemory.js2-28](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L2-L28)
 
 ## Architecture Overview
 
@@ -66,7 +66,7 @@ getActualObjectOrFunctionFromShadowObjectOrFrame()
 
 The shadow memory system operates by attaching special non-enumerable properties to JavaScript objects and maintaining a separate frame stack that mirrors the execution call stack.
 
-Sources: [src/js/runtime/SMemory.js29-54](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L29-L54)
+Sources: [src/runtime/SMemory.js29-54](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L29-L54)
 
 ## Shadow Object Management
 
@@ -98,7 +98,7 @@ Analysis Metadata
 
 The system uses three special properties to implement the shadow object association:
 PropertyPurposeContent`*J$O*`Shadow Object ReferencePoints to the actual shadow object`*J$A*`Actual Object ReferencePoints back to the original object`*J$F*`Frame ReferenceLinks functions to their defining scope
-Sources: [src/js/runtime/SMemory.js32-35](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L32-L35)[src/js/runtime/SMemory.js205-228](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L205-L228)
+Sources: [src/runtime/SMemory.js32-35](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L32-L35)[src/runtime/SMemory.js205-228](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L205-L228)
 
 ### Property Access Resolution
 
@@ -142,7 +142,7 @@ Has own property?
 Move to proto
 ```
 
-Sources: [src/js/runtime/SMemory.js74-80](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L74-L80)[src/js/runtime/SMemory.js175-203](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L175-L203)
+Sources: [src/runtime/SMemory.js74-80](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L74-L80)[src/runtime/SMemory.js175-203](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L175-L203)
 
 ## Frame Stack Management
 
@@ -182,7 +182,7 @@ Variable Declarations
 
 Frame management operations correspond to execution events:
 OperationTriggerAction`functionEnter`Function callPush new frame, link to defining scope`functionReturn`Function returnPop current frame`scriptEnter`Script executionHandle global/module scopes`scriptReturn`Script completionRestore previous scope
-Sources: [src/js/runtime/SMemory.js257-276](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L257-L276)[src/js/runtime/SMemory.js280-305](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L280-L305)
+Sources: [src/runtime/SMemory.js257-276](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L257-L276)[src/runtime/SMemory.js280-305](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L280-L305)
 
 ## Core API Methods
 
@@ -216,7 +216,7 @@ getShadowFrame(name)
 getFrame(name)
 ```
 
-Sources: [src/js/runtime/SMemory.js74-125](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L74-L125)[src/js/runtime/SMemory.js135-171](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L135-L171)
+Sources: [src/runtime/SMemory.js74-125](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L74-L125)[src/runtime/SMemory.js135-171](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L135-L171)
 
 ### Variable Resolution Algorithm
 
@@ -246,7 +246,7 @@ tmp === null?
 Return frameStack[0] (global)
 ```
 
-Sources: [src/js/runtime/SMemory.js135-145](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L135-L145)
+Sources: [src/runtime/SMemory.js135-145](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L135-L145)
 
 ## Integration with Analysis Framework
 
@@ -284,7 +284,7 @@ scriptEnter()
 scriptReturn()
 ```
 
-Sources: [src/js/runtime/SMemory.js311-353](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L311-L353)
+Sources: [src/runtime/SMemory.js311-353](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L311-L353)
 
 ### Usage in Custom Analyses
 
@@ -306,7 +306,7 @@ var frameID = sandbox.smemory.getIDFromShadowObjectOrFrame(shadowFrame);
 console.log("READ " + frameID + "." + name);
 ```
 
-Sources: [src/js/plugins/scratch/SmemTest.js20-40](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/scratch/SmemTest.js#L20-L40)
+Sources: [src/plugins/scratch/SmemTest.js20-40](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/scratch/SmemTest.js#L20-L40)
 
 ## Implementation Details
 
@@ -334,4 +334,4 @@ if (processEnv) {
 
 The shadow object creation process includes error handling for DOM objects and other restricted objects where property attachment may fail.
 
-Sources: [src/js/runtime/SMemory.js36-53](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L36-L53)[src/js/runtime/SMemory.js218-226](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/SMemory.js#L218-L226)
+Sources: [src/runtime/SMemory.js36-53](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L36-L53)[src/runtime/SMemory.js218-226](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/SMemory.js#L218-L226)

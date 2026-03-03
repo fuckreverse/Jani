@@ -1,6 +1,6 @@
 # Runtime System
 Relevant source files
-- [src/js/runtime/analysis.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js)
+- [src/runtime/analysis.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js)
 - [tests/test47.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/test47.js)
 
 The Runtime System provides the execution environment for instrumented JavaScript code in Jalangi2. It implements the J$ sandbox that receives and processes callback invocations from instrumented code, managing execution context, analysis integration, and runtime state.
@@ -71,13 +71,13 @@ J$.Th (Throw)
 J$.Ex (Exception)
 ```
 
-Sources: [src/js/runtime/analysis.js25-27](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L25-L27)[src/js/runtime/analysis.js775-810](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L775-L810)
+Sources: [src/runtime/analysis.js25-27](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L25-L27)[src/runtime/analysis.js775-810](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L775-L810)
 
 ## Runtime Callback Functions
 
 The instrumented code invokes specific J$ callback functions for different JavaScript operations. These callbacks serve as interception points where analyses can observe and modify program behavior.
 CallbackPurposeKey ParametersAnalysis Hooks`J$.F`Function call`iid`, `f`, `flags``invokeFunPre`, `invokeFun``J$.M`Method call`iid`, `base`, `offset`, `flags``invokeFunPre`, `invokeFun``J$.G`Property read`iid`, `base`, `offset`, `flags``getFieldPre`, `getField``J$.P`Property write`iid`, `base`, `offset`, `val`, `flags``putFieldPre`, `putField``J$.R`Variable read`iid`, `name`, `val`, `flags``read``J$.W`Variable write`iid`, `name`, `val`, `lhs`, `flags``write``J$.B`Binary operation`iid`, `op`, `left`, `right`, `flags``binaryPre`, `binary``J$.U`Unary operation`iid`, `op`, `left``unaryPre`, `unary``J$.T`Literal creation`iid`, `val`, `type`, `hasGetterSetter``literal`
-Sources: [src/js/runtime/analysis.js229-244](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L229-L244)[src/js/runtime/analysis.js314-367](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L314-L367)[src/js/runtime/analysis.js372-401](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L372-L401)[src/js/runtime/analysis.js534-630](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L534-L630)[src/js/runtime/analysis.js634-679](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L634-L679)[src/js/runtime/analysis.js253-277](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L253-L277)
+Sources: [src/runtime/analysis.js229-244](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L229-L244)[src/runtime/analysis.js314-367](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L314-L367)[src/runtime/analysis.js372-401](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L372-L401)[src/runtime/analysis.js534-630](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L534-L630)[src/runtime/analysis.js634-679](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L634-L679)[src/runtime/analysis.js253-277](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L253-L277)
 
 ## Execution Context Management
 
@@ -87,7 +87,7 @@ The runtime system maintains execution context through function entry/exit track
 
 ```
 
-Sources: [src/js/runtime/analysis.js455-463](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L455-L463)[src/js/runtime/analysis.js466-490](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L466-L490)[src/js/runtime/analysis.js493-498](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L493-L498)[src/js/runtime/analysis.js502-518](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L502-L518)[src/js/runtime/analysis.js80-91](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L80-L91)[src/js/runtime/analysis.js42-48](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L42-L48)
+Sources: [src/runtime/analysis.js455-463](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L455-L463)[src/runtime/analysis.js466-490](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L466-L490)[src/runtime/analysis.js493-498](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L493-L498)[src/runtime/analysis.js502-518](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L502-L518)[src/runtime/analysis.js80-91](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L80-L91)[src/runtime/analysis.js42-48](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L42-L48)
 
 ## Analysis Integration Pattern
 
@@ -129,7 +129,7 @@ Return Final Result
 Update lastComputedValue
 ```
 
-Sources: [src/js/runtime/analysis.js320-327](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L320-L327)[src/js/runtime/analysis.js329-338](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L329-L338)[src/js/runtime/analysis.js347-355](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L347-L355)[src/js/runtime/analysis.js357-366](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L357-L366)
+Sources: [src/runtime/analysis.js320-327](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L320-L327)[src/runtime/analysis.js329-338](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L329-L338)[src/runtime/analysis.js347-355](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L347-L355)[src/runtime/analysis.js357-366](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L357-L366)
 
 ## Exception and Control Flow Handling
 
@@ -139,7 +139,7 @@ The runtime system carefully preserves JavaScript's exception handling and contr
 
 ```
 
-Sources: [src/js/runtime/analysis.js415-417](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L415-L417)[src/js/runtime/analysis.js420-428](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L420-L428)[src/js/runtime/analysis.js432-442](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L432-L442)[src/js/runtime/analysis.js448-452](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L448-L452)[src/js/runtime/analysis.js696-698](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L696-L698)[src/js/runtime/analysis.js702-719](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L702-L719)[src/js/runtime/analysis.js482-488](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L482-L488)
+Sources: [src/runtime/analysis.js415-417](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L415-L417)[src/runtime/analysis.js420-428](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L420-L428)[src/runtime/analysis.js432-442](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L432-L442)[src/runtime/analysis.js448-452](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L448-L452)[src/runtime/analysis.js696-698](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L696-L698)[src/runtime/analysis.js702-719](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L702-L719)[src/runtime/analysis.js482-488](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L482-L488)
 
 ## Special Function Handling
 
@@ -178,10 +178,10 @@ EVAL_ORG(instrumentedCode)
 Create Instrumented Function
 ```
 
-Sources: [src/js/runtime/analysis.js166-168](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L166-L168)[src/js/runtime/analysis.js170-183](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L170-L183)[src/js/runtime/analysis.js189-192](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L189-L192)[src/js/runtime/analysis.js48](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L48-L48)[tests/test47.js3-10](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/test47.js#L3-L10)
+Sources: [src/runtime/analysis.js166-168](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L166-L168)[src/runtime/analysis.js170-183](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L170-L183)[src/runtime/analysis.js189-192](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L189-L192)[src/runtime/analysis.js48](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L48-L48)[tests/test47.js3-10](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/test47.js#L3-L10)
 
 ## Instrumentation ID and Source Map Management
 
 The runtime system maintains instrumentation identifiers (`iid`) and source map information (`sid`) to track code locations and enable precise analysis reporting.
 VariablePurposeScope`iid`Instrumentation ID - unique identifier for each instrumented locationPer callback invocation`sid`Source ID - identifies the source file/script being executedGlobal, managed via stack`smap`Source map - maps source IDs to their corresponding `iids` arraysGlobal`sidStack`Stack of source IDs for nested script executionGlobal`sidCounter`Counter for generating unique source IDsGlobal
-Sources: [src/js/runtime/analysis.js80-91](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L80-L91)[src/js/runtime/analysis.js82-87](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L82-L87)[src/js/runtime/analysis.js89-91](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L89-L91)[src/js/runtime/analysis.js50-51](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysis.js#L50-L51)
+Sources: [src/runtime/analysis.js80-91](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L80-L91)[src/runtime/analysis.js82-87](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L82-L87)[src/runtime/analysis.js89-91](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L89-L91)[src/runtime/analysis.js50-51](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysis.js#L50-L51)

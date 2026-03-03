@@ -18,7 +18,7 @@
  * @file StatCollector —— 轻量级性能统计（计时器、计数器、累加器）。
  *
  * 可在 Node.js 中直接运行（打印已保存的统计数据）：
- *   node src/js/utils/StatCollector.js
+ *   node src/utils/StatCollector.js
  */
 
 import { readFileSync, writeFileSync } from 'fs';

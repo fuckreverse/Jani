@@ -20,7 +20,7 @@
  *   - 插桩幂等性（同文件多次插桩结果一致）
  */
 
-import { init, instrumentCode } from '../src/js/instrument/esnstrument.js';
+import { init, instrumentCode } from '../src/instrument/esnstrument.js';
 
 // ─── 测试框架（极简，无外部依赖）────────────────────────────────────────────────
 
@@ -713,7 +713,7 @@ test('Guard: wrapWrite 传入 name.value=undefined 的 Literal 应抛出错误',
     // 模拟 BUG-5 修复前的情形：解构声明的 def.id.name 是 undefined，
     // 被包成 createLiteralAst(undefined) 后传入 wrapWrite
     // 现在 wrapWrite 内部有 guard，应提前抛出诊断性错误
-    import('../src/js/instrument/wrappers.js').then(W => {
+    import('../src/instrument/wrappers.js').then(W => {
         W.init(ALL_CONFIG);
     }).catch(() => {}); // 模块已被缓存，仅验证 guard 的存在性
 

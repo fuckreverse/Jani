@@ -4,11 +4,11 @@
  * @file LogData —— 记录对象字段访问、变量读写和函数调用，输出结构化 trace（配合 TraceWriter）。
  *
  * 需要配合 SMemory 和 TraceWriter 使用：
- *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/plugins/ChainedAnalyses.js \
- *     --analysis src/js/runtime/SMemory.js \
- *     --analysis src/js/plugins/datatraces/TraceWriter.js \
- *     --analysis src/js/plugins/datatraces/LogData.js \
+ *   node src/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/plugins/ChainedAnalyses.js \
+ *     --analysis src/runtime/SMemory.js \
+ *     --analysis src/plugins/datatraces/TraceWriter.js \
+ *     --analysis src/plugins/datatraces/LogData.js \
  *     tests/octane/deltablue.js
  */
 

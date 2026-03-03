@@ -115,7 +115,7 @@ async function main() {
 
     // 加载插桩器
     const { init, instrumentCode } = await import(
-        `${ROOT_DIR}/src/js/instrument/esnstrument.js`
+        `${ROOT_DIR}/src/instrument/esnstrument.js`
     );
     init({
         ENABLE_SAMPLING:           false,

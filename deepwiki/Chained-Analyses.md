@@ -1,7 +1,7 @@
 # Chained Analyses
 Relevant source files
-- [src/js/plugins/ChainedAnalyses.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalyses.js)
-- [src/js/plugins/ChainedAnalysesNoCheck.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalysesNoCheck.js)
+- [src/plugins/ChainedAnalyses.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalyses.js)
+- [src/plugins/ChainedAnalysesNoCheck.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalysesNoCheck.js)
 
 The Chained Analyses system enables combining multiple dynamic analyses to run simultaneously on the same instrumented JavaScript code. This system provides a transparent mechanism for composing analyses, where each analysis callback is executed in sequence when the corresponding runtime event occurs.
 
@@ -52,7 +52,7 @@ putField()
 ...other callbacks
 ```
 
-Sources: [src/js/plugins/ChainedAnalyses.js21-103](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalyses.js#L21-L103)[src/js/plugins/ChainedAnalysesNoCheck.js21-89](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalysesNoCheck.js#L21-L89)
+Sources: [src/plugins/ChainedAnalyses.js21-103](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalyses.js#L21-L103)[src/plugins/ChainedAnalysesNoCheck.js21-89](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalysesNoCheck.js#L21-L89)
 
 ## Core Components
 
@@ -114,7 +114,7 @@ scriptExit
 endExecution
 ```
 
-Sources: [src/js/plugins/ChainedAnalyses.js34-43](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalyses.js#L34-L43)[src/js/plugins/ChainedAnalysesNoCheck.js24-33](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalysesNoCheck.js#L24-L33)
+Sources: [src/plugins/ChainedAnalyses.js34-43](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalyses.js#L34-L43)[src/plugins/ChainedAnalysesNoCheck.js24-33](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalysesNoCheck.js#L24-L33)
 
 ## Analysis Registration Process
 
@@ -162,7 +162,7 @@ The registration process involves:
 4. **Function Storage**: Store the analysis function and context in arrays
 5. **Dynamic Execution**: Execute all registered functions when callback is invoked
 
-Sources: [src/js/plugins/ChainedAnalyses.js47-81](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalyses.js#L47-L81)[src/js/plugins/ChainedAnalysesNoCheck.js37-67](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalysesNoCheck.js#L37-L67)
+Sources: [src/plugins/ChainedAnalyses.js47-81](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalyses.js#L47-L81)[src/plugins/ChainedAnalysesNoCheck.js37-67](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalysesNoCheck.js#L37-L67)
 
 ## Callback Execution Flow
 
@@ -199,7 +199,7 @@ The execution process:
 3. **Return Value**: Return the result from the last analysis (if any)
 4. **Exception Handling**: Catch and report any analysis errors
 
-Sources: [src/js/plugins/ChainedAnalyses.js55-71](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalyses.js#L55-L71)[src/js/plugins/ChainedAnalysesNoCheck.js45-57](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalysesNoCheck.js#L45-L57)
+Sources: [src/plugins/ChainedAnalyses.js55-71](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalyses.js#L55-L71)[src/plugins/ChainedAnalysesNoCheck.js45-57](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalysesNoCheck.js#L45-L57)
 
 ## System Variants
 
@@ -221,7 +221,7 @@ The optimized variant removes error handling for better performance:
 - **Same Interface**: Identical API but without error recovery
 
 FeatureChainedAnalysesChainedAnalysesNoCheckException Handling✓✗Error Reporting✓✗PerformanceStandardOptimizedBrowser Integration✓✓
-Sources: [src/js/plugins/ChainedAnalyses.js56-70](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalyses.js#L56-L70)[src/js/plugins/ChainedAnalysesNoCheck.js46-56](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalysesNoCheck.js#L46-L56)
+Sources: [src/plugins/ChainedAnalyses.js56-70](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalyses.js#L56-L70)[src/plugins/ChainedAnalysesNoCheck.js46-56](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalysesNoCheck.js#L46-L56)
 
 ## Integration with J$ Sandbox
 
@@ -262,7 +262,7 @@ This allows natural syntax like:
 sandbox.analysis = new MyAnalysis();
 ```
 
-Sources: [src/js/plugins/ChainedAnalyses.js84-92](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalyses.js#L84-L92)[src/js/plugins/ChainedAnalysesNoCheck.js70-78](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalysesNoCheck.js#L70-L78)
+Sources: [src/plugins/ChainedAnalyses.js84-92](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalyses.js#L84-L92)[src/plugins/ChainedAnalysesNoCheck.js70-78](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalysesNoCheck.js#L70-L78)
 
 ## Browser Features
 
@@ -274,4 +274,4 @@ Both variants include browser-specific functionality:
 
 This feature enables interactive control of analysis execution in web applications.
 
-Sources: [src/js/plugins/ChainedAnalyses.js94-101](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalyses.js#L94-L101)[src/js/plugins/ChainedAnalysesNoCheck.js80-87](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/plugins/ChainedAnalysesNoCheck.js#L80-L87)
+Sources: [src/plugins/ChainedAnalyses.js94-101](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalyses.js#L94-L101)[src/plugins/ChainedAnalysesNoCheck.js80-87](https://github.com/Samsung/jalangi2/blob/28d2181c/src/plugins/ChainedAnalysesNoCheck.js#L80-L87)

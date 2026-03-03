@@ -30,6 +30,6 @@ function foo(x, y) {
     }
 }
 
-require('../../src/js/analyses/concolic/jtest');
+require('../../src/analyses/concolic/jtest');
 test(foo, 0, 0);
 

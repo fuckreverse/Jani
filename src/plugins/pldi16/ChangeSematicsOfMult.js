@@ -5,8 +5,8 @@
  * @author Koushik Sen
  *
  * 运行示例：
- *   node src/js/commands/jalangi.js --inlineIID --inlineSource \
- *     --analysis src/js/plugins/pldi16/ChangeSematicsOfMult.js \
+ *   node src/commands/jalangi.js --inlineIID --inlineSource \
+ *     --analysis src/plugins/pldi16/ChangeSematicsOfMult.js \
  *     tests/pldi16/ChangeSematicsOfMultTest.js
  */
 

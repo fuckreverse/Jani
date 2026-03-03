@@ -1,8 +1,8 @@
 # Analysis Development
 Relevant source files
 - [node_test/apiTests.js](https://github.com/Samsung/jalangi2/blob/28d2181c/node_test/apiTests.js)
-- [src/js/runtime/analysisCallbackTemplate.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js)
-- [src/js/utils/api.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/utils/api.js)
+- [src/runtime/analysisCallbackTemplate.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js)
+- [src/utils/api.js](https://github.com/Samsung/jalangi2/blob/28d2181c/src/utils/api.js)
 - [tests/test45.js](https://github.com/Samsung/jalangi2/blob/28d2181c/tests/test45.js)
 
 This document covers the framework and processes for developing custom dynamic analyses using Jalangi2's callback-based analysis system. It explains the overall architecture, development workflow, and key components that analysis developers need to understand.
@@ -68,7 +68,7 @@ SMemory API
 J$ Utilities
 ```
 
-Sources: [src/js/runtime/analysisCallbackTemplate.js1-647](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L1-L647)[src/js/utils/api.js1-251](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/utils/api.js#L1-L251)[node_test/apiTests.js1-67](https://github.com/Samsung/jalangi2/blob/28d2181c/node_test/apiTests.js#L1-L67)
+Sources: [src/runtime/analysisCallbackTemplate.js1-647](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L1-L647)[src/utils/api.js1-251](https://github.com/Samsung/jalangi2/blob/28d2181c/src/utils/api.js#L1-L251)[node_test/apiTests.js1-67](https://github.com/Samsung/jalangi2/blob/28d2181c/node_test/apiTests.js#L1-L67)
 
 ## Analysis Runtime Integration
 
@@ -127,7 +127,7 @@ Source Maps
 J$.smap
 ```
 
-Sources: [src/js/runtime/analysisCallbackTemplate.js28-643](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L28-L643)
+Sources: [src/runtime/analysisCallbackTemplate.js28-643](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L28-L643)
 
 ## Core Development Components
 
@@ -135,13 +135,13 @@ Sources: [src/js/runtime/analysisCallbackTemplate.js28-643](https://github.com/S
 
 The `MyAnalysis` class in `analysisCallbackTemplate.js` serves as the foundation for all custom analyses. It defines the complete callback interface with detailed documentation for each method:
 Callback TypeMethodsPurposeFunction Calls`invokeFunPre`, `invokeFun`Function invocation trackingProperty Access`getFieldPre`, `getField`, `putFieldPre`, `putField`Object property operationsVariable Access`read`, `write`Variable read/write operationsLiterals`literal`Literal value creationOperations`binaryPre`, `binary`, `unaryPre`, `unary`Binary and unary operationsControl Flow`conditional`Branching decisionsExecution Flow`functionEnter`, `functionExit`, `scriptEnter`, `scriptExit`Execution boundaries
-Sources: [src/js/runtime/analysisCallbackTemplate.js101-640](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L101-L640)
+Sources: [src/runtime/analysisCallbackTemplate.js101-640](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L101-L640)
 
 ### Programmatic API
 
 The `api.js` module provides programmatic interfaces for instrumenting code and running analyses from Node.js applications:
 FunctionPurposeReturn Type`instrumentString`Instrument JavaScript code stringsObject with `code`, `instAST`, `sourceMapObject``instrumentDir`Instrument entire directoriesPromise resolving to output directory`analyze`Run analysis on instrumented codePromise with execution results
-Sources: [src/js/utils/api.js105-251](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/utils/api.js#L105-L251)
+Sources: [src/utils/api.js105-251](https://github.com/Samsung/jalangi2/blob/28d2181c/src/utils/api.js#L105-L251)
 
 ### Runtime Integration Points
 
@@ -152,7 +152,7 @@ Custom analyses access runtime information through several key interfaces:
 - **Utilities**: `sandbox.Utils` for common analysis operations
 - **Global State**: `J$.sid` for current script ID, `J$.getGlobalIID()` for unique instruction identification
 
-Sources: [src/js/runtime/analysisCallbackTemplate.js58-90](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/runtime/analysisCallbackTemplate.js#L58-L90)
+Sources: [src/runtime/analysisCallbackTemplate.js58-90](https://github.com/Samsung/jalangi2/blob/28d2181c/src/runtime/analysisCallbackTemplate.js#L58-L90)
 
 ## Development Process
 
@@ -182,4 +182,4 @@ Analyses can be executed through multiple interfaces:
 - **Programmatic**: Through the `api.js` interface from Node.js
 - **Web-based**: Via proxy instrumentation for browser analysis
 
-Sources: [src/js/utils/api.js224-246](https://github.com/Samsung/jalangi2/blob/28d2181c/src/js/utils/api.js#L224-L246)[node_test/apiTests.js25-66](https://github.com/Samsung/jalangi2/blob/28d2181c/node_test/apiTests.js#L25-L66)
+Sources: [src/utils/api.js224-246](https://github.com/Samsung/jalangi2/blob/28d2181c/src/utils/api.js#L224-L246)[node_test/apiTests.js25-66](https://github.com/Samsung/jalangi2/blob/28d2181c/node_test/apiTests.js#L25-L66)

@@ -8,9 +8,9 @@
  *  - 端到端：三层组合（AnalysisHost + SMemoryPlugin + LogAllAnalysis）
  */
 
-import { AnalysisHost, HOOKS }          from '../src/js/runtime/AnalysisHost.js';
-import { SMemory, SMemoryPlugin }        from '../src/js/runtime/SMemory.js';
-import { LogAllAnalysis }               from '../src/js/plugins/tutorial/LogAll.js';
+import { AnalysisHost, HOOKS }          from '../src/runtime/AnalysisHost.js';
+import { SMemory, SMemoryPlugin }        from '../src/runtime/SMemory.js';
+import { LogAllAnalysis }               from '../src/plugins/tutorial/LogAll.js';
 
 // ─── 极简测试框架 ─────────────────────────────────────────────────────────────
 

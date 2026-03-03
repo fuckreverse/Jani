@@ -32,7 +32,7 @@ import { parseArgs }         from 'node:util';
 import {
     deserializeBatchFromBinary,
     serializeBatchToNDJSON,
-} from '../../src/js/runtime/logging/EventSerializer.js';
+} from '../../src/runtime/logging/EventSerializer.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
