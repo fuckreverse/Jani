@@ -225,7 +225,7 @@ if (typeof J$ === 'undefined') {
     function replaceInStatement(code) {
         var cached = _templateCache[code];
         if (!cached) {
-            var parsed = acorn.parse(code, {ecmaVersion: 2020});
+            var parsed = acorn.parse(code, {ecmaVersion: 'latest'});
             // 用 JSON 序列化去掉 loc/start/end，缓存纯结构
             cached = JSON.parse(JSON.stringify(parsed.body));
             _templateCache[code] = cached;

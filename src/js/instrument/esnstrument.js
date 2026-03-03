@@ -20,7 +20,7 @@
 // JALANGI DO NOT INSTRUMENT
 
 /*jslint browser: true */
-/*global astUtil acorn esotope J$ */
+/*global astUtil acorn astring J$ */
 
 /**
  * Jalangi2 插桩入口模块（浏览器版）。
@@ -39,7 +39,7 @@
  *  - J$.Config
  *  - J$.Constants
  *  - acorn          （全局，由页面或构建工具注入）
- *  - esotope        （全局，由页面或构建工具注入）
+ *  - astring        （全局，由页面或构建工具注入；替代旧版 esotope，支持 ES2020+）
  */
 
 if (typeof J$ === 'undefined') {
@@ -249,7 +249,11 @@ if (typeof J$ === 'undefined') {
         'FunctionExpression': function (node, context) {
             node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
             var ret1;
-            if (context === astUtil.CONTEXT.GETTER || context === astUtil.CONTEXT.SETTER) {
+            if (context === astUtil.CONTEXT.GETTER
+                    || context === astUtil.CONTEXT.SETTER
+                    || context === astUtil.CONTEXT.METHOD) {
+                // getter/setter/class 方法：FunctionExpression 是方法定义的一部分，
+                // 不作为独立字面量包装（astring 要求 MethodDefinition.value 是原始 FunctionExpression）
                 ret1 = node;
             } else {
                 ret1 = W.wrapLiteral(node, node, N_LOG_FUNCTION_LIT);
@@ -307,7 +311,10 @@ if (typeof J$ === 'undefined') {
         },
 
         'CatchClause': function (node) {
-            W.wrapCatchClause(node, node.body.body, node.param.name);
+            // ES2019+: optional catch binding 时 node.param 为 null，跳过初始化包装
+            if (node.param && node.param.type === 'Identifier') {
+                W.wrapCatchClause(node, node.body.body, node.param.name);
+            }
             W.popScope();
             return node;
         },
@@ -469,10 +476,14 @@ if (typeof J$ === 'undefined') {
 
     // ─── AST 转换主流程 ────────────────────────────────────────────────────────
 
+    // 当前插桩使用的 sourceType（由 instrumentCode options 设置）
+    var _currentSourceType = 'script';
+
     function transformString(code, visitorsPost, visitorsPre) {
-        // ecmaVersion 2020（ES2020）：包含可选链(?.)、空值合并(??)、BigInt 等。
-        // 当升级到 acorn 8+ 时，可改为 'latest' 以自动跟进最新 ES 标准。
-        var newAst = acorn.parse(code, {locations: true, ecmaVersion: 2020});
+        // 使用 'latest' 让 acorn 始终以当前版本支持的最高 ES 标准解析。
+        // sourceType 由调用方通过 options.sourceType 传入（'script' 或 'module'）；
+        // module 模式允许顶层 await、import/export 等语法（需 acorn 8+）。
+        var newAst = acorn.parse(code, {locations: true, ecmaVersion: 'latest', sourceType: _currentSourceType});
         sandbox.addScopes(newAst);
         var len = visitorsPost.length;
         for (var i = 0; i < len; i++) {
@@ -516,6 +527,9 @@ if (typeof J$ === 'undefined') {
         var inlineSource  = options.inlineSource;
         var url           = options.url;
 
+        // sourceType: 'script'（默认）或 'module'（支持顶层 await / import / export）
+        _currentSourceType = options.sourceType || 'script';
+
         // 初始化 IID 计数器及文件名
         IID.initialize(
             isEval,
@@ -552,7 +566,8 @@ if (typeof J$ === 'undefined') {
                 var hoistedFcts = [];
                 newAst = hoistFunctionDeclaration(newAst, hoistedFcts);
 
-                var newCode = esotope.generate(newAst, {comment: true, parse: acorn.parse});
+                // astring.generate 支持 ES2020+，替代旧版 esotope（仅支持 ES5/ES6）
+                var newCode = astring.generate(newAst);
                 code = newCode + '\n' + noInstr + '\n';
             } catch (ex) {
                 console.log('Failed to instrument', code);
@@ -627,8 +642,8 @@ if (typeof J$ === 'undefined') {
 
 // exports J$.instrumentCode
 // exports J$.instrumentEvalCode
-// depends on acorn          (global)
-// depends on esotope        (global)
+// depends on acorn          (global, >= 8.0)
+// depends on astring        (global, replaces esotope; supports ES2020+)
 // depends on J$.Constants
 // depends on J$.Config
 // depends on J$.astUtil

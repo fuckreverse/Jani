@@ -163,6 +163,77 @@ if (typeof J$ === 'undefined') {
         var fromName = 'arguments';
         var toName   = JALANGI_VAR + '_arguments';
 
+        /**
+         * 从一个可能是任意模式（pattern）的参数节点中收集所有绑定的标识符名称。
+         *
+         * 支持 ES6+ 参数格式：
+         *  - Identifier              → `x`
+         *  - RestElement             → `...rest`
+         *  - AssignmentPattern       → `x = 10`（默认值）
+         *  - ObjectPattern           → `{a, b}`（对象解构）
+         *  - ArrayPattern            → `[x, y]`（数组解构）
+         *
+         * @param {object}   param     - 参数的 AST 节点
+         * @param {string[]} collected - 收集标识符名称的输出数组
+         */
+        function collectParamNames(param, collected) {
+            if (!param) return;
+            switch (param.type) {
+                case 'Identifier':
+                    collected.push(param.name);
+                    break;
+                case 'RestElement':
+                    collectParamNames(param.argument, collected);
+                    break;
+                case 'AssignmentPattern':
+                    collectParamNames(param.left, collected);
+                    break;
+                case 'ObjectPattern':
+                    for (var i = 0; i < param.properties.length; i++) {
+                        var prop = param.properties[i];
+                        // RestElement in object: { ...rest }
+                        if (prop.type === 'RestElement') {
+                            collectParamNames(prop, collected);
+                        } else {
+                            collectParamNames(prop.value, collected);
+                        }
+                    }
+                    break;
+                case 'ArrayPattern':
+                    for (var j = 0; j < param.elements.length; j++) {
+                        if (param.elements[j]) {
+                            collectParamNames(param.elements[j], collected);
+                        }
+                    }
+                    break;
+                default:
+                    // 其他节点类型（不应出现），安全忽略
+                    break;
+            }
+        }
+
+        /**
+         * 处理一个函数参数节点：
+         *  1. 如果是简单 Identifier 且名为 `arguments`，重命名为 `J$_arguments`
+         *  2. 将其绑定的所有名称注册到当前作用域
+         */
+        function registerParam(param) {
+            // 仅顶层 Identifier 才需要做 arguments 重命名
+            if (param.type === 'Identifier') {
+                if (param.name === fromName) {
+                    param.name = toName;
+                }
+                currentScope.addVar(param.name, 'arg');
+            } else {
+                // 复杂模式：收集所有绑定名称，不做重命名（arguments 不能出现在解构里）
+                var names = [];
+                collectParamNames(param, names);
+                for (var k = 0; k < names.length; k++) {
+                    currentScope.addVar(names[k], 'arg');
+                }
+            }
+        }
+
         function handleFun(node) {
             var oldScope = currentScope;
             currentScope = new Scope(currentScope, false);
@@ -170,34 +241,49 @@ if (typeof J$ === 'undefined') {
 
             if (node.type === 'FunctionDeclaration') {
                 oldScope.addVar(node.id.name, 'defun', node.loc, node);
-                MAP(node.params, function (param) {
-                    if (param.name === fromName) {
-                        param.name = toName;
-                    }
-                    currentScope.addVar(param.name, 'arg');
-                });
+                MAP(node.params, registerParam);
             } else if (node.type === 'FunctionExpression') {
                 if (node.id !== null) {
                     currentScope.addVar(node.id.name, 'lambda');
                 }
-                MAP(node.params, function (param) {
-                    if (param.name === fromName) {
-                        param.name = toName;
-                    }
-                    currentScope.addVar(param.name, 'arg');
-                });
+                MAP(node.params, registerParam);
+            } else if (node.type === 'ArrowFunctionExpression') {
+                // ES6+: 箭头函数没有自己的 id，但有 params
+                MAP(node.params, registerParam);
             }
             // Program 节点：currentScope 即顶层全局作用域，无需注册 id
         }
 
         function handleVar(node) {
-            currentScope.addVar(node.id.name, 'var');
+            // node.id 可能是解构模式（ObjectPattern / ArrayPattern）
+            if (node.id && node.id.type === 'Identifier') {
+                currentScope.addVar(node.id.name, 'var');
+            } else if (node.id) {
+                // 解构声明：收集所有绑定名称
+                var varNames = [];
+                collectParamNames(node.id, varNames);
+                for (var vi = 0; vi < varNames.length; vi++) {
+                    currentScope.addVar(varNames[vi], 'var');
+                }
+            }
         }
 
         function handleCatch(node) {
             currentScope = new Scope(currentScope, true);
             node.scope = currentScope;
-            currentScope.addVar(node.param.name, 'catch');
+            // ES2019+: optional catch binding（catch 无参数）时 param 为 null
+            if (node.param) {
+                if (node.param.type === 'Identifier') {
+                    currentScope.addVar(node.param.name, 'catch');
+                } else {
+                    // 解构 catch 参数
+                    var catchNames = [];
+                    collectParamNames(node.param, catchNames);
+                    for (var ci = 0; ci < catchNames.length; ci++) {
+                        currentScope.addVar(catchNames[ci], 'catch');
+                    }
+                }
+            }
         }
 
         function popScope(node) {
@@ -206,18 +292,20 @@ if (typeof J$ === 'undefined') {
         }
 
         var visitorPre = {
-            'Program':             handleFun,
-            'FunctionDeclaration': handleFun,
-            'FunctionExpression':  handleFun,
-            'VariableDeclarator':  handleVar,
-            'CatchClause':         handleCatch
+            'Program':                handleFun,
+            'FunctionDeclaration':    handleFun,
+            'FunctionExpression':     handleFun,
+            'ArrowFunctionExpression': handleFun,  // ES6+
+            'VariableDeclarator':     handleVar,
+            'CatchClause':            handleCatch
         };
 
         var visitorPost = {
-            'Program':             popScope,
-            'FunctionDeclaration': popScope,
-            'FunctionExpression':  popScope,
-            'CatchClause':         popScope,
+            'Program':                popScope,
+            'FunctionDeclaration':    popScope,
+            'FunctionExpression':     popScope,
+            'ArrowFunctionExpression': popScope,   // ES6+
+            'CatchClause':            popScope,
 
             // 重命名 arguments → J$_arguments（RHS 读取场景）
             'Identifier': function (node, context) {

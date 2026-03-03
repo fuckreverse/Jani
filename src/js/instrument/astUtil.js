@@ -59,7 +59,10 @@ if (typeof J$ === 'undefined') {
         // inside a setter
         SETTER:7,
 
-        TYPEOF:8
+        TYPEOF:8,
+
+        // ES6+: inside a class method (MethodDefinition.value)
+        METHOD:9
     };
 
     /**
@@ -108,9 +111,22 @@ if (typeof J$ === 'undefined') {
                         (type === 'UpdateExpression' && key === 'argument') ||
                         (type === 'UnaryExpression' && key === 'argument' && object.operator === 'delete') ||
                         (type === 'ForInStatement' && key === 'left') ||
+                        // ES6+: for-of 左侧是赋值目标
+                        (type === 'ForOfStatement' && key === 'left') ||
                         ((type === 'FunctionExpression' || type === 'FunctionDeclaration') && key === 'id') ||
+                        // ES6+: 箭头函数 id（通常为 null，但保持一致性）
+                        (type === 'ArrowFunctionExpression' && key === 'id') ||
+                        // ES6+: class 的名称标识符不需要插桩
+                        ((type === 'ClassDeclaration' || type === 'ClassExpression') && key === 'id') ||
+                        // ES6+: class 的父类引用是 RHS，不在这里屏蔽
+                        // ES6+: import/export 声明中的标识符
+                        (type === 'ImportSpecifier' && (key === 'local' || key === 'imported')) ||
+                        (type === 'ImportDefaultSpecifier' && key === 'local') ||
+                        (type === 'ImportNamespaceSpecifier' && key === 'local') ||
+                        (type === 'ExportSpecifier' && (key === 'local' || key === 'exported')) ||
                         (type === 'LabeledStatement' && key === 'label') ||
                         (type === 'BreakStatement' && key === 'label') ||
+                        // ES6+: catch 的参数可能是解构模式，整体作为 IGNORE
                         (type === 'CatchClause' && key === 'param') ||
                         (type === 'ContinueStatement' && key === 'label') ||
                         ((type === 'CallExpression' || type === 'NewExpression') &&
@@ -118,11 +134,20 @@ if (typeof J$ === 'undefined') {
                             (object.callee.type === 'MemberExpression' ||
                                 (object.callee.type === 'Identifier' && object.callee.name === 'eval'))) ||
                         (type === 'VariableDeclarator' && key === 'id') ||
-                        (type === 'MemberExpression' && !object.computed && key === 'property')) {
+                        (type === 'MemberExpression' && !object.computed && key === 'property') ||
+                        // ES6+: 解构赋值的左侧模式中的 key 不是 RHS
+                        (type === 'Property' && key === 'key' && !object.computed) ||
+                        // ES6+: RestElement / AssignmentPattern 左侧不插桩
+                        (type === 'RestElement' && key === 'argument') ||
+                        (type === 'AssignmentPattern' && key === 'left') ||
+                        // ES2022+: class private field 名称不插桩
+                        (type === 'PropertyDefinition' && key === 'key' && !object.computed) ||
+                        (type === 'MethodDefinition' && key === 'key' && !object.computed)) {
                         newContext = CONTEXT.IGNORE;
                     } else if (type === 'ObjectExpression' && key === 'properties') {
                         newContext = CONTEXT.OEXP;
-                    } else if ((type === 'FunctionExpression' || type === 'FunctionDeclaration') && key === 'params') {
+                    } else if ((type === 'FunctionExpression' || type === 'FunctionDeclaration' || type === 'ArrowFunctionExpression') && key === 'params') {
+                        // ES6+: ArrowFunctionExpression 也有 params
                         newContext = CONTEXT.PARAMS;
                     } else if (context === CONTEXT.OEXP) {
                         newContext = CONTEXT.OEXP2;
@@ -134,6 +159,9 @@ if (typeof J$ === 'undefined') {
                         newContext = CONTEXT.GETTER;
                     } else if (object.key && key === 'value' && object.kind === 'set') {
                         newContext = CONTEXT.SETTER;
+                    } else if (type === 'MethodDefinition' && key === 'value') {
+                        // ES6+: class method value is a FunctionExpression but should not be wrapped as a literal
+                        newContext = CONTEXT.METHOD;
                     } else if (type === 'CallExpression' && key === 'callee' && child.type === 'Identifier' && child.name === 'eval') {
                         newContext = CONTEXT.IGNORE;
                     } else if (type === 'UnaryExpression' && key === 'argument' && object.operator === 'typeof' && child.type === 'Identifier') {
