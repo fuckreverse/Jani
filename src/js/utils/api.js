@@ -22,10 +22,16 @@
 require('./../Constants.js');
 require('./../Config.js');
 require('./../instrument/astUtil.js');
-require('./../instrument/esnstrument.js');
+require('./../instrument/iid.js');
+require('./../instrument/scope.js');
+// acorn/esotope/astring must be set as globals before wrappers.js and esnstrument.js are loaded,
+// because they reference acorn at module parse time via replaceInStatement's template cache.
 // TODO making globals here is kind of gross, but esnstrument relies on it
 acorn = require('acorn');
 esotope = require('esotope');
+astring = require('astring');
+require('./../instrument/wrappers.js');
+require('./../instrument/esnstrument.js');
 
 var path = require('path');
 var temp = require('temp');

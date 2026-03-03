@@ -183,6 +183,14 @@ if (typeof J$ === 'undefined') {
                 case 'object':
                     litType = (node.value === null) ? N_LOG_NULL_LIT : N_LOG_REGEXP_LIT;
                     break;
+                case 'bigint':
+                    // ES2020 BigInt 字面量（如 42n）：类型未知，不插桩，直接返回原节点。
+                    // 强行传入 wrapLiteral 会导致 litType === undefined，引发后续崩溃。
+                    return node;
+                default:
+                    // 未来可能出现的新字面量类型（如 TemplateLiteral 虽有独立节点，此处作保底）：
+                    // 保守地返回原节点，不插桩，避免传入 undefined 的 litType。
+                    return node;
             }
             return W.wrapLiteral(node, node, litType);
         },

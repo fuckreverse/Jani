@@ -104,7 +104,7 @@ if (typeof J$ === 'undefined') {
         }
 
         for (key in object) {
-//            if (object.hasOwnProperty(key)) {
+            if (object.hasOwnProperty(key)) {
                 child = object[key];
                 if (typeof child === 'object' && child !== null && key !== "scope" && (noIgnore || !ignoreSubAst(object))) {
                     if ((type === 'AssignmentExpression' && key === 'left') ||
@@ -173,11 +173,20 @@ if (typeof J$ === 'undefined') {
                         object[key] = transformAst(child, visitorPost, visitorPre, newContext, noIgnore);
                     }
                 }
-//            }
+            }
         }
 
         if (visitorPost && HOP(visitorPost, type)) {
             ret = visitorPost[type](object, context);
+            // 防御性检查：访问者必须返回一个节点。
+            // 遗漏 return 会导致 ret === undefined，之后被当作合法节点继续传递，
+            // 直到几百行后才崩溃，且调用栈看不到插桩过程，极难定位。
+            if (ret === undefined) {
+                throw new Error(
+                    '[jalangi] transformAst: visitor for "' + type + '" returned undefined. ' +
+                    'Did you forget to return the node?'
+                );
+            }
         } else {
             ret = object;
         }

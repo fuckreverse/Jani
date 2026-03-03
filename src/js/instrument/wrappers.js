@@ -119,6 +119,23 @@ if (typeof J$ === 'undefined') {
 
     // ─── 工具函数 ──────────────────────────────────────────────────────────────
 
+    /**
+     * 断言 val 是一个合法的 AST 节点（非 null、非 undefined、且有 type 字段）。
+     * 当 wrap* 函数收到无效参数时，在插桩阶段立即报错，
+     * 而不是生成错误代码后等运行时才崩溃。
+     *
+     * @param {*}      val        - 要检查的值
+     * @param {string} callerName - 调用方名称（用于错误消息）
+     */
+    function assertAstNode(val, callerName) {
+        if (val === null || val === undefined || typeof val.type !== 'string') {
+            throw new Error(
+                '[jalangi] ' + callerName + ': received invalid AST node: ' +
+                JSON.stringify(val)
+            );
+        }
+    }
+
     function createLiteralAst(name) {
         return {type: 'Literal', value: name};
     }
@@ -129,7 +146,7 @@ if (typeof J$ === 'undefined') {
 
     function transferLoc(toNode, fromNode) {
         if (fromNode.loc) toNode.loc = fromNode.loc;
-        if (fromNode.raw) toNode.raw = fromNode.loc;
+        if (fromNode.raw) toNode.raw = fromNode.raw;  // 修复 typo：原来错误地用了 fromNode.loc
     }
 
     function createBitPattern() {
@@ -225,10 +242,18 @@ if (typeof J$ === 'undefined') {
     function replaceInStatement(code) {
         var cached = _templateCache[code];
         if (!cached) {
-            var parsed = acorn.parse(code, {ecmaVersion: 'latest'});
-            // 用 JSON 序列化去掉 loc/start/end，缓存纯结构
-            cached = JSON.parse(JSON.stringify(parsed.body));
-            _templateCache[code] = cached;
+            try {
+                var parsed = acorn.parse(code, {ecmaVersion: 'latest'});
+                // 用 JSON 序列化去掉 loc/start/end，缓存纯结构
+                cached = JSON.parse(JSON.stringify(parsed.body));
+                _templateCache[code] = cached;
+            } catch (e) {
+                // 附加完整模板内容，插案失败时能快速定位是哪个 wrap 函数的模板出错
+                throw new Error(
+                    '[jalangi] replaceInStatement failed to parse template:\n  ' +
+                    code + '\n  Cause: ' + e.message
+                );
+            }
         }
         return deepCloneAndReplace(cached, arguments);
     }
@@ -260,6 +285,9 @@ if (typeof J$ === 'undefined') {
     // ─── 各种 wrap 函数 ───────────────────────────────────────────────────────
 
     function wrapPutField(node, base, offset, rvalue, isComputed) {
+        assertAstNode(node,   'wrapPutField/node');
+        assertAstNode(base,   'wrapPutField/base');
+        assertAstNode(offset, 'wrapPutField/offset');
         if (!Config.INSTR_PUTFIELD || Config.INSTR_PUTFIELD(isComputed ? null : offset.value, node)) {
             IID.printIidToLoc(node);
             var ret = replaceInExpr(
@@ -287,6 +315,9 @@ if (typeof J$ === 'undefined') {
     }
 
     function wrapMethodCall(node, base, offset, isCtor, isComputed) {
+        assertAstNode(node,   'wrapMethodCall/node');
+        assertAstNode(base,   'wrapMethodCall/base');
+        assertAstNode(offset, 'wrapMethodCall/offset');
         IID.printIidToLoc(node);
         IID.printSpecialIidToLoc(node.callee);
         var ret = replaceInExpr(
@@ -308,6 +339,9 @@ if (typeof J$ === 'undefined') {
     }
 
     function wrapGetField(node, base, offset, isComputed) {
+        assertAstNode(node,   'wrapGetField/node');
+        assertAstNode(base,   'wrapGetField/base');
+        assertAstNode(offset, 'wrapGetField/offset');
         if (!Config.INSTR_GETFIELD || Config.INSTR_GETFIELD(node.computed ? null : offset.value, node)) {
             IID.printIidToLoc(node);
             var ret = replaceInExpr(
@@ -321,6 +355,8 @@ if (typeof J$ === 'undefined') {
     }
 
     function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal) {
+        assertAstNode(node, 'wrapRead/node');
+        assertAstNode(name, 'wrapRead/name');
         if (!Config.INSTR_READ || Config.INSTR_READ(name, node)) {
             IID.printIidToLoc(node);
             var ret = replaceInExpr(
@@ -346,6 +382,8 @@ if (typeof J$ === 'undefined') {
     }
 
     function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration) {
+        assertAstNode(node, 'wrapWrite/node');
+        assertAstNode(name, 'wrapWrite/name');
         if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name, node)) {
             IID.printIidToLoc(node);
             var ret = replaceInExpr(
@@ -943,6 +981,51 @@ if (typeof J$ === 'undefined') {
         }
     }
 
+    // ─── createBitPattern 语义化包装 ─────────────────────────────────────────
+    //
+    // createBitPattern(true, false, true) 这类调用完全看不出每个布尔值的含义。
+    // 用具名包装函数替代，调用点的意图一目了然，同时防止参数顺序传错。
+
+    /** 属性读取的 flags：(isComputed, isOpAssign, isMethodCall) */
+    function getFieldFlags(isComputed, isOpAssign, isMethodCall) {
+        return createBitPattern(isComputed, isOpAssign, isMethodCall);
+    }
+
+    /** 属性写入的 flags：(isComputed, isOpAssign) */
+    function putFieldFlags(isComputed, isOpAssign) {
+        return createBitPattern(isComputed, isOpAssign);
+    }
+
+    /** 函数调用的 flags：(isConstructor) */
+    function funCallFlags(isConstructor) {
+        return createBitPattern(isConstructor);
+    }
+
+    /** 方法调用的 flags：(isConstructor, isComputed) */
+    function methodCallFlags(isConstructor, isComputed) {
+        return createBitPattern(isConstructor, isComputed);
+    }
+
+    /** 变量读取的 flags：(isGlobal, isScriptLocal) */
+    function readFlags(isGlobal, isScriptLocal) {
+        return createBitPattern(isGlobal, isScriptLocal);
+    }
+
+    /** 变量写入的 flags：(isGlobal, isScriptLocal, isDeclaration) */
+    function writeFlags(isGlobal, isScriptLocal, isDeclaration) {
+        return createBitPattern(isGlobal, isScriptLocal, isDeclaration);
+    }
+
+    /** 变量声明（init）的 flags：(isArgument, isLocalSync, isCatchParam) */
+    function initFlags(isArgument, isLocalSync, isCatchParam) {
+        return createBitPattern(isArgument, isLocalSync, isCatchParam);
+    }
+
+    /** 二元运算的 flags：(isComputed, unused1, unused2) */
+    function binaryOpFlags(isComputed) {
+        return createBitPattern(isComputed, false, false);
+    }
+
     // ─── 导出 ──────────────────────────────────────────────────────────────────
 
     sandbox.Wrappers = {
@@ -956,6 +1039,16 @@ if (typeof J$ === 'undefined') {
         createIdentifierAst: createIdentifierAst,
         transferLoc:         transferLoc,
         createBitPattern:    createBitPattern,
+
+        // 语义化 flags 包装（替代裸 createBitPattern(true, false, ...) 调用）
+        getFieldFlags:   getFieldFlags,
+        putFieldFlags:   putFieldFlags,
+        funCallFlags:    funCallFlags,
+        methodCallFlags: methodCallFlags,
+        readFlags:       readFlags,
+        writeFlags:      writeFlags,
+        initFlags:       initFlags,
+        binaryOpFlags:   binaryOpFlags,
 
         // 字面量类型常量（供 visitor 使用）
         N_LOG_ARRAY_LIT:     N_LOG_ARRAY_LIT,

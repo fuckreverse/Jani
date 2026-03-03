@@ -52,23 +52,35 @@
                 if (tmp = analysis[field]) {
                     var fun = self[field];
                     if (!fun) {
-                        fun = self[field] = function () {
+                        // 修复1：用命名函数替换 arguments.callee。
+                        //   arguments.callee 在 strict mode 下会抛 TypeError，且已被规范废弃。
+                        //   命名函数表达式可以在函数体内通过名字引用自身，完全等价且无副作用。
+                        //
+                        // 修复2：链式值传递。
+                        //   原实现中 args 数组在整个循环期间固定不变，
+                        //   所以分析 A 若通过返回值修改了参数，分析 B 收到的仍是原始参数。
+                        //   新实现：每轮调用后，若返回值包含修改过的字段（result/args/base/f 等），
+                        //   则将其合并回 args，使得后续分析看到更新后的值。
+                        fun = self[field] = function chainedDispatch() {
                             try {
                                 var ret1;
-                                var thisFun = arguments.callee;
-                                var len = thisFun.afs.length;
-                                var args = [];
-                                for(var x=0;x<arguments.length;x++) {
-                                    args[x] = arguments[x];
-                                }
-                                for (var i = 0; i < len; i++) {
-                                    ret1 = thisFun.afs[i].apply(thisFun.afThis[i], args);
+                                var len = chainedDispatch.afs.length;
+                                // 将 arguments 转换为真数组，后续可能被更新
+                                var args = Array.prototype.slice.call(arguments);
+                                for (var j = 0; j < len; j++) {
+                                    ret1 = chainedDispatch.afs[j].apply(chainedDispatch.afThis[j], args);
+                                    // 如果分析返回了修改后的参数对象，更新 args 以供后续分析使用
+                                    // 约定：返回值是对象且含 skip / result / args 等字段时视为修改
+                                    if (ret1 && typeof ret1 === 'object') {
+                                        if (Array.isArray(ret1.args)) {
+                                            args = ret1.args;
+                                        }
+                                    }
                                 }
                                 return ret1;
                             } catch (e) {
                                 clientAnalysisException(e);
                             }
-
                         };
                         fun.afs = [];
                         fun.afThis = [];

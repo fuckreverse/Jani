@@ -172,8 +172,10 @@ if (typeof J$ === 'undefined') {
         var newArgs = [].slice.call(args).map(function (v) { return String(new String(v)); });
         // Invoke with the original parameters to preserve exceptional behavior if input is invalid
         f.apply(base, newArgs);
-        var code = '(function(' + newArgs.slice(0, newArgs.length - 1).join(', ') + ') { ' + newArgs[newArgs.length-1] + ' })';
-        var code = sandbox.instrumentEvalCode(code, iid, false);
+        // 修复 bug：原来此处有两个 var code 声明（重复声明），在 strict mode 下会报错。
+        // 第一个改名为 rawCode 以明确语义。
+        var rawCode = '(function(' + newArgs.slice(0, newArgs.length - 1).join(', ') + ') { ' + newArgs[newArgs.length-1] + ' })';
+        var code = sandbox.instrumentEvalCode(rawCode, iid, false);
         // Using EVAL_ORG instead of eval() is important as it preserves the scoping semantics of Function()
         var out = EVAL_ORG(code);
         return out;
