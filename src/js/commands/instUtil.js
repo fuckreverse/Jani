@@ -29,11 +29,6 @@
 import { readFileSync } from 'fs';
 import { join, resolve, basename } from 'path';
 import { parse as urlParse } from 'url';
-import { createRequire } from 'module';
-
-// 仍需 CJS require 的遗留模块（headers/footers 尚未迁移到 ESM）
-const require = createRequire(import.meta.url);
-
 // 默认 header 源文件列表（浏览器注入用）
 export let headerSources = [
     'node_modules/acorn/dist/acorn.js',
@@ -43,16 +38,10 @@ let _headersSet   = false;
 let _headerCode   = '';
 
 /**
- * 追加 analysis-specific 的 headerSources（来自 ../headers.js），只执行一次。
+ * 追加 analysis-specific 的 headerSources，只执行一次。
  */
 export function setHeaders() {
     if (!_headersSet) {
-        try {
-            const extra = require('../browser/headers').headerSources;
-            headerSources = headerSources.concat(extra);
-        } catch {
-            // ../headers.js 不存在时跳过（核心测试场景不需要）
-        }
         _headersSet = true;
     }
 }
@@ -187,26 +176,8 @@ export function getInlinedScripts(analyses, initParams, extraAppScripts, EXTRA_S
  * @param {string|null} jalangiRoot
  * @returns {string}
  */
-export function getFooterString(jalangiRoot) {
-    let footerSources;
-    try {
-        footerSources = require('../browser/footers').footerSources;
-    } catch {
-        return '';
-    }
-
-    let code = '';
-    for (let src of footerSources) {
-        if (jalangiRoot) src = join(jalangiRoot, src);
-        if (src.endsWith('.js')) {
-            code += `<script type="text/javascript">`;
-            code += readFileSync(src, 'utf8');
-            code += `</script>`;
-        } else {
-            code += readFileSync(src, 'utf8');
-        }
-    }
-    return code;
+export function getFooterString(_jalangiRoot) {
+    return '';
 }
 
 const INLINE_REGEXP = /#(inline|event-handler|js-url)/;
