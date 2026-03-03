@@ -8,14 +8,17 @@
     "astring": "^1.9.0",
     "codemirror": "5.1.0",
     "datatables": "1.10.6",
-    "jquery": "3.5.0"
+    "jquery": "3.5.0",
+    "ws": "^8.19.0"
   },
   "bundledDependencies": [
     "acorn",
     "astring"
   ],
   "scripts": {
-    "test": "node test/instrument.test.mjs"
+    "test": "node test/instrument.test.mjs",
+    "test:logging": "node test/logging.test.mjs",
+    "trace-server": "node tools/trace-server/server.mjs"
   },
   "license": "Apache-2.0",
   "repository": {
