@@ -23,12 +23,34 @@
  *   J$.analysis = new ExecutionTraceAnalysis(J$, null, {
  *     useIdb: true, dbName: 'my-db', storeName: 'trace'
  *   });
+ *
+ * 诊断日志（直接输出到 console，不走 TraceLogger/IDB）：
+ *  - JALANGI_DEBUG=1（Node.js）或 localStorage.jalangiDebug='1'（浏览器）开启 debug 级别
+ *  - error/warn 级别（栈帧不匹配、未预期异常等）始终输出
  */
 
 import { TraceLogger } from '../runtime/logging/TraceLogger.js';
 
 const MAX_BYTES  = 100;
 const INDENT_UNIT = '  ';
+
+// ── 诊断日志工具（直接到 console）─────────────────────────────────────────────
+const IS_BROWSER = typeof window !== 'undefined' || typeof globalThis.self !== 'undefined';
+
+function _isDebugEnabled() {
+    if (!IS_BROWSER) {
+        return (typeof process !== 'undefined') && process?.env?.JALANGI_DEBUG === '1';
+    }
+    try { return localStorage?.getItem?.('jalangiDebug') === '1'; } catch { return false; }
+}
+
+const dbg = {
+    debug(...args) {
+        if (_isDebugEnabled()) console.debug('[Jalangi:ExecutionTrace]', ...args);
+    },
+    warn(...args)  { console.warn( '[Jalangi:ExecutionTrace]', ...args); },
+    error(...args) { console.error('[Jalangi:ExecutionTrace]', ...args); },
+};
 
 // ── 工具 ─────────────────────────────────────────────────────────────────────
 
@@ -164,6 +186,7 @@ export class ExecutionTraceAnalysis {
         if (options.logger instanceof TraceLogger) {
             // 外部直接传入
             this._logger = options.logger;
+            dbg.debug('constructor: using externally provided TraceLogger');
         } else {
             // 根据选项自动构建
             const {
@@ -184,10 +207,16 @@ export class ExecutionTraceAnalysis {
                 ...(nodeConsole !== undefined && { nodeConsole }),
                 keyToConsole: true,
             });
+            dbg.debug('constructor: created TraceLogger', { useIdb, dbName, storeName });
         }
 
         // 启动后端初始化（异步，不阻塞构造函数）
         this._loggerReady = this._logger.init();
+        this._loggerReady.then(() => {
+            dbg.debug('TraceLogger init complete — backend ready:', this._logger.isReady);
+        }).catch(err => {
+            dbg.error('TraceLogger init error:', err.message, err.stack ?? '');
+        });
 
         // 将 TraceLogger 挂到 sandbox.tracer，
         // 使所有插件通过 sandbox.log() → sandbox.tracer.key() 路由到同一实例
@@ -256,10 +285,21 @@ export class ExecutionTraceAnalysis {
         this._stack.push(new Frame(newIndent));
         this._callStack.push({ callLineTemplate, innerLines: [] });
 
+        dbg.debug(`invokeFunPre: ${desc} iid=${iid} stackDepth=${this._stack.length}`);
         return { f, base, args, skip: false };
     }
 
     invokeFun(iid, f, base, args, result, isConstructor, isMethod) {
+        // 健壮性检查：如果栈帧已空（不正常），记录诊断日志
+        if (this._stack.length === 0 || this._callStack.length === 0) {
+            const name = f?.name || '(anonymous)';
+            dbg.error(
+                `invokeFun: stack underflow — stack=${this._stack.length} callStack=${this._callStack.length}` +
+                ` fn=${name} iid=${iid} isConstructor=${isConstructor} isMethod=${isMethod}`
+            );
+            return { result };
+        }
+
         this._flushTop(iid);
 
         const frame    = this._stack.pop();
@@ -270,6 +310,8 @@ export class ExecutionTraceAnalysis {
         const rc        = loc ? `${loc[0]}:${loc[1]}` : '?:?';
         const retIndent = INDENT_UNIT.repeat(frame.indent > 0 ? frame.indent - 1 : 0);
         const retLineTemplate = `[${rc}] ${retIndent}← return ${name} ; result=${serialize(result)}`;
+
+        dbg.debug(`invokeFun: ← ${name} iid=${iid} stackDepth=${this._stack.length}`);
 
         const parent = this._top();
         if (parent) {
@@ -286,6 +328,7 @@ export class ExecutionTraceAnalysis {
     // ── 脚本进出（KEY 级别）───────────────────────────────────────────────────
 
     scriptEnter(iid, instrumentedFileName, originalFileName) {
+        dbg.debug(`scriptEnter: "${originalFileName}" iid=${iid} stackDepth=${this._stack.length}`);
         // 脚本开始：重点日志 → 控制台 + 后端
         this._key('info', `▶ script: ${originalFileName}`);
         this._stack.push(new Frame(1));
@@ -293,13 +336,21 @@ export class ExecutionTraceAnalysis {
     }
 
     scriptExit(iid, wrappedExceptionVal) {
-        this._flushTop(iid);
-        this._stack.pop();
-        this._callStack.pop();
+        // 健壮性检查
+        if (this._stack.length === 0) {
+            dbg.error(`scriptExit: stack underflow (iid=${iid}) — no matching scriptEnter?`);
+        } else {
+            this._flushTop(iid);
+            this._stack.pop();
+            this._callStack.pop();
+        }
         // 脚本结束：重点日志
         if (wrappedExceptionVal) {
-            this._key('error', `◀ script end (exception: ${serialize(wrappedExceptionVal.exception)})`);
+            const exStr = serialize(wrappedExceptionVal.exception);
+            dbg.debug(`scriptExit: exception iid=${iid} exception=${exStr}`);
+            this._key('error', `◀ script end (exception: ${exStr})`);
         } else {
+            dbg.debug(`scriptExit: normal iid=${iid}`);
             this._key('info', `◀ script end`);
         }
         return { wrappedExceptionVal, isBacktrack: false };
@@ -309,11 +360,14 @@ export class ExecutionTraceAnalysis {
 
     functionExit(iid, returnVal, wrappedExceptionVal) {
         if (wrappedExceptionVal) {
+            const exStr = serialize(wrappedExceptionVal.exception);
             this._flushTop(iid);
             const loc    = getLocation(this._sb, iid);
             const rc     = loc ? `${loc[0]}:${loc[1]}` : '?:?';
             const indent = INDENT_UNIT.repeat(this._top()?.indent ?? 0);
-            const text   = `[${rc}] ${indent}✗ throw ; exception=${serialize(wrappedExceptionVal.exception)}`;
+            const text   = `[${rc}] ${indent}✗ throw ; exception=${exStr}`;
+
+            dbg.debug(`functionExit: exception at iid=${iid}: ${exStr}`);
             // 异常：重点日志（控制台）+ 普通 trace（后端，保留完整上下文）
             this._key('error', text);
             this._emit(text);   // 同时记进序列（后端），便于关联前后 trace
@@ -377,6 +431,11 @@ export class ExecutionTraceAnalysis {
     // ── 执行结束（KEY 级别汇总）──────────────────────────────────────────────
 
     endExecution() {
+        const residualFrames = this._stack.length;
+        if (residualFrames > 0) {
+            dbg.warn(`endExecution: ${residualFrames} residual frame(s) in stack — possible missing scriptExit/functionExit`);
+        }
+
         // Flush 残余 pending 帧
         while (this._stack.length > 0) {
             this._flushTop(null);
@@ -385,12 +444,21 @@ export class ExecutionTraceAnalysis {
         }
 
         // 汇总行：重点日志（控制台 + 后端）
+        dbg.debug(`endExecution: total seq=${this._seq}`);
         this._key('info', `=== ExecutionTrace: total ${this._seq} events ===`);
 
         // 关闭 LogManager（等待 init 完成后再 close，避免竞态）
         this._loggerReady
-            .then(() => this._logger.close())
-            .catch(err => console.warn('[ExecutionTrace] logger close error:', err.message));
+            .then(() => {
+                dbg.debug('endExecution: closing TraceLogger...');
+                return this._logger.close();
+            })
+            .then(() => {
+                dbg.debug('endExecution: TraceLogger closed');
+            })
+            .catch(err => {
+                dbg.error('endExecution: logger close error:', err.message, err.stack ?? '');
+            });
     }
 
     onReady(cb) { cb(); }

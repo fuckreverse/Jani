@@ -12,6 +12,10 @@
  *  3. 将事件批次交给注册的后端（backend.write(batch)）
  *  4. 支持多后端同时运行（如同时写 IndexedDB 和 WebSocket）
  *
+ * 诊断日志（直接输出到 console，不走后端）：
+ *  - JALANGI_DEBUG=1（Node.js）或 localStorage.jalangiDebug='1'（浏览器）开启 debug 级别
+ *  - error/warn 级别始终输出
+ *
  * 使用方式：
  *
  *   import { LogManager } from '.../logging/LogManager.js';
@@ -33,6 +37,22 @@ import { RingBuffer } from './RingBuffer.js';
 
 // 判断运行环境
 const IS_BROWSER = typeof window !== 'undefined' || typeof self !== 'undefined';
+
+// ── 诊断日志工具（直接到 console，不走 LogManager/后端）──────────────────────
+function _isDebugEnabled() {
+    if (!IS_BROWSER) {
+        return (typeof process !== 'undefined') && process?.env?.JALANGI_DEBUG === '1';
+    }
+    try { return localStorage?.getItem?.('jalangiDebug') === '1'; } catch { return false; }
+}
+
+const dbg = {
+    debug(...args) {
+        if (_isDebugEnabled()) console.debug('[Jalangi:LogManager]', ...args);
+    },
+    warn(...args)  { console.warn( '[Jalangi:LogManager]', ...args); },
+    error(...args) { console.error('[Jalangi:LogManager]', ...args); },
+};
 
 /**
  * 调度一个低优先级的异步任务：
@@ -87,11 +107,21 @@ export class LogManager {
             flushErrors:  0,
         };
 
+        dbg.debug('constructed', {
+            backends:       this._backends.length,
+            capacity,
+            flushThreshold,
+            flushIntervalMs,
+            overflowPolicy,
+            drainBatchSize,
+        });
+
         // 定时 flush
         if (flushIntervalMs > 0) {
             this._flushTimer = setInterval(() => this._doFlush(), flushIntervalMs);
             // Node.js 下 setInterval 不阻止进程退出
             if (this._flushTimer?.unref) this._flushTimer.unref();
+            dbg.debug(`periodic flush enabled: every ${flushIntervalMs}ms`);
         }
 
         // 自动关闭钩子
@@ -125,6 +155,7 @@ export class LogManager {
      * 可以在 analysis.endExecution 或 beforeunload 中调用。
      */
     async flush() {
+        dbg.debug(`flush() called — ring.size=${this._ring.size}`);
         await this._doFlush();
     }
 
@@ -133,8 +164,12 @@ export class LogManager {
      * 之后调用 log() 的事件会被静默丢弃。
      */
     async close() {
-        if (this._closed) return;
+        if (this._closed) {
+            dbg.debug('close() called but already closed — skipping');
+            return;
+        }
         this._closed = true;
+        dbg.debug(`close() — ring.size=${this._ring.size} totalLogged=${this.stats.totalLogged}`);
 
         if (this._flushTimer) {
             clearInterval(this._flushTimer);
@@ -145,7 +180,21 @@ export class LogManager {
         await this._drainAll();
 
         // 关闭所有后端
-        await Promise.allSettled(this._backends.map(b => b.close?.()));
+        const closeResults = await Promise.allSettled(this._backends.map(b => b.close?.()));
+        for (let i = 0; i < closeResults.length; i++) {
+            const r = closeResults[i];
+            if (r.status === 'rejected') {
+                dbg.error(`backend[${i}] close() failed:`, r.reason?.message ?? r.reason, r.reason?.stack ?? '');
+            } else {
+                dbg.debug(`backend[${i}] closed`);
+            }
+        }
+
+        dbg.debug('close() complete', {
+            totalLogged:  this.stats.totalLogged,
+            totalFlushed: this.stats.totalFlushed,
+            flushErrors:  this.stats.flushErrors,
+        });
     }
 
     /**
@@ -154,6 +203,7 @@ export class LogManager {
      */
     addBackend(backend) {
         this._backends.push(backend);
+        dbg.debug(`addBackend — total backends: ${this._backends.length}`);
     }
 
     /**
@@ -162,7 +212,12 @@ export class LogManager {
      */
     removeBackend(backend) {
         const idx = this._backends.indexOf(backend);
-        if (idx !== -1) this._backends.splice(idx, 1);
+        if (idx !== -1) {
+            this._backends.splice(idx, 1);
+            dbg.debug(`removeBackend[${idx}] — total backends: ${this._backends.length}`);
+        } else {
+            dbg.warn('removeBackend: backend not found');
+        }
     }
 
     /** 返回当前 RingBuffer 统计 + LogManager 统计 */
@@ -185,7 +240,9 @@ export class LogManager {
         if (this._ring.size === 0) return;
         if (this._backends.length === 0) {
             // 没有后端：直接丢弃（避免无限积压）
+            const dropped = this._ring.size;
             this._ring.drain();
+            dbg.warn(`_doFlush: no backends configured, dropped ${dropped} events`);
             return;
         }
 
@@ -193,32 +250,50 @@ export class LogManager {
         if (batch.length === 0) return;
 
         this.stats.totalFlushed += batch.length;
+        dbg.debug(`_doFlush: writing batch of ${batch.length} events to ${this._backends.length} backend(s) (totalFlushed=${this.stats.totalFlushed})`);
 
         // 并行写入所有后端，单个失败不影响其他
         const results = await Promise.allSettled(
             this._backends.map(b => b.write(batch))
         );
-        for (const r of results) {
+        for (let i = 0; i < results.length; i++) {
+            const r = results[i];
             if (r.status === 'rejected') {
                 this.stats.flushErrors++;
-                // 静默失败：打印到 console（不抛出，避免影响主程序）
-                console.error('[LogManager] backend write error:', r.reason);
+                // 输出完整错误信息（含 stack trace），便于排查后端问题
+                dbg.error(
+                    `backend[${i}] write failed (batch=${batch.length}, totalErrors=${this.stats.flushErrors}):`,
+                    r.reason?.message ?? r.reason
+                );
+                if (r.reason?.stack) {
+                    dbg.error('stack trace:', r.reason.stack);
+                }
             }
         }
 
         // 如果 RingBuffer 仍有数据，继续调度（处理积压）
         if (this._ring.size > 0) {
+            dbg.debug(`_doFlush: ring still has ${this._ring.size} events, scheduling next flush`);
             scheduleAsync(() => this._doFlush());
         }
     }
 
     /** 持续 drain 直到 RingBuffer 清空（用于 close 时） */
     async _drainAll() {
+        let rounds = 0;
         while (this._ring.size > 0) {
+            rounds++;
             await this._doFlush();
         }
+        if (rounds > 0) dbg.debug(`_drainAll done in ${rounds} round(s)`);
         // 通知所有后端 flush（确保 IO 写入完成）
-        await Promise.allSettled(this._backends.map(b => b.flush?.()));
+        const flushResults = await Promise.allSettled(this._backends.map(b => b.flush?.()));
+        for (let i = 0; i < flushResults.length; i++) {
+            const r = flushResults[i];
+            if (r.status === 'rejected') {
+                dbg.error(`backend[${i}] flush() failed:`, r.reason?.message ?? r.reason, r.reason?.stack ?? '');
+            }
+        }
     }
 
     /** 绑定自动关闭钩子 */
@@ -227,6 +302,7 @@ export class LogManager {
             // 浏览器：beforeunload 同步 flush（注意：异步操作在此处可能被截断）
             // pagehide 比 beforeunload 更可靠（在 bfcache 下也会触发）
             const handler = () => {
+                dbg.debug('auto-close: page unload — draining sync');
                 // 同步清空 RingBuffer（无法 await，尽力而为）
                 this._drainAllSync();
             };
@@ -237,9 +313,13 @@ export class LogManager {
         } else {
             // Node.js：监听进程退出信号
             const handler = async () => {
+                dbg.debug('auto-close: process signal — closing');
                 await this.close();
             };
-            process.once('exit',    () => this._drainAllSync());
+            process.once('exit',    () => {
+                dbg.debug('auto-close: process exit — draining sync');
+                this._drainAllSync();
+            });
             process.once('SIGTERM', handler);
             process.once('SIGINT',  handler);
         }
@@ -253,16 +333,19 @@ export class LogManager {
     _drainAllSync() {
         if (this._ring.size === 0) return;
         const batch = this._ring.drain();
+        dbg.debug(`_drainAllSync: ${batch.length} events`);
         for (const backend of this._backends) {
             try {
                 if (typeof backend.writeSync === 'function') {
                     backend.writeSync(batch);
                 } else {
                     // 触发异步写入（不 await），尽力而为
-                    backend.write(batch).catch(() => {});
+                    backend.write(batch).catch((err) => {
+                        dbg.error('_drainAllSync: async write failed:', err.message);
+                    });
                 }
             } catch (e) {
-                // 忽略退出时的错误
+                dbg.error('_drainAllSync: backend error:', e.message);
             }
         }
     }

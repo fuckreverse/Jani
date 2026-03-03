@@ -21,14 +21,16 @@
  *   --output <file>    输出文件路径（默认：in-place 覆盖原文件）
  *   --db-name <name>   IndexedDB 数据库名（默认：jalangi-traces）
  *   --store-name <n>   IndexedDB ObjectStore 名（默认：execution-trace）
- *   --source-type <t>  'script'（默认）或 'module'
+ *   --source-type <t>  'script'（默认）或 'module'（支持顶层 await）
  *   --no-idb           不启用 IndexedDB（仅 console 输出 trace）
  *   --dry-run          只打印结果，不写文件
+ *   --debug            输出详细构建日志（等价于 JALANGI_DEBUG=1）
  *   --help / -h        显示本帮助
  *
  * 示例：
  *   npm run trace:instrument -- src/app.js
  *   npm run trace:instrument -- --output dist/app.traced.js src/app.js
+ *   npm run trace:instrument -- --debug src/app.js
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
@@ -43,6 +45,32 @@ const __dirname  = dirname(__filename);
 const ROOT_DIR   = resolve(__dirname, '..');
 const SRC        = (...parts) => join(ROOT_DIR, 'src', 'js', ...parts);
 
+// ── 诊断日志工具（直接输出到 console）────────────────────────────────────────
+//
+// debug 级别：由 --debug 参数或 JALANGI_DEBUG=1 环境变量开启。
+// error/warn 级别：始终输出。
+//
+// 在 parseArgs 之前，先读取环境变量；--debug 参数在 parseArgs 之后设置。
+
+let _debugEnabled = process.env.JALANGI_DEBUG === '1';
+
+const log = {
+    debug(...args) {
+        if (_debugEnabled) console.debug('[instrument]', ...args);
+    },
+    info(...args)  { console.log(  '[instrument]', ...args); },
+    warn(...args)  { console.warn( '[instrument]', ...args); },
+    error(...args) { console.error('[instrument]', ...args); },
+    /** 阶段计时：返回 done 函数，调用时打印耗时 */
+    phase(name) {
+        const t0 = Date.now();
+        if (_debugEnabled) console.debug(`[instrument] ── ${name}...`);
+        return (extra = '') => {
+            if (_debugEnabled) console.debug(`[instrument] ✓ ${name} (${Date.now() - t0}ms)${extra ? ' ' + extra : ''}`);
+        };
+    },
+};
+
 // ── 参数解析 ──────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
@@ -53,6 +81,7 @@ function parseArgs(argv) {
         sourceType: 'script',
         useIdb:     true,
         dryRun:     false,
+        debug:      false,
         file:       null,
     };
 
@@ -66,9 +95,10 @@ function parseArgs(argv) {
             case '--source-type': opts.sourceType = argv[++i]; break;
             case '--no-idb':      opts.useIdb     = false;     break;
             case '--dry-run':     opts.dryRun     = true;      break;
+            case '--debug':       opts.debug       = true;     break;
             default:
-                if (a.startsWith('--')) { console.error(`未知选项: ${a}`); process.exit(1); }
-                if (opts.file) { console.error('只支持单个目标文件。'); process.exit(1); }
+                if (a.startsWith('--')) { log.error(`未知选项: ${a}`); process.exit(1); }
+                if (opts.file) { log.error('只支持单个目标文件。'); process.exit(1); }
                 opts.file = resolve(a);
         }
     }
@@ -89,6 +119,7 @@ function printHelp() {
   --source-type <t>   'script'（默认）或 'module'
   --no-idb            不启用 IndexedDB（仅 console 输出）
   --dry-run           只打印，不写文件
+  --debug             输出详细构建日志（等价于 JALANGI_DEBUG=1）
   --help / -h         显示此帮助
     `.trim());
 }
@@ -110,11 +141,13 @@ function printHelp() {
  * @returns {Promise<string>}  打包后的 IIFE 字符串
  */
 async function buildRuntimeBundle(opts) {
+    const doneReadWorker = log.phase('读取 idb-worker.js');
     // idb-worker.js 内联为字符串（classic worker，不经过 rollup）
     const idbWorkerSrc = readFileSync(
         SRC('runtime', 'logging', 'workers', 'idb-worker.js'),
         'utf8'
     ).replace(/^\/\/ JALANGI DO NOT INSTRUMENT\s*\n?/m, '').trim();
+    doneReadWorker(`(${(idbWorkerSrc.length / 1024).toFixed(1)} KB)`);
 
     // 虚拟入口 ID
     const ENTRY_ID = '\0jalangi-entry';
@@ -171,6 +204,9 @@ J$.analysis = new ExecutionTraceAnalysis(J$, null, {
         './backends/MemoryBackend.js':     '\0stub:MemoryBackend',
     };
 
+    // 收集 rollup 警告，最后统一输出（避免和阶段日志混在一起）
+    const rollupWarnings = [];
+
     const plugins = [
         // ── Plugin 1: 虚拟入口 ────────────────────────────────────────────────
         {
@@ -190,6 +226,9 @@ J$.analysis = new ExecutionTraceAnalysis(J$, null, {
                     /new URL\s*\(\s*['"][^'"]+['"]\s*,\s*import\.meta\.url\s*\)/g,
                     '__idbWorkerUrl'
                 );
+                if (patched !== code) {
+                    log.debug('patch-idb-worker-url: patched import.meta.url in', id);
+                }
                 return patched !== code ? { code: patched, map: null } : null;
             },
         },
@@ -203,32 +242,46 @@ J$.analysis = new ExecutionTraceAnalysis(J$, null, {
             resolveDynamicImport(specifier) {
                 if (typeof specifier !== 'string') return null;
                 const mapped = DYNAMIC_IMPORT_MAP[specifier];
+                if (mapped) log.debug(`resolve-dynamic-import: "${specifier}" → "${mapped}"`);
                 return mapped ?? null;
             },
             load(id) {
                 // stub 模块：空导出，rollup 会 tree-shake 掉使用它们的代码
-                if (id === '\0stub:WsBackend')
+                if (id === '\0stub:WsBackend') {
+                    log.debug('load stub: WsBackend');
                     return 'export const WsBackend = undefined;';
-                if (id === '\0stub:NodeStreamBackend')
+                }
+                if (id === '\0stub:NodeStreamBackend') {
+                    log.debug('load stub: NodeStreamBackend');
                     return 'export const NodeStreamBackend = undefined;';
-                if (id === '\0stub:MemoryBackend')
+                }
+                if (id === '\0stub:MemoryBackend') {
+                    log.debug('load stub: MemoryBackend');
                     return 'export const MemoryBackend = undefined;';
+                }
             },
         },
     ];
 
+    const doneRollupBuild = log.phase('rollup build');
     const bundle = await rollup({
         input:    ENTRY_ID,
         plugins,
         external: [],   // 不外置任何模块
         onwarn(warning) {
-            // 只显示未解析 import 的警告（其余静默）
             if (warning.code === 'UNRESOLVED_IMPORT') {
-                console.warn('[rollup]', warning.message);
+                // 未解析 import 是实质性问题，始终输出
+                log.warn('[rollup] UNRESOLVED_IMPORT:', warning.message);
+            } else {
+                // 其他警告只在 debug 模式下显示
+                rollupWarnings.push(warning);
+                log.debug('[rollup]', warning.code, warning.message);
             }
         },
     });
+    doneRollupBuild();
 
+    const doneRollupGen = log.phase('rollup generate IIFE');
     const { output } = await bundle.generate({
         format:               'iife',
         name:                 '__jalangi__',
@@ -245,7 +298,14 @@ J$.analysis = new ExecutionTraceAnalysis(J$, null, {
     });
 
     await bundle.close();
-    return output[0].code;
+    const bundleCode = output[0].code;
+    doneRollupGen(`(${(bundleCode.length / 1024).toFixed(1)} KB, ${output[0].moduleIds?.length ?? '?'} modules)`);
+
+    if (rollupWarnings.length > 0) {
+        log.debug(`rollup: ${rollupWarnings.length} non-critical warning(s) suppressed (use --debug to see all)`);
+    }
+
+    return bundleCode;
 }
 
 // ── 主逻辑 ────────────────────────────────────────────────────────────────────
@@ -253,10 +313,18 @@ J$.analysis = new ExecutionTraceAnalysis(J$, null, {
 async function main() {
     const opts = parseArgs(process.argv.slice(2));
 
+    // 同步 debug 标志（--debug 参数优先）
+    if (opts.debug) _debugEnabled = true;
+
+    log.debug('options:', JSON.stringify(opts, null, 2));
+    log.debug('ROOT_DIR:', ROOT_DIR);
+
     // 动态导入插桩器
+    const doneLoadInstrumenter = log.phase('加载插桩器 esnstrument.js');
     const { init, instrumentCode } = await import(
         `${ROOT_DIR}/src/js/instrument/esnstrument.js`
     );
+    doneLoadInstrumenter();
 
     init({
         ENABLE_SAMPLING:           false,
@@ -277,27 +345,46 @@ async function main() {
     const outPath   = opts.output ? resolve(opts.output) : inputPath;
 
     // ── 读目标文件 ────────────────────────────────────────────────────────────
+    const doneRead = log.phase(`读取目标文件: ${inputPath}`);
     const originalCode = readFileSync(inputPath, 'utf8');
+    doneRead(`(${(originalCode.length / 1024).toFixed(1)} KB, ${originalCode.split('\n').length} 行)`);
 
     if (originalCode.includes('// JALANGI DO NOT INSTRUMENT')) {
-        console.warn(`⊘ 跳过（已标记 DO NOT INSTRUMENT）: ${inputPath}`);
+        log.warn(`跳过（已标记 DO NOT INSTRUMENT）: ${inputPath}`);
         process.exit(0);
     }
 
     // ── 插桩目标代码 ──────────────────────────────────────────────────────────
-    const result = instrumentCode({
-        code:             originalCode,
-        origCodeFileName: inputPath,
-        instCodeFileName: outPath,
-        inlineSourceMap:  true,
-        inlineSource:     true,
-        sourceType:       opts.sourceType,
-        isEval:           false,
-    });
+    const doneInstr = log.phase('插桩目标代码');
+    let result;
+    try {
+        result = instrumentCode({
+            code:             originalCode,
+            origCodeFileName: inputPath,
+            instCodeFileName: outPath,
+            inlineSourceMap:  true,
+            inlineSource:     true,
+            sourceType:       opts.sourceType,
+            isEval:           false,
+        });
+    } catch (err) {
+        log.error('插桩失败:', err.message);
+        if (err.stack) log.error('Stack trace:\n' + err.stack);
+        process.exit(1);
+    }
+    const iidCount = Object.keys(result.sourceMapObject ?? {}).filter(k => !isNaN(k)).length;
+    doneInstr(`(${iidCount} IIDs, ${(result.code.length / 1024).toFixed(1)} KB)`);
 
     // ── 用 rollup 构建运行时 bundle ───────────────────────────────────────────
-    console.log('正在用 rollup 打包运行时...');
-    const runtimeBundle = await buildRuntimeBundle(opts);
+    log.info('正在用 rollup 打包运行时...');
+    let runtimeBundle;
+    try {
+        runtimeBundle = await buildRuntimeBundle(opts);
+    } catch (err) {
+        log.error('rollup 打包失败:', err.message);
+        if (err.stack) log.error('Stack trace:\n' + err.stack);
+        process.exit(1);
+    }
 
     // ── 拼接最终输出 ──────────────────────────────────────────────────────────
     //
@@ -306,6 +393,7 @@ async function main() {
     //   2. 运行时 IIFE（设置 globalThis.J$，安装所有钩子和 analysis）
     //   3. 插桩后的目标代码（直接调用 J$.R / J$.W / ... 等）
     //
+    const doneConcatenate = log.phase('拼接最终输出');
     const header = `\
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║  Jalangi2 Runtime Bundle (auto-generated ${new Date().toISOString().slice(0,10)})  ║
@@ -313,6 +401,7 @@ async function main() {
 // ╚══════════════════════════════════════════════════════════════════════════╝
 `;
     const finalCode = header + runtimeBundle + '\n' + result.code;
+    doneConcatenate(`(total ${(finalCode.length / 1024).toFixed(1)} KB)`);
 
     // ── 写出 ──────────────────────────────────────────────────────────────────
     if (opts.dryRun) {
@@ -320,12 +409,14 @@ async function main() {
         console.log(`\n=== [dry-run] 输出文件: ${outPath} (${finalCode.length} chars) ===\n`);
         console.log(preview);
     } else {
+        const doneWrite = log.phase(`写出: ${outPath}`);
         const outDir = dirname(outPath);
-        if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
+        if (!existsSync(outDir)) {
+            log.debug(`创建目录: ${outDir}`);
+            mkdirSync(outDir, { recursive: true });
+        }
         writeFileSync(outPath, finalCode, 'utf8');
-
-        const iidCount = Object.keys(result.sourceMapObject ?? {})
-            .filter(k => !isNaN(k)).length;
+        doneWrite(`(${(finalCode.length / 1024).toFixed(1)} KB)`);
 
         console.log(`✓ 插桩完成`);
         console.log(`  源文件  : ${inputPath}`);
@@ -336,11 +427,14 @@ async function main() {
             console.log(`  IDB     : ${opts.dbName} / ${opts.storeName}`);
         }
         console.log(`\n直接替换网页中原始的 <script src="..."> 标签即可。`);
+        if (!opts.debug && !_debugEnabled) {
+            console.log(`  提示: 使用 --debug 或 JALANGI_DEBUG=1 可查看详细构建日志`);
+        }
     }
 }
 
 main().catch(err => {
-    console.error('[instrument-for-browser] 致命错误:', err.message);
-    if (process.env.DEBUG) console.error(err.stack);
+    log.error('致命错误:', err.message);
+    if (err.stack) log.error('Stack trace:\n' + err.stack);
     process.exit(1);
 });

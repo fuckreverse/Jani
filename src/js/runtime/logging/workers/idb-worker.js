@@ -19,7 +19,7 @@
  *
  *   { cmd: 'write', batch: Array, batchId: number }
  *     → 批量写入，完成后回复 { type: 'ack', batchId, count }
- *       失败时回复 { type: 'error', batchId, message }
+ *       失败时回复 { type: 'error', batchId, message, stack }
  *
  *   { cmd: 'flush' }
  *     → 确认所有进行中事务完成，回复 { type: 'flushed' }
@@ -36,7 +36,27 @@
  * 存储格式：
  *   每条事件作为一个 IDB record，key = autoIncrement。
  *   record 结构：{ ts: DOMHighResTimeStamp, ...event }
+ *
+ * 诊断日志：
+ *   Worker 内使用 console.debug/warn/error 直接输出到浏览器 DevTools Console，
+ *   受 localStorage.jalangiDebug='1' 控制（debug 级别），
+ *   warn/error 始终输出。
  */
+
+// ── 诊断日志工具（Worker 内，直接到 console）──────────────────────────────────
+//
+// 注意：Worker 内无法访问主线程的 localStorage，
+// 所以在 init 时由主线程传入 debug 开关（通过 msg.debug）；
+// 初始化前默认关闭，以减少噪声。
+let _debugEnabled = false;
+
+const dbg = {
+    debug(...args) {
+        if (_debugEnabled) console.debug('[Jalangi:idb-worker]', ...args);
+    },
+    warn(...args)  { console.warn( '[Jalangi:idb-worker]', ...args); },
+    error(...args) { console.error('[Jalangi:idb-worker]', ...args); },
+};
 
 // ─── IndexedDB 辅助 ────────────────────────────────────────────────────────────
 
@@ -47,12 +67,15 @@ let storeName = 'events';
 /** 打开（或升级）数据库 */
 function openDB(name, store, version = 1) {
     return new Promise((resolve, reject) => {
+        dbg.debug(`openDB: opening "${name}" v${version}, store="${store}"`);
         const req = indexedDB.open(name, version);
 
         req.onupgradeneeded = (evt) => {
             const database = evt.target.result;
+            dbg.debug(`onupgradeneeded: upgrading from v${evt.oldVersion} → v${evt.newVersion}`);
             // 如果 store 不存在则创建
             if (!database.objectStoreNames.contains(store)) {
+                dbg.debug(`creating objectStore "${store}"`);
                 const os = database.createObjectStore(store, {
                     keyPath:       'id',
                     autoIncrement: true,
@@ -63,14 +86,23 @@ function openDB(name, store, version = 1) {
                 os.createIndex('sid',   'sid',   { unique: false });
                 // 时间戳索引（便于按时间范围查询）
                 os.createIndex('ts',    'ts',    { unique: false });
+                dbg.debug(`objectStore "${store}" created with indexes: type, iid, sid, ts`);
+            } else {
+                dbg.debug(`objectStore "${store}" already exists — skipping creation`);
             }
         };
 
-        req.onsuccess  = (evt) => resolve(evt.target.result);
-        req.onerror    = (evt) => reject(evt.target.error);
-        req.onblocked  = ()    => {
+        req.onsuccess  = (evt) => {
+            dbg.debug(`openDB success: "${name}" v${evt.target.result.version}`);
+            resolve(evt.target.result);
+        };
+        req.onerror    = (evt) => {
+            dbg.error(`openDB error for "${name}":`, evt.target.error?.message ?? evt.target.error);
+            reject(evt.target.error);
+        };
+        req.onblocked  = () => {
             // 有其他连接阻塞了升级，等待它们关闭
-            console.warn('[idb-worker] DB upgrade blocked, waiting...');
+            dbg.warn(`DB upgrade blocked for "${name}" — another connection is still open`);
         };
     });
 }
@@ -89,15 +121,26 @@ function writeBatch(batch) {
             count++;
         }
 
-        tx.oncomplete = () => resolve(count);
-        tx.onerror    = (evt) => reject(evt.target.error);
-        tx.onabort    = (evt) => reject(new Error('Transaction aborted: ' + (evt.target.error?.message ?? 'unknown')));
+        tx.oncomplete = () => {
+            dbg.debug(`writeBatch: committed ${count} events`);
+            resolve(count);
+        };
+        tx.onerror    = (evt) => {
+            dbg.error('writeBatch transaction error:', evt.target.error?.message ?? evt.target.error);
+            reject(evt.target.error);
+        };
+        tx.onabort    = (evt) => {
+            const reason = evt.target.error?.message ?? 'unknown';
+            dbg.error('writeBatch transaction aborted:', reason);
+            reject(new Error('Transaction aborted: ' + reason));
+        };
     });
 }
 
 /** 查询 store 中的事件 */
 function queryEvents(filter = {}, limit = 10000) {
     return new Promise((resolve, reject) => {
+        dbg.debug(`queryEvents: filter=${JSON.stringify(filter)} limit=${limit}`);
         const tx    = db.transaction(storeName, 'readonly');
         const store = tx.objectStore(storeName);
         const results = [];
@@ -116,21 +159,32 @@ function queryEvents(filter = {}, limit = 10000) {
                 results.push(cursor.value);
                 cursor.continue();
             } else {
+                dbg.debug(`queryEvents: returned ${results.length} records`);
                 resolve(results);
             }
         };
-        req.onerror = (evt) => reject(evt.target.error);
+        req.onerror = (evt) => {
+            dbg.error('queryEvents error:', evt.target.error?.message ?? evt.target.error);
+            reject(evt.target.error);
+        };
     });
 }
 
 /** 清空 store */
 function clearStore() {
     return new Promise((resolve, reject) => {
+        dbg.debug(`clearStore: clearing "${storeName}"`);
         const tx    = db.transaction(storeName, 'readwrite');
         const store = tx.objectStore(storeName);
         const req   = store.clear();
-        req.onsuccess = () => resolve();
-        req.onerror   = (evt) => reject(evt.target.error);
+        req.onsuccess = () => {
+            dbg.debug('clearStore: done');
+            resolve();
+        };
+        req.onerror   = (evt) => {
+            dbg.error('clearStore error:', evt.target.error?.message ?? evt.target.error);
+            reject(evt.target.error);
+        };
     });
 }
 
@@ -140,6 +194,11 @@ function clearStore() {
 let pendingTxCount  = 0;
 let flushResolvers  = [];
 
+// 统计
+let _totalBatches = 0;
+let _totalEvents  = 0;
+let _totalErrors  = 0;
+
 self.onmessage = async (evt) => {
     const msg = evt.data;
 
@@ -147,27 +206,47 @@ self.onmessage = async (evt) => {
         switch (msg.cmd) {
 
             case 'init': {
+                // 读取主线程传来的 debug 开关（可选）
+                if (msg.debug === true) _debugEnabled = true;
                 dbName    = msg.dbName    ?? dbName;
                 storeName = msg.storeName ?? storeName;
                 const ver = msg.version   ?? 1;
+                dbg.debug(`init: dbName="${dbName}" storeName="${storeName}" version=${ver}`);
                 db = await openDB(dbName, storeName, ver);
                 self.postMessage({ type: 'ready', dbName, storeName });
+                dbg.debug('init: sent "ready"');
                 break;
             }
 
             case 'write': {
                 if (!db) {
+                    dbg.error(`write batchId=${msg.batchId}: DB not initialized`);
                     self.postMessage({ type: 'error', batchId: msg.batchId, message: 'DB not initialized' });
                     return;
                 }
+                const batchSize = msg.batch?.length ?? 0;
+                dbg.debug(`write batchId=${msg.batchId} size=${batchSize} (pendingTx=${pendingTxCount + 1})`);
                 pendingTxCount++;
+                _totalBatches++;
+                _totalEvents += batchSize;
                 try {
                     const count = await writeBatch(msg.batch);
                     self.postMessage({ type: 'ack', batchId: msg.batchId, count });
+                    dbg.debug(`write ack batchId=${msg.batchId} count=${count} (totalBatches=${_totalBatches} totalEvents=${_totalEvents})`);
+                } catch (writeErr) {
+                    _totalErrors++;
+                    dbg.error(`write failed batchId=${msg.batchId} (totalErrors=${_totalErrors}):`, writeErr?.message ?? writeErr);
+                    self.postMessage({
+                        type:    'error',
+                        batchId: msg.batchId,
+                        message: writeErr?.message ?? String(writeErr),
+                        stack:   writeErr?.stack,
+                    });
                 } finally {
                     pendingTxCount--;
                     // 如果有等待 flush 的 resolve，检查是否都完成了
                     if (pendingTxCount === 0 && flushResolvers.length > 0) {
+                        dbg.debug(`flush: all pending tx done, resolving ${flushResolvers.length} waiter(s)`);
                         for (const r of flushResolvers) r();
                         flushResolvers = [];
                     }
@@ -176,18 +255,22 @@ self.onmessage = async (evt) => {
             }
 
             case 'flush': {
+                dbg.debug(`flush: pendingTxCount=${pendingTxCount}`);
                 if (pendingTxCount === 0) {
                     self.postMessage({ type: 'flushed' });
+                    dbg.debug('flush: no pending tx, sent "flushed" immediately');
                 } else {
                     // 等待所有进行中事务完成
                     await new Promise(resolve => flushResolvers.push(resolve));
                     self.postMessage({ type: 'flushed' });
+                    dbg.debug('flush: all tx drained, sent "flushed"');
                 }
                 break;
             }
 
             case 'query': {
                 if (!db) {
+                    dbg.warn('query: DB not initialized — returning empty');
                     self.postMessage({ type: 'queryResult', events: [] });
                     return;
                 }
@@ -198,6 +281,7 @@ self.onmessage = async (evt) => {
 
             case 'clear': {
                 if (!db) {
+                    dbg.warn('clear: DB not initialized — nothing to clear');
                     self.postMessage({ type: 'cleared' });
                     return;
                 }
@@ -207,18 +291,23 @@ self.onmessage = async (evt) => {
             }
 
             case 'close': {
+                dbg.debug(`close: closing DB (totalBatches=${_totalBatches} totalEvents=${_totalEvents} errors=${_totalErrors})`);
                 if (db) {
                     db.close();
                     db = null;
                 }
                 self.postMessage({ type: 'closed' });
+                dbg.debug('close: sent "closed"');
                 break;
             }
 
             default:
-                console.warn('[idb-worker] Unknown command:', msg.cmd);
+                dbg.warn('unknown command:', msg.cmd);
         }
     } catch (err) {
+        _totalErrors++;
+        dbg.error(`unhandled error in cmd="${msg.cmd}":`, err?.message ?? String(err));
+        if (err?.stack) dbg.error('stack:', err.stack);
         self.postMessage({
             type:    'error',
             batchId: msg.batchId,
@@ -230,5 +319,5 @@ self.onmessage = async (evt) => {
 
 // Worker 错误兜底
 self.onerror = (evt) => {
-    console.error('[idb-worker] Uncaught error:', evt.message);
+    console.error('[Jalangi:idb-worker] Uncaught Worker error:', evt.message, `(${evt.filename}:${evt.lineno})`);
 };

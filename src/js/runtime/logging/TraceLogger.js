@@ -20,6 +20,11 @@
  *  - 所有 NORMAL 写入都通过 LogManager（有 RingBuffer 缓冲 + 后端分发）
  *  - KEY 日志同步写控制台，不经过 LogManager（避免 async 延迟影响可读性）
  *
+ * 诊断日志（直接输出到 console，不走 LogManager）：
+ *  - 通过 JALANGI_DEBUG=1 (Node.js 环境变量) 或
+ *    localStorage.jalangiDebug='1' (浏览器) 开启 debug 级别输出
+ *  - error/warn 级别诊断日志始终输出（无需开关）
+ *
  * 使用方式：
  *
  *   // 浏览器（IDB）：
@@ -48,6 +53,26 @@
 
 // ── 运行环境检测 ────────────────────────────────────────────────────────────────
 const IS_BROWSER = typeof window !== 'undefined' || typeof globalThis.self !== 'undefined';
+
+// ── 诊断日志工具（直接到 console，不走 LogManager/IDB）────────────────────────
+//
+// debug 级别：需要 JALANGI_DEBUG=1（Node.js）或 localStorage.jalangiDebug='1'（浏览器）
+// warn/error 级别：始终输出
+
+function _isDebugEnabled() {
+    if (!IS_BROWSER) {
+        return process?.env?.JALANGI_DEBUG === '1';
+    }
+    try { return localStorage?.getItem?.('jalangiDebug') === '1'; } catch { return false; }
+}
+
+const dbg = {
+    debug(...args) {
+        if (_isDebugEnabled()) console.debug('[Jalangi:TraceLogger]', ...args);
+    },
+    warn(...args)  { console.warn( '[Jalangi:TraceLogger]', ...args); },
+    error(...args) { console.error('[Jalangi:TraceLogger]', ...args); },
+};
 
 export class TraceLogger {
     /**
@@ -92,6 +117,15 @@ export class TraceLogger {
         /** @type {import('./LogManager.js').LogManager|null} */
         this._mgr  = null;
         this._ready = null;  // Promise，init() 返回的
+
+        dbg.debug('constructed', {
+            env: IS_BROWSER ? 'browser' : 'node',
+            useIdb,
+            dbName,
+            storeName,
+            nodeFile: IS_BROWSER ? '(n/a)' : nodeFile,
+            wsUrl,
+        });
     }
 
     // ── 初始化 ─────────────────────────────────────────────────────────────────
@@ -105,58 +139,83 @@ export class TraceLogger {
      */
     init() {
         if (this._ready) return this._ready;
+        dbg.debug('init() called — starting backend initialization');
         this._ready = this._doInit().catch(err => {
-            console.warn('[TraceLogger] init failed, falling back to console-only:', err.message);
+            dbg.error('init failed, falling back to console-only:', err.message, err.stack ?? '');
             this._mgr = null;
         });
         return this._ready;
     }
 
     async _doInit() {
+        const t0      = Date.now();
         const backends = [];
         const opts     = this._opts;
 
         if (IS_BROWSER) {
             // ── 浏览器：IDB 后端 ─────────────────────────────────────────────
             if (opts.useIdb) {
-                const { IdbWorkerBackend } = await import('./backends/IdbWorkerBackend.js');
-                const idb = new IdbWorkerBackend({
-                    dbName:    opts.dbName,
-                    storeName: opts.storeName,
-                });
-                await idb.init();
-                backends.push(idb);
+                dbg.debug('initializing IdbWorkerBackend', { dbName: opts.dbName, storeName: opts.storeName });
+                try {
+                    const { IdbWorkerBackend } = await import('./backends/IdbWorkerBackend.js');
+                    const idb = new IdbWorkerBackend({
+                        dbName:    opts.dbName,
+                        storeName: opts.storeName,
+                    });
+                    await idb.init();
+                    backends.push(idb);
+                    dbg.debug('IdbWorkerBackend ready');
+                } catch (err) {
+                    dbg.error('IdbWorkerBackend init failed:', err.message, err.stack ?? '');
+                    // 继续用其他后端（不抛出，降级处理）
+                }
             }
 
             // ── 浏览器：WebSocket 后端（可选）───────────────────────────────
             if (opts.wsUrl) {
-                const { WsBackend } = await import('./backends/WsBackend.js');
-                const ws = new WsBackend({
-                    url:         opts.wsUrl,
-                    format:      'binary',
-                    autoConnect: true,
-                });
-                // 等待连接成功（或超时）；失败不阻断
-                await ws.connect().catch(err =>
-                    console.warn('[TraceLogger] WsBackend connect failed:', err.message)
-                );
-                backends.push(ws);
+                dbg.debug('connecting WsBackend', { url: opts.wsUrl });
+                try {
+                    const { WsBackend } = await import('./backends/WsBackend.js');
+                    const ws = new WsBackend({
+                        url:         opts.wsUrl,
+                        format:      'binary',
+                        autoConnect: true,
+                    });
+                    // 等待连接成功（或超时）；失败不阻断
+                    await ws.connect().catch(err => {
+                        dbg.warn('WsBackend connect failed (non-fatal):', err.message);
+                    });
+                    backends.push(ws);
+                    dbg.debug('WsBackend connected');
+                } catch (err) {
+                    dbg.error('WsBackend setup failed:', err.message, err.stack ?? '');
+                }
             }
         } else {
             // ── Node.js：文件后端 ────────────────────────────────────────────
             if (opts.nodeFile) {
-                const { NodeStreamBackend } = await import('./backends/NodeStreamBackend.js');
-                backends.push(new NodeStreamBackend({ path: opts.nodeFile }));
+                dbg.debug('opening NodeStreamBackend', { path: opts.nodeFile });
+                try {
+                    const { NodeStreamBackend } = await import('./backends/NodeStreamBackend.js');
+                    backends.push(new NodeStreamBackend({ path: opts.nodeFile }));
+                    dbg.debug('NodeStreamBackend ready', { path: opts.nodeFile });
+                } catch (err) {
+                    dbg.error('NodeStreamBackend init failed:', err.message, err.stack ?? '');
+                }
             }
 
             // ── Node.js：控制台后端（可选）──────────────────────────────────
             if (opts.nodeConsole || backends.length === 0) {
                 // 没有文件后端时回退到控制台
                 backends.push(new ConsoleBackend());
+                dbg.debug('using ConsoleBackend' + (backends.length === 1 ? ' (fallback, no file backend)' : ' (nodeConsole=true)'));
             }
         }
 
-        if (backends.length === 0) return;   // 纯控制台模式，不需要 LogManager
+        if (backends.length === 0) {
+            dbg.warn('no backends configured — trace data will only appear on console (KEY events)');
+            return;   // 纯控制台模式，不需要 LogManager
+        }
 
         const { LogManager } = await import('./LogManager.js');
         this._mgr = new LogManager({
@@ -164,6 +223,9 @@ export class TraceLogger {
             autoClose: true,
             ...this._opts.logManagerOptions,
         });
+
+        const elapsed = Date.now() - t0;
+        dbg.debug(`_doInit() complete — ${backends.length} backend(s) ready, took ${elapsed}ms`);
     }
 
     // ── 公共 API ──────────────────────────────────────────────────────────────
@@ -207,11 +269,19 @@ export class TraceLogger {
      * @returns {Promise<void>}
      */
     async close() {
-        if (!this._mgr) return;
+        if (!this._mgr) {
+            dbg.debug('close() called — no LogManager (already closed or never initialized)');
+            return;
+        }
+        dbg.debug('close() — flushing LogManager...');
+        const t0 = Date.now();
         try {
+            const stats = this._mgr.getStats?.();
             await this._mgr.close();
+            const elapsed = Date.now() - t0;
+            dbg.debug(`close() done in ${elapsed}ms`, stats ? `logged=${stats.logManager.totalLogged} flushed=${stats.logManager.totalFlushed} errors=${stats.logManager.flushErrors}` : '');
         } catch (err) {
-            console.warn('[TraceLogger] close error:', err.message);
+            dbg.error('close() error:', err.message, err.stack ?? '');
         }
         this._mgr = null;
     }
