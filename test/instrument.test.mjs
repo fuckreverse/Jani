@@ -1,10 +1,11 @@
 /**
- * test_esm.mjs — 插桩器端到端集成测试
+ * instrument.test.mjs — 插桩器端到端集成测试
  *
- * 运行方式：  node test_esm.mjs
+ * 运行方式：  node test/instrument.test.mjs
+ *            npm test
  *
  * 覆盖范围：
- *   - ES5 基础语法
+ *   - ES5 基础语法（含钩子断言）
  *   - ES6（箭头函数、class、解构、模板字符串、rest/default 参数、Promise）
  *   - ES2017（async/await）
  *   - ES2019（optional catch binding）
@@ -14,7 +15,9 @@
  *   - IID source map 完整性
  *   - inlineSourceMap 模式
  *   - JALANGI DO NOT INSTRUMENT 跳过逻辑
- *   - Config 选择性禁用插桩
+ *   - Config 选择性禁用插桩（含全部 12 个 Config 字段）
+ *   - 边界条件（语法错误、空代码、严格模式、init 参数校验）
+ *   - 插桩幂等性（同文件多次插桩结果一致）
  */
 
 import { init, instrumentCode } from '../src/js/instrument/esnstrument.js';
@@ -87,24 +90,28 @@ console.log('\n── ES5 ──────────────────
 
 test('基本 var 声明 + 二元运算', () => {
     const r = instr('var x = 1 + 2; console.log(x);');
-    assert(r.code.length > 0);
-    assertIncludes(r.code, 'J$.', '应注入 J$ 钩子');
+    assertIncludes(r.code, 'J$.B(', '应注入二元运算钩子 J$.B');
+    assertIncludes(r.code, 'J$.W(', '应注入写入钩子 J$.W');
+    assertIncludes(r.code, 'J$.N(', '应注入变量初始化钩子 J$.N');
 });
 
 test('function 声明', () => {
     const r = instr('function foo(a) { return a + 1; }');
-    assert(r.code.length > 0);
-    assertIncludes(r.code, 'J$.Fe', '应注入函数入口钩子');
+    assertIncludes(r.code, 'J$.Fe(', '应注入函数入口钩子 J$.Fe');
+    assertIncludes(r.code, 'J$.Fr(', '应注入函数返回钩子 J$.Fr');
+    assertIncludes(r.code, 'J$.B(', '应注入二元运算钩子 J$.B');
 });
 
 test('for-in 循环', () => {
     const r = instr('var o = {a:1}; for (var k in o) { console.log(k); }');
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.H(', '应注入 hash 钩子用于 for-in 右侧');
+    assertIncludes(r.code, 'J$.W(', '应注入写入钩子（for-in 变量赋值）');
 });
 
 test('try-catch-finally', () => {
     const r = instr('try { x(); } catch(e) { console.log(e); } finally { done(); }');
-    assert(r.code.length > 0);
+    // try-catch 包裹逻辑：脚本级 try-catch 应存在
+    assertIncludes(r.code, 'J$.Se(', '应注入脚本入口钩子 J$.Se');
 });
 
 // ════════════════════════════════════════════════════════════════
@@ -114,64 +121,78 @@ console.log('\n── ES6 ──────────────────
 
 test('箭头函数 + 默认参数', () => {
     const r = instr('const f = (x, y = 0) => x + y;');
-    assert(r.code.length > 0);
+    // 箭头函数无 arguments，不注入 J$.Fe，但会被 wrapLiteral 包装为 J$.T
+    assertIncludes(r.code, 'J$.T(', '箭头函数应被 wrapLiteral 包装为 J$.T');
+    assertIncludes(r.code, 'J$.B(', '应注入二元运算钩子 J$.B');
 });
 
 test('箭头函数（表达式体）', () => {
     const r = instr('var add = (a, b) => a + b;');
-    assert(r.code.length > 0);
+    // 表达式体箭头函数无 arguments，不注入 J$.Fe；但变量写入和读取应有钩子
+    assertIncludes(r.code, 'J$.W(', '箭头函数赋值应注入写入钩子 J$.W');
+    assertIncludes(r.code, 'J$.R(', '参数应注入读取钩子 J$.R');
 });
 
 test('class（constructor + 普通方法）', () => {
     const r = instr('class Animal { constructor(n) { this.name = n; } speak() { return this.name; } }');
-    assert(r.code.length > 0);
     // class 方法不应被 wrapLiteral 成字面量
     assertIncludes(r.code, 'speak', 'class 方法名应保留');
+    assertIncludes(r.code, 'J$.Fe(', 'class 方法应注入 J$.Fe');
+    assertIncludes(r.code, 'J$.P(', 'this.name 赋值应注入属性写入钩子 J$.P');
 });
 
 test('class（getter / setter）', () => {
     const r = instr('class Box { get val() { return this._v; } set val(v) { this._v = v; } }');
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.Fe(', 'getter/setter 函数应注入 J$.Fe');
+    // getter/setter 的 FunctionExpression 不应被当作独立字面量（无 J$.T）
+    assert(!r.code.includes('J$.T('), 'getter/setter 内函数不应被 wrapLiteral 包装');
 });
 
 test('class 继承', () => {
     const r = instr('class Dog extends Animal { bark() { return "woof"; } }');
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.Fe(', 'class 方法应注入 J$.Fe');
 });
 
 test('对象解构', () => {
     const r = instr('const {a, b} = obj;');
-    assert(r.code.length > 0);
+    // 解构右侧的 obj 应被插桩为读取
+    assertIncludes(r.code, 'J$.R(', '解构右侧应注入读取钩子 J$.R');
 });
 
 test('数组解构', () => {
     const r = instr('const [x, y] = [1, 2];');
-    assert(r.code.length > 0);
+    // 数组字面量 [1, 2] 应被插桩为字面量
+    assertIncludes(r.code, 'J$.T(', '数组字面量应注入 J$.T');
 });
 
 test('模板字符串', () => {
     const r = instr('var s = `hello ${name}`;');
-    assert(r.code.length > 0);
+    // name 是读取操作
+    assertIncludes(r.code, 'J$.R(', '模板字符串中的变量引用应注入读取钩子 J$.R');
 });
 
 test('rest 参数', () => {
     const r = instr('function f(...args) { return args; }');
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.Fe(', '含 rest 参数的函数应注入 J$.Fe');
 });
 
 test('spread 运算符', () => {
     const r = instr('const arr = [1, ...other, 2];');
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.T(', '含 spread 的数组字面量应注入 J$.T');
+    assertIncludes(r.code, 'J$.R(', 'spread 的 other 应注入读取钩子 J$.R');
 });
 
 test('Promise', () => {
     const r = instr('var p = new Promise((resolve, reject) => { resolve(42); });');
-    assert(r.code.length > 0);
+    // new Promise 被插桩为 J$.F（构造调用与普通调用共用 J$.F），Promise 本身被读取插桩
+    assertIncludes(r.code, 'J$.F(', 'new Promise() 应注入 J$.F');
+    assertIncludes(r.code, 'J$.R(', 'Promise 标识符应注入读取钩子 J$.R');
 });
 
 test('解构函数参数', () => {
     const r = instr('function f({x, y}, [a, b]) { return x + y + a + b; }');
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.Fe(', '解构参数函数应注入 J$.Fe');
+    assertIncludes(r.code, 'J$.B(', '函数体内二元运算应注入 J$.B');
 });
 
 // ════════════════════════════════════════════════════════════════
@@ -181,7 +202,8 @@ console.log('\n── ES2017 ─────────────────
 
 test('async / await', () => {
     const r = instr('async function fetchData() { var data = await fetch("/api"); return data.json(); }');
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.Fe(', 'async 函数应注入 J$.Fe');
+    assertIncludes(r.code, 'J$.Fr(', 'async 函数应注入返回钩子 J$.Fr');
 });
 
 // ════════════════════════════════════════════════════════════════
@@ -190,9 +212,9 @@ test('async / await', () => {
 console.log('\n── ES2019 ───────────────────────────────────────────────');
 
 test('optional catch binding（无参数 catch）', () => {
-    // node.param 为 null，不能访问 .name
+    // node.param 为 null，不能访问 .name —— 测试插桩器不崩溃且正常产出
     const r = instr('try { foo(); } catch { console.log("caught"); }');
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.Se(', 'optional catch binding 代码应能正常插桩');
 });
 
 // ════════════════════════════════════════════════════════════════
@@ -202,23 +224,32 @@ console.log('\n── ES2020 ─────────────────
 
 test('optional chaining (?.)' , () => {
     const r = instr('var x = obj?.foo?.bar;');
-    assert(r.code.length > 0);
+    // optional chaining 被 acorn 拆解为 ChainExpression，内部的属性访问应被插桩
+    assertIncludes(r.code, 'J$.G(', 'optional chaining 内部属性访问应注入 J$.G');
 });
 
-test('nullish coalescing (??)', () => {
+test('nullish coalescing (??) 注入条件钩子', () => {
+    // ?? 被 acorn 解析为 LogicalExpression { operator: '??' }
+    // wrapLogicalNullish 应注入 J$.C（条件钩子）记录分支
     const r = instr('var x = a ?? b;');
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.C(', '?? 运算符应注入条件钩子 J$.C');
+    assertIncludes(r.code, 'J$._tm_p', '?? 应使用临时变量暂存左侧值');
 });
 
 test('BigInt 字面量', () => {
-    // BigInt 节点 typeof 为 'bigint'，插桩器应跳过不崩溃
+    // BigInt 节点 typeof 为 'bigint'，插桩器应跳过不崩溃（不插桩 BigInt 字面量）
     const r = instr('var n = 9007199254740991n;');
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.Se(', 'BigInt 代码应能正常插桩');
+    // BigInt 字面量本身不被 wrapLiteral 包装
+    assertIncludes(r.code, '9007199254740991n', 'BigInt 字面量应原样保留');
 });
 
 test('logical assignment (||= &&= ??=)', () => {
     const r = instr('a ||= b; a &&= c; a ??= d;');
-    assert(r.code.length > 0);
+    // LogicalAssignment 拆解为 LogicalExpression + WriteExpression，用 J$.W 记录写入
+    // 同时用 J$.C 记录条件分支（||/&&/??）
+    assertIncludes(r.code, 'J$.W(', 'logical assignment 应注入写入钩子 J$.W');
+    assertIncludes(r.code, 'J$.C(', 'logical assignment 的条件分支应注入 J$.C');
 });
 
 // ════════════════════════════════════════════════════════════════
@@ -228,17 +259,20 @@ console.log('\n── ES2022 ─────────────────
 
 test('class private fields + getter', () => {
     const r = instr('class Counter { #count = 0; increment() { this.#count++; } get value() { return this.#count; } }');
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.Fe(', '含私有字段的 class 方法应注入 J$.Fe');
+    // 私有字段名 #count 应保留（插桩器不改变私有字段标识符）
+    assertIncludes(r.code, '#count', '私有字段名 #count 应保留');
 });
 
 test('class static field', () => {
     const r = instr('class Cfg { static debug = false; }');
-    assert(r.code.length > 0);
+    // static field 初始化应被插桩
+    assertIncludes(r.code, 'J$.Se(', 'class static field 代码应能正常插桩');
 });
 
 test('顶层 await（module 模式）', () => {
     const r = instr('const res = await fetch("https://example.com"); console.log(res.status);', { sourceType: 'module' });
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.F(', '顶层 await 的 fetch() 调用应注入 J$.F');
 });
 
 // ════════════════════════════════════════════════════════════════
@@ -248,12 +282,14 @@ console.log('\n── ESM ──────────────────
 
 test('import + export（module 模式）', () => {
     const r = instr('import { foo } from "./foo.js"; export const bar = foo();', { sourceType: 'module' });
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.F(', 'foo() 调用应注入 J$.F');
+    assertIncludes(r.code, 'J$.N(', 'const bar 初始化应注入 J$.N');
 });
 
 test('export default function', () => {
     const r = instr('export default function greet(name) { return `Hello, ${name}`; }', { sourceType: 'module' });
-    assert(r.code.length > 0);
+    assertIncludes(r.code, 'J$.Fe(', 'export default function 应注入 J$.Fe');
+    assertIncludes(r.code, 'J$.Fr(', '函数应注入返回钩子 J$.Fr');
 });
 
 // ════════════════════════════════════════════════════════════════
@@ -307,7 +343,27 @@ test('INSTR_READ = () => false 时不注入读取钩子', () => {
     init({ ...ALL_CONFIG, INSTR_READ: () => false });
     const r = instr('var x = a + b;');
     assert(!r.code.includes('J$.R('), '不应有 J$.R 读取钩子');
-    // 恢复全量 Config
+    init(ALL_CONFIG);
+});
+
+test('INSTR_WRITE = () => false 时不注入写入钩子', () => {
+    init({ ...ALL_CONFIG, INSTR_WRITE: () => false });
+    const r = instr('x = 1;');
+    assert(!r.code.includes('J$.W('), '不应有 J$.W 写入钩子');
+    init(ALL_CONFIG);
+});
+
+test('INSTR_GETFIELD = () => false 时不注入属性读取钩子', () => {
+    init({ ...ALL_CONFIG, INSTR_GETFIELD: () => false });
+    const r = instr('var x = obj.foo;');
+    assert(!r.code.includes('J$.G('), '不应有 J$.G 属性读取钩子');
+    init(ALL_CONFIG);
+});
+
+test('INSTR_PUTFIELD = () => false 时不注入属性写入钩子', () => {
+    init({ ...ALL_CONFIG, INSTR_PUTFIELD: () => false });
+    const r = instr('obj.foo = 1;');
+    assert(!r.code.includes('J$.P('), '不应有 J$.P 属性写入钩子');
     init(ALL_CONFIG);
 });
 
@@ -316,6 +372,107 @@ test('INSTR_BINARY = () => false 时不注入二元运算钩子', () => {
     const r = instr('var x = 1 + 2;');
     assert(!r.code.includes('J$.B('), '不应有 J$.B 二元运算钩子');
     init(ALL_CONFIG);
+});
+
+test('INSTR_UNARY = () => false 时不注入一元运算钩子', () => {
+    init({ ...ALL_CONFIG, INSTR_UNARY: () => false });
+    const r = instr('var x = -a;');
+    assert(!r.code.includes('J$.U('), '不应有 J$.U 一元运算钩子');
+    init(ALL_CONFIG);
+});
+
+test('INSTR_LITERAL = () => false 时不注入字面量钩子', () => {
+    init({ ...ALL_CONFIG, INSTR_LITERAL: () => false });
+    const r = instr('var x = [1, 2];');
+    assert(!r.code.includes('J$.T('), '不应有 J$.T 字面量钩子');
+    init(ALL_CONFIG);
+});
+
+test('INSTR_CONDITIONAL = () => false 时不注入条件钩子', () => {
+    init({ ...ALL_CONFIG, INSTR_CONDITIONAL: () => false });
+    const r = instr('var x = a ? b : c;');
+    assert(!r.code.includes('J$.C('), '不应有 J$.C 条件钩子');
+    init(ALL_CONFIG);
+});
+
+test('INSTR_INIT = () => false 时不注入变量初始化钩子', () => {
+    init({ ...ALL_CONFIG, INSTR_INIT: () => false });
+    const r = instr('var x = 1;');
+    assert(!r.code.includes('J$.N('), '不应有 J$.N 初始化钩子');
+    init(ALL_CONFIG);
+});
+
+// ════════════════════════════════════════════════════════════════
+// 边界条件
+// ════════════════════════════════════════════════════════════════
+console.log('\n── 边界条件 ─────────────────────────────────────────────');
+
+test('语法错误代码应抛出带文件名的错误', () => {
+    let caught = false;
+    try {
+        instr('function (', { file: 'bad.js' });
+    } catch (e) {
+        caught = true;
+        // 错误信息应包含文件名（由 instrumentCode 的 catch 块提供）
+        assertIncludes(e.message, 'bad.js', '错误信息应包含文件名');
+        assert(e.cause instanceof Error, 'error.cause 应为原始 SyntaxError');
+    }
+    assert(caught, '语法错误代码应抛出异常');
+});
+
+test('空字符串代码不崩溃且返回有效结果', () => {
+    const r = instr('');
+    // 空代码：插桩后只有脚本入口/出口 + NO_INSTR 标记
+    assertIncludes(r.code, 'JALANGI DO NOT INSTRUMENT', '空代码插桩结果应含 NO_INSTR 标记');
+    assert(typeof r.sourceMapObject === 'object', '空代码应有 sourceMapObject');
+});
+
+test('含 use strict 的代码不崩溃', () => {
+    // 严格模式下 arguments.callee 会抛出，插桩器应通过 try-catch 降级处理
+    const r = instr('"use strict"; function foo() { return 1; }');
+    assertIncludes(r.code, 'J$.Fe(', '严格模式代码应注入 J$.Fe');
+    // 降级后的 callee 读取不应让插桩结果包含裸 arguments.callee（应有 try-catch 包裹）
+    // astring 生成带空格的代码，检查关键词即可
+    assertIncludes(r.code, 'return arguments.callee', '应有 arguments.callee 的 try-catch 降级');
+    assertIncludes(r.code, 'catch (e)', '应有 catch 分支降级');
+});
+
+test('init() 传入 null 应抛出 TypeError', () => {
+    let caught = false;
+    try {
+        init(null);
+    } catch (e) {
+        caught = true;
+        assert(e instanceof TypeError, '应抛出 TypeError');
+        assertIncludes(e.message, '[jalangi]', '错误信息应包含 [jalangi] 前缀');
+    }
+    assert(caught, 'init(null) 应抛出异常');
+    // 恢复
+    init(ALL_CONFIG);
+});
+
+test('init() 传入非对象应抛出 TypeError', () => {
+    let caught = false;
+    try {
+        init('bad');
+    } catch (e) {
+        caught = true;
+        assert(e instanceof TypeError, '应抛出 TypeError');
+    }
+    assert(caught, 'init("bad") 应抛出异常');
+    init(ALL_CONFIG);
+});
+
+test('插桩幂等性：同一代码两次插桩 IID 起始值相同', () => {
+    // labelCounter 在每次 instrumentCode 前重置，保证幂等性
+    const code = 'for (var k in obj) { k; }';
+    const r1 = instr(code);
+    const r2 = instr(code);
+    // 两次插桩的 sourceMapObject 中 nBranches 应一致
+    assertEqual(r1.sourceMapObject.nBranches, r2.sourceMapObject.nBranches,
+        '两次插桩的 nBranches 应一致（插桩幂等性）');
+    // 两次插桩的代码应完全一致（字符串比较）
+    assertEqual(r1.code, r2.code, '两次插桩同一代码结果应完全相同');
 });
 
 // ════════════════════════════════════════════════════════════════

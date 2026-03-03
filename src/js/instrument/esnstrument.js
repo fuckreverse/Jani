@@ -52,6 +52,9 @@ let _sid = null;        // 当前脚本 ID
  * @param {*}      [sid]    - 当前脚本 ID（用于 eval 的 source map）
  */
 function init(config, analysis, sid) {
+    if (config == null || typeof config !== 'object') {
+        throw new TypeError('[jalangi] init(): config must be a non-null object');
+    }
     _config  = config;
     _analysis = analysis ?? null;
     _sid      = sid ?? null;
@@ -327,6 +330,8 @@ const visitorOps = {
     LogicalExpression(node) {
         if (node.operator === '&&') return W.wrapLogicalAnd(node, node.left, node.right);
         if (node.operator === '||') return W.wrapLogicalOr(node, node.left, node.right);
+        // ES2020: ?? (nullish coalescing) 在 acorn 中解析为 LogicalExpression
+        if (node.operator === '??') return W.wrapLogicalNullish(node, node.left, node.right);
         return node;
     },
 
@@ -482,8 +487,9 @@ function instrumentCode(options) {
 
     let code = options.code;
 
-    // 初始化 IID 计数器及文件名
+    // 初始化 IID 计数器及文件名，并重置文件级可变状态（保证插桩幂等性）
     IID.initialize(isEval, options.instCodeFileName, options.origCodeFileName);
+    W.resetPerFile();
 
     // pre-hook（允许分析修改代码或跳过插桩）
     let skip = false;
@@ -513,8 +519,13 @@ function instrumentCode(options) {
             const newCode = astringGenerate(newAst);
             code = `${newCode}\n${NO_INSTR}\n`;
         } catch (ex) {
-            console.error('Failed to instrument', code);
-            throw ex;
+            const fileName = options.origCodeFileName ?? '(unknown)';
+            const wrappedErr = new Error(
+                `[jalangi] Failed to instrument ${fileName}: ${ex.message}`
+            );
+            wrappedErr.cause = ex;
+            wrappedErr.origCodeFileName = fileName;
+            throw wrappedErr;
         }
     }
 

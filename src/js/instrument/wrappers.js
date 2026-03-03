@@ -28,13 +28,9 @@ import * as acorn from 'acorn';
 import { JALANGI_VAR, HOP } from '../Constants.js';
 import * as IID from './iid.js';
 
-// ─── Config 引用（由外部在运行时设置，插桩器初始化后不变）──────────────────────
-// Config 模块尚未 ESM 化，通过参数注入方式传入。见 createWrappers(config)。
-// 这里先声明，由 init() 赋值。
+// ─── Config 引用（由宿主调用 init(config) 注入，插桩期间只读）────────────────────
+// Config 对象通过 init() 参数注入，避免模块间循环依赖。
 let Config;
-
-// ─── 运行时注入：acorn 在 Node 下由 import 提供，浏览器由 init() 注入 ─────────
-// （浏览器构建时 acorn 是 bundled 进来的，不需要额外处理）
 
 // ─── 常量 ─────────────────────────────────────────────────────────────────────
 
@@ -63,7 +59,6 @@ const logReturnAggrFunName        = `${JALANGI_VAR}.Ra`;
 const logUncaughtExceptionFunName = `${JALANGI_VAR}.Ex`;
 const logLastComputedFunName      = `${JALANGI_VAR}.L`;
 const logTmpVarName               = `${JALANGI_VAR}._tm_p`;
-const logSampleFunName            = `${JALANGI_VAR}.S`;    // eslint-disable-line no-unused-vars
 const logWithFunName              = `${JALANGI_VAR}.Wi`;
 const logBinaryOpFunName          = `${JALANGI_VAR}.B`;
 const logUnaryOpFunName           = `${JALANGI_VAR}.U`;
@@ -75,18 +70,14 @@ const logX1FunName                = `${JALANGI_VAR}.X1`;
 const instrumentCodeFunName       = `${JALANGI_VAR}.instrumentEvalCode`;
 
 // ─── N_LOG_* 字面量类型常量 ────────────────────────────────────────────────────
+// 这些整数常量在运行时传给 J$.T（wrapLiteral），用于标识字面量的具体类型。
+// 旧版中存在的 N_LOG_FUNCTION_ENTER(4)、N_LOG_SCRIPT_ENTER(6)、N_LOG_GETFIELD(8)、
+// N_LOG_RETURN(13)、N_LOG_READ(17)、N_LOG_HASH(19)、N_LOG_SPECIAL(20) 已不再使用，已删除。
 
-const N_LOG_FUNCTION_ENTER  = 4;   // eslint-disable-line no-unused-vars
-const N_LOG_SCRIPT_ENTER    = 6;   // eslint-disable-line no-unused-vars
-const N_LOG_GETFIELD        = 8;   // eslint-disable-line no-unused-vars
 const N_LOG_ARRAY_LIT       = 10;
 const N_LOG_OBJECT_LIT      = 11;
 const N_LOG_FUNCTION_LIT    = 12;
-const N_LOG_RETURN          = 13;  // eslint-disable-line no-unused-vars
 const N_LOG_REGEXP_LIT      = 14;
-const N_LOG_READ            = 17;  // eslint-disable-line no-unused-vars
-const N_LOG_HASH            = 19;  // eslint-disable-line no-unused-vars
-const N_LOG_SPECIAL         = 20;  // eslint-disable-line no-unused-vars
 const N_LOG_STRING_LIT      = 21;
 const N_LOG_NUMBER_LIT      = 22;
 const N_LOG_BOOLEAN_LIT     = 23;
@@ -471,6 +462,28 @@ function wrapLogicalOr(node, left, right) {
     return node;
 }
 
+/**
+ * 插桩 nullish coalescing 运算符 (??)。
+ *
+ * `a ?? b` 语义：a 不为 null/undefined 时取 a，否则取 b。
+ * 插桩模板：将 left 存入临时变量，用 J$.C 记录分支，
+ * 若非 nullish（J$._() 取回暂存值），否则取 right。
+ *
+ * 注意：`??` 在 acorn 中解析为 LogicalExpression { operator: '??' }
+ */
+function wrapLogicalNullish(node, left, right) {
+    if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('??', node)) {
+        IID.printCondIidToLoc(node);
+        const ret = replaceInExpr(
+            `(${logTmpVarName} = ${RP}2, ${logConditionalFunName}(${RP}1, ${logTmpVarName} != null && ${logTmpVarName} !== undefined) ? ${logLastFunName}() : ${RP}3)`,
+            IID.getCondIid(), left, right
+        );
+        transferLoc(ret, node);
+        return ret;
+    }
+    return node;
+}
+
 function wrapSwitchDiscriminant(node, discriminant) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('switch', node)) {
         IID.printCondIidToLoc(node);
@@ -620,8 +633,9 @@ function createCallInitAsStatement(node, name, val, isArgumentSync, lhs, isCatch
 
 function createCallAsFunEnterStatement(node) {
     IID.printIidToLoc(node);
+    // arguments.callee 在严格模式下会抛出 TypeError，使用 try-catch 安全降级为 undefined
     const ret = replaceInStatement(
-        `${logFunctionEnterFunName}(${RP}1,arguments.callee, this, arguments)`,
+        `${logFunctionEnterFunName}(${RP}1,(function(){try{return arguments.callee}catch(e){return undefined}}()), this, arguments)`,
         IID.getIid()
     );
     transferLoc(ret[0].expression, node);
@@ -870,10 +884,18 @@ function init(config) {
     Config = config;
 }
 
+/**
+ * 每次插桩新文件前调用，重置文件级别的可变状态。
+ * 目前负责重置 labelCounter，保证插桩幂等性（相同代码多次插桩结果一致）。
+ */
+function resetPerFile() {
+    labelCounter = 0;
+}
+
 // ─── 导出 ──────────────────────────────────────────────────────────────────────
 
 export {
-    init,
+    init, resetPerFile,
     // scope 状态管理
     setScope, popScope, getScope,
     // AST 辅助
@@ -888,7 +910,7 @@ export {
     wrapGetField, wrapRead, wrapReadWithUndefinedCheck,
     wrapWrite, wrapWriteWithUndefinedCheck,
     wrapReturn, wrapThrow, wrapWithX1, wrapHash, wrapEvalArg,
-    wrapUnaryOp, wrapBinaryOp, wrapLogicalAnd, wrapLogicalOr,
+    wrapUnaryOp, wrapBinaryOp, wrapLogicalAnd, wrapLogicalOr, wrapLogicalNullish,
     wrapSwitchDiscriminant, wrapSwitchTest, wrapWith, wrapConditional,
     wrapLiteral, wrapForIn, wrapCatchClause,
     wrapScriptBodyWithTryCatch, wrapFunBodyWithTryCatch,
