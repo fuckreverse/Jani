@@ -154,57 +154,36 @@ async function buildRuntimeBundle(opts) {
 
     // 虚拟入口：纯静态 import，无动态 import，rollup 可完全分析
     //
-    // 关键：TraceLogger / LogManager 里有动态 import，
+    // 关键：TraceLogger / LogManager / JalangiSandbox 里有动态 import，
     // 我们通过 plugin（resolveDynamicImport）把它们都重定向到真实路径，
     // 这样 rollup 会把这些模块当成普通静态依赖内联进来。
     // WsBackend / NodeStreamBackend / MemoryBackend 重定向到空 stub，
     // 由 treeshake 消除（不在 bundle 里）。
     const entryCode = `
-// 静态导入所有运行时依赖
-import { APPLY, CALL, HAS_OWN_PROPERTY, HAS_OWN_PROPERTY_CALL,
-         JALANGI_VAR, SPECIAL_PROP, SPECIAL_PROP2, SPECIAL_PROP3, SPECIAL_PROP4,
-         SPECIAL_PROP_SID, SPECIAL_PROP_IID, UNKNOWN, HOP, hasGetterSetter
-} from '${SRC('Constants.js')}';
-import { createRuntime    } from '${SRC('runtime', 'analysis.js')}';
-import { createIidToLocation } from '${SRC('runtime', 'iidToLocation.js')}';
-import { IdbWorkerBackend } from '${SRC('runtime', 'logging', 'backends', 'IdbWorkerBackend.js')}';
-import { RingBuffer       } from '${SRC('runtime', 'logging', 'RingBuffer.js')}';
-import { LogManager       } from '${SRC('runtime', 'logging', 'LogManager.js')}';
-import { TraceLogger      } from '${SRC('runtime', 'logging', 'TraceLogger.js')}';
-import { AnalysisHost     } from '${SRC('runtime', 'AnalysisHost.js')}';
+import { JalangiSandbox } from '${SRC('runtime', 'JalangiSandbox.js')}';
 import { ExecutionTraceAnalysis } from '${SRC('sample_analyses', 'ExecutionTrace.js')}';
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
-var J$ = globalThis.J$ = globalThis.J$ || {};
+var J$ = globalThis.J$ = new JalangiSandbox();
 
-J$.Constants = {
-    APPLY, CALL, HAS_OWN_PROPERTY, HAS_OWN_PROPERTY_CALL,
-    JALANGI_VAR, SPECIAL_PROP, SPECIAL_PROP2, SPECIAL_PROP3, SPECIAL_PROP4,
-    SPECIAL_PROP_SID, SPECIAL_PROP_IID, UNKNOWN, HOP, hasGetterSetter
-};
-J$.smap = J$.smap || {};
-J$.sid  = 0;
-
-createRuntime(J$);
-createIidToLocation(J$);
-
-// 用 AnalysisHost 注册插件（替代直接赋值），支持后续通过 .use() 链式扩展
-J$.analysis = new AnalysisHost()
-    .use(new ExecutionTraceAnalysis(J$, null, {
-        useIdb:    ${opts.useIdb},
-        dbName:    ${JSON.stringify(opts.dbName)},
-        storeName: ${JSON.stringify(opts.storeName)},
-    }));
+// 注册 ExecutionTrace 分析插件
+J$.analysis.use(new ExecutionTraceAnalysis(J$, null, {
+    useIdb:    ${opts.useIdb},
+    dbName:    ${JSON.stringify(opts.dbName)},
+    storeName: ${JSON.stringify(opts.storeName)},
+}));
 `;
 
     // 模块路径 → 真实文件路径（用于动态 import 重定向）
     const DYNAMIC_IMPORT_MAP = {
-        './backends/IdbWorkerBackend.js':  SRC('runtime', 'logging', 'backends', 'IdbWorkerBackend.js'),
-        './LogManager.js':                 SRC('runtime', 'logging', 'LogManager.js'),
+        './backends/IdbWorkerBackend.js':           SRC('runtime', 'logging', 'backends', 'IdbWorkerBackend.js'),
+        './LogManager.js':                          SRC('runtime', 'logging', 'LogManager.js'),
+        // JalangiSandbox.#registerExecutionTrace 中的动态 import（此处已在入口静态导入，stub 掉避免重复）
+        '../sample_analyses/ExecutionTrace.js':     '\0stub:ExecutionTrace',
         // 下面三个不打进浏览器 bundle，用 stub 替代
-        './backends/WsBackend.js':         '\0stub:WsBackend',
-        './backends/NodeStreamBackend.js': '\0stub:NodeStreamBackend',
-        './backends/MemoryBackend.js':     '\0stub:MemoryBackend',
+        './backends/WsBackend.js':                  '\0stub:WsBackend',
+        './backends/NodeStreamBackend.js':           '\0stub:NodeStreamBackend',
+        './backends/MemoryBackend.js':              '\0stub:MemoryBackend',
     };
 
     // 收集 rollup 警告，最后统一输出（避免和阶段日志混在一起）
@@ -261,6 +240,12 @@ J$.analysis = new AnalysisHost()
                 if (id === '\0stub:MemoryBackend') {
                     log.debug('load stub: MemoryBackend');
                     return 'export const MemoryBackend = undefined;';
+                }
+                if (id === '\0stub:ExecutionTrace') {
+                    // JalangiSandbox.#registerExecutionTrace 的动态 import 路径，
+                    // 入口已静态导入过，此处 stub 掉避免 rollup 重复打包
+                    log.debug('load stub: ExecutionTrace (already statically imported in entry)');
+                    return 'export const ExecutionTraceAnalysis = undefined;';
                 }
             },
         },

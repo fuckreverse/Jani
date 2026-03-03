@@ -20,7 +20,7 @@
  *       .use(new LogAllAnalysis(smemory));
  */
 
-/** 所有可能的钩子名称（与 analysis.js 运行时保持一致）。 */
+/** 所有可能的钩子名称（与 JalangiRuntime.js 运行时保持一致）。 */
 const HOOKS = Object.freeze([
     '_return', '_throw', '_with',
     'binaryPre', 'binary', 'conditional',

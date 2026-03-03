@@ -25,6 +25,5 @@ export const headerSources = [
     'src/js/Config.js',
     'src/js/instrument/astUtil.js',
     'src/js/instrument/esnstrument.js',
-    'src/js/runtime/iidToLocation.js',
-    'src/js/runtime/analysis.js',
+    'src/js/runtime/JalangiRuntime.js',
 ];

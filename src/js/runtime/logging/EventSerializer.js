@@ -22,7 +22,7 @@
  *      [16..]  变长负载（UTF-8 字符串或 f64 8字节）
  *    适合：WsBackend（二进制帧）、IdbWorkerBackend
  *
- * 事件类型枚举（EVENT_TYPE）与 analysis.js 钩子一一对应：
+ * 事件类型枚举（EVENT_TYPE）与 JalangiRuntime.js 钩子一一对应：
  *   read / write / getField / putField / binary / unary / literal
  *   declare / invokeFun / functionEnter / functionExit
  *   scriptEnter / scriptExit / conditional / endExpression
