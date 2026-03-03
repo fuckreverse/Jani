@@ -521,6 +521,64 @@ test('插桩幂等性：同一代码两次插桩 IID 起始值相同', () => {
 });
 
 // ════════════════════════════════════════════════════════════════
+// BUG 回归测试（修复后添加，防止退化）
+// ════════════════════════════════════════════════════════════════
+console.log('\n── BUG 回归测试 ─────────────────────────────────────');
+
+test('BUG1: INSTR_BINARY 回调第二参数应为 AST node 而非 operator 字符串', () => {
+    // 修复前：Config.INSTR_BINARY(operator, operator)  第二参数是字符串
+    // 修复后：Config.INSTR_BINARY(operator, node)      第二参数是 AST node
+    let secondArgType = null;
+    init({ ...ALL_CONFIG, INSTR_BINARY: (op, second) => { secondArgType = typeof second; return true; } });
+    instr('var x = 1 + 2;');
+    init(ALL_CONFIG);
+    assertEqual(secondArgType, 'object', 'INSTR_BINARY 第二参数应为 AST node（object），不应为字符串');
+});
+
+test('BUG2: ENABLE_SAMPLING 模式不应崩溃（循环引用修复）', () => {
+    // 修复前：mergeBodies 中 alternate: node.body 造成循环引用 → hoistFunctionDeclaration 栈溢出
+    // 修复后：用新建的 BlockStatement 包裹 instrumentedStmts 作为 alternate
+    init({ ...ALL_CONFIG, ENABLE_SAMPLING: true });
+    const r = instr('function f() { return 1; }');
+    assertIncludes(r.code, 'J$.S(', 'ENABLE_SAMPLING 模式应注入采样钩子 J$.S');
+    init(ALL_CONFIG);
+});
+
+test('BUG2b: ENABLE_SAMPLING 辅助函数 wrapper 不应被 mergeBodies 错误处理', () => {
+    // 修复前：wrapFunBodyWithTryCatch 注入的 "function n(){}" 辅助节点没有 bodyOrig，
+    // 被 visitorMergeBodyPre 误触发导致 consequent=undefined → astring 崩溃
+    init({ ...ALL_CONFIG, ENABLE_SAMPLING: true });
+    const r = instr('function outer() { function inner() { return 2; } return inner(); }');
+    assertIncludes(r.code, 'J$.S(', '嵌套函数 ENABLE_SAMPLING 应正常产出');
+    init(ALL_CONFIG);
+});
+
+test('BUG3: 箭头函数参数不应被错误标记为全局变量', () => {
+    // 修复前：visitorRRPre 缺少 ArrowFunctionExpression → _scope 不更新到箭头的 scope
+    //         导致箭头参数 hasVar() 返回 null → wrapRead 以 isGlobal=true 处理
+    // 修复后：添加 ArrowFunctionExpression: W.setScope + 对应的 popScope
+    // 验证方式：检查 J$.R 的第 4 个参数 bitPattern：
+    //   isGlobal=true  → 2，isGlobal=false → 0
+    const r = instr('var f = (x) => x + 1;');
+    // J$.R(iid, "x", x, <bitPattern>) - bitPattern for local = 0
+    const match = r.code.match(/J\$\.R\(\s*\d+\s*,\s*"x"\s*,[^,]+,\s*(\d+)\s*\)/);
+    assert(match !== null, '应存在对 x 的读取插桩 J$.R');
+    assertEqual(parseInt(match[1]), 0, '箭头参数 x 的 isGlobal 应为 false（bitPattern=0）');
+});
+
+test('BUG3b: 嵌套箭头函数各自独立作用域不相互污染', () => {
+    // 修复后：外层箭头 x、内层箭头 y 都应在各自 scope 中正确识别为局部变量
+    const r = instr('var f = (x) => (y) => x + y;');
+    // 两个参数 x 和 y 的 bitPattern 都应为 0
+    const xMatch = r.code.match(/J\$\.R\(\s*\d+\s*,\s*"x"\s*,[^,]+,\s*(\d+)\s*\)/);
+    const yMatch = r.code.match(/J\$\.R\(\s*\d+\s*,\s*"y"\s*,[^,]+,\s*(\d+)\s*\)/);
+    assert(xMatch !== null, '应存在对 x 的读取插桩');
+    assert(yMatch !== null, '应存在对 y 的读取插桩');
+    assertEqual(parseInt(xMatch[1]), 0, '外层箭头参数 x 应为局部变量（bitPattern=0）');
+    assertEqual(parseInt(yMatch[1]), 0, '内层箭头参数 y 应为局部变量（bitPattern=0）');
+});
+
+// ════════════════════════════════════════════════════════════════
 // 汇总
 // ════════════════════════════════════════════════════════════════
 console.log(`\n${'─'.repeat(52)}`);

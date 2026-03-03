@@ -424,7 +424,7 @@ function wrapUnaryOp(node, argument, operator) {
 }
 
 function wrapBinaryOp(node, left, right, operator, isComputed) {
-    if (!Config.INSTR_BINARY || Config.INSTR_BINARY(operator, operator)) {
+    if (!Config.INSTR_BINARY || Config.INSTR_BINARY(operator, node)) {
         IID.printOpIidToLoc(node);
         const ret = replaceInExpr(
             `${logBinaryOpFunName}(${RP}1, ${RP}2, ${RP}3, ${RP}4,${createBitPattern(isComputed, false, false)})`,
@@ -482,8 +482,10 @@ function wrapLogicalNullish(node, left, right) {
         // deepCloneAndReplace 误识别为占位符导致崩溃。
         const tmpProp = `tmp_${tmpVarCounter++}`;
         const uniqueTmp = `${JALANGI_VAR}.${tmpProp}`;
+        // `!= null` 使用宽松比较，已同时排除 null 和 undefined（因为 null == undefined），
+        // 无需再加 `!== undefined`，后者是冗余条件。
         const ret = replaceInExpr(
-            `(${uniqueTmp} = ${RP}2, ${logConditionalFunName}(${RP}1, ${uniqueTmp} != null && ${uniqueTmp} !== undefined) ? ${logLastFunName}() : ${RP}3)`,
+            `(${uniqueTmp} = ${RP}2, ${logConditionalFunName}(${RP}1, ${uniqueTmp} != null) ? ${logLastFunName}() : ${RP}3)`,
             IID.getCondIid(), left, right
         );
         transferLoc(ret, node);
@@ -573,6 +575,11 @@ function ifObjectExpressionHasGetterSetter(node) {
     return node.properties.some(p => p.kind === 'get' || p.kind === 'set');
 }
 
+/**
+ * 从已插桩的函数 AST 中提取 J$.Fe 调用的 IID（internalFunId）。
+ * 只适用于含有 J$.Fe 入口语句的 FunctionExpression / FunctionDeclaration。
+ * ArrowFunctionExpression 没有 J$.Fe，应直接传 undefined。
+ */
 function getFnIdFromAst(ast) {
     const entryExpr = ast.body.body[0];
     if (entryExpr.type !== 'ExpressionStatement') throw new Error('IllegalStateException');
@@ -593,14 +600,25 @@ function wrapLiteral(node, ast, funId) {
             let internalFunId;
             if (node.type === 'FunctionExpression') {
                 internalFunId = getFnIdFromAst(node);
+            } else if (node.type === 'ArrowFunctionExpression') {
+                // 箭头函数没有 J$.Fe 入口钩子，internalFunId 为 undefined（运行时跳过关联）
+                internalFunId = undefined;
             } else {
                 if (node.type !== 'Identifier') throw new Error('IllegalStateException');
                 internalFunId = getFnIdFromAst(_scope.funNodes[node.name]);
             }
-            ret = replaceInExpr(
-                `${logLitFunName}(${RP}1, ${RP}2, ${RP}3,${hasGetterSetter}, ${internalFunId})`,
-                IID.getIid(), ast, createLiteralAst(funId)
-            );
+            if (internalFunId !== undefined) {
+                ret = replaceInExpr(
+                    `${logLitFunName}(${RP}1, ${RP}2, ${RP}3,${hasGetterSetter}, ${internalFunId})`,
+                    IID.getIid(), ast, createLiteralAst(funId)
+                );
+            } else {
+                // 箭头函数：不传 internalFunId，运行时不尝试关联 J$.Fe
+                ret = replaceInExpr(
+                    `${logLitFunName}(${RP}1, ${RP}2, ${RP}3,${hasGetterSetter})`,
+                    IID.getIid(), ast, createLiteralAst(funId)
+                );
+            }
         } else {
             ret = replaceInExpr(
                 `${logLitFunName}(${RP}1, ${RP}2, ${RP}3,${hasGetterSetter})`,
@@ -755,8 +773,8 @@ function syncDefuns(node, scopeArg, isScript) {
         }
     }
     if (scopeArg) {
+        // Object.keys 仅返回自有可枚举属性，HOP 检查已冗余，移除
         for (const name of Object.keys(scopeArg.vars)) {
-            if (!HOP(scopeArg.vars, name)) continue;
             const varType = scopeArg.vars[name];
             let ident;
             if (varType === 'defun') {
@@ -802,6 +820,79 @@ function instrumentFunctionEntryExit(node, ast) {
         ? createCallAsFunEnterStatement(node)
         : [];
     return [...body, ...syncDefuns(node, _scope, false), ...ast];
+}
+
+/**
+ * 仅对箭头函数（ArrowFunctionExpression）的块体（block body）执行参数/var 同步。
+ *
+ * 箭头函数没有独立的 `arguments` 和 `this` 绑定，也无法通过
+ * arguments.callee 引用自身，因此：
+ *  - 不注入 J$.Fe / J$.Fr 入口/出口钩子
+ *  - 不插入 `arguments` 的 J$.N 同步语句（箭头函数无 arguments 对象）
+ * 但其参数（arg）和局部 var 声明仍通过 J$.N 注册给运行时分析工具。
+ *
+ * 表达式体箭头（expression=true）的 body 是单个表达式，无法插入语句，
+ * 直接跳过，不修改 node。
+ */
+function instrumentArrowFunctionBody(node) {
+    // 表达式体（e.g. x => x + 1）：body 是表达式，无法插语句
+    if (node.expression) return;
+    // 块体（e.g. x => { return x + 1; }）：只插入 arg/var 同步，跳过 arguments 同步
+    // syncDefuns 以 isScript=true 调用可跳过 arguments 初始化段，
+    // 但会导致跳过 try-catch 包裹检查；此处手动过滤更安全：
+    // 我们直接跳过 syncDefuns 中的 arguments 部分，只处理 scopeArg.vars
+    const synced = syncArrowDefuns(node, _scope);
+    if (synced.length > 0) {
+        node.body.body = [...synced, ...node.body.body];
+    }
+}
+
+/**
+ * 与 syncDefuns 类似，但跳过 `arguments` 初始化（箭头函数无此绑定）。
+ * 仅处理 scopeArg.vars 中的 arg / var / defun / lambda 条目。
+ */
+function syncArrowDefuns(node, scopeArg) {
+    if (!scopeArg) return [];
+    let ret = [];
+    // Object.keys 仅返回自有可枚举属性，HOP 检查已冗余，移除
+    for (const name of Object.keys(scopeArg.vars)) {
+        const varType = scopeArg.vars[name];
+        let ident;
+        if (varType === 'defun') {
+            ident = createIdentifierAst(name);
+            ident.loc = scopeArg.funLocs[name];
+            if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+                ret = ret.concat(createCallInitAsStatement(node,
+                    createLiteralAst(name),
+                    wrapLiteral(ident, ident, N_LOG_FUNCTION_LIT),
+                    false, ident, false, true));
+            } else {
+                ret = ret.concat(createExpressionStatement(ident,
+                    wrapLiteral(ident, ident, N_LOG_FUNCTION_LIT)));
+            }
+        } else if (varType === 'lambda') {
+            if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+                ident = createIdentifierAst(name);
+                ident.loc = scopeArg.funLocs[name];
+                ret = ret.concat(createCallInitAsStatement(node,
+                    createLiteralAst(name), ident, false, ident, false, true));
+            }
+        } else if (varType === 'arg') {
+            if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+                ident = createIdentifierAst(name);
+                ret = ret.concat(createCallInitAsStatement(node,
+                    createLiteralAst(name), ident, true, ident, false, true));
+            }
+        } else if (varType === 'var') {
+            if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+                ret = ret.concat(createCallInitAsStatement(node,
+                    createLiteralAst(name),
+                    createIdentifierAst(name),
+                    false, undefined, false, false));
+            }
+        }
+    }
+    return ret;
 }
 
 function instrumentScriptEntryExit(node, body0, instFile, origFile) {
@@ -928,6 +1019,6 @@ export {
     // 高级函数
     instrumentStore, instrumentLoad, instrumentLoadModStore,
     instrumentPreIncDec, adjustIncDec, instrumentCall,
-    instrumentFunctionEntryExit, instrumentScriptEntryExit,
+    instrumentFunctionEntryExit, instrumentArrowFunctionBody, instrumentScriptEntryExit,
     createCallAsFunEnterStatement, createCallAsScriptEnterStatement,
 };

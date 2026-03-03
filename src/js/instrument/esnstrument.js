@@ -38,6 +38,8 @@ import { CONTEXT, transformAst } from './astUtil.js';
 import { addScopes }       from './scope.js';
 import * as IID            from './iid.js';
 import * as W              from './wrappers.js';
+// ArrowFunctionExpression 专用初始化（仅做 syncDefuns，不注入 J$.Fe）
+const { instrumentArrowFunctionBody } = W;
 
 // ─── Config 注入（由宿主在使用前调用 init() 设置）──────────────────────────────
 let _config = null;
@@ -114,6 +116,12 @@ const visitorCloneBodyPre = {
 // ─── visitor：合并采样函数体（用于 ENABLE_SAMPLING 模式）────────────────────
 
 function mergeBodies(node) {
+    // 仅处理经过 Pass 0（visitorCloneBodyPre）存入了 bodyOrig 的函数节点。
+    // wrapFunBodyWithTryCatch / wrapScriptBodyWithTryCatch 在 Pass 2 中注入了
+    // 辅助性的 "function n() { ... }" wrapper，这些节点没有 bodyOrig，
+    // 在此直接跳过，不进行采样合并，否则会将 undefined 作为 consequent 传给 astring。
+    if (!node.bodyOrig) return node;
+
     IID.printIidToLoc(node);
     const iid = IID.getIid();
     const test = {
@@ -139,11 +147,17 @@ function mergeBodies(node) {
             ],
         },
     };
+    // 先保存当前 body 中的语句列表（instrumented 后的函数体），
+    // 再创建全新的 BlockStatement 作为 alternate，避免 alternate: node.body
+    // 与 node.body.body 的重新赋值之间产生循环引用，导致
+    // hoistFunctionDeclaration 的 Object.keys 遍历无限递归。
+    const instrumentedStmts = node.body.body;
+    const alternateBlock = { type: 'BlockStatement', body: instrumentedStmts };
     node.body.body = [{
         type:       'IfStatement',
         test,
         consequent: node.bodyOrig,
-        alternate:  node.body,
+        alternate:  alternateBlock,
     }];
     delete node.bodyOrig;
     return node;
@@ -157,10 +171,14 @@ const visitorMergeBodyPre = {
 // ─── visitor：作用域绑定（Pre）────────────────────────────────────────────────
 
 const visitorRRPre = {
-    Program:             W.setScope,
-    FunctionDeclaration: W.setScope,
-    FunctionExpression:  W.setScope,
-    CatchClause:         W.setScope,
+    Program:                 W.setScope,
+    FunctionDeclaration:     W.setScope,
+    FunctionExpression:      W.setScope,
+    // ArrowFunctionExpression 在 addScopes 阶段已分配 .scope（含参数注册），
+    // 必须在这里同步更新 _scope，否则遍历箭头函数体内的标识符时
+    // _scope 仍指向父作用域，导致箭头参数和局部变量被错误识别为全局变量。
+    ArrowFunctionExpression: W.setScope,
+    CatchClause:             W.setScope,
 };
 
 // ─── visitor：主插桩变换（Post）──────────────────────────────────────────────
@@ -249,6 +267,18 @@ const visitorRRPost = {
         node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
         W.popScope();
         return node;
+    },
+
+    ArrowFunctionExpression(node) {
+        // 箭头函数没有独立的 `arguments` / `this` / `callee`，
+        // 不注入 J$.Fe / J$.Fr 入口出口钩子，但需要：
+        //  1. 对块体注入参数/var 同步语句（syncDefuns）
+        //  2. 恢复 _scope 到父作用域（popScope）
+        //  3. 将节点包装为字面量（J$.T），与 FunctionExpression 一致
+        instrumentArrowFunctionBody(node);
+        const ret = W.wrapLiteral(node, node, N_LOG_FUNCTION_LIT);
+        W.popScope();
+        return ret;
     },
 
     ObjectExpression: (node) => W.wrapLiteral(node, node, N_LOG_OBJECT_LIT),
