@@ -216,6 +216,15 @@ const visitorRRPost = {
             // BUG-5 fix: 解构声明（ObjectPattern / ArrayPattern）的 def.id 不是 Identifier，
             // 直接访问 def.id.name 会得到 undefined，导致错误地插入 J$.W(iid, undefined, ...)。
             // 对非 Identifier 的解构模式暂不插桩写入（解构赋值已由 AssignmentExpression 处理）。
+            //
+            // Guard: 若 def.id 既不是 Identifier 也不是解构 Pattern，说明遇到了未预期的 AST 节点类型
+            const _knownNonIdentTypes = new Set(['ObjectPattern', 'ArrayPattern']);
+            if (def.id.type !== 'Identifier' && !_knownNonIdentTypes.has(def.id.type)) {
+                throw new Error(
+                    `[jalangi] VariableDeclaration: unexpected declarator id type "${def.id.type}". ` +
+                    `Expected Identifier, ObjectPattern, or ArrayPattern.`
+                );
+            }
             if (def.init !== null && def.id.type === 'Identifier') {
                 let init = W.wrapWrite(def.init, W.createLiteralAst(def.id.name), def.init, def.id,
                     false, W.getScope().isGlobal(def.id.name), true);
@@ -395,11 +404,16 @@ const visitorOps = {
     },
 
     FunctionExpression(node) {
+        // Guard: generator/async FunctionExpression 不应进入 wrapFunBodyWithTryCatch
+        // wrapFunBodyWithTryCatch 内部也有相同 guard，此处提前拦截提供更清晰的调用栈
+        if (node.generator || node.async) return node;
         node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
         return node;
     },
 
     FunctionDeclaration(node) {
+        // Guard: generator/async FunctionDeclaration 不应进入 wrapFunBodyWithTryCatch
+        if (node.generator || node.async) return node;
         node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
         return node;
     },
@@ -509,6 +523,34 @@ const NO_INSTR = '// JALANGI DO NOT INSTRUMENT';
  * }}
  */
 function instrumentCode(options) {
+    // Guard: init() 必须在第一次调用前完成
+    if (_config === null) {
+        throw new Error(
+            '[jalangi] instrumentCode() called before init(). ' +
+            'You must call init(config) first to provide a Config object.'
+        );
+    }
+    // Guard: options 必须是对象
+    if (options == null || typeof options !== 'object') {
+        throw new TypeError(
+            `[jalangi] instrumentCode(): options must be a non-null object, got ${typeof options}`
+        );
+    }
+    // Guard: code 必须是字符串
+    if (typeof options.code !== 'string') {
+        throw new TypeError(
+            `[jalangi] instrumentCode(): options.code must be a string, got ${typeof options.code}. ` +
+            `If you want to skip instrumentation, pass an empty string '' instead.`
+        );
+    }
+    // Guard: sourceType 只允许 'script' 或 'module'
+    const _srcType = options.sourceType ?? 'script';
+    if (_srcType !== 'script' && _srcType !== 'module') {
+        throw new Error(
+            `[jalangi] instrumentCode(): options.sourceType must be 'script' or 'module', got ${JSON.stringify(_srcType)}`
+        );
+    }
+
     const {
         isEval        = false,
         thisIid,

@@ -284,6 +284,13 @@ function wrapGetField(node, base, offset, isComputed) {
 function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal) {
     assertAstNode(node, 'wrapRead/node');
     assertAstNode(name, 'wrapRead/name');
+    // Guard: Literal 名称必须是字符串，undefined 说明上游错误地把解构模式的 .name 传入了
+    if (name.type === 'Literal' && typeof name.value !== 'string') {
+        throw new Error(
+            `[jalangi] wrapRead: name.value should be a string identifier name, got ${JSON.stringify(name.value)}. ` +
+            `This usually means a destructuring pattern's .id.name (undefined) was passed instead of an Identifier.name.`
+        );
+    }
     if (!Config.INSTR_READ || Config.INSTR_READ(name, node)) {
         IID.printIidToLoc(node);
         const ret = replaceInExpr(
@@ -311,6 +318,13 @@ function wrapReadWithUndefinedCheck(node, name) {
 function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration) {
     assertAstNode(node, 'wrapWrite/node');
     assertAstNode(name, 'wrapWrite/name');
+    // Guard: Literal 名称必须是字符串，undefined 说明上游错误地把解构模式的 .name 传入了
+    if (name.type === 'Literal' && typeof name.value !== 'string') {
+        throw new Error(
+            `[jalangi] wrapWrite: name.value should be a string identifier name, got ${JSON.stringify(name.value)}. ` +
+            `This usually means a destructuring pattern's .id.name (undefined) was passed instead of an Identifier.name.`
+        );
+    }
     if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name, node)) {
         IID.printIidToLoc(node);
         const ret = replaceInExpr(
@@ -640,6 +654,21 @@ function createExpressionStatement(lhs, node) {
 }
 
 function createCallInitAsStatement(node, name, val, isArgumentSync, lhs, isCatchParam, isAssign) {
+    // Guard: isAssign=true 时 lhs 必须存在，且不能是 'arguments'（严格模式下赋值 arguments 为语法错误）
+    if (isAssign) {
+        if (!lhs) {
+            throw new Error(
+                '[jalangi] createCallInitAsStatement: isAssign=true but lhs is null/undefined. ' +
+                'Pass a valid AST node as lhs, or use isAssign=false to call J$.N without assignment.'
+            );
+        }
+        if (lhs.type === 'Identifier' && lhs.name === 'arguments') {
+            throw new Error(
+                '[jalangi] createCallInitAsStatement: attempting to assign to "arguments" (isAssign=true, lhs=arguments). ' +
+                'This causes SyntaxError in strict mode. Use isAssign=false instead.'
+            );
+        }
+    }
     IID.printIidToLoc(node);
     let ret;
     if (isAssign) {
@@ -691,7 +720,17 @@ function wrapForIn(node, left, right, body) {
     const isDeclaration = (left.type === 'VariableDeclaration');
     let tmp, extra;
     if (isDeclaration) {
-        const name = node.left.declarations[0].id.name;
+        // Guard: for-in 只支持单个普通标识符声明，不支持解构模式
+        // （如 for (var {a} in obj)）。acorn 在马上报语法错误，但防御性地确认。
+        const decl = node.left.declarations[0];
+        if (!decl || decl.id.type !== 'Identifier') {
+            throw new Error(
+                `[jalangi] wrapForIn: for-in left-hand side declaration has a non-Identifier pattern ` +
+                `(got ${decl?.id?.type ?? 'undefined'}). ` +
+                `Destructuring patterns in for-in are not supported.`
+            );
+        }
+        const name = decl.id.name;
         tmp   = replaceInExpr(`${name} = ${logTmpVarName}`);
         extra = instrumentStore(tmp, isDeclaration);
         const ret = replaceInStatement(
@@ -745,14 +784,22 @@ function wrapScriptBodyWithTryCatch(node, body) {
 }
 
 function wrapFunBodyWithTryCatch(node, body) {
-    // BUG-2/3 fix: generator 函数（function*）和 async 函数的 yield/await
-    // 在被 while(true){try/finally} 包裹后语义会被破坏：
-    //  - generator: yield 在 try/finally 中时，finally 在每次 yield 后立即执行，
-    //    打乱了生成器的暂停/恢复语义；continue jalangiLabelN 也无法实现预期的重入。
-    //  - async: await 同理，finally 会在 await 解析前执行，导致提前 return。
-    // 修复：对这两类函数直接返回原始 body，不做 try/finally 包裹。
-    if (node.generator || node.async) {
-        return body;
+    // Guard: generator 和 async 函数不应进入包裹逻辑。
+    // 修复早已在 visitorOps 层面拦截，但如果未来某个 visitor 気必直接调用此函数，
+    // 必须在这里提前抛错而不是静默返回错误的代码。
+    if (node.generator) {
+        throw new Error(
+            `[jalangi] wrapFunBodyWithTryCatch: called on a generator function (function*). ` +
+            `Generator functions must NOT be wrapped with while(true)/try/finally because yield semantics would be broken. ` +
+            `Handle generator nodes before calling this function.`
+        );
+    }
+    if (node.async) {
+        throw new Error(
+            `[jalangi] wrapFunBodyWithTryCatch: called on an async function. ` +
+            `Async functions must NOT be wrapped with while(true)/try/finally because await semantics would be broken. ` +
+            `Handle async nodes before calling this function.`
+        );
     }
     if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
         IID.printIidToLoc(node);
@@ -789,6 +836,15 @@ function syncDefuns(node, scopeArg, isScript) {
         // Object.keys 仅返回自有可枚举属性，HOP 检查已冗余，移除
         for (const name of Object.keys(scopeArg.vars)) {
             const varType = scopeArg.vars[name];
+            // Guard: varType 必须是已知类型之一；出现未知类型说明 scope.js 收锂了新的变量类型
+            const _knownVarTypes = new Set(['defun', 'lambda', 'arg', 'var']);
+            if (!_knownVarTypes.has(varType)) {
+                throw new Error(
+                    `[jalangi] syncDefuns: unknown varType "${varType}" for variable "${name}". ` +
+                    `Expected one of: defun, lambda, arg, var. ` +
+                    `If scope.js added a new varType, update syncDefuns to handle it.`
+                );
+            }
             let ident;
             if (varType === 'defun') {
                 ident = createIdentifierAst(name);
