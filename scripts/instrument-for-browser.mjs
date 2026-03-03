@@ -171,6 +171,7 @@ import { IdbWorkerBackend } from '${SRC('runtime', 'logging', 'backends', 'IdbWo
 import { RingBuffer       } from '${SRC('runtime', 'logging', 'RingBuffer.js')}';
 import { LogManager       } from '${SRC('runtime', 'logging', 'LogManager.js')}';
 import { TraceLogger      } from '${SRC('runtime', 'logging', 'TraceLogger.js')}';
+import { AnalysisHost     } from '${SRC('runtime', 'AnalysisHost.js')}';
 import { ExecutionTraceAnalysis } from '${SRC('sample_analyses', 'ExecutionTrace.js')}';
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
@@ -187,11 +188,13 @@ J$.sid  = 0;
 createRuntime(J$);
 createIidToLocation(J$);
 
-J$.analysis = new ExecutionTraceAnalysis(J$, null, {
-    useIdb:    ${opts.useIdb},
-    dbName:    ${JSON.stringify(opts.dbName)},
-    storeName: ${JSON.stringify(opts.storeName)},
-});
+// 用 AnalysisHost 注册插件（替代直接赋值），支持后续通过 .use() 链式扩展
+J$.analysis = new AnalysisHost()
+    .use(new ExecutionTraceAnalysis(J$, null, {
+        useIdb:    ${opts.useIdb},
+        dbName:    ${JSON.stringify(opts.dbName)},
+        storeName: ${JSON.stringify(opts.storeName)},
+    }));
 `;
 
     // 模块路径 → 真实文件路径（用于动态 import 重定向）
