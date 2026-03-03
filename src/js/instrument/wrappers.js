@@ -14,1103 +14,887 @@
  * limitations under the License.
  */
 
-// do not remove the following comment
 // JALANGI DO NOT INSTRUMENT
-
-/*jslint browser: true */
-/*global J$ acorn */
 
 /**
  * AST 包装（wrap）函数库。
  *
- * 负责将插桩钩子注入到各类 AST 节点中，提供：
- *  - wrapPutField / wrapGetField        —— 属性读写
- *  - wrapRead / wrapWrite               —— 变量读写
- *  - wrapBinaryOp / wrapUnaryOp         —— 一二元运算
- *  - wrapLogicalAnd / wrapLogicalOr     —— 短路运算
- *  - wrapConditional / wrapSwitchXxx    —— 条件分支
- *  - wrapLiteral                        —— 字面量
- *  - wrapReturn / wrapThrow             —— return / throw
- *  - wrapMethodCall / wrapFunCall       —— 函数/方法调用
- *  - wrapWithX1 / wrapHash / wrapWith   —— 表达式末尾、hash、with
- *  - wrapEvalArg                        —— eval 参数
- *  - wrapForIn / wrapForInBody          —— for-in
- *  - wrapCatchClause                    —— catch 子句
- *  - wrapScriptBodyWithTryCatch         —— 脚本级 try/catch
- *  - wrapFunBodyWithTryCatch            —— 函数级 try/catch
- *  - wrapModAssign                      —— 复合赋值（op=）
- *
- * 核心优化：replaceInExpr / replaceInStatement 使用 **模板缓存**，
+ * 负责将插桩钩子注入到各类 AST 节点中。
+ * 核心优化：replaceInExpr / replaceInStatement 使用模板缓存，
  * 避免每次调用都重新执行 acorn.parse。
  */
 
-if (typeof J$ === 'undefined') {
-    J$ = {};
+import * as acorn from 'acorn';
+import { JALANGI_VAR, HOP } from '../Constants.js';
+import * as IID from './iid.js';
+
+// ─── Config 引用（由外部在运行时设置，插桩器初始化后不变）──────────────────────
+// Config 模块尚未 ESM 化，通过参数注入方式传入。见 createWrappers(config)。
+// 这里先声明，由 init() 赋值。
+let Config;
+
+// ─── 运行时注入：acorn 在 Node 下由 import 提供，浏览器由 init() 注入 ─────────
+// （浏览器构建时 acorn 是 bundled 进来的，不需要额外处理）
+
+// ─── 常量 ─────────────────────────────────────────────────────────────────────
+
+const RP = `${JALANGI_VAR}_`;   // 占位符前缀，如 J$_1
+
+// ─── 运行时函数名（插桩时注入到 AST 中的字符串常量）──────────────────────────
+
+const logFunctionEnterFunName     = `${JALANGI_VAR}.Fe`;
+const logFunctionReturnFunName    = `${JALANGI_VAR}.Fr`;
+const logFunCallFunName           = `${JALANGI_VAR}.F`;
+const logMethodCallFunName        = `${JALANGI_VAR}.M`;
+const logAssignFunName            = `${JALANGI_VAR}.A`;
+const logPutFieldFunName          = `${JALANGI_VAR}.P`;
+const logGetFieldFunName          = `${JALANGI_VAR}.G`;
+const logScriptEntryFunName       = `${JALANGI_VAR}.Se`;
+const logScriptExitFunName        = `${JALANGI_VAR}.Sr`;
+const logReadFunName              = `${JALANGI_VAR}.R`;
+const logWriteFunName             = `${JALANGI_VAR}.W`;
+const logIFunName                 = `${JALANGI_VAR}.I`;
+const logHashFunName              = `${JALANGI_VAR}.H`;
+const logLitFunName               = `${JALANGI_VAR}.T`;
+const logInitFunName              = `${JALANGI_VAR}.N`;
+const logReturnFunName            = `${JALANGI_VAR}.Rt`;
+const logThrowFunName             = `${JALANGI_VAR}.Th`;
+const logReturnAggrFunName        = `${JALANGI_VAR}.Ra`;
+const logUncaughtExceptionFunName = `${JALANGI_VAR}.Ex`;
+const logLastComputedFunName      = `${JALANGI_VAR}.L`;
+const logTmpVarName               = `${JALANGI_VAR}._tm_p`;
+const logSampleFunName            = `${JALANGI_VAR}.S`;    // eslint-disable-line no-unused-vars
+const logWithFunName              = `${JALANGI_VAR}.Wi`;
+const logBinaryOpFunName          = `${JALANGI_VAR}.B`;
+const logUnaryOpFunName           = `${JALANGI_VAR}.U`;
+const logConditionalFunName       = `${JALANGI_VAR}.C`;
+const logSwitchLeftFunName        = `${JALANGI_VAR}.C1`;
+const logSwitchRightFunName       = `${JALANGI_VAR}.C2`;
+const logLastFunName              = `${JALANGI_VAR}._`;
+const logX1FunName                = `${JALANGI_VAR}.X1`;
+const instrumentCodeFunName       = `${JALANGI_VAR}.instrumentEvalCode`;
+
+// ─── N_LOG_* 字面量类型常量 ────────────────────────────────────────────────────
+
+const N_LOG_FUNCTION_ENTER  = 4;   // eslint-disable-line no-unused-vars
+const N_LOG_SCRIPT_ENTER    = 6;   // eslint-disable-line no-unused-vars
+const N_LOG_GETFIELD        = 8;   // eslint-disable-line no-unused-vars
+const N_LOG_ARRAY_LIT       = 10;
+const N_LOG_OBJECT_LIT      = 11;
+const N_LOG_FUNCTION_LIT    = 12;
+const N_LOG_RETURN          = 13;  // eslint-disable-line no-unused-vars
+const N_LOG_REGEXP_LIT      = 14;
+const N_LOG_READ            = 17;  // eslint-disable-line no-unused-vars
+const N_LOG_HASH            = 19;  // eslint-disable-line no-unused-vars
+const N_LOG_SPECIAL         = 20;  // eslint-disable-line no-unused-vars
+const N_LOG_STRING_LIT      = 21;
+const N_LOG_NUMBER_LIT      = 22;
+const N_LOG_BOOLEAN_LIT     = 23;
+const N_LOG_UNDEFINED_LIT   = 24;
+const N_LOG_NULL_LIT        = 25;
+
+// ─── AST 工具函数 ──────────────────────────────────────────────────────────────
+
+/**
+ * 断言 val 是一个合法的 AST 节点（非 null、非 undefined、且有 type 字段）。
+ */
+function assertAstNode(val, callerName) {
+    if (val == null || typeof val.type !== 'string') {
+        throw new Error(
+            `[jalangi] ${callerName}: received invalid AST node: ${JSON.stringify(val)}`
+        );
+    }
 }
 
-(function (sandbox) {
-    if (typeof sandbox.Wrappers !== 'undefined') {
-        return;
+const createLiteralAst    = (name) => ({ type: 'Literal',     value: name });
+const createIdentifierAst = (name) => ({ type: 'Identifier',  name  });
+
+function transferLoc(toNode, fromNode) {
+    if (fromNode.loc) toNode.loc = fromNode.loc;
+    if (fromNode.raw) toNode.raw = fromNode.raw;
+}
+
+/**
+ * 将可变数量的布尔参数编码为一个整数位掩码。
+ * createBitPattern(true, false, true) → 0b101 = 5
+ */
+function createBitPattern(...flags) {
+    return flags.reduce((acc, f) => (acc << 1) + (f ? 1 : 0), 0);
+}
+
+// ─── 模板缓存（核心优化）────────────────────────────────────────────────────────
+//
+// replaceInStatement / replaceInExpr 每次都接收一个代码模板字符串，
+// 其中的占位符 J$_1, J$_2, ... 会被真实 AST 节点替换。
+//
+// 第一次解析时缓存去掉 loc 的纯结构 AST，后续深拷贝复用，省去重复 parse。
+
+/** 模板字符串 → 缓存的 AST body 数组（去掉 loc/start/end） */
+const _templateCache = new Map();
+
+/**
+ * 深拷贝并替换 AST 中的占位符。
+ *
+ * 规则：
+ *  1. Identifier 且名称以 RP 开头 → 替换为 args[N]
+ *  2. BlockStatement.body 若展开后某元素是数组，则 flat 一层
+ */
+function deepCloneAndReplace(node, args) {
+    if (node === null || typeof node !== 'object') return node;
+
+    // 数组：逐元素处理，flat 一层（支持 BlockStatement body 展开）
+    if (Array.isArray(node)) {
+        const result = [];
+        for (const item of node) {
+            const replaced = deepCloneAndReplace(item, args);
+            if (Array.isArray(replaced)) result.push(...replaced);
+            else result.push(replaced);
+        }
+        return result;
     }
 
-    var astUtil   = sandbox.astUtil;
-    var Config    = sandbox.Config;
-    var Constants = sandbox.Constants;
-    var IID       = sandbox.IIDManager;
+    // 占位符 Identifier: J$_N → args[N]
+    if (node.type === 'Identifier' && node.name.startsWith(RP)) {
+        return args[parseInt(node.name.slice(RP.length), 10)];
+    }
 
-    var JALANGI_VAR = Constants.JALANGI_VAR;
-    var RP = JALANGI_VAR + '_';
+    // BlockStatement：先递归，再检查展开约定
+    if (node.type === 'BlockStatement') {
+        const newBody = deepCloneAndReplace(node.body, args);
+        if (newBody.length === 1
+                && newBody[0]?.type === 'ExpressionStatement'
+                && Array.isArray(newBody[0].expression)) {
+            return { type: 'BlockStatement', body: newBody[0].expression };
+        }
+        return { type: 'BlockStatement', body: newBody };
+    }
 
-    // ─── IID 绑定的便捷别名 ────────────────────────────────────────────────────
-    // （直接从 IID 模块取，避免重复绑定）
+    // 普通节点：逐属性拷贝，跳过位置信息
+    const obj = {};
+    for (const key of Object.keys(node)) {
+        if (key !== 'loc' && key !== 'start' && key !== 'end') {
+            obj[key] = deepCloneAndReplace(node[key], args);
+        }
+    }
+    return obj;
+}
 
-    // ─── 函数名常量 ────────────────────────────────────────────────────────────
-
-    var logFunctionEnterFunName   = JALANGI_VAR + '.Fe';
-    var logFunctionReturnFunName  = JALANGI_VAR + '.Fr';
-    var logFunCallFunName         = JALANGI_VAR + '.F';
-    var logMethodCallFunName      = JALANGI_VAR + '.M';
-    var logAssignFunName          = JALANGI_VAR + '.A';
-    var logPutFieldFunName        = JALANGI_VAR + '.P';
-    var logGetFieldFunName        = JALANGI_VAR + '.G';
-    var logScriptEntryFunName     = JALANGI_VAR + '.Se';
-    var logScriptExitFunName      = JALANGI_VAR + '.Sr';
-    var logReadFunName            = JALANGI_VAR + '.R';
-    var logWriteFunName           = JALANGI_VAR + '.W';
-    var logIFunName               = JALANGI_VAR + '.I';
-    var logHashFunName            = JALANGI_VAR + '.H';
-    var logLitFunName             = JALANGI_VAR + '.T';
-    var logInitFunName            = JALANGI_VAR + '.N';
-    var logReturnFunName          = JALANGI_VAR + '.Rt';
-    var logThrowFunName           = JALANGI_VAR + '.Th';
-    var logReturnAggrFunName      = JALANGI_VAR + '.Ra';
-    var logUncaughtExceptionFunName = JALANGI_VAR + '.Ex';
-    var logLastComputedFunName    = JALANGI_VAR + '.L';
-    var logTmpVarName             = JALANGI_VAR + '._tm_p';
-    var logSampleFunName          = JALANGI_VAR + '.S';
-    var logWithFunName            = JALANGI_VAR + '.Wi';
-    var logBinaryOpFunName        = JALANGI_VAR + '.B';
-    var logUnaryOpFunName         = JALANGI_VAR + '.U';
-    var logConditionalFunName     = JALANGI_VAR + '.C';
-    var logSwitchLeftFunName      = JALANGI_VAR + '.C1';
-    var logSwitchRightFunName     = JALANGI_VAR + '.C2';
-    var logLastFunName            = JALANGI_VAR + '._';
-    var logX1FunName              = JALANGI_VAR + '.X1';
-    var instrumentCodeFunName     = JALANGI_VAR + '.instrumentEvalCode';
-
-    // ─── N_LOG_* 字面量类型常量 ────────────────────────────────────────────────
-
-    var N_LOG_FUNCTION_ENTER  = 4;
-    var N_LOG_SCRIPT_ENTER    = 6;
-    var N_LOG_GETFIELD        = 8;
-    var N_LOG_ARRAY_LIT       = 10;
-    var N_LOG_OBJECT_LIT      = 11;
-    var N_LOG_FUNCTION_LIT    = 12;
-    var N_LOG_RETURN          = 13;
-    var N_LOG_REGEXP_LIT      = 14;
-    var N_LOG_READ            = 17;
-    var N_LOG_HASH            = 19;
-    var N_LOG_SPECIAL         = 20;
-    var N_LOG_STRING_LIT      = 21;
-    var N_LOG_NUMBER_LIT      = 22;
-    var N_LOG_BOOLEAN_LIT     = 23;
-    var N_LOG_UNDEFINED_LIT   = 24;
-    var N_LOG_NULL_LIT        = 25;
-
-    // ─── 工具函数 ──────────────────────────────────────────────────────────────
-
-    /**
-     * 断言 val 是一个合法的 AST 节点（非 null、非 undefined、且有 type 字段）。
-     * 当 wrap* 函数收到无效参数时，在插桩阶段立即报错，
-     * 而不是生成错误代码后等运行时才崩溃。
-     *
-     * @param {*}      val        - 要检查的值
-     * @param {string} callerName - 调用方名称（用于错误消息）
-     */
-    function assertAstNode(val, callerName) {
-        if (val === null || val === undefined || typeof val.type !== 'string') {
+/**
+ * 解析模板代码，返回 body 语句数组，并替换占位符。
+ *
+ * 调用约定：replaceInStatement(templateStr, arg1, arg2, ...)
+ * 其中 templateStr 中的 J$_1, J$_2 … 会被 arg1, arg2 … 替换。
+ */
+function replaceInStatement(code, ...args) {
+    let cached = _templateCache.get(code);
+    if (!cached) {
+        try {
+            const parsed = acorn.parse(code, { ecmaVersion: 'latest' });
+            cached = JSON.parse(JSON.stringify(parsed.body));
+            _templateCache.set(code, cached);
+        } catch (e) {
             throw new Error(
-                '[jalangi] ' + callerName + ': received invalid AST node: ' +
-                JSON.stringify(val)
+                `[jalangi] replaceInStatement failed to parse template:\n  ${code}\n  Cause: ${e.message}`
             );
         }
     }
+    // args 从索引 1 开始对应模板中的 J$_1，与旧版 arguments[1] 对齐
+    return deepCloneAndReplace(cached, [undefined, ...args]);
+}
 
-    function createLiteralAst(name) {
-        return {type: 'Literal', value: name};
-    }
+function replaceInExpr(code, ...args) {
+    return replaceInStatement(code, ...args)[0].expression;
+}
 
-    function createIdentifierAst(name) {
-        return {type: 'Identifier', name: name};
-    }
+// ─── 作用域引用（由 esnstrument.js 的 visitor 动态管理）──────────────────────
 
-    function transferLoc(toNode, fromNode) {
-        if (fromNode.loc) toNode.loc = fromNode.loc;
-        if (fromNode.raw) toNode.raw = fromNode.raw;  // 修复 typo：原来错误地用了 fromNode.loc
-    }
+let _scope = null;
 
-    function createBitPattern() {
-        var ret = 0;
-        for (var i = 0; i < arguments.length; i++) {
-            ret = (ret << 1) + (arguments[i] ? 1 : 0);
-        }
+const setScope  = (node) => { _scope = node.scope; };
+const popScope  = ()     => { _scope = _scope.parent; };
+const getScope  = ()     => _scope;
+
+// ─── getPropertyAsAst ────────────────────────────────────────────────────────
+
+const getPropertyAsAst = (ast) =>
+    ast.computed ? ast.property : createLiteralAst(ast.property.name);
+
+// ─── wrap 函数 ────────────────────────────────────────────────────────────────
+
+function wrapPutField(node, base, offset, rvalue, isComputed) {
+    assertAstNode(node,   'wrapPutField/node');
+    assertAstNode(base,   'wrapPutField/base');
+    assertAstNode(offset, 'wrapPutField/offset');
+    if (!Config.INSTR_PUTFIELD || Config.INSTR_PUTFIELD(isComputed ? null : offset.value, node)) {
+        IID.printIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logPutFieldFunName}(${RP}1, ${RP}2, ${RP}3, ${RP}4,${createBitPattern(isComputed, false)})`,
+            IID.getIid(), base, offset, rvalue
+        );
+        transferLoc(ret, node);
         return ret;
     }
+    return node;
+}
 
-    // ─── 模板缓存（核心优化）────────────────────────────────────────────────────
-    //
-    // 旧实现中，replaceInStatement / replaceInExpr 每次都调用 acorn.parse(templateString)，
-    // 并通过 AST 替换把占位符 RP_1、RP_2 等换成真实 AST 节点。
-    //
-    // 优化：第一次解析时缓存去掉 loc 的纯结构 AST，后续通过深拷贝 + 替换完成，
-    // 省去重复 parse 的开销。
-
-    /** 模板字符串 -> 缓存的 AST body 数组（去掉 loc/start/end） */
-    var _templateCache = {};
-
-    /**
-     * 深拷贝并替换 AST 中的占位符。
-     *
-     * 规则：
-     *  1. Identifier 且名称以 RP 开头 → 替换为 args[N]
-     *  2. BlockStatement 处理完子节点替换后，若 body 展开为数组（来自 RP_N 参数是数组的情况），
-     *     则按原始 replaceInStatement 语义展开。
-     *
-     * 注意：展开判断必须在子节点替换之后执行（先替换占位符，再检查结果是否是数组）。
-     */
-    function deepCloneAndReplace(node, args) {
-        if (node === null || typeof node !== 'object') {
-            return node;
-        }
-
-        // 数组：逐元素处理，并做 BlockStatement body 的扁平化展开
-        if (Array.isArray(node)) {
-            var result = [];
-            for (var ai = 0; ai < node.length; ai++) {
-                var replaced = deepCloneAndReplace(node[ai], args);
-                // 若 body 展开后某元素是数组，则 flat 一层（来自 RP_N 是语句数组的情况）
-                if (Array.isArray(replaced)) {
-                    for (var bi = 0; bi < replaced.length; bi++) {
-                        result.push(replaced[bi]);
-                    }
-                } else {
-                    result.push(replaced);
-                }
-            }
-            return result;
-        }
-
-        // 占位符 Identifier：名称形如 J$_1 → 取 args[1]
-        if (node.type === 'Identifier' && node.name.indexOf(RP) === 0) {
-            var idx = parseInt(node.name.substring(RP.length), 10);
-            // args[idx] 可能是一个 AST 节点，也可能是一个语句数组（用于 BlockStatement body 展开）
-            return args[idx];
-        }
-
-        // BlockStatement：先处理子节点，再检查展开
-        if (node.type === 'BlockStatement') {
-            // 先递归替换 body 数组
-            var newBody = deepCloneAndReplace(node.body, args);
-            // 如果 body 只有一个 ExpressionStatement 且其 expression 是数组，
-            // 这是原始代码中"把语句数组嵌入 block"的约定：展开为那个数组
-            if (newBody.length === 1
-                    && newBody[0] && newBody[0].type === 'ExpressionStatement'
-                    && Array.isArray(newBody[0].expression)) {
-                return {type: 'BlockStatement', body: newBody[0].expression};
-            }
-            return {type: 'BlockStatement', body: newBody};
-        }
-
-        // 普通节点：逐属性拷贝
-        var obj = {};
-        for (var key in node) {
-            if (node.hasOwnProperty(key) && key !== 'loc' && key !== 'start' && key !== 'end') {
-                obj[key] = deepCloneAndReplace(node[key], args);
-            }
-        }
-        return obj;
+function wrapModAssign(node, base, offset, op, rvalue, isComputed, isNumber) {
+    if (!Config.INSTR_PROPERTY_BINARY_ASSIGNMENT || Config.INSTR_PROPERTY_BINARY_ASSIGNMENT(op, node.computed ? null : offset.value, node)) {
+        IID.printModIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logAssignFunName}(${RP}1,${RP}2,${RP}3,${RP}4,${createBitPattern(isComputed, isNumber)})(${RP}5)`,
+            IID.getIid(), base, offset, createLiteralAst(op), rvalue
+        );
+        transferLoc(ret, node);
+        return ret;
     }
+    return node;
+}
 
-    /**
-     * 解析模板代码，返回 body 语句数组，并替换占位符。
-     *
-     * 调用方式与原始版本相同：
-     *   replaceInStatement(templateString, arg1, arg2, ...)
-     *
-     * 其中 templateString 中的 J$_1, J$_2, ... 会被 arg1, arg2, ... 替换。
-     */
-    function replaceInStatement(code) {
-        var cached = _templateCache[code];
-        if (!cached) {
-            try {
-                var parsed = acorn.parse(code, {ecmaVersion: 'latest'});
-                // 用 JSON 序列化去掉 loc/start/end，缓存纯结构
-                cached = JSON.parse(JSON.stringify(parsed.body));
-                _templateCache[code] = cached;
-            } catch (e) {
-                // 附加完整模板内容，插案失败时能快速定位是哪个 wrap 函数的模板出错
-                throw new Error(
-                    '[jalangi] replaceInStatement failed to parse template:\n  ' +
-                    code + '\n  Cause: ' + e.message
-                );
-            }
-        }
-        return deepCloneAndReplace(cached, arguments);
-    }
+function wrapMethodCall(node, base, offset, isCtor, isComputed) {
+    assertAstNode(node,   'wrapMethodCall/node');
+    assertAstNode(base,   'wrapMethodCall/base');
+    assertAstNode(offset, 'wrapMethodCall/offset');
+    IID.printIidToLoc(node);
+    IID.printSpecialIidToLoc(node.callee);
+    const ret = replaceInExpr(
+        `${logMethodCallFunName}(${RP}1, ${RP}2, ${RP}3, ${createBitPattern(isCtor, isComputed)})`,
+        IID.getIid(), base, offset
+    );
+    transferLoc(ret, node.callee);
+    return ret;
+}
 
-    function replaceInExpr(code) {
-        var ret = replaceInStatement.apply(this, arguments);
-        return ret[0].expression;
-    }
+function wrapFunCall(node, ast, isCtor) {
+    IID.printIidToLoc(node);
+    const ret = replaceInExpr(
+        `${logFunCallFunName}(${RP}1, ${RP}2, ${createBitPattern(isCtor)})`,
+        IID.getIid(), ast
+    );
+    transferLoc(ret, node.callee);
+    return ret;
+}
 
-    // ─── 作用域引用（由 instrumenter 动态设置）────────────────────────────────
-
-    // 当前活动的 scope（在 visitorRRPre 中设置）
-    var scope = null;
-
-    function setScope(node) {
-        scope = node.scope;
-    }
-
-    function popScope() {
-        scope = scope.parent;
-    }
-
-    // ─── getPropertyAsAst ─────────────────────────────────────────────────────
-
-    function getPropertyAsAst(ast) {
-        return ast.computed ? ast.property : createLiteralAst(ast.property.name);
-    }
-
-    // ─── 各种 wrap 函数 ───────────────────────────────────────────────────────
-
-    function wrapPutField(node, base, offset, rvalue, isComputed) {
-        assertAstNode(node,   'wrapPutField/node');
-        assertAstNode(base,   'wrapPutField/base');
-        assertAstNode(offset, 'wrapPutField/offset');
-        if (!Config.INSTR_PUTFIELD || Config.INSTR_PUTFIELD(isComputed ? null : offset.value, node)) {
-            IID.printIidToLoc(node);
-            var ret = replaceInExpr(
-                logPutFieldFunName +
-                '(' + RP + '1, ' + RP + '2, ' + RP + '3, ' + RP + '4,' + createBitPattern(isComputed, false) + ')',
-                IID.getIid(), base, offset, rvalue
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return node;
-    }
-
-    function wrapModAssign(node, base, offset, op, rvalue, isComputed, isNumber) {
-        if (!Config.INSTR_PROPERTY_BINARY_ASSIGNMENT || Config.INSTR_PROPERTY_BINARY_ASSIGNMENT(op, node.computed ? null : offset.value, node)) {
-            IID.printModIidToLoc(node);
-            var ret = replaceInExpr(
-                logAssignFunName + '(' + RP + '1,' + RP + '2,' + RP + '3,' + RP + '4,' + createBitPattern(isComputed, isNumber) + ')(' + RP + '5)',
-                IID.getIid(), base, offset, createLiteralAst(op), rvalue
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return node;
-    }
-
-    function wrapMethodCall(node, base, offset, isCtor, isComputed) {
-        assertAstNode(node,   'wrapMethodCall/node');
-        assertAstNode(base,   'wrapMethodCall/base');
-        assertAstNode(offset, 'wrapMethodCall/offset');
+function wrapGetField(node, base, offset, isComputed) {
+    assertAstNode(node,   'wrapGetField/node');
+    assertAstNode(base,   'wrapGetField/base');
+    assertAstNode(offset, 'wrapGetField/offset');
+    if (!Config.INSTR_GETFIELD || Config.INSTR_GETFIELD(node.computed ? null : offset.value, node)) {
         IID.printIidToLoc(node);
-        IID.printSpecialIidToLoc(node.callee);
-        var ret = replaceInExpr(
-            logMethodCallFunName + '(' + RP + '1, ' + RP + '2, ' + RP + '3, ' + createBitPattern(isCtor, isComputed) + ')',
+        const ret = replaceInExpr(
+            `${logGetFieldFunName}(${RP}1, ${RP}2, ${RP}3,${createBitPattern(isComputed, false, false)})`,
             IID.getIid(), base, offset
         );
-        transferLoc(ret, node.callee);
+        transferLoc(ret, node);
         return ret;
     }
+    return node;
+}
 
-    function wrapFunCall(node, ast, isCtor) {
+function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal) {
+    assertAstNode(node, 'wrapRead/node');
+    assertAstNode(name, 'wrapRead/name');
+    if (!Config.INSTR_READ || Config.INSTR_READ(name, node)) {
         IID.printIidToLoc(node);
-        var ret = replaceInExpr(
-            logFunCallFunName + '(' + RP + '1, ' + RP + '2, ' + createBitPattern(isCtor) + ')',
-            IID.getIid(), ast
-        );
-        transferLoc(ret, node.callee);
-        return ret;
-    }
-
-    function wrapGetField(node, base, offset, isComputed) {
-        assertAstNode(node,   'wrapGetField/node');
-        assertAstNode(base,   'wrapGetField/base');
-        assertAstNode(offset, 'wrapGetField/offset');
-        if (!Config.INSTR_GETFIELD || Config.INSTR_GETFIELD(node.computed ? null : offset.value, node)) {
-            IID.printIidToLoc(node);
-            var ret = replaceInExpr(
-                logGetFieldFunName + '(' + RP + '1, ' + RP + '2, ' + RP + '3,' + createBitPattern(isComputed, false, false) + ')',
-                IID.getIid(), base, offset
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return node;
-    }
-
-    function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal) {
-        assertAstNode(node, 'wrapRead/node');
-        assertAstNode(name, 'wrapRead/name');
-        if (!Config.INSTR_READ || Config.INSTR_READ(name, node)) {
-            IID.printIidToLoc(node);
-            var ret = replaceInExpr(
-                logReadFunName + '(' + RP + '1, ' + RP + '2, ' + RP + '3,' + createBitPattern(isGlobal, isScriptLocal) + ')',
-                isReUseIid ? IID.getPrevIidNoInc() : IID.getIid(),
-                name, val
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return val;
-    }
-
-    function wrapReadWithUndefinedCheck(node, name) {
-        var ret = replaceInExpr(
-            '(' + logIFunName + '(typeof (' + name + ') === \'undefined\'? (' + RP + '2) : (' + RP + '3)))',
-            createIdentifierAst(name),
-            wrapRead(node, createLiteralAst(name), createIdentifierAst('undefined'), false, true, false),
-            wrapRead(node, createLiteralAst(name), createIdentifierAst(name), true, true, false)
+        const ret = replaceInExpr(
+            `${logReadFunName}(${RP}1, ${RP}2, ${RP}3,${createBitPattern(isGlobal, isScriptLocal)})`,
+            isReUseIid ? IID.getPrevIidNoInc() : IID.getIid(),
+            name, val
         );
         transferLoc(ret, node);
         return ret;
     }
+    return val;
+}
 
-    function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration) {
-        assertAstNode(node, 'wrapWrite/node');
-        assertAstNode(name, 'wrapWrite/name');
-        if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name, node)) {
-            IID.printIidToLoc(node);
-            var ret = replaceInExpr(
-                logWriteFunName + '(' + RP + '1, ' + RP + '2, ' + RP + '3, ' + RP + '4,' + createBitPattern(isGlobal, isScriptLocal, isDeclaration) + ')',
-                IID.getIid(), name, val, lhs
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return val;
-    }
+function wrapReadWithUndefinedCheck(node, name) {
+    const ret = replaceInExpr(
+        `(${logIFunName}(typeof (${name}) === 'undefined'? (${RP}2) : (${RP}3)))`,
+        createIdentifierAst(name),
+        wrapRead(node, createLiteralAst(name), createIdentifierAst('undefined'), false, true, false),
+        wrapRead(node, createLiteralAst(name), createIdentifierAst(name), true, true, false)
+    );
+    transferLoc(ret, node);
+    return ret;
+}
 
-    function wrapWriteWithUndefinedCheck(node, name, val, lhs) {
-        if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name, node)) {
-            IID.printIidToLoc(node);
-            var ret = replaceInExpr(
-                logWriteFunName + '(' + RP + '1, ' + RP + '2, ' + RP + '3, ' + logIFunName + '(typeof(' + lhs.name + ')===\'undefined\'?undefined:' + lhs.name + '),' + createBitPattern(true, false, false) + ')',
-                IID.getIid(), name, val
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return val;
-    }
-
-    function wrapRHSOfModStore(node, left, right, op) {
-        var ret = replaceInExpr(RP + '1 ' + op + ' ' + RP + '2', left, right);
-        transferLoc(ret, node);
-        return ret;
-    }
-
-    function makeNumber(node, left) {
-        var ret = replaceInExpr(' + ' + RP + '1 ', left);
-        transferLoc(ret, node);
-        return ret;
-    }
-
-    function wrapLHSOfModStore(node, left, right) {
-        var ret = replaceInExpr(RP + '1 = ' + RP + '2', left, right);
-        transferLoc(ret, node);
-        return ret;
-    }
-
-    function wrapReturn(node, expr) {
-        var lid = (expr === null) ? node : expr;
-        IID.printIidToLoc(lid);
-        if (expr === null) {
-            expr = createIdentifierAst('undefined');
-        }
-        var ret = replaceInExpr(
-            logReturnFunName + '(' + RP + '1, ' + RP + '2)',
-            IID.getIid(), expr
-        );
-        transferLoc(ret, lid);
-        return ret;
-    }
-
-    function wrapThrow(node, expr) {
-        IID.printIidToLoc(expr);
-        var ret = replaceInExpr(
-            logThrowFunName + '(' + RP + '1, ' + RP + '2)',
-            IID.getIid(), expr
-        );
-        transferLoc(ret, expr);
-        return ret;
-    }
-
-    function wrapWithX1(node, ast) {
-        if (!Config.INSTR_END_EXPRESSION || Config.INSTR_END_EXPRESSION(node)) {
-            if (!ast || ast.type.indexOf('Expression') <= 0) return ast;
-            IID.printIidToLoc(node);
-            var ret = replaceInExpr(
-                logX1FunName + '(' + RP + '1,' + RP + '2)',
-                IID.getIid(), ast
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return ast;
-    }
-
-    function wrapHash(node, ast) {
+function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration) {
+    assertAstNode(node, 'wrapWrite/node');
+    assertAstNode(name, 'wrapWrite/name');
+    if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name, node)) {
         IID.printIidToLoc(node);
-        var ret = replaceInExpr(
-            logHashFunName + '(' + RP + '1, ' + RP + '2)',
+        const ret = replaceInExpr(
+            `${logWriteFunName}(${RP}1, ${RP}2, ${RP}3, ${RP}4,${createBitPattern(isGlobal, isScriptLocal, isDeclaration)})`,
+            IID.getIid(), name, val, lhs
+        );
+        transferLoc(ret, node);
+        return ret;
+    }
+    return val;
+}
+
+function wrapWriteWithUndefinedCheck(node, name, val, lhs) {
+    if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name, node)) {
+        IID.printIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logWriteFunName}(${RP}1, ${RP}2, ${RP}3, ${logIFunName}(typeof(${lhs.name})==='undefined'?undefined:${lhs.name}),${createBitPattern(true, false, false)})`,
+            IID.getIid(), name, val
+        );
+        transferLoc(ret, node);
+        return ret;
+    }
+    return val;
+}
+
+function wrapRHSOfModStore(node, left, right, op) {
+    const ret = replaceInExpr(`${RP}1 ${op} ${RP}2`, left, right);
+    transferLoc(ret, node);
+    return ret;
+}
+
+function makeNumber(node, left) {
+    const ret = replaceInExpr(` + ${RP}1 `, left);
+    transferLoc(ret, node);
+    return ret;
+}
+
+function wrapLHSOfModStore(node, left, right) {
+    const ret = replaceInExpr(`${RP}1 = ${RP}2`, left, right);
+    transferLoc(ret, node);
+    return ret;
+}
+
+function wrapReturn(node, expr) {
+    const lid = expr ?? node;
+    IID.printIidToLoc(lid);
+    const actualExpr = expr ?? createIdentifierAst('undefined');
+    const ret = replaceInExpr(
+        `${logReturnFunName}(${RP}1, ${RP}2)`,
+        IID.getIid(), actualExpr
+    );
+    transferLoc(ret, lid);
+    return ret;
+}
+
+function wrapThrow(node, expr) {
+    IID.printIidToLoc(expr);
+    const ret = replaceInExpr(
+        `${logThrowFunName}(${RP}1, ${RP}2)`,
+        IID.getIid(), expr
+    );
+    transferLoc(ret, expr);
+    return ret;
+}
+
+function wrapWithX1(node, ast) {
+    if (!Config.INSTR_END_EXPRESSION || Config.INSTR_END_EXPRESSION(node)) {
+        if (!ast || !ast.type.includes('Expression')) return ast;
+        IID.printIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logX1FunName}(${RP}1,${RP}2)`,
             IID.getIid(), ast
         );
         transferLoc(ret, node);
         return ret;
     }
+    return ast;
+}
 
-    function wrapEvalArg(ast) {
-        IID.printIidToLoc(ast);
-        var ret = replaceInExpr(
-            instrumentCodeFunName + '(' + RP + '1, ' + RP + '2, true)',
-            ast, IID.getIid()
+function wrapHash(node, ast) {
+    IID.printIidToLoc(node);
+    const ret = replaceInExpr(
+        `${logHashFunName}(${RP}1, ${RP}2)`,
+        IID.getIid(), ast
+    );
+    transferLoc(ret, node);
+    return ret;
+}
+
+function wrapEvalArg(ast) {
+    IID.printIidToLoc(ast);
+    const ret = replaceInExpr(
+        `${instrumentCodeFunName}(${RP}1, ${RP}2, true)`,
+        ast, IID.getIid()
+    );
+    transferLoc(ret, ast);
+    return ret;
+}
+
+function wrapUnaryOp(node, argument, operator) {
+    if (!Config.INSTR_UNARY || Config.INSTR_UNARY(operator, node)) {
+        IID.printOpIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logUnaryOpFunName}(${RP}1,${RP}2,${RP}3)`,
+            IID.getOpIid(), createLiteralAst(operator), argument
         );
-        transferLoc(ret, ast);
+        transferLoc(ret, node);
         return ret;
     }
+    return node;
+}
 
-    function wrapUnaryOp(node, argument, operator) {
-        if (!Config.INSTR_UNARY || Config.INSTR_UNARY(operator, node)) {
-            IID.printOpIidToLoc(node);
-            var ret = replaceInExpr(
-                logUnaryOpFunName + '(' + RP + '1,' + RP + '2,' + RP + '3)',
-                IID.getOpIid(), createLiteralAst(operator), argument
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return node;
+function wrapBinaryOp(node, left, right, operator, isComputed) {
+    if (!Config.INSTR_BINARY || Config.INSTR_BINARY(operator, operator)) {
+        IID.printOpIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logBinaryOpFunName}(${RP}1, ${RP}2, ${RP}3, ${RP}4,${createBitPattern(isComputed, false, false)})`,
+            IID.getOpIid(), createLiteralAst(operator), left, right
+        );
+        transferLoc(ret, node);
+        return ret;
     }
+    return node;
+}
 
-    function wrapBinaryOp(node, left, right, operator, isComputed) {
-        if (!Config.INSTR_BINARY || Config.INSTR_BINARY(operator, operator)) {
-            IID.printOpIidToLoc(node);
-            var ret = replaceInExpr(
-                logBinaryOpFunName + '(' + RP + '1, ' + RP + '2, ' + RP + '3, ' + RP + '4,' + createBitPattern(isComputed, false, false) + ')',
-                IID.getOpIid(), createLiteralAst(operator), left, right
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return node;
+function wrapLogicalAnd(node, left, right) {
+    if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('&&', node)) {
+        IID.printCondIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logConditionalFunName}(${RP}1, ${RP}2)?${RP}3:${logLastFunName}()`,
+            IID.getCondIid(), left, right
+        );
+        transferLoc(ret, node);
+        return ret;
     }
+    return node;
+}
 
-    function wrapLogicalAnd(node, left, right) {
-        if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('&&', node)) {
-            IID.printCondIidToLoc(node);
-            var ret = replaceInExpr(
-                logConditionalFunName + '(' + RP + '1, ' + RP + '2)?' + RP + '3:' + logLastFunName + '()',
-                IID.getCondIid(), left, right
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return node;
+function wrapLogicalOr(node, left, right) {
+    if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('||', node)) {
+        IID.printCondIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logConditionalFunName}(${RP}1, ${RP}2)?${logLastFunName}():${RP}3`,
+            IID.getCondIid(), left, right
+        );
+        transferLoc(ret, node);
+        return ret;
     }
+    return node;
+}
 
-    function wrapLogicalOr(node, left, right) {
-        if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('||', node)) {
-            IID.printCondIidToLoc(node);
-            var ret = replaceInExpr(
-                logConditionalFunName + '(' + RP + '1, ' + RP + '2)?' + logLastFunName + '():' + RP + '3',
-                IID.getCondIid(), left, right
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return node;
+function wrapSwitchDiscriminant(node, discriminant) {
+    if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('switch', node)) {
+        IID.printCondIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logSwitchLeftFunName}(${RP}1, ${RP}2)`,
+            IID.getCondIid(), discriminant
+        );
+        transferLoc(ret, node);
+        return ret;
     }
+    return node;
+}
 
-    function wrapSwitchDiscriminant(node, discriminant) {
-        if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('switch', node)) {
-            IID.printCondIidToLoc(node);
-            var ret = replaceInExpr(
-                logSwitchLeftFunName + '(' + RP + '1, ' + RP + '2)',
-                IID.getCondIid(), discriminant
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return node;
+function wrapSwitchTest(node, test) {
+    if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('switch', node)) {
+        IID.printCondIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logSwitchRightFunName}(${RP}1, ${RP}2)`,
+            IID.getCondIid(), test
+        );
+        transferLoc(ret, node);
+        return ret;
     }
+    return node;
+}
 
-    function wrapSwitchTest(node, test) {
-        if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('switch', node)) {
-            IID.printCondIidToLoc(node);
-            var ret = replaceInExpr(
-                logSwitchRightFunName + '(' + RP + '1, ' + RP + '2)',
-                IID.getCondIid(), test
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return node;
+function wrapWith(node) {
+    if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('with', node)) {
+        IID.printIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logWithFunName}(${RP}1, ${RP}2)`,
+            IID.getIid(), node
+        );
+        transferLoc(ret, node);
+        return ret;
     }
+    return node;
+}
 
-    function wrapWith(node) {
-        if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('with', node)) {
-            IID.printIidToLoc(node);
-            var ret = replaceInExpr(
-                logWithFunName + '(' + RP + '1, ' + RP + '2)',
-                IID.getIid(), node
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return node;
+function wrapConditional(node, test) {
+    if (node === null) return node;  // for(;;) 的空条件
+    if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('other', node)) {
+        IID.printCondIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logConditionalFunName}(${RP}1, ${RP}2)`,
+            IID.getCondIid(), test
+        );
+        transferLoc(ret, node);
+        return ret;
     }
+    return node;
+}
 
-    function wrapConditional(node, test) {
-        if (node === null) return node; // for(;;) 的空条件
-        if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('other', node)) {
-            IID.printCondIidToLoc(node);
-            var ret = replaceInExpr(
-                logConditionalFunName + '(' + RP + '1, ' + RP + '2)',
-                IID.getCondIid(), test
-            );
-            transferLoc(ret, node);
-            return ret;
-        }
-        return node;
+// ─── 字面量 wrap ──────────────────────────────────────────────────────────────
+
+const dummyFun    = () => {};
+const dummyObject = {};
+const dummyArray  = [];
+
+function getLiteralValue(funId, node) {
+    if (node.name === 'undefined') return undefined;
+    if (node.name === 'NaN')       return NaN;
+    if (node.name === 'Infinity')  return Infinity;
+    switch (funId) {
+        case N_LOG_NUMBER_LIT:
+        case N_LOG_STRING_LIT:
+        case N_LOG_NULL_LIT:
+        case N_LOG_REGEXP_LIT:
+        case N_LOG_BOOLEAN_LIT:   return node.value;
+        case N_LOG_ARRAY_LIT:     return dummyArray;
+        case N_LOG_FUNCTION_LIT:  return dummyFun;
+        case N_LOG_OBJECT_LIT:    return dummyObject;
     }
+    throw new Error(`${funId} not known`);
+}
 
-    // ─── 字面量 wrap ──────────────────────────────────────────────────────────
+function ifObjectExpressionHasGetterSetter(node) {
+    if (node.type !== 'ObjectExpression') return false;
+    return node.properties.some(p => p.kind === 'get' || p.kind === 'set');
+}
 
-    var dummyFun    = function () {};
-    var dummyObject = {};
-    var dummyArray  = [];
+function getFnIdFromAst(ast) {
+    const entryExpr = ast.body.body[0];
+    if (entryExpr.type !== 'ExpressionStatement') throw new Error('IllegalStateException');
+    const call = entryExpr.expression;
+    if (call.type !== 'CallExpression') throw new Error('IllegalStateException');
+    if (call.callee.type !== 'MemberExpression') throw new Error('IllegalStateException');
+    if (call.callee.object.name !== JALANGI_VAR) throw new Error('IllegalStateException');
+    if (call.callee.property.name !== 'Fe') throw new Error('IllegalStateException');
+    return call.arguments[0].value;
+}
 
-    function getLiteralValue(funId, node) {
-        if (node.name === 'undefined') return undefined;
-        if (node.name === 'NaN')       return NaN;
-        if (node.name === 'Infinity')  return Infinity;
-        switch (funId) {
-            case N_LOG_NUMBER_LIT:
-            case N_LOG_STRING_LIT:
-            case N_LOG_NULL_LIT:
-            case N_LOG_REGEXP_LIT:
-            case N_LOG_BOOLEAN_LIT:
-                return node.value;
-            case N_LOG_ARRAY_LIT:    return dummyArray;
-            case N_LOG_FUNCTION_LIT: return dummyFun;
-            case N_LOG_OBJECT_LIT:   return dummyObject;
-        }
-        throw new Error(funId + ' not known');
-    }
-
-    function ifObjectExpressionHasGetterSetter(node) {
-        if (node.type === 'ObjectExpression') {
-            for (var i = 0; i < node.properties.length; i++) {
-                var kind = node.properties[i].kind;
-                if (kind === 'get' || kind === 'set') return true;
-            }
-        }
-        return false;
-    }
-
-    function getFnIdFromAst(ast) {
-        var entryExpr = ast.body.body[0];
-        if (entryExpr.type !== 'ExpressionStatement') {
-            throw new Error('IllegalStateException');
-        }
-        entryExpr = entryExpr.expression;
-        if (entryExpr.type !== 'CallExpression') throw new Error('IllegalStateException');
-        if (entryExpr.callee.type !== 'MemberExpression') throw new Error('IllegalStateException');
-        if (entryExpr.callee.object.name !== JALANGI_VAR) throw new Error('IllegalStateException');
-        if (entryExpr.callee.property.name !== 'Fe') throw new Error('IllegalStateException');
-        return entryExpr['arguments'][0].value;
-    }
-
-    function wrapLiteral(node, ast, funId) {
-        if (!Config.INSTR_LITERAL || Config.INSTR_LITERAL(getLiteralValue(funId, node), node)) {
-            IID.printIidToLoc(node);
-            var hasGetterSetter = ifObjectExpressionHasGetterSetter(node);
-            var ret;
-            if (funId === N_LOG_FUNCTION_LIT) {
-                var internalFunId = null;
-                if (node.type === 'FunctionExpression') {
-                    internalFunId = getFnIdFromAst(node);
-                } else {
-                    if (node.type !== 'Identifier') throw new Error('IllegalStateException');
-                    internalFunId = getFnIdFromAst(scope.funNodes[node.name]);
-                }
-                ret = replaceInExpr(
-                    logLitFunName + '(' + RP + '1, ' + RP + '2, ' + RP + '3,' + hasGetterSetter + ', ' + internalFunId + ')',
-                    IID.getIid(), ast, createLiteralAst(funId), internalFunId
-                );
+function wrapLiteral(node, ast, funId) {
+    if (!Config.INSTR_LITERAL || Config.INSTR_LITERAL(getLiteralValue(funId, node), node)) {
+        IID.printIidToLoc(node);
+        const hasGetterSetter = ifObjectExpressionHasGetterSetter(node);
+        let ret;
+        if (funId === N_LOG_FUNCTION_LIT) {
+            let internalFunId;
+            if (node.type === 'FunctionExpression') {
+                internalFunId = getFnIdFromAst(node);
             } else {
-                ret = replaceInExpr(
-                    logLitFunName + '(' + RP + '1, ' + RP + '2, ' + RP + '3,' + hasGetterSetter + ')',
-                    IID.getIid(), ast, createLiteralAst(funId)
-                );
+                if (node.type !== 'Identifier') throw new Error('IllegalStateException');
+                internalFunId = getFnIdFromAst(_scope.funNodes[node.name]);
             }
-            transferLoc(ret, node);
-            return ret;
-        }
-        return node;
-    }
-
-    // ─── 语句级 wrap ──────────────────────────────────────────────────────────
-
-    function createExpressionStatement(lhs, node) {
-        var ret = replaceInStatement(RP + '1 = ' + RP + '2', lhs, node);
-        transferLoc(ret[0].expression, node);
-        return ret;
-    }
-
-    function createCallInitAsStatement(node, name, val, isArgumentSync, lhs, isCatchParam, isAssign) {
-        IID.printIidToLoc(node);
-        var ret;
-        if (isAssign) {
-            ret = replaceInStatement(
-                RP + '1 = ' + logInitFunName + '(' + RP + '2, ' + RP + '3, ' + RP + '4, ' + createBitPattern(isArgumentSync, false, isCatchParam) + ')',
-                lhs, IID.getIid(), name, val
+            ret = replaceInExpr(
+                `${logLitFunName}(${RP}1, ${RP}2, ${RP}3,${hasGetterSetter}, ${internalFunId})`,
+                IID.getIid(), ast, createLiteralAst(funId)
             );
         } else {
-            ret = replaceInStatement(
-                logInitFunName + '(' + RP + '1, ' + RP + '2, ' + RP + '3, ' + createBitPattern(isArgumentSync, false, isCatchParam) + ')',
-                IID.getIid(), name, val
+            ret = replaceInExpr(
+                `${logLitFunName}(${RP}1, ${RP}2, ${RP}3,${hasGetterSetter})`,
+                IID.getIid(), ast, createLiteralAst(funId)
             );
         }
-        transferLoc(ret[0].expression, node);
+        transferLoc(ret, node);
         return ret;
     }
+    return node;
+}
 
-    function createCallAsFunEnterStatement(node) {
-        IID.printIidToLoc(node);
-        var ret = replaceInStatement(
-            logFunctionEnterFunName + '(' + RP + '1,arguments.callee, this, arguments)',
-            IID.getIid()
+// ─── 语句级 wrap ──────────────────────────────────────────────────────────────
+
+function createExpressionStatement(lhs, node) {
+    const ret = replaceInStatement(`${RP}1 = ${RP}2`, lhs, node);
+    transferLoc(ret[0].expression, node);
+    return ret;
+}
+
+function createCallInitAsStatement(node, name, val, isArgumentSync, lhs, isCatchParam, isAssign) {
+    IID.printIidToLoc(node);
+    let ret;
+    if (isAssign) {
+        ret = replaceInStatement(
+            `${RP}1 = ${logInitFunName}(${RP}2, ${RP}3, ${RP}4, ${createBitPattern(isArgumentSync, false, isCatchParam)})`,
+            lhs, IID.getIid(), name, val
         );
-        transferLoc(ret[0].expression, node);
-        return ret;
-    }
-
-    function createCallAsScriptEnterStatement(node, instFile, origFile) {
-        IID.printIidToLoc(node);
-        var ret = replaceInStatement(
-            logScriptEntryFunName + '(' + RP + '1,' + RP + '2, ' + RP + '3)',
-            IID.getIid(),
-            createLiteralAst(instFile),
-            createLiteralAst(origFile)
+    } else {
+        ret = replaceInStatement(
+            `${logInitFunName}(${RP}1, ${RP}2, ${RP}3, ${createBitPattern(isArgumentSync, false, isCatchParam)})`,
+            IID.getIid(), name, val
         );
-        transferLoc(ret[0].expression, node);
-        return ret;
     }
+    transferLoc(ret[0].expression, node);
+    return ret;
+}
 
-    // ─── for-in / catch / try-catch 包装 ─────────────────────────────────────
+function createCallAsFunEnterStatement(node) {
+    IID.printIidToLoc(node);
+    const ret = replaceInStatement(
+        `${logFunctionEnterFunName}(${RP}1,arguments.callee, this, arguments)`,
+        IID.getIid()
+    );
+    transferLoc(ret[0].expression, node);
+    return ret;
+}
 
-    var labelCounter = 0;
+function createCallAsScriptEnterStatement(node, instFile, origFile) {
+    IID.printIidToLoc(node);
+    const ret = replaceInStatement(
+        `${logScriptEntryFunName}(${RP}1,${RP}2, ${RP}3)`,
+        IID.getIid(),
+        createLiteralAst(instFile),
+        createLiteralAst(origFile)
+    );
+    transferLoc(ret[0].expression, node);
+    return ret;
+}
 
-    function wrapForIn(node, left, right, body) {
-        IID.printIidToLoc(node);
-        var tmp, extra, isDeclaration = (left.type === 'VariableDeclaration');
-        if (isDeclaration) {
-            var name = node.left.declarations[0].id.name;
-            tmp = replaceInExpr(name + ' = ' + logTmpVarName);
-        } else {
-            tmp = replaceInExpr(RP + '1 = ' + logTmpVarName, left);
-        }
-        transferLoc(tmp, node);
+// ─── for-in / catch / try-catch 包装 ──────────────────────────────────────────
+
+let labelCounter = 0;
+
+function wrapForIn(node, left, right, body) {
+    IID.printIidToLoc(node);
+    const isDeclaration = (left.type === 'VariableDeclaration');
+    let tmp, extra;
+    if (isDeclaration) {
+        const name = node.left.declarations[0].id.name;
+        tmp   = replaceInExpr(`${name} = ${logTmpVarName}`);
         extra = instrumentStore(tmp, isDeclaration);
-
-        if (body.type === 'BlockExpression') {
-            body = body.body;
-        } else {
-            body = [body];
-        }
-
-        var ret;
-        if (isDeclaration) {
-            ret = replaceInStatement(
-                'function n() {  for(' + logTmpVarName + ' in ' + RP + '1) {var ' + name + ' = ' + RP + '2;\n {' + RP + '3}}}',
-                right, wrapWithX1(node, extra.right), body
-            );
-        } else {
-            ret = replaceInStatement(
-                'function n() {  for(' + logTmpVarName + ' in ' + RP + '1) {' + RP + '2;\n {' + RP + '3}}}',
-                right, wrapWithX1(node, extra), body
-            );
-        }
-        ret = ret[0].body.body[0];
-        transferLoc(ret, node);
-        return ret;
+        const ret = replaceInStatement(
+            `function n() { for(${logTmpVarName} in ${RP}1) {var ${name} = ${RP}2;\n {${RP}3}}}`,
+            right, wrapWithX1(node, extra.right), body
+        );
+        const forin = ret[0].body.body[0];
+        transferLoc(forin, node);
+        return forin;
+    } else {
+        tmp   = replaceInExpr(`${RP}1 = ${logTmpVarName}`, left);
+        extra = instrumentStore(tmp, isDeclaration);
+        const ret = replaceInStatement(
+            `function n() { for(${logTmpVarName} in ${RP}1) {${RP}2;\n {${RP}3}}}`,
+            right, wrapWithX1(node, extra), body
+        );
+        const forin = ret[0].body.body[0];
+        transferLoc(forin, node);
+        return forin;
     }
+}
 
-    function wrapCatchClause(node, body, name) {
-        if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-            body.unshift(createCallInitAsStatement(
-                node,
-                createLiteralAst(name),
-                createIdentifierAst(name),
-                false, createIdentifierAst(name), true, true
-            )[0]);
-        }
+function wrapCatchClause(node, body, name) {
+    if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+        body.unshift(createCallInitAsStatement(
+            node,
+            createLiteralAst(name),
+            createIdentifierAst(name),
+            false, createIdentifierAst(name), true, true
+        )[0]);
     }
+}
 
-    function wrapScriptBodyWithTryCatch(node, body) {
+function wrapScriptBodyWithTryCatch(node, body) {
+    if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
+        IID.printIidToLoc(node);
+        const iid1 = IID.getIid();
+        IID.printIidToLoc(node);
+        const l = labelCounter++;
+        const ret = replaceInStatement(
+            `function n() { jalangiLabel${l}: while(true) { try {${RP}1} catch(${JALANGI_VAR}e) { ${logUncaughtExceptionFunName}(${RP}2,${JALANGI_VAR}e); } finally { if (${logScriptExitFunName}(${RP}3)) { ${logLastComputedFunName}(); continue jalangiLabel${l};\n } else {\n  ${logLastComputedFunName}(); break jalangiLabel${l};\n }}\n }}`,
+            body, iid1, IID.getIid()
+        );
+        const stmts = ret[0].body.body;
+        transferLoc(stmts[0], node);
+        return stmts;
+    }
+    return body;
+}
+
+function wrapFunBodyWithTryCatch(node, body) {
+    if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
+        IID.printIidToLoc(node);
+        const iid1 = IID.getIid();
+        IID.printIidToLoc(node);
+        const l = labelCounter++;
+        const ret = replaceInStatement(
+            `function n() { jalangiLabel${l}: while(true) { try {${RP}1} catch(${JALANGI_VAR}e) { ${logUncaughtExceptionFunName}(${RP}2,${JALANGI_VAR}e); } finally { if (${logFunctionReturnFunName}(${RP}3)) continue jalangiLabel${l};\n else \n  return ${logReturnAggrFunName}();\n }\n }}`,
+            body, iid1, IID.getIid()
+        );
+        const stmts = ret[0].body.body;
+        transferLoc(stmts[0], node);
+        return stmts;
+    }
+    return body;
+}
+
+// ─── syncDefuns / instrumentFunctionEntryExit / instrumentScriptEntryExit ────
+
+function syncDefuns(node, scopeArg, isScript) {
+    let ret = [];
+    if (!isScript) {
         if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
-            IID.printIidToLoc(node);
-            var iid1 = IID.getIid();
-            IID.printIidToLoc(node);
-            var l = labelCounter++;
-            var ret = replaceInStatement(
-                'function n() { jalangiLabel' + l + ': while(true) { try {' + RP + '1} catch(' + JALANGI_VAR +
-                'e) { ' + logUncaughtExceptionFunName + '(' + RP + '2,' + JALANGI_VAR +
-                'e); } finally { if (' + logScriptExitFunName + '(' +
-                RP + '3)) { ' + logLastComputedFunName + '(); continue jalangiLabel' + l + ';\n } else {\n  ' +
-                logLastComputedFunName + '(); break jalangiLabel' + l + ';\n }}\n }}',
-                body, iid1, IID.getIid()
-            );
-            ret = ret[0].body.body;
-            transferLoc(ret[0], node);
-            return ret;
+            if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+                const ident = createIdentifierAst('arguments');
+                ret = ret.concat(createCallInitAsStatement(node,
+                    createLiteralAst('arguments'), ident, true, ident, false, true));
+            }
         }
-        return body;
     }
-
-    function wrapFunBodyWithTryCatch(node, body) {
-        if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
-            IID.printIidToLoc(node);
-            var iid1 = IID.getIid();
-            IID.printIidToLoc(node);
-            var l = labelCounter++;
-            var ret = replaceInStatement(
-                'function n() { jalangiLabel' + l + ': while(true) { try {' + RP + '1} catch(' + JALANGI_VAR +
-                'e) { ' + logUncaughtExceptionFunName + '(' + RP + '2,' + JALANGI_VAR +
-                'e); } finally { if (' + logFunctionReturnFunName + '(' +
-                RP + '3)) continue jalangiLabel' + l + ';\n else \n  return ' + logReturnAggrFunName + '();\n }\n }}',
-                body, iid1, IID.getIid()
-            );
-            ret = ret[0].body.body;
-            transferLoc(ret[0], node);
-            return ret;
-        }
-        return body;
-    }
-
-    // ─── syncDefuns / instrumentFunctionEntryExit / instrumentScriptEntryExit ─
-
-    function HOP(obj, prop) {
-        return Object.prototype.hasOwnProperty.call(obj, prop);
-    }
-
-    function syncDefuns(node, scopeArg, isScript) {
-        var ret = [], ident;
-        if (!isScript) {
-            if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
+    if (scopeArg) {
+        for (const name of Object.keys(scopeArg.vars)) {
+            if (!HOP(scopeArg.vars, name)) continue;
+            const varType = scopeArg.vars[name];
+            let ident;
+            if (varType === 'defun') {
+                ident = createIdentifierAst(name);
+                ident.loc = scopeArg.funLocs[name];
                 if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                    ident = createIdentifierAst('arguments');
                     ret = ret.concat(createCallInitAsStatement(node,
-                        createLiteralAst('arguments'), ident, true, ident, false, true));
+                        createLiteralAst(name),
+                        wrapLiteral(ident, ident, N_LOG_FUNCTION_LIT),
+                        false, ident, false, true));
+                } else {
+                    ret = ret.concat(createExpressionStatement(ident,
+                        wrapLiteral(ident, ident, N_LOG_FUNCTION_LIT)));
+                }
+            } else if (varType === 'lambda') {
+                if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+                    ident = createIdentifierAst(name);
+                    ident.loc = scopeArg.funLocs[name];
+                    ret = ret.concat(createCallInitAsStatement(node,
+                        createLiteralAst(name), ident, false, ident, false, true));
+                }
+            } else if (varType === 'arg') {
+                if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+                    ident = createIdentifierAst(name);
+                    ret = ret.concat(createCallInitAsStatement(node,
+                        createLiteralAst(name), ident, true, ident, false, true));
+                }
+            } else if (varType === 'var') {
+                if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+                    ret = ret.concat(createCallInitAsStatement(node,
+                        createLiteralAst(name),
+                        createIdentifierAst(name),
+                        false, undefined, false, false));
                 }
             }
         }
-        if (scopeArg) {
-            for (var name in scopeArg.vars) {
-                if (HOP(scopeArg.vars, name)) {
-                    if (scopeArg.vars[name] === 'defun') {
-                        if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                            ident = createIdentifierAst(name);
-                            ident.loc = scopeArg.funLocs[name];
-                            ret = ret.concat(createCallInitAsStatement(node,
-                                createLiteralAst(name),
-                                wrapLiteral(ident, ident, N_LOG_FUNCTION_LIT),
-                                false, ident, false, true));
-                        } else {
-                            ident = createIdentifierAst(name);
-                            ident.loc = scopeArg.funLocs[name];
-                            ret = ret.concat(createExpressionStatement(ident,
-                                wrapLiteral(ident, ident, N_LOG_FUNCTION_LIT)));
-                        }
-                    }
-                    if (scopeArg.vars[name] === 'lambda') {
-                        if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                            ident = createIdentifierAst(name);
-                            ident.loc = scopeArg.funLocs[name];
-                            ret = ret.concat(createCallInitAsStatement(node,
-                                createLiteralAst(name), ident, false, ident, false, true));
-                        }
-                    }
-                    if (scopeArg.vars[name] === 'arg') {
-                        if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                            ident = createIdentifierAst(name);
-                            ret = ret.concat(createCallInitAsStatement(node,
-                                createLiteralAst(name), ident, true, ident, false, true));
-                        }
-                    }
-                    if (scopeArg.vars[name] === 'var') {
-                        if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                            ret = ret.concat(createCallInitAsStatement(node,
-                                createLiteralAst(name),
-                                createIdentifierAst(name),
-                                false, undefined, false, false));
-                        }
-                    }
-                }
-            }
-        }
-        return ret;
     }
+    return ret;
+}
 
-    function instrumentFunctionEntryExit(node, ast) {
-        var body;
-        if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
-            body = createCallAsFunEnterStatement(node);
+function instrumentFunctionEntryExit(node, ast) {
+    const body = (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node))
+        ? createCallAsFunEnterStatement(node)
+        : [];
+    return [...body, ...syncDefuns(node, _scope, false), ...ast];
+}
+
+function instrumentScriptEntryExit(node, body0, instFile, origFile) {
+    const body = (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node))
+        ? createCallAsScriptEnterStatement(node, instFile, origFile)
+        : [];
+    return [...body, ...syncDefuns(node, _scope, true), ...body0];
+}
+
+// ─── instrumentStore / instrumentLoad / instrumentLoadModStore / instrumentPreIncDec
+
+function instrumentStore(node, isDeclaration) {
+    if (node.left.type === 'Identifier') {
+        const hasVar = _scope.hasVar(node.left.name);
+        node.right = hasVar
+            ? wrapWrite(node.right, createLiteralAst(node.left.name), node.right, node.left,
+                false, _scope.isGlobal(node.left.name), isDeclaration)
+            : wrapWriteWithUndefinedCheck(node.right, createLiteralAst(node.left.name), node.right, node.left);
+        return node;
+    }
+    return wrapPutField(node, node.left.object, getPropertyAsAst(node.left), node.right, node.left.computed);
+}
+
+function instrumentLoad(ast, isTypeof) {
+    if (ast.type === 'Identifier') {
+        if (ast.name === 'undefined') return wrapLiteral(ast, ast, N_LOG_UNDEFINED_LIT);
+        if (ast.name === 'NaN' || ast.name === 'Infinity') return wrapLiteral(ast, ast, N_LOG_NUMBER_LIT);
+        if (ast.name === JALANGI_VAR) return ast;
+        if (_scope.hasVar(ast.name)) {
+            return wrapRead(ast, createLiteralAst(ast.name), ast, false, false, _scope.isGlobal(ast.name));
+        } else if (isTypeof) {
+            return wrapReadWithUndefinedCheck(ast, ast.name);
         } else {
-            body = [];
+            return wrapRead(ast, createLiteralAst(ast.name), ast, false, true, false);
         }
-        body = body.concat(syncDefuns(node, scope, false)).concat(ast);
-        return body;
+    } else if (ast.type === 'MemberExpression') {
+        return wrapGetField(ast, ast.object, getPropertyAsAst(ast), ast.computed);
     }
+    return ast;
+}
 
-    function instrumentScriptEntryExit(node, body0, instFile, origFile) {
-        var body;
-        if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
-            body = createCallAsScriptEnterStatement(node, instFile, origFile);
-        } else {
-            body = [];
-        }
-        body = body.concat(syncDefuns(node, scope, true)).concat(body0);
-        return body;
+function instrumentLoadModStore(node, isNumber) {
+    if (node.left.type === 'Identifier') {
+        let tmp0 = instrumentLoad(node.left, false);
+        if (isNumber) tmp0 = makeNumber(node, instrumentLoad(tmp0, false));
+        const tmp1 = wrapRHSOfModStore(node.right, tmp0, node.right,
+            node.operator.slice(0, -1));
+        const tmp2 = _scope.hasVar(node.left.name)
+            ? wrapWrite(node, createLiteralAst(node.left.name), tmp1, node.left,
+                false, _scope.isGlobal(node.left.name), false)
+            : wrapWriteWithUndefinedCheck(node, createLiteralAst(node.left.name), tmp1, node.left);
+        return wrapLHSOfModStore(node, node.left, tmp2);
     }
+    return wrapModAssign(node, node.left.object,
+        getPropertyAsAst(node.left),
+        node.operator.slice(0, -1),
+        node.right, node.left.computed, !!isNumber);
+}
 
-    // ─── instrumentStore / instrumentLoad / instrumentLoadModStore / instrumentPreIncDec ─
+function instrumentPreIncDec(node) {
+    let right = createLiteralAst(1);
+    right = wrapLiteral(right, right, N_LOG_NUMBER_LIT);
+    const ret = wrapRHSOfModStore(node, node.argument, right, `${node.operator[0]}=`);
+    return instrumentLoadModStore(ret, true);
+}
 
-    function instrumentStore(node, isDeclaration) {
-        var ret;
-        if (node.left.type === 'Identifier') {
-            if (scope.hasVar(node.left.name)) {
-                ret = wrapWrite(node.right, createLiteralAst(node.left.name), node.right, node.left,
-                    false, scope.isGlobal(node.left.name), isDeclaration);
-            } else {
-                ret = wrapWriteWithUndefinedCheck(node.right, createLiteralAst(node.left.name), node.right, node.left);
-            }
-            node.right = ret;
-            return node;
-        } else {
-            ret = wrapPutField(node, node.left.object, getPropertyAsAst(node.left), node.right, node.left.computed);
-            return ret;
-        }
-    }
+function adjustIncDec(op, ast) {
+    const binOp = (op === '++') ? '-' : '+';
+    let right = createLiteralAst(1);
+    right = wrapLiteral(right, right, N_LOG_NUMBER_LIT);
+    return wrapRHSOfModStore(ast, ast, right, binOp);
+}
 
-    function instrumentLoad(ast, isTypeof) {
-        var ret;
-        if (ast.type === 'Identifier') {
-            if (ast.name === 'undefined') {
-                return wrapLiteral(ast, ast, N_LOG_UNDEFINED_LIT);
-            } else if (ast.name === 'NaN' || ast.name === 'Infinity') {
-                return wrapLiteral(ast, ast, N_LOG_NUMBER_LIT);
-            }
-            if (ast.name === JALANGI_VAR) return ast;
-            if (scope.hasVar(ast.name)) {
-                return wrapRead(ast, createLiteralAst(ast.name), ast, false, false, scope.isGlobal(ast.name));
-            } else if (isTypeof) {
-                return wrapReadWithUndefinedCheck(ast, ast.name);
-            } else {
-                return wrapRead(ast, createLiteralAst(ast.name), ast, false, true, false);
-            }
-        } else if (ast.type === 'MemberExpression') {
-            return wrapGetField(ast, ast.object, getPropertyAsAst(ast), ast.computed);
-        }
+function instrumentCall(callAst, isCtor) {
+    const ast = callAst.callee;
+    if (ast.type === 'MemberExpression') {
+        return wrapMethodCall(callAst, ast.object, getPropertyAsAst(ast), isCtor, ast.computed);
+    } else if (ast.type === 'Identifier' && ast.name === 'eval') {
         return ast;
     }
+    return wrapFunCall(callAst, ast, isCtor);
+}
 
-    function instrumentLoadModStore(node, isNumber) {
-        if (node.left.type === 'Identifier') {
-            var tmp0 = instrumentLoad(node.left, false);
-            if (isNumber) {
-                tmp0 = makeNumber(node, instrumentLoad(tmp0, false));
-            }
-            var tmp1 = wrapRHSOfModStore(node.right, tmp0, node.right, node.operator.substring(0, node.operator.length - 1));
-            var tmp2;
-            if (scope.hasVar(node.left.name)) {
-                tmp2 = wrapWrite(node, createLiteralAst(node.left.name), tmp1, node.left,
-                    false, scope.isGlobal(node.left.name), false);
-            } else {
-                tmp2 = wrapWriteWithUndefinedCheck(node, createLiteralAst(node.left.name), tmp1, node.left);
-            }
-            tmp2 = wrapLHSOfModStore(node, node.left, tmp2);
-            return tmp2;
-        } else {
-            return wrapModAssign(node, node.left.object,
-                getPropertyAsAst(node.left),
-                node.operator.substring(0, node.operator.length - 1),
-                node.right, node.left.computed, !!isNumber);
-        }
-    }
+// ─── 初始化（注入 Config）────────────────────────────────────────────────────
 
-    function instrumentPreIncDec(node) {
-        var right = createLiteralAst(1);
-        right = wrapLiteral(right, right, N_LOG_NUMBER_LIT);
-        var ret = wrapRHSOfModStore(node, node.argument, right, node.operator.substring(0, 1) + '=');
-        return instrumentLoadModStore(ret, true);
-    }
+/**
+ * 在使用任何 wrap 函数前，必须先调用 init(config) 注入配置对象。
+ */
+function init(config) {
+    Config = config;
+}
 
-    function adjustIncDec(op, ast) {
-        op = (op === '++') ? '-' : '+';
-        var right = createLiteralAst(1);
-        right = wrapLiteral(right, right, N_LOG_NUMBER_LIT);
-        return wrapRHSOfModStore(ast, ast, right, op);
-    }
+// ─── 导出 ──────────────────────────────────────────────────────────────────────
 
-    function instrumentCall(callAst, isCtor) {
-        var ast = callAst.callee;
-        if (ast.type === 'MemberExpression') {
-            return wrapMethodCall(callAst, ast.object, getPropertyAsAst(ast), isCtor, ast.computed);
-        } else if (ast.type === 'Identifier' && ast.name === 'eval') {
-            return ast;
-        } else {
-            return wrapFunCall(callAst, ast, isCtor);
-        }
-    }
-
-    // ─── createBitPattern 语义化包装 ─────────────────────────────────────────
-    //
-    // createBitPattern(true, false, true) 这类调用完全看不出每个布尔值的含义。
-    // 用具名包装函数替代，调用点的意图一目了然，同时防止参数顺序传错。
-
-    /** 属性读取的 flags：(isComputed, isOpAssign, isMethodCall) */
-    function getFieldFlags(isComputed, isOpAssign, isMethodCall) {
-        return createBitPattern(isComputed, isOpAssign, isMethodCall);
-    }
-
-    /** 属性写入的 flags：(isComputed, isOpAssign) */
-    function putFieldFlags(isComputed, isOpAssign) {
-        return createBitPattern(isComputed, isOpAssign);
-    }
-
-    /** 函数调用的 flags：(isConstructor) */
-    function funCallFlags(isConstructor) {
-        return createBitPattern(isConstructor);
-    }
-
-    /** 方法调用的 flags：(isConstructor, isComputed) */
-    function methodCallFlags(isConstructor, isComputed) {
-        return createBitPattern(isConstructor, isComputed);
-    }
-
-    /** 变量读取的 flags：(isGlobal, isScriptLocal) */
-    function readFlags(isGlobal, isScriptLocal) {
-        return createBitPattern(isGlobal, isScriptLocal);
-    }
-
-    /** 变量写入的 flags：(isGlobal, isScriptLocal, isDeclaration) */
-    function writeFlags(isGlobal, isScriptLocal, isDeclaration) {
-        return createBitPattern(isGlobal, isScriptLocal, isDeclaration);
-    }
-
-    /** 变量声明（init）的 flags：(isArgument, isLocalSync, isCatchParam) */
-    function initFlags(isArgument, isLocalSync, isCatchParam) {
-        return createBitPattern(isArgument, isLocalSync, isCatchParam);
-    }
-
-    /** 二元运算的 flags：(isComputed, unused1, unused2) */
-    function binaryOpFlags(isComputed) {
-        return createBitPattern(isComputed, false, false);
-    }
-
-    // ─── 导出 ──────────────────────────────────────────────────────────────────
-
-    sandbox.Wrappers = {
-        // scope 状态管理（由 esnstrument.js 的 visitor 调用）
-        setScope:  setScope,
-        popScope:  popScope,
-        getScope:  function () { return scope; },
-
-        // AST 辅助
-        createLiteralAst:    createLiteralAst,
-        createIdentifierAst: createIdentifierAst,
-        transferLoc:         transferLoc,
-        createBitPattern:    createBitPattern,
-
-        // 语义化 flags 包装（替代裸 createBitPattern(true, false, ...) 调用）
-        getFieldFlags:   getFieldFlags,
-        putFieldFlags:   putFieldFlags,
-        funCallFlags:    funCallFlags,
-        methodCallFlags: methodCallFlags,
-        readFlags:       readFlags,
-        writeFlags:      writeFlags,
-        initFlags:       initFlags,
-        binaryOpFlags:   binaryOpFlags,
-
-        // 字面量类型常量（供 visitor 使用）
-        N_LOG_ARRAY_LIT:     N_LOG_ARRAY_LIT,
-        N_LOG_OBJECT_LIT:    N_LOG_OBJECT_LIT,
-        N_LOG_FUNCTION_LIT:  N_LOG_FUNCTION_LIT,
-        N_LOG_NUMBER_LIT:    N_LOG_NUMBER_LIT,
-        N_LOG_STRING_LIT:    N_LOG_STRING_LIT,
-        N_LOG_BOOLEAN_LIT:   N_LOG_BOOLEAN_LIT,
-        N_LOG_NULL_LIT:      N_LOG_NULL_LIT,
-        N_LOG_REGEXP_LIT:    N_LOG_REGEXP_LIT,
-        N_LOG_UNDEFINED_LIT: N_LOG_UNDEFINED_LIT,
-
-        // wrap 函数
-        wrapPutField:          wrapPutField,
-        wrapModAssign:         wrapModAssign,
-        wrapMethodCall:        wrapMethodCall,
-        wrapFunCall:           wrapFunCall,
-        wrapGetField:          wrapGetField,
-        wrapRead:              wrapRead,
-        wrapReadWithUndefinedCheck: wrapReadWithUndefinedCheck,
-        wrapWrite:             wrapWrite,
-        wrapWriteWithUndefinedCheck: wrapWriteWithUndefinedCheck,
-        wrapReturn:            wrapReturn,
-        wrapThrow:             wrapThrow,
-        wrapWithX1:            wrapWithX1,
-        wrapHash:              wrapHash,
-        wrapEvalArg:           wrapEvalArg,
-        wrapUnaryOp:           wrapUnaryOp,
-        wrapBinaryOp:          wrapBinaryOp,
-        wrapLogicalAnd:        wrapLogicalAnd,
-        wrapLogicalOr:         wrapLogicalOr,
-        wrapSwitchDiscriminant: wrapSwitchDiscriminant,
-        wrapSwitchTest:        wrapSwitchTest,
-        wrapWith:              wrapWith,
-        wrapConditional:       wrapConditional,
-        wrapLiteral:           wrapLiteral,
-        wrapForIn:             wrapForIn,
-        wrapCatchClause:       wrapCatchClause,
-        wrapScriptBodyWithTryCatch: wrapScriptBodyWithTryCatch,
-        wrapFunBodyWithTryCatch:    wrapFunBodyWithTryCatch,
-
-        // 高级函数（供 visitor 直接调用）
-        instrumentStore:           instrumentStore,
-        instrumentLoad:            instrumentLoad,
-        instrumentLoadModStore:    instrumentLoadModStore,
-        instrumentPreIncDec:       instrumentPreIncDec,
-        adjustIncDec:              adjustIncDec,
-        instrumentCall:            instrumentCall,
-        instrumentFunctionEntryExit: instrumentFunctionEntryExit,
-        instrumentScriptEntryExit:   instrumentScriptEntryExit,
-
-        // 函数入口/脚本入口语句生成
-        createCallAsFunEnterStatement:   createCallAsFunEnterStatement,
-        createCallAsScriptEnterStatement: createCallAsScriptEnterStatement,
-        getPropertyAsAst: getPropertyAsAst
-    };
-
-}(J$));
-
-// exports J$.Wrappers
-// depends on J$.astUtil
-// depends on J$.Config
-// depends on J$.Constants
-// depends on J$.IIDManager
-// depends on acorn (global)
+export {
+    init,
+    // scope 状态管理
+    setScope, popScope, getScope,
+    // AST 辅助
+    createLiteralAst, createIdentifierAst, transferLoc, createBitPattern,
+    getPropertyAsAst,
+    // 字面量类型常量
+    N_LOG_ARRAY_LIT, N_LOG_OBJECT_LIT, N_LOG_FUNCTION_LIT,
+    N_LOG_NUMBER_LIT, N_LOG_STRING_LIT, N_LOG_BOOLEAN_LIT,
+    N_LOG_NULL_LIT, N_LOG_REGEXP_LIT, N_LOG_UNDEFINED_LIT,
+    // wrap 函数
+    wrapPutField, wrapModAssign, wrapMethodCall, wrapFunCall,
+    wrapGetField, wrapRead, wrapReadWithUndefinedCheck,
+    wrapWrite, wrapWriteWithUndefinedCheck,
+    wrapReturn, wrapThrow, wrapWithX1, wrapHash, wrapEvalArg,
+    wrapUnaryOp, wrapBinaryOp, wrapLogicalAnd, wrapLogicalOr,
+    wrapSwitchDiscriminant, wrapSwitchTest, wrapWith, wrapConditional,
+    wrapLiteral, wrapForIn, wrapCatchClause,
+    wrapScriptBodyWithTryCatch, wrapFunBodyWithTryCatch,
+    // 高级函数
+    instrumentStore, instrumentLoad, instrumentLoadModStore,
+    instrumentPreIncDec, adjustIncDec, instrumentCall,
+    instrumentFunctionEntryExit, instrumentScriptEntryExit,
+    createCallAsFunEnterStatement, createCallAsScriptEnterStatement,
+};

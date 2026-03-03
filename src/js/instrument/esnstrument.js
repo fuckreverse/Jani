@@ -14,647 +14,560 @@
  * limitations under the License.
  */
 
-// Author: Koushik Sen
-
-// do not remove the following comment
 // JALANGI DO NOT INSTRUMENT
 
-/*jslint browser: true */
-/*global astUtil acorn astring J$ */
-
 /**
- * Jalangi2 插桩入口模块（浏览器版）。
+ * Jalangi2 插桩入口模块（浏览器 ESM 版）。
  *
  * 职责：
- *  1. 定义 AST visitor（visitorRRPre / visitorRRPost / visitorOps / visitorCloneBodyPre / visitorMergeBodyPre）
+ *  1. 定义 AST visitor（visitorRRPre / visitorRRPost / visitorOps / sampling visitor）
  *  2. 实现 hoistFunctionDeclaration（兼容 Firefox 的函数声明提升）
- *  3. 实现 instrumentCode(options) —— 主要对外 API
- *  4. 实现 instrumentEvalCode(code, iid, isDirect) —— eval 插桩包装
+ *  3. 导出 instrumentCode(options)  —— 主要对外 API
+ *  4. 导出 instrumentEvalCode(code, iid, isDirect)  —— eval 插桩包装
  *
- * 依赖的子模块（需在本文件之前加载）：
- *  - J$.IIDManager  （iid.js）
- *  - J$.addScopes   （scope.js）
- *  - J$.Wrappers    （wrappers.js）
- *  - J$.astUtil
- *  - J$.Config
- *  - J$.Constants
- *  - acorn          （全局，由页面或构建工具注入）
- *  - astring        （全局，由页面或构建工具注入；替代旧版 esotope，支持 ES2020+）
+ * 依赖：
+ *  - acorn   (npm，>= 8.0，ecmaVersion:'latest' 支持 ES2022+)
+ *  - astring (npm，支持 ES2022+ 代码生成，替代旧版 esotope)
  */
 
-if (typeof J$ === 'undefined') {
-    J$ = {};
+import * as acorn   from 'acorn';
+import { generate as astringGenerate } from 'astring';
+
+import { JALANGI_VAR }     from '../Constants.js';
+import { CONTEXT, transformAst } from './astUtil.js';
+import { addScopes }       from './scope.js';
+import * as IID            from './iid.js';
+import * as W              from './wrappers.js';
+
+// ─── Config 注入（由宿主在使用前调用 init() 设置）──────────────────────────────
+let _config = null;
+let _analysis = null;   // 当前分析对象（J$.analysis 等价物）
+let _sid = null;        // 当前脚本 ID
+
+/**
+ * 初始化插桩器。必须在第一次调用 instrumentCode 之前调用。
+ *
+ * @param {object} config   - Jalangi Config 对象
+ * @param {object} [analysis] - 当前 analysis 对象（可选，用于 pre/post hook）
+ * @param {*}      [sid]    - 当前脚本 ID（用于 eval 的 source map）
+ */
+function init(config, analysis, sid) {
+    _config  = config;
+    _analysis = analysis ?? null;
+    _sid      = sid ?? null;
+    W.init(config);
 }
 
-(function (sandbox) {
-    if (typeof sandbox.instrumentCode !== 'undefined') {
-        return;
-    }
+// ─── 字面量类型常量（本地别名）────────────────────────────────────────────────
 
-    var astUtil   = sandbox.astUtil;
-    var Config    = sandbox.Config;
-    var Constants = sandbox.Constants;
-    var IID       = sandbox.IIDManager;
-    var W         = sandbox.Wrappers;   // wrap 函数库
+const {
+    N_LOG_ARRAY_LIT,
+    N_LOG_OBJECT_LIT,
+    N_LOG_FUNCTION_LIT,
+    N_LOG_NUMBER_LIT,
+    N_LOG_STRING_LIT,
+    N_LOG_BOOLEAN_LIT,
+    N_LOG_NULL_LIT,
+    N_LOG_REGEXP_LIT,
+    N_LOG_UNDEFINED_LIT,
+} = W;
 
-    var JALANGI_VAR = Constants.JALANGI_VAR;
+// ─── RegExp 序列化（用于 JSON 缓存 IID 时序列化 AST）────────────────────────
 
-    // JSON 使用全局对象的原生版本，防止被用户分析修改
-    var _global = (function () { return this; }()) || globalThis;
-    var JSON = {
-        parse:     _global.JSON.parse.bind(_global.JSON),
-        stringify: _global.JSON.stringify.bind(_global.JSON)
+function regExpToJSON() {
+    return {
+        type:       'J$.AST.REGEXP',
+        value:      this.source,
+        glb:        this.global,
+        ignoreCase: this.ignoreCase,
+        multiline:  this.multiline,
     };
+}
 
-    // ─── 字面量类型常量（本地别名）────────────────────────────────────────────
+function JSONStringifyHandler(key, value) {
+    if (key === 'scope')         return undefined;
+    if (value instanceof RegExp) return regExpToJSON.call(value);
+    return value;
+}
 
-    var N_LOG_ARRAY_LIT     = W.N_LOG_ARRAY_LIT;
-    var N_LOG_OBJECT_LIT    = W.N_LOG_OBJECT_LIT;
-    var N_LOG_FUNCTION_LIT  = W.N_LOG_FUNCTION_LIT;
-    var N_LOG_NUMBER_LIT    = W.N_LOG_NUMBER_LIT;
-    var N_LOG_STRING_LIT    = W.N_LOG_STRING_LIT;
-    var N_LOG_BOOLEAN_LIT   = W.N_LOG_BOOLEAN_LIT;
-    var N_LOG_NULL_LIT      = W.N_LOG_NULL_LIT;
-    var N_LOG_REGEXP_LIT    = W.N_LOG_REGEXP_LIT;
-    var N_LOG_UNDEFINED_LIT = W.N_LOG_UNDEFINED_LIT;
-
-    // ─── RegExp 序列化（用于 JSON 缓存 IID 时序列化 AST）─────────────────────
-
-    function regExpToJSON() {
-        return {
-            type:       'J$.AST.REGEXP',
-            value:      this.source,
-            glb:        this.global,
-            ignoreCase: this.ignoreCase,
-            multiline:  this.multiline
-        };
+function JSONParseHandler(key, value) {
+    if (typeof value === 'object' && value?.type === 'J$.AST.REGEXP') {
+        const flags = `${value.glb ? 'g' : ''}${value.ignoreCase ? 'i' : ''}${value.multiline ? 'm' : ''}`;
+        return RegExp(value.value, flags);
     }
+    return value;
+}
 
-    function JSONStringifyHandler(key, value) {
-        if (key === 'scope')          return undefined;
-        if (value instanceof RegExp)  return regExpToJSON.call(value);
-        return value;
-    }
+const cloneAst = (src) =>
+    JSON.parse(JSON.stringify(src, JSONStringifyHandler), JSONParseHandler);
 
-    function JSONParseHandler(key, value) {
-        if (typeof value === 'object' && value && value.type === 'J$.AST.REGEXP') {
-            var flags = '';
-            if (value.glb)        flags += 'g';
-            if (value.ignoreCase) flags += 'i';
-            if (value.multiline)  flags += 'm';
-            return RegExp(value.value, flags);
-        }
-        return value;
-    }
+// ─── visitor：克隆函数体（用于 ENABLE_SAMPLING 模式）──────────────────────────
 
-    function clone(src) {
-        return JSON.parse(JSON.stringify(src, JSONStringifyHandler), JSONParseHandler);
-    }
+const visitorCloneBodyPre = {
+    FunctionExpression(node)  { node.bodyOrig = cloneAst(node.body); return node; },
+    FunctionDeclaration(node) { node.bodyOrig = cloneAst(node.body); return node; },
+};
 
-    // ─── visitor：克隆函数体（用于 ENABLE_SAMPLING 模式）──────────────────────
+// ─── visitor：合并采样函数体（用于 ENABLE_SAMPLING 模式）────────────────────
 
-    var visitorCloneBodyPre = {
-        'FunctionExpression': function (node) {
-            node.bodyOrig = clone(node.body);
-            return node;
-        },
-        'FunctionDeclaration': function (node) {
-            node.bodyOrig = clone(node.body);
-            return node;
-        }
-    };
-
-    // ─── visitor：合并采样函数体（用于 ENABLE_SAMPLING 模式）──────────────────
-
-    function mergeBodies(node) {
-        IID.printIidToLoc(node);
-        var iid = IID.getIid();
-        var JALANGI_VAR_local = JALANGI_VAR;
-        // 内联构建 AST，避免对模板字符串的额外 parse
-        var test = {
-            type: 'UnaryExpression',
-            operator: '!',
-            prefix: true,
-            argument: {
-                type: 'CallExpression',
-                callee: {
+function mergeBodies(node) {
+    IID.printIidToLoc(node);
+    const iid = IID.getIid();
+    const test = {
+        type: 'UnaryExpression',
+        operator: '!',
+        prefix: true,
+        argument: {
+            type: 'CallExpression',
+            callee: {
+                type: 'MemberExpression',
+                object:   { type: 'Identifier', name: JALANGI_VAR },
+                property: { type: 'Identifier', name: 'S' },
+                computed: false,
+            },
+            arguments: [
+                iid,
+                {
                     type: 'MemberExpression',
-                    object: {type: 'Identifier', name: JALANGI_VAR_local},
-                    property: {type: 'Identifier', name: 'S'},
-                    computed: false
+                    object:   { type: 'Identifier', name: 'arguments' },
+                    property: { type: 'Identifier', name: 'callee' },
+                    computed: false,
                 },
-                arguments: [iid, {type: 'MemberExpression', object: {type: 'Identifier', name: 'arguments'}, property: {type: 'Identifier', name: 'callee'}, computed: false}]
-            }
-        };
-        node.body.body = [{
-            type: 'IfStatement',
-            test: test,
-            consequent: node.bodyOrig,
-            alternate: node.body
-        }];
-        delete node.bodyOrig;
-        return node;
-    }
-
-    var visitorMergeBodyPre = {
-        'FunctionExpression': mergeBodies,
-        'FunctionDeclaration': mergeBodies
+            ],
+        },
     };
+    node.body.body = [{
+        type:       'IfStatement',
+        test,
+        consequent: node.bodyOrig,
+        alternate:  node.body,
+    }];
+    delete node.bodyOrig;
+    return node;
+}
 
-    // ─── visitor：作用域绑定（Pre）────────────────────────────────────────────
+const visitorMergeBodyPre = {
+    FunctionExpression:  mergeBodies,
+    FunctionDeclaration: mergeBodies,
+};
 
-    var visitorRRPre = {
-        'Program':             W.setScope,
-        'FunctionDeclaration': W.setScope,
-        'FunctionExpression':  W.setScope,
-        'CatchClause':         W.setScope
-    };
+// ─── visitor：作用域绑定（Pre）────────────────────────────────────────────────
 
-    // ─── visitor：主插桩变换（Post）───────────────────────────────────────────
+const visitorRRPre = {
+    Program:             W.setScope,
+    FunctionDeclaration: W.setScope,
+    FunctionExpression:  W.setScope,
+    CatchClause:         W.setScope,
+};
 
-    var visitorRRPost = {
-        'Literal': function (node, context) {
-            if (context !== astUtil.CONTEXT.RHS) return node;
-            var litType;
-            switch (typeof node.value) {
-                case 'number':  litType = N_LOG_NUMBER_LIT;  break;
-                case 'string':  litType = N_LOG_STRING_LIT;  break;
-                case 'boolean': litType = N_LOG_BOOLEAN_LIT; break;
-                case 'object':
-                    litType = (node.value === null) ? N_LOG_NULL_LIT : N_LOG_REGEXP_LIT;
-                    break;
-                case 'bigint':
-                    // ES2020 BigInt 字面量（如 42n）：类型未知，不插桩，直接返回原节点。
-                    // 强行传入 wrapLiteral 会导致 litType === undefined，引发后续崩溃。
-                    return node;
-                default:
-                    // 未来可能出现的新字面量类型（如 TemplateLiteral 虽有独立节点，此处作保底）：
-                    // 保守地返回原节点，不插桩，避免传入 undefined 的 litType。
-                    return node;
-            }
-            return W.wrapLiteral(node, node, litType);
-        },
+// ─── visitor：主插桩变换（Post）──────────────────────────────────────────────
 
-        'Program': function (node) {
-            var ret = W.instrumentScriptEntryExit(
-                node, node.body,
-                IID.getInstCodeFileName(),
-                IID.getOrigCodeFileName()
-            );
-            node.body = ret;
-            W.popScope();
-            return node;
-        },
-
-        'VariableDeclaration': function (node) {
-            node.declarations = node.declarations.map(function (def) {
-                if (def.init !== null) {
-                    var init = W.wrapWrite(def.init, W.createLiteralAst(def.id.name), def.init, def.id,
-                        false, W.getScope().isGlobal(def.id.name), true);
-                    init = W.wrapWithX1(def.init, init);
-                    def.init = init;
-                }
-                return def;
-            });
-            return node;
-        },
-
-        'NewExpression': function (node) {
-            var ret = {
-                type: 'CallExpression',
-                callee: W.instrumentCall(node, true),
-                arguments: node.arguments
-            };
-            W.transferLoc(ret, node);
-            return ret;
-        },
-
-        'CallExpression': function (node) {
-            var isEval = node.callee.type === 'Identifier' && node.callee.name === 'eval';
-            node.callee = W.instrumentCall(node, false);
-            if (isEval) {
-                node.arguments = node.arguments.map(W.wrapEvalArg);
-            }
-            return node;
-        },
-
-        'AssignmentExpression': function (node) {
-            if (node.operator === '=') {
-                return W.instrumentStore(node, false);
-            } else {
-                return W.instrumentLoadModStore(node);
-            }
-        },
-
-        'UpdateExpression': function (node) {
-            var ret1 = W.instrumentPreIncDec(node);
-            if (!node.prefix) {
-                ret1 = W.adjustIncDec(node.operator, ret1);
-            }
-            return ret1;
-        },
-
-        'FunctionExpression': function (node, context) {
-            node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
-            var ret1;
-            if (context === astUtil.CONTEXT.GETTER
-                    || context === astUtil.CONTEXT.SETTER
-                    || context === astUtil.CONTEXT.METHOD) {
-                // getter/setter/class 方法：FunctionExpression 是方法定义的一部分，
-                // 不作为独立字面量包装（astring 要求 MethodDefinition.value 是原始 FunctionExpression）
-                ret1 = node;
-            } else {
-                ret1 = W.wrapLiteral(node, node, N_LOG_FUNCTION_LIT);
-            }
-            W.popScope();
-            return ret1;
-        },
-
-        'FunctionDeclaration': function (node) {
-            node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
-            W.popScope();
-            return node;
-        },
-
-        'ObjectExpression': function (node) {
-            return W.wrapLiteral(node, node, N_LOG_OBJECT_LIT);
-        },
-
-        'ArrayExpression': function (node) {
-            return W.wrapLiteral(node, node, N_LOG_ARRAY_LIT);
-        },
-
-        'ThisExpression': function (node) {
-            return W.wrapRead(node, W.createLiteralAst('this'), node, false, false, false);
-        },
-
-        'Identifier': function (node, context) {
-            if (context === astUtil.CONTEXT.RHS) {
-                return W.instrumentLoad(node, false);
-            } else if (context === astUtil.CONTEXT.TYPEOF) {
-                return W.instrumentLoad(node, true);
-            }
-            return node;
-        },
-
-        'MemberExpression': function (node, context) {
-            if (context === astUtil.CONTEXT.RHS) {
-                return W.instrumentLoad(node, false);
-            }
-            return node;
-        },
-
-        'SequenceExpression': function (node) {
-            var len = node.expressions.length;
-            for (var i = 0; i < len - 1; i++) {
-                node.expressions[i] = W.wrapWithX1(node.expressions[i], node.expressions[i]);
-            }
-            return node;
-        },
-
-        'ForInStatement': function (node) {
-            node.right = W.wrapHash(node.right, node.right);
-            node = W.wrapForIn(node, node.left, node.right, node.body);
-            return node;
-        },
-
-        'CatchClause': function (node) {
-            // ES2019+: optional catch binding 时 node.param 为 null，跳过初始化包装
-            if (node.param && node.param.type === 'Identifier') {
-                W.wrapCatchClause(node, node.body.body, node.param.name);
-            }
-            W.popScope();
-            return node;
-        },
-
-        'ReturnStatement': function (node) {
-            var ret = W.wrapReturn(node, node.argument);
-            node.argument = W.wrapWithX1(node, ret);
-            return node;
-        },
-
-        'ThrowStatement': function (node) {
-            var ret = W.wrapThrow(node, node.argument);
-            node.argument = W.wrapWithX1(node, ret);
-            return node;
-        },
-
-        'ExpressionStatement': function (node) {
-            node.expression = W.wrapWithX1(node, node.expression);
-            return node;
-        }
-    };
-
-    // ─── visitor：运算符插桩（Post）───────────────────────────────────────────
-
-    function funCond(node) {
-        node.test = W.wrapConditional(node.test, node.test);
-        node.test = W.wrapWithX1(node, node.test);
-        node.init   = W.wrapWithX1(node, node.init);
-        node.update = W.wrapWithX1(node, node.update);
-        return node;
-    }
-
-    var visitorOps = {
-        'Program': function (node) {
-            node.body = W.wrapScriptBodyWithTryCatch(node, node.body);
-            return node;
-        },
-
-        'BinaryExpression': function (node) {
-            return W.wrapBinaryOp(node, node.left, node.right, node.operator);
-        },
-
-        'LogicalExpression': function (node) {
-            if (node.operator === '&&') return W.wrapLogicalAnd(node, node.left, node.right);
-            if (node.operator === '||') return W.wrapLogicalOr(node, node.left, node.right);
-            return node;
-        },
-
-        'UnaryExpression': function (node) {
-            if (node.operator === 'void') return node;
-            if (node.operator === 'delete') {
-                if (node.argument.object) {
-                    return W.wrapBinaryOp(node, node.argument.object,
-                        W.getPropertyAsAst(node.argument), node.operator, node.argument.computed);
-                }
+const visitorRRPost = {
+    Literal(node, context) {
+        if (context !== CONTEXT.RHS) return node;
+        switch (typeof node.value) {
+            case 'number':  return W.wrapLiteral(node, node, N_LOG_NUMBER_LIT);
+            case 'string':  return W.wrapLiteral(node, node, N_LOG_STRING_LIT);
+            case 'boolean': return W.wrapLiteral(node, node, N_LOG_BOOLEAN_LIT);
+            case 'object':
+                return W.wrapLiteral(node, node, node.value === null ? N_LOG_NULL_LIT : N_LOG_REGEXP_LIT);
+            case 'bigint':
+                // ES2020 BigInt 字面量（如 42n）：暂不插桩，返回原节点
                 return node;
-            }
-            return W.wrapUnaryOp(node, node.argument, node.operator);
-        },
-
-        'SwitchStatement': function (node) {
-            var dis = W.wrapSwitchDiscriminant(node.discriminant, node.discriminant);
-            dis = W.wrapWithX1(node.discriminant, dis);
-            node.cases = node.cases.map(function (acase) {
-                if (acase.test) {
-                    var test = W.wrapSwitchTest(acase.test, acase.test);
-                    acase.test = W.wrapWithX1(acase.test, test);
-                }
-                return acase;
-            });
-            node.discriminant = dis;
-            return node;
-        },
-
-        'FunctionExpression': function (node) {
-            node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
-            return node;
-        },
-
-        'FunctionDeclaration': function (node) {
-            node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
-            return node;
-        },
-
-        'WithStatement': function (node) {
-            node.object = W.wrapWith(node.object);
-            return node;
-        },
-
-        'ConditionalExpression': funCond,
-        'IfStatement':           funCond,
-        'WhileStatement':        funCond,
-        'DoWhileStatement':      funCond,
-        'ForStatement':          funCond
-    };
-
-    // ─── 函数声明提升（Firefox 兼容）──────────────────────────────────────────
-
-    /**
-     * 将 FunctionDeclaration 节点提升到每个作用域 body 的最前面
-     * （紧接在 J$.Se / J$.Fe 调用之后），以匹配浏览器的实际求值顺序。
-     *
-     * @param {object}   ast                - 要处理的 AST 节点
-     * @param {string[]} hoistedFunctions   - 收集被提升的函数名（用于调试）
-     */
-    function hoistFunctionDeclaration(ast, hoistedFunctions) {
-        if (ast.body) {
-            var newBody = [];
-            var startIndex = 0;
-
-            // 跳过 J$.Se / J$.Fe 调用（必须保持在最前面）
-            if (ast.body.length > 0) {
-                var first = ast.body[0];
-                if (first.type === 'ExpressionStatement'
-                        && first.expression.type === 'CallExpression'
-                        && first.expression.callee.object
-                        && first.expression.callee.object.name === 'J$'
-                        && first.expression.callee.property
-                        && (first.expression.callee.property.name === 'Se'
-                            || first.expression.callee.property.name === 'Fe')) {
-                    newBody.push(first);
-                    startIndex = 1;
-                }
-            }
-
-            // 先放 FunctionDeclaration
-            for (var i = startIndex; i < ast.body.length; i++) {
-                if (ast.body[i].type === 'FunctionDeclaration') {
-                    newBody.push(ast.body[i]);
-                    if (newBody.length !== i + 1) {
-                        hoistedFunctions.push(ast.body[i].id.name);
-                    }
-                }
-            }
-            // 再放其余语句
-            for (var j = startIndex; j < ast.body.length; j++) {
-                if (ast.body[j].type !== 'FunctionDeclaration') {
-                    newBody.push(ast.body[j]);
-                }
-            }
-
-            ast.body.length = 0;
-            for (var k = 0; k < newBody.length; k++) {
-                ast.body.push(newBody[k]);
-            }
+            default:
+                return node;
         }
+    },
 
-        // 递归处理子节点
-        for (var key in ast) {
-            if (ast.hasOwnProperty(key) && key !== 'scope') {
-                var child = ast[key];
-                if (child && typeof child === 'object') {
-                    hoistFunctionDeclaration(child, hoistedFunctions);
-                }
-            }
-        }
-        return ast;
-    }
-
-    // ─── AST 转换主流程 ────────────────────────────────────────────────────────
-
-    // 当前插桩使用的 sourceType（由 instrumentCode options 设置）
-    var _currentSourceType = 'script';
-
-    function transformString(code, visitorsPost, visitorsPre) {
-        // 使用 'latest' 让 acorn 始终以当前版本支持的最高 ES 标准解析。
-        // sourceType 由调用方通过 options.sourceType 传入（'script' 或 'module'）；
-        // module 模式允许顶层 await、import/export 等语法（需 acorn 8+）。
-        var newAst = acorn.parse(code, {locations: true, ecmaVersion: 'latest', sourceType: _currentSourceType});
-        sandbox.addScopes(newAst);
-        var len = visitorsPost.length;
-        for (var i = 0; i < len; i++) {
-            newAst = astUtil.transformAst(newAst, visitorsPost[i], visitorsPre[i], astUtil.CONTEXT.RHS);
-        }
-        return newAst;
-    }
-
-    // ─── 主 API ────────────────────────────────────────────────────────────────
-
-    // 如果代码中包含此字符串，跳过插桩
-    var noInstr = '// JALANGI DO NOT INSTRUMENT';
-
-    /**
-     * 对代码字符串进行插桩。
-     *
-     * @param {{
-     *   isEval:           boolean,   // 是否是 eval 动态代码
-     *   code:             string,    // 要插桩的代码
-     *   thisIid:          number,    // eval 时的调用点 IID
-     *   origCodeFileName: string,    // 原始文件名（用于 source map）
-     *   instCodeFileName: string,    // 插桩后文件名
-     *   inlineSourceMap:  boolean,   // 是否内联完整 source map
-     *   inlineSource:     boolean,   // 是否内联原始源代码
-     *   url:              string,    // 脚本的 URL（可选）
-     *   isDirect:         boolean    // eval 是否是直接调用
-     * }} options
-     *
-     * @return {{
-     *   code:            string,
-     *   instAST:         object,
-     *   sourceMapObject: object,
-     *   sourceMapString: string
-     * }}
-     */
-    function instrumentCode(options) {
-        var aret, skip = false;
-        var isEval        = options.isEval;
-        var code          = options.code;
-        var thisIid       = options.thisIid;
-        var inlineSource  = options.inlineSource;
-        var url           = options.url;
-
-        // sourceType: 'script'（默认）或 'module'（支持顶层 await / import / export）
-        _currentSourceType = options.sourceType || 'script';
-
-        // 初始化 IID 计数器及文件名
-        IID.initialize(
-            isEval,
-            options.instCodeFileName,
-            options.origCodeFileName
+    Program(node) {
+        const ret = W.instrumentScriptEntryExit(
+            node, node.body,
+            IID.getInstCodeFileName(),
+            IID.getOrigCodeFileName()
         );
+        node.body = ret;
+        W.popScope();
+        return node;
+    },
 
-        // pre-hook（允许分析修改代码或跳过插桩）
-        if (sandbox.analysis && sandbox.analysis.instrumentCodePre) {
-            aret = sandbox.analysis.instrumentCodePre(thisIid, code, options.isDirect);
-            if (aret) {
-                code  = aret.code;
-                skip  = aret.skip;
+    VariableDeclaration(node) {
+        node.declarations = node.declarations.map((def) => {
+            if (def.init !== null) {
+                let init = W.wrapWrite(def.init, W.createLiteralAst(def.id.name), def.init, def.id,
+                    false, W.getScope().isGlobal(def.id.name), true);
+                init = W.wrapWithX1(def.init, init);
+                def.init = init;
             }
-        }
+            return def;
+        });
+        return node;
+    },
 
-        var newAst;
-        if (!skip && typeof code === 'string' && code.indexOf(noInstr) < 0) {
-            try {
-                // 注意：shebang（#!）仅出现在 Node.js 脚本首行，浏览器中不会遇到，
-                // 故此处不做 removeShebang 处理。
-
-                if (Config.ENABLE_SAMPLING) {
-                    newAst = transformString(code,
-                        [visitorCloneBodyPre, visitorRRPost, visitorOps, visitorMergeBodyPre],
-                        [undefined,           visitorRRPre,  undefined,  undefined]);
-                } else {
-                    newAst = transformString(code,
-                        [visitorRRPost, visitorOps],
-                        [visitorRRPre,  undefined]);
-                }
-
-                // 提升函数声明（Firefox 兼容）
-                var hoistedFcts = [];
-                newAst = hoistFunctionDeclaration(newAst, hoistedFcts);
-
-                // astring.generate 支持 ES2020+，替代旧版 esotope（仅支持 ES5/ES6）
-                var newCode = astring.generate(newAst);
-                code = newCode + '\n' + noInstr + '\n';
-            } catch (ex) {
-                console.log('Failed to instrument', code);
-                throw ex;
-            }
-        }
-
-        // 构建 source map 信息
-        var sourceInfo = IID.getSourceInfo();
-        if (url)          sourceInfo.url      = url;
-        if (isEval) {
-            sourceInfo.evalSid = sandbox.sid;
-            sourceInfo.evalIid = thisIid;
-        }
-        if (inlineSource) sourceInfo.code = options.code;
-
-        var sourceMapString = JSON.stringify(sourceInfo);
-
-        // 精简版 source map 头（不含逐行位置，只有元数据）
-        var tmp = {
-            nBranches:              sourceInfo.nBranches,
-            originalCodeFileName:   sourceInfo.originalCodeFileName,
-            instrumentedCodeFileName: sourceInfo.instrumentedCodeFileName
+    NewExpression(node) {
+        const ret = {
+            type:      'CallExpression',
+            callee:    W.instrumentCall(node, true),
+            arguments: node.arguments,
         };
-        if (url)    tmp.url = url;
-        if (isEval) { tmp.evalSid = sourceInfo.evalSid; tmp.evalIid = thisIid; }
+        W.transferLoc(ret, node);
+        return ret;
+    },
 
-        var instCode;
-        if (options.inlineSourceMap) {
-            instCode = JALANGI_VAR + '.iids = ' + sourceMapString + ';\n' + code;
-        } else {
-            instCode = JALANGI_VAR + '.iids = ' + JSON.stringify(tmp) + ';\n' + code;
+    CallExpression(node) {
+        const isEval = node.callee.type === 'Identifier' && node.callee.name === 'eval';
+        node.callee = W.instrumentCall(node, false);
+        if (isEval) node.arguments = node.arguments.map(W.wrapEvalArg);
+        return node;
+    },
+
+    AssignmentExpression(node) {
+        return node.operator === '='
+            ? W.instrumentStore(node, false)
+            : W.instrumentLoadModStore(node);
+    },
+
+    UpdateExpression(node) {
+        let ret = W.instrumentPreIncDec(node);
+        if (!node.prefix) ret = W.adjustIncDec(node.operator, ret);
+        return ret;
+    },
+
+    FunctionExpression(node, context) {
+        node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
+        // getter / setter / class 方法不作为独立字面量包装
+        const ret = (context === CONTEXT.GETTER || context === CONTEXT.SETTER || context === CONTEXT.METHOD)
+            ? node
+            : W.wrapLiteral(node, node, N_LOG_FUNCTION_LIT);
+        W.popScope();
+        return ret;
+    },
+
+    FunctionDeclaration(node) {
+        node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
+        W.popScope();
+        return node;
+    },
+
+    ObjectExpression: (node) => W.wrapLiteral(node, node, N_LOG_OBJECT_LIT),
+    ArrayExpression:  (node) => W.wrapLiteral(node, node, N_LOG_ARRAY_LIT),
+
+    ThisExpression: (node) =>
+        W.wrapRead(node, W.createLiteralAst('this'), node, false, false, false),
+
+    Identifier(node, context) {
+        if (context === CONTEXT.RHS)    return W.instrumentLoad(node, false);
+        if (context === CONTEXT.TYPEOF) return W.instrumentLoad(node, true);
+        return node;
+    },
+
+    MemberExpression(node, context) {
+        if (context === CONTEXT.RHS) return W.instrumentLoad(node, false);
+        return node;
+    },
+
+    SequenceExpression(node) {
+        const last = node.expressions.length - 1;
+        for (let i = 0; i < last; i++) {
+            node.expressions[i] = W.wrapWithX1(node.expressions[i], node.expressions[i]);
         }
+        return node;
+    },
 
-        // post-hook
-        if (isEval && sandbox.analysis && sandbox.analysis.instrumentCode) {
-            aret = sandbox.analysis.instrumentCode(thisIid, instCode, newAst, options.isDirect);
-            if (aret) {
-                instCode = aret.result;
+    ForInStatement(node) {
+        node.right = W.wrapHash(node.right, node.right);
+        return W.wrapForIn(node, node.left, node.right, node.body);
+    },
+
+    CatchClause(node) {
+        // ES2019+: optional catch binding 时 node.param 为 null，跳过包装
+        if (node.param?.type === 'Identifier') {
+            W.wrapCatchClause(node, node.body.body, node.param.name);
+        }
+        W.popScope();
+        return node;
+    },
+
+    ReturnStatement(node) {
+        const ret = W.wrapReturn(node, node.argument);
+        node.argument = W.wrapWithX1(node, ret);
+        return node;
+    },
+
+    ThrowStatement(node) {
+        const ret = W.wrapThrow(node, node.argument);
+        node.argument = W.wrapWithX1(node, ret);
+        return node;
+    },
+
+    ExpressionStatement(node) {
+        node.expression = W.wrapWithX1(node, node.expression);
+        return node;
+    },
+};
+
+// ─── visitor：运算符插桩（Post）──────────────────────────────────────────────
+
+function funCond(node) {
+    node.test   = W.wrapConditional(node.test, node.test);
+    node.test   = W.wrapWithX1(node, node.test);
+    node.init   = W.wrapWithX1(node, node.init);
+    node.update = W.wrapWithX1(node, node.update);
+    return node;
+}
+
+const visitorOps = {
+    Program(node) {
+        node.body = W.wrapScriptBodyWithTryCatch(node, node.body);
+        return node;
+    },
+
+    BinaryExpression: (node) =>
+        W.wrapBinaryOp(node, node.left, node.right, node.operator),
+
+    LogicalExpression(node) {
+        if (node.operator === '&&') return W.wrapLogicalAnd(node, node.left, node.right);
+        if (node.operator === '||') return W.wrapLogicalOr(node, node.left, node.right);
+        return node;
+    },
+
+    UnaryExpression(node) {
+        if (node.operator === 'void') return node;
+        if (node.operator === 'delete') {
+            if (node.argument.object) {
+                return W.wrapBinaryOp(node, node.argument.object,
+                    W.getPropertyAsAst(node.argument), node.operator, node.argument.computed);
+            }
+            return node;
+        }
+        return W.wrapUnaryOp(node, node.argument, node.operator);
+    },
+
+    SwitchStatement(node) {
+        let dis = W.wrapSwitchDiscriminant(node.discriminant, node.discriminant);
+        dis = W.wrapWithX1(node.discriminant, dis);
+        node.cases = node.cases.map((acase) => {
+            if (acase.test) {
+                const test = W.wrapSwitchTest(acase.test, acase.test);
+                acase.test = W.wrapWithX1(acase.test, test);
+            }
+            return acase;
+        });
+        node.discriminant = dis;
+        return node;
+    },
+
+    FunctionExpression(node) {
+        node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
+        return node;
+    },
+
+    FunctionDeclaration(node) {
+        node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
+        return node;
+    },
+
+    WithStatement(node) {
+        node.object = W.wrapWith(node.object);
+        return node;
+    },
+
+    ConditionalExpression: funCond,
+    IfStatement:           funCond,
+    WhileStatement:        funCond,
+    DoWhileStatement:      funCond,
+    ForStatement:          funCond,
+};
+
+// ─── 函数声明提升（Firefox 兼容）─────────────────────────────────────────────
+
+/**
+ * 将 FunctionDeclaration 提升到每个作用域 body 的最前面
+ * （紧接在 J$.Se / J$.Fe 调用之后），以匹配浏览器的实际求值顺序。
+ */
+function hoistFunctionDeclaration(ast, hoistedFunctions) {
+    if (ast.body && Array.isArray(ast.body)) {
+        const newBody = [];
+        let startIndex = 0;
+
+        // 跳过 J$.Se / J$.Fe（必须保持在最前面）
+        if (ast.body.length > 0) {
+            const first = ast.body[0];
+            if (first.type === 'ExpressionStatement'
+                    && first.expression.type === 'CallExpression'
+                    && first.expression.callee.object?.name === 'J$'
+                    && (first.expression.callee.property?.name === 'Se'
+                        || first.expression.callee.property?.name === 'Fe')) {
+                newBody.push(first);
+                startIndex = 1;
             }
         }
 
-        return {
-            code:            instCode,
-            instAST:         newAst,
-            sourceMapObject: sourceInfo,
-            sourceMapString: sourceMapString
-        };
+        // 先放 FunctionDeclaration
+        for (let i = startIndex; i < ast.body.length; i++) {
+            if (ast.body[i].type === 'FunctionDeclaration') {
+                newBody.push(ast.body[i]);
+                if (newBody.length !== i + 1) hoistedFunctions.push(ast.body[i].id.name);
+            }
+        }
+        // 再放其余语句
+        for (let i = startIndex; i < ast.body.length; i++) {
+            if (ast.body[i].type !== 'FunctionDeclaration') newBody.push(ast.body[i]);
+        }
+
+        ast.body = newBody;
     }
 
-    /**
-     * eval 插桩的快捷包装（始终内联 source map 和原始代码）。
-     */
-    function instrumentEvalCode(code, iid, isDirect) {
-        return instrumentCode({
-            code:            code,
-            thisIid:         iid,
-            isEval:          true,
-            inlineSourceMap: true,
-            inlineSource:    true,
-            isDirect:        isDirect
-        }).code;
+    // 递归处理子节点
+    for (const key of Object.keys(ast)) {
+        if (key === 'scope') continue;
+        const child = ast[key];
+        if (child && typeof child === 'object') {
+            hoistFunctionDeclaration(child, hoistedFunctions);
+        }
+    }
+    return ast;
+}
+
+// ─── AST 转换主流程 ────────────────────────────────────────────────────────────
+
+function transformString(code, visitorsPost, visitorsPre, sourceType) {
+    const newAst = acorn.parse(code, {
+        locations:   true,
+        ecmaVersion: 'latest',
+        sourceType,
+    });
+    addScopes(newAst);
+    for (let i = 0; i < visitorsPost.length; i++) {
+        transformAst(newAst, visitorsPost[i], visitorsPre[i], CONTEXT.RHS);
+    }
+    return newAst;
+}
+
+// ─── 主 API ────────────────────────────────────────────────────────────────────
+
+const NO_INSTR = '// JALANGI DO NOT INSTRUMENT';
+
+/**
+ * 对代码字符串进行插桩。
+ *
+ * @param {{
+ *   isEval:           boolean,   // 是否是 eval 动态代码
+ *   code:             string,    // 要插桩的代码
+ *   thisIid:          number,    // eval 时的调用点 IID
+ *   origCodeFileName: string,    // 原始文件名（用于 source map）
+ *   instCodeFileName: string,    // 插桩后文件名
+ *   inlineSourceMap:  boolean,   // 是否内联完整 source map
+ *   inlineSource:     boolean,   // 是否内联原始源代码
+ *   url:              string,    // 脚本的 URL（可选）
+ *   isDirect:         boolean,   // eval 是否是直接调用
+ *   sourceType:       string,    // 'script'（默认）或 'module'
+ * }} options
+ *
+ * @return {{
+ *   code:            string,
+ *   instAST:         object,
+ *   sourceMapObject: object,
+ *   sourceMapString: string
+ * }}
+ */
+function instrumentCode(options) {
+    const {
+        isEval        = false,
+        thisIid,
+        inlineSource  = false,
+        url,
+        isDirect,
+        sourceType    = 'script',
+    } = options;
+
+    let code = options.code;
+
+    // 初始化 IID 计数器及文件名
+    IID.initialize(isEval, options.instCodeFileName, options.origCodeFileName);
+
+    // pre-hook（允许分析修改代码或跳过插桩）
+    let skip = false;
+    if (_analysis?.instrumentCodePre) {
+        const aret = _analysis.instrumentCodePre(thisIid, code, isDirect);
+        if (aret) { code = aret.code; skip = aret.skip; }
     }
 
-    // ─── 导出 ──────────────────────────────────────────────────────────────────
+    let newAst;
+    if (!skip && typeof code === 'string' && !code.includes(NO_INSTR)) {
+        try {
+            if (_config?.ENABLE_SAMPLING) {
+                newAst = transformString(code,
+                    [visitorCloneBodyPre, visitorRRPost, visitorOps, visitorMergeBodyPre],
+                    [undefined,           visitorRRPre,  undefined,  undefined],
+                    sourceType);
+            } else {
+                newAst = transformString(code,
+                    [visitorRRPost, visitorOps],
+                    [visitorRRPre,  undefined],
+                    sourceType);
+            }
 
-    sandbox.instrumentCode     = instrumentCode;
-    sandbox.instrumentEvalCode = instrumentEvalCode;
+            newAst = hoistFunctionDeclaration(newAst, []);
 
-}(J$));
+            // astring 支持 ES2022+，替代旧版 esotope
+            const newCode = astringGenerate(newAst);
+            code = `${newCode}\n${NO_INSTR}\n`;
+        } catch (ex) {
+            console.error('Failed to instrument', code);
+            throw ex;
+        }
+    }
 
+    // 构建 source map 信息
+    const sourceInfo = IID.getSourceInfo();
+    if (url)         sourceInfo.url      = url;
+    if (isEval) {
+        sourceInfo.evalSid = _sid;
+        sourceInfo.evalIid = thisIid;
+    }
+    if (inlineSource) sourceInfo.code = options.code;
 
-// exports J$.instrumentCode
-// exports J$.instrumentEvalCode
-// depends on acorn          (global, >= 8.0)
-// depends on astring        (global, replaces esotope; supports ES2020+)
-// depends on J$.Constants
-// depends on J$.Config
-// depends on J$.astUtil
-// depends on J$.IIDManager  (iid.js)
-// depends on J$.addScopes   (scope.js)
-// depends on J$.Wrappers    (wrappers.js)
+    const sourceMapString = JSON.stringify(sourceInfo);
+
+    // 精简版 source map 头（不含逐行位置，只有元数据）
+    const tmp = {
+        nBranches:                sourceInfo.nBranches,
+        originalCodeFileName:     sourceInfo.originalCodeFileName,
+        instrumentedCodeFileName: sourceInfo.instrumentedCodeFileName,
+    };
+    if (url)    tmp.url = url;
+    if (isEval) { tmp.evalSid = sourceInfo.evalSid; tmp.evalIid = thisIid; }
+
+    let instCode = options.inlineSourceMap
+        ? `${JALANGI_VAR}.iids = ${sourceMapString};\n${code}`
+        : `${JALANGI_VAR}.iids = ${JSON.stringify(tmp)};\n${code}`;
+
+    // post-hook
+    if (isEval && _analysis?.instrumentCode) {
+        const aret = _analysis.instrumentCode(thisIid, instCode, newAst, isDirect);
+        if (aret) instCode = aret.result;
+    }
+
+    return {
+        code:            instCode,
+        instAST:         newAst,
+        sourceMapObject: sourceInfo,
+        sourceMapString,
+    };
+}
+
+/**
+ * eval 插桩的快捷包装（始终内联 source map 和原始代码）。
+ */
+function instrumentEvalCode(code, iid, isDirect) {
+    return instrumentCode({
+        code,
+        thisIid:         iid,
+        isEval:          true,
+        inlineSourceMap: true,
+        inlineSource:    true,
+        isDirect,
+    }).code;
+}
+
+export { init, instrumentCode, instrumentEvalCode };

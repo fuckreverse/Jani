@@ -2,30 +2,20 @@
   "name": "jalangi2",
   "version": "0.2.6",
   "description": "dynamic analysis framework for JavaScript",
+  "type": "module",
   "dependencies": {
     "acorn": "^8.16.0",
-    "argparse": "0.1.6",
     "astring": "^1.9.0",
     "codemirror": "5.1.0",
-    "cover": "0.2.9",
     "datatables": "1.10.6",
-    "escodegen": "^2.1.0",
-    "esotope": "1.4.5",
-    "estraverse": "4.0.0",
-    "graceful-ncp": "3.0.0",
-    "jquery": "3.5.0",
-    "mkdirp": "0.5.6",
-    "parse5": "2.1.5",
-    "q": "1.2.0",
-    "rewriting-proxy": "0.5.1",
-    "temp": "0.9.1"
+    "jquery": "3.5.0"
   },
   "bundledDependencies": [
     "acorn",
-    "esotope"
+    "astring"
   ],
   "scripts": {
-    "test": "./node_modules/.bin/mocha --reporter spec node_test && python3 scripts/runalltests.py"
+    "test": "node --experimental-vm-modules node_modules/.bin/mocha --reporter spec node_test"
   },
   "license": "Apache-2.0",
   "repository": {
@@ -33,13 +23,11 @@
     "url": "https://github.com/Samsung/jalangi2.git"
   },
   "devDependencies": {
-    "mocha": "7.1.2",
-    "shelljs": "^0.6.0"
+    "mocha": "^10.0.0"
   },
-  "main": "src/js/utils/api.js",
-  "bin": "src/js/commands/jalangi.js",
+  "main": "src/js/instrument/esnstrument.js",
   "bundleDependencies": [
     "acorn",
-    "esotope"
+    "astring"
   ]
 }
