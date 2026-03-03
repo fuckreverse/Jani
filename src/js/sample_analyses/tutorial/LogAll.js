@@ -87,7 +87,7 @@ class LogAllAnalysis {
     getField(iid, base, offset, val, isComputed, isOpAssign, isMethodCall) {
         if (this._mem) {
             const shadowObj = this._mem.getShadowObject(base, offset, true);
-            console.log('getField(' + JSON.stringify({
+            this._sandbox.log('getField(' + JSON.stringify({
                 base:         this._mem.getIDFromShadowObjectOrFrame(shadowObj.owner),
                 offset,
                 val:          this._getValue(val),
@@ -108,7 +108,7 @@ class LogAllAnalysis {
     putField(iid, base, offset, val, isComputed, isOpAssign) {
         if (this._mem) {
             const shadowObj = this._mem.getShadowObject(base, offset, true);
-            console.log('putField(' + JSON.stringify({
+            this._sandbox.log('putField(' + JSON.stringify({
                 base:       this._mem.getIDFromShadowObjectOrFrame(shadowObj.owner),
                 offset,
                 val:        this._getValue(val),

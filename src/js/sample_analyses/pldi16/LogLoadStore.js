@@ -18,7 +18,6 @@ export class LogLoadStoreAnalysis {
         this._indentation = 0;
         this._cacheCount  = 0;
         this._cacheStr    = '';
-        this._logs        = [];
     }
 
     _log(str) {
@@ -26,11 +25,7 @@ export class LogLoadStoreAnalysis {
             this._cacheStr    = '    '.repeat(this._indentation);
             this._cacheCount  = this._indentation;
         }
-        if (this._sandbox.Results) {
-            this._logs.push(`<li>${this._cacheStr.replace(/ /g, '\u00a0')}${str} </li>`);
-        } else {
-            console.log(this._cacheStr + str);
-        }
+        this._sandbox.log(this._cacheStr + str);
     }
 
     invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
@@ -69,9 +64,5 @@ export class LogLoadStoreAnalysis {
         return { result: val };
     }
 
-    endExecution() {
-        if (this._sandbox.Results) {
-            for (const entry of this._logs) this._sandbox.log(entry);
-        }
-    }
+    endExecution() {}
 }

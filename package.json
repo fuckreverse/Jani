@@ -18,7 +18,8 @@
   "scripts": {
     "test": "node test/instrument.test.mjs",
     "test:logging": "node test/logging.test.mjs",
-    "trace-server": "node tools/trace-server/server.mjs"
+    "trace-server": "node tools/trace-server/server.mjs",
+    "trace:instrument": "node scripts/instrument-for-browser.mjs"
   },
   "license": "Apache-2.0",
   "repository": {

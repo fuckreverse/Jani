@@ -608,9 +608,16 @@ export function createRuntime(sandbox) {
         sandbox.analysis?.endExecution?.();
     }
 
-    /** 日志输出（兼容浏览器 Results 面板和 Node.js console） */
+    /**
+     * 日志输出——统一路由：
+     *  1. sandbox.tracer（TraceLogger）存在时，作为 KEY 事件输出（控制台 + 后端）
+     *  2. 旧式 sandbox.Results 面板（浏览器内嵌结果显示）
+     *  3. 回退：console.log
+     */
     function log(str) {
-        if (sandbox.Results?.execute) {
+        if (sandbox.tracer?.key) {
+            sandbox.tracer.key('info', String(str));
+        } else if (sandbox.Results?.execute) {
             sandbox.Results.execute((div) => { div.append(`${str}<br>`); });
         } else {
             console.log(str);

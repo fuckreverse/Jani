@@ -74,6 +74,6 @@ export class SpecialCoverageAnalysis {
         }
         this._testIndex++;
         const stat = this._sandbox.Features.addCoverage(this._testCode, ret, !noadd);
-        console.log(`Modified feature graph ${stat.modified}`);
+        this._sandbox.log(`Modified feature graph ${stat.modified}`);
     }
 }

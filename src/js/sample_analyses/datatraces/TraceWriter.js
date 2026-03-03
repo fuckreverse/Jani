@@ -15,6 +15,7 @@ export class TraceWriter {
      * @param {string} traceFileName  输出文件名（Node.js 环境）或 WebSocket 频道名
      */
     constructor(sandbox, traceFileName) {
+        this._sandbox     = sandbox;
         this._constants   = sandbox.Constants;
         this._config      = sandbox.Config;
         this._fileName    = traceFileName;
@@ -113,7 +114,7 @@ export class TraceWriter {
 
     _openSocketIfNotOpen() {
         if (!this._socket) {
-            console.log('Opening connection');
+            this._sandbox.log('Opening connection');
             this._socket = new WebSocket('ws://127.0.0.1:8080', 'log-protocol');
             this._socket.onopen    = () => this._tryRemoteLog();
             this._socket.onmessage = () => this._tryRemoteLog2();

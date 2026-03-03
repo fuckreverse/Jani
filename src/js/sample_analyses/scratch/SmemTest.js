@@ -27,31 +27,31 @@ export class SmemTestAnalysis {
 
     literal(iid, val, hasGetterSetter) {
         if (typeof val === 'function') {
-            console.log(`Function id:${this._getValue(val)}`);
+            this._sandbox.log(`Function id:${this._getValue(val)}`);
         }
     }
 
     getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall) {
         const mem       = this._sandbox.smemory;
         const shadowObj = mem.getShadowObject(base, offset, true);
-        console.log(`GET_FIELD ${mem.getIDFromShadowObjectOrFrame(shadowObj.owner)}.${offset} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
+        this._sandbox.log(`GET_FIELD ${mem.getIDFromShadowObjectOrFrame(shadowObj.owner)}.${offset} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 
     putFieldPre(iid, base, offset, val, isComputed, isOpAssign) {
         const mem       = this._sandbox.smemory;
         const shadowObj = mem.getShadowObject(base, offset, false);
-        console.log(`PUT_FIELD ${mem.getIDFromShadowObjectOrFrame(shadowObj.owner)}.${offset} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
+        this._sandbox.log(`PUT_FIELD ${mem.getIDFromShadowObjectOrFrame(shadowObj.owner)}.${offset} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 
     read(iid, name, val, isGlobal, isScriptLocal) {
         const mem       = this._sandbox.smemory;
         const shadowObj = mem.getShadowFrame(name);
-        console.log(`READ ${mem.getIDFromShadowObjectOrFrame(shadowObj)}.${name} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
+        this._sandbox.log(`READ ${mem.getIDFromShadowObjectOrFrame(shadowObj)}.${name} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 
     write(iid, name, val, lhs, isGlobal, isScriptLocal) {
         const mem       = this._sandbox.smemory;
         const shadowObj = mem.getShadowFrame(name);
-        console.log(`WRITE ${mem.getIDFromShadowObjectOrFrame(shadowObj)}.${name} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
+        this._sandbox.log(`WRITE ${mem.getIDFromShadowObjectOrFrame(shadowObj)}.${name} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 }

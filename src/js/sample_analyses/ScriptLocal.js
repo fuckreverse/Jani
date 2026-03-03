@@ -10,6 +10,21 @@
 
 export class ScriptLocalAnalysis {
     /**
+     * @param {object} [sandbox]  J$ 全局对象（用于 sandbox.log 路由）
+     */
+    constructor(sandbox = null) {
+        this._sandbox = sandbox;
+    }
+
+    _log(str) {
+        if (this._sandbox?.log) {
+            this._sandbox.log(str);
+        } else {
+            console.log(str);
+        }
+    }
+
+    /**
      * 将作用域标志转成可读字符串。
      * @param {boolean} isGlobal
      * @param {boolean} isScriptLocal
@@ -23,10 +38,10 @@ export class ScriptLocalAnalysis {
     }
 
     read(iid, name, val, isGlobal, isScriptLocal) {
-        console.log(`Reading from ${name} (${ScriptLocalAnalysis._writeFlags(isGlobal, isScriptLocal)})`);
+        this._log(`Reading from ${name} (${ScriptLocalAnalysis._writeFlags(isGlobal, isScriptLocal)})`);
     }
 
     write(iid, name, val, lhs, isGlobal, isScriptLocal) {
-        console.log(`Writing to ${name} (${ScriptLocalAnalysis._writeFlags(isGlobal, isScriptLocal)})`);
+        this._log(`Writing to ${name} (${ScriptLocalAnalysis._writeFlags(isGlobal, isScriptLocal)})`);
     }
 }

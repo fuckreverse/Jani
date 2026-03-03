@@ -36,7 +36,6 @@ export class TraceAllAnalysis {
         this._indentation = 0;
         this._cacheCount  = 0;
         this._cacheStr    = '';
-        this._logs        = [];
     }
 
     _getValue(v) {
@@ -61,11 +60,7 @@ export class TraceAllAnalysis {
             this._cacheStr   = '    '.repeat(this._indentation);
             this._cacheCount = this._indentation;
         }
-        if (this._sandbox.Results) {
-            this._logs.push(`<li>${this._cacheStr.replace(/ /g, '\u00a0')}${str} </li>`);
-        } else {
-            console.log(this._cacheStr + str);
-        }
+        this._sandbox.log(this._cacheStr + str);
     }
 
     _loc(iid) { return this._sandbox.iidToLocation(this._sandbox.sid, iid); }
@@ -210,9 +205,6 @@ export class TraceAllAnalysis {
 
     endExecution() {
         this._log('endExpression()');
-        if (this._sandbox.Results) {
-            for (const entry of this._logs) this._sandbox.log(entry);
-        }
     }
 
     runInstrumentedFunctionBody(iid, f, functionIid, functionSid) {

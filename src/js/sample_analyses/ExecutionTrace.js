@@ -5,20 +5,29 @@
  *
  * 每条顶层表达式语句输出格式：
  *
- *   [seq] [row:col]  <indent>原始源码文本 ; var1=v1, var2=v2, ...
- *   [seq] [row:col]  <indent+1>→ call fn(n) ; arg0=v, ...
- *   [seq] [row:col]  <indent+2>内层语句 ; ...
- *   [seq] [row:col]  <indent+1>← return fn ; result=v
+ *   [row:col]  <indent>原始源码文本 ; var1=v1, var2=v2, ...
+ *   [row:col]  <indent+1>→ call fn(n) ; arg0=v, ...
+ *   [row:col]  <indent+2>内层语句 ; ...
+ *   [row:col]  <indent+1>← return fn ; result=v
  *
- * 顶层语句行始终先输出（包含该语句执行完毕后的最终变量值），
- * 然后按执行顺序依次输出嵌套的 call/return 及函数体内语句。
+ * 所有普通 trace 行通过 TraceLogger.trace() 写入后端（IndexedDB / 文件）；
+ * 重点事件（脚本开始/结束、异常）通过 TraceLogger.key() 同步输出到控制台，
+ * 同时也写入后端作为边界标记。
  *
  * 用法：
  *   import { ExecutionTraceAnalysis } from './ExecutionTrace.js';
- *   J$.analysis = new ExecutionTraceAnalysis(J$, originalSourceCode);
+ *   const logger = new TraceLogger({ useIdb: true });
+ *   J$.analysis = new ExecutionTraceAnalysis(J$, originalSourceCode, { logger });
+ *
+ * 若不传 logger，会自动根据选项创建：
+ *   J$.analysis = new ExecutionTraceAnalysis(J$, null, {
+ *     useIdb: true, dbName: 'my-db', storeName: 'trace'
+ *   });
  */
 
-const MAX_BYTES = 100;
+import { TraceLogger } from '../runtime/logging/TraceLogger.js';
+
+const MAX_BYTES  = 100;
 const INDENT_UNIT = '  ';
 
 // ── 工具 ─────────────────────────────────────────────────────────────────────
@@ -63,7 +72,6 @@ function extractSource(lines, loc) {
     const s0 = Math.max(sl - 1, 0), e0 = Math.min(el - 1, lines.length - 1);
 
     // 从行首开始截取（忽略 sc），以便包含 var/const/let/return 等关键字。
-    // 行首的前导空白后续会被 trim 掉，不影响展示。
     let text;
     if (s0 === e0) {
         text = lines[s0].slice(0, ec);
@@ -77,31 +85,14 @@ function extractSource(lines, loc) {
 }
 
 // ── 帧结构 ────────────────────────────────────────────────────────────────────
-//
-// 每进入一层（script / function call），压入一个 Frame。
-// Frame 记录该层内所有语句的已序列化输出行（_lines），
-// 以及当前正在收集中的语句 pending（_kvMap / _firstIid）。
-//
-// endExpression 时：
-//   1. 把 _kvMap 序列化为顶层语句行，seq 号在此刻分配
-//   2. 把该语句执行期间嵌套产生的子行（call/ret/内层语句）从子层取出，
-//      附加在顶层语句行之后，统一加入本层的 _lines
-//
-// invokeFunPre：
-//   压入子 Frame，记录 call 行文本（带 seq 占位，稍后输出）
-//
-// invokeFun（返回后）：
-//   1. flush 子层当前 pending
-//   2. 把子层所有已完成的行连同 call/ret 行合并为一个"子块"
-//   3. 把子块附加到父层当前语句的 _children 里
 
 class Frame {
     constructor(indent) {
-        this.indent   = indent;       // 本层基础缩进级别
-        this._kvMap   = new Map();    // 当前语句 pending kv（key→最新值）
-        this._firstIid = null;        // 当前语句首个子操作 iid
-        this._children = [];          // 当前语句产生的子块（call/ret + 内层行）
-        this.doneLines = [];          // 本层已完成的输出行（字符串数组）
+        this.indent    = indent;
+        this._kvMap    = new Map();
+        this._firstIid = null;
+        this._children = [];
+        this.doneLines = [];
     }
 
     collect(iid, key, val) {
@@ -109,18 +100,10 @@ class Frame {
         this._kvMap.set(key, val);
     }
 
-    /**
-     * 将子块（调用链产生的行）附加到当前语句的 children 中。
-     * callLine / retLine 是 call/return 的文本行（已格式化，含 seq 占位）。
-     */
     addChild(callLine, innerLines, retLine) {
         this._children.push({ callLine, innerLines, retLine });
     }
 
-    /**
-     * Flush 当前 pending 为一条完整语句记录（顶层行 + children）。
-     * 返回 { stmtLine, childLines } 供调用方分配 seq 并输出。
-     */
     flushStmt(stmtIid, sb, lines) {
         if (this._kvMap.size === 0 && this._firstIid === null && this._children.length === 0) {
             return null;
@@ -133,7 +116,6 @@ class Frame {
         const valStr  = [...this._kvMap.entries()].map(([k, v]) => `${k}=${serialize(v)}`).join(', ');
         const stmtLine = `[${rc}] ${indent}${srcText}${valStr ? ' ; ' + valStr : ''}`;
 
-        // 收集所有子行（保持执行顺序）
         const childLines = [];
         for (const { callLine, innerLines, retLine } of this._children) {
             if (callLine) childLines.push(callLine);
@@ -141,7 +123,6 @@ class Frame {
             if (retLine) childLines.push(retLine);
         }
 
-        // 清空
         this._kvMap.clear();
         this._firstIid = null;
         this._children = [];
@@ -154,50 +135,103 @@ class Frame {
 
 export class ExecutionTraceAnalysis {
     /**
-     * @param {object} [sandbox]     - J$ 全局对象
-     * @param {string} [sourceCode]  - 原始源码文本
+     * @param {object} [sandbox]      J$ 全局对象
+     * @param {string} [sourceCode]   原始源码文本（可选，用于提取源码片段）
+     * @param {object} [options]
+     *
+     * === 日志后端（三选一，优先级从高到低）===
+     * @param {TraceLogger} [options.logger]
+     *   直接传入已构造好的 TraceLogger 实例（最灵活，可在外部完全配置）
+     *
+     * @param {boolean} [options.useIdb=false]
+     *   浏览器中启用 IndexedDB（自动创建 TraceLogger，等价于传 logger with useIdb:true）
+     * @param {string}  [options.dbName='jalangi-traces']
+     * @param {string}  [options.storeName='execution-trace']
+     * @param {string}  [options.wsUrl]    可选同时推送到 WebSocket
+     *
+     * @param {string|false} [options.nodeFile='jalangi-trace.ndjson']
+     *   Node.js 下输出文件（false = 只输出控制台）
+     * @param {boolean} [options.nodeConsole=false]  Node.js 下同时输出控制台
      */
-    constructor(sandbox, sourceCode) {
+    constructor(sandbox, sourceCode, options = {}) {
         this._sb    = sandbox;
         this._seq   = 0;
         this._lines = sourceCode ? sourceCode.split(/\r\n|\r|\n/) : null;
-        this._stack = [];   // Frame 栈
-
-        // 正在进行中的函数调用信息栈（与 _stack 同步 push/pop）
-        // 每项：{ callLineTemplate, innerLines }
+        this._stack     = [];
         this._callStack = [];
+
+        // ── 建立 TraceLogger ──────────────────────────────────────────────────
+        if (options.logger instanceof TraceLogger) {
+            // 外部直接传入
+            this._logger = options.logger;
+        } else {
+            // 根据选项自动构建
+            const {
+                useIdb    = false,
+                dbName,
+                storeName,
+                wsUrl,
+                nodeFile,
+                nodeConsole,
+            } = options;
+
+            this._logger = new TraceLogger({
+                useIdb,
+                ...(dbName    != null && { dbName }),
+                ...(storeName != null && { storeName }),
+                ...(wsUrl     != null && { wsUrl }),
+                ...(nodeFile  !== undefined && { nodeFile }),
+                ...(nodeConsole !== undefined && { nodeConsole }),
+                keyToConsole: true,
+            });
+        }
+
+        // 启动后端初始化（异步，不阻塞构造函数）
+        this._loggerReady = this._logger.init();
+
+        // 将 TraceLogger 挂到 sandbox.tracer，
+        // 使所有插件通过 sandbox.log() → sandbox.tracer.key() 路由到同一实例
+        if (sandbox) {
+            sandbox.tracer = this._logger;
+        }
     }
 
-    _output(line) {
-        const sb = this._sb;
-        if (sb?.log) sb.log(line); else console.log(line);
-    }
+    // ── 内部日志辅助 ──────────────────────────────────────────────────────────
 
-    _nextSeq() { return ++this._seq; }
-
-    _top() { return this._stack[this._stack.length - 1]; }
-
-    /** 输出并编号一行 */
-    _emit(text) {
-        this._output(`[${this._nextSeq()}] ${text}`);
+    /**
+     * 输出普通 trace 行（高频，走 LogManager 缓冲后端）。
+     * @param {string} text
+     */
+    _trace(text) {
+        this._logger.trace({ type: 'trace', seq: this._seq, text });
     }
 
     /**
-     * Flush 当前 Frame 栈顶的 pending 语句，立即输出所有行（含 children）。
+     * 输出重点事件（低频：脚本边界、异常、汇总）。
+     * 同步写控制台，同时写后端作边界标记。
+     * @param {'info'|'warn'|'error'} level
+     * @param {string} text
      */
+    _key(level, text) {
+        this._logger.key(level, text);
+    }
+
+    _nextSeq() { return ++this._seq; }
+    _top()     { return this._stack[this._stack.length - 1]; }
+
+    /** 分配 seq、输出普通行 */
+    _emit(text) {
+        this._trace(`[${this._nextSeq()}] ${text}`);
+    }
+
     _flushTop(stmtIid) {
         const frame = this._top();
         if (!frame) return;
         const result = frame.flushStmt(stmtIid, this._sb, this._lines);
         if (!result) return;
-
         const { stmtLine, childLines } = result;
-        // 先输出顶层语句行
         this._emit(stmtLine);
-        // 再输出子行（call/ret/内层语句），每行单独分配 seq
-        for (const cl of childLines) {
-            this._emit(cl);
-        }
+        for (const cl of childLines) this._emit(cl);
     }
 
     // ── 函数调用边界 ──────────────────────────────────────────────────────────
@@ -212,14 +246,12 @@ export class ExecutionTraceAnalysis {
         const kvParts = args.map((a, i) => `arg${i}=${serialize(a)}`);
         if (isMethod && base !== undefined) kvParts.unshift(`this=${serialize(base)}`);
 
-        const loc        = getLocation(this._sb, iid);
-        const rc         = loc ? `${loc[0]}:${loc[1]}` : '?:?';
+        const loc          = getLocation(this._sb, iid);
+        const rc           = loc ? `${loc[0]}:${loc[1]}` : '?:?';
         const parentIndent = this._stack.length > 0 ? this._top().indent : 0;
         const callIndent   = INDENT_UNIT.repeat(parentIndent + 1);
-        // call 行模板（不含 seq，稍后输出时分配）
         const callLineTemplate = `[${rc}] ${callIndent}${desc}${kvParts.length ? ' ; ' + kvParts.join(', ') : ''}`;
 
-        // push 新 Frame（函数体缩进 = parent.indent + 2，比 call 行多一级）
         const newIndent = parentIndent + 2;
         this._stack.push(new Frame(newIndent));
         this._callStack.push({ callLineTemplate, innerLines: [] });
@@ -228,29 +260,21 @@ export class ExecutionTraceAnalysis {
     }
 
     invokeFun(iid, f, base, args, result, isConstructor, isMethod) {
-        // flush 当前层残余 pending
         this._flushTop(iid);
 
-        // 收集当前层所有已完成的行
-        const frame = this._stack.pop();
+        const frame    = this._stack.pop();
         const callInfo = this._callStack.pop();
 
-        const name   = f?.name || '(anonymous)';
-        const loc    = getLocation(this._sb, iid);
-        const rc     = loc ? `${loc[0]}:${loc[1]}` : '?:?';
+        const name      = f?.name || '(anonymous)';
+        const loc       = getLocation(this._sb, iid);
+        const rc        = loc ? `${loc[0]}:${loc[1]}` : '?:?';
         const retIndent = INDENT_UNIT.repeat(frame.indent > 0 ? frame.indent - 1 : 0);
         const retLineTemplate = `[${rc}] ${retIndent}← return ${name} ; result=${serialize(result)}`;
 
-        // 把 call/inner/ret 作为子块附加给父层的当前语句
         const parent = this._top();
         if (parent) {
-            parent.addChild(
-                callInfo.callLineTemplate,
-                [...frame.doneLines],
-                retLineTemplate
-            );
+            parent.addChild(callInfo.callLineTemplate, [...frame.doneLines], retLineTemplate);
         } else {
-            // 顶层（script 根层）调用，直接输出
             this._emit(callInfo.callLineTemplate);
             for (const l of frame.doneLines) this._emit(l);
             this._emit(retLineTemplate);
@@ -259,12 +283,11 @@ export class ExecutionTraceAnalysis {
         return { result };
     }
 
-    // ── 脚本进出 ──────────────────────────────────────────────────────────────
+    // ── 脚本进出（KEY 级别）───────────────────────────────────────────────────
 
     scriptEnter(iid, instrumentedFileName, originalFileName) {
-        const loc = getLocation(this._sb, iid);
-        const rc  = loc ? `${loc[0]}:${loc[1]}` : '?:?';
-        this._emit(`[${rc}] ▶ script: ${originalFileName}`);
+        // 脚本开始：重点日志 → 控制台 + 后端
+        this._key('info', `▶ script: ${originalFileName}`);
         this._stack.push(new Frame(1));
         this._callStack.push({ callLineTemplate: null, innerLines: [] });
     }
@@ -273,9 +296,12 @@ export class ExecutionTraceAnalysis {
         this._flushTop(iid);
         this._stack.pop();
         this._callStack.pop();
-        const loc = getLocation(this._sb, iid);
-        const rc  = loc ? `${loc[0]}:${loc[1]}` : '?:?';
-        this._emit(`[${rc}] ◀ script end`);
+        // 脚本结束：重点日志
+        if (wrappedExceptionVal) {
+            this._key('error', `◀ script end (exception: ${serialize(wrappedExceptionVal.exception)})`);
+        } else {
+            this._key('info', `◀ script end`);
+        }
         return { wrappedExceptionVal, isBacktrack: false };
     }
 
@@ -287,7 +313,10 @@ export class ExecutionTraceAnalysis {
             const loc    = getLocation(this._sb, iid);
             const rc     = loc ? `${loc[0]}:${loc[1]}` : '?:?';
             const indent = INDENT_UNIT.repeat(this._top()?.indent ?? 0);
-            this._emit(`[${rc}] ${indent}✗ throw ; exception=${serialize(wrappedExceptionVal.exception)}`);
+            const text   = `[${rc}] ${indent}✗ throw ; exception=${serialize(wrappedExceptionVal.exception)}`;
+            // 异常：重点日志（控制台）+ 普通 trace（后端，保留完整上下文）
+            this._key('error', text);
+            this._emit(text);   // 同时记进序列（后端），便于关联前后 trace
         }
         return { returnVal, wrappedExceptionVal, isBacktrack: false };
     }
@@ -312,8 +341,8 @@ export class ExecutionTraceAnalysis {
         return { result: val };
     }
 
-    binary(iid, op, left, right, result)   { this._top()?.collect(iid, `(${op})`, result); return { result }; }
-    unary(iid, op, left, result)           { this._top()?.collect(iid, `(${op})`, result); return { result }; }
+    binary(iid, op, left, right, result)  { this._top()?.collect(iid, `(${op})`, result); return { result }; }
+    unary(iid, op, left, result)          { this._top()?.collect(iid, `(${op})`, result); return { result }; }
 
     literal(iid, val) {
         if (typeof val !== 'object' && typeof val !== 'function') {
@@ -337,25 +366,31 @@ export class ExecutionTraceAnalysis {
 
         const { stmtLine, childLines } = result;
 
-        // 把完成的行加入本层 doneLines，在父层 flushStmt 时统一输出
-        // —— 但若已在根层（script 层，栈长度==1），直接输出
         if (this._stack.length <= 1) {
-            // script 层：直接输出
             this._emit(stmtLine);
             for (const cl of childLines) this._emit(cl);
         } else {
-            // 函数体层：加入本层 doneLines，等父层 invokeFun 时取走
             frame.doneLines.push(stmtLine, ...childLines);
         }
     }
 
+    // ── 执行结束（KEY 级别汇总）──────────────────────────────────────────────
+
     endExecution() {
+        // Flush 残余 pending 帧
         while (this._stack.length > 0) {
             this._flushTop(null);
             this._stack.pop();
             this._callStack.pop();
         }
-        this._output(`=== ExecutionTrace: total ${this._seq} events ===`);
+
+        // 汇总行：重点日志（控制台 + 后端）
+        this._key('info', `=== ExecutionTrace: total ${this._seq} events ===`);
+
+        // 关闭 LogManager（等待 init 完成后再 close，避免竞态）
+        this._loggerReady
+            .then(() => this._logger.close())
+            .catch(err => console.warn('[ExecutionTrace] logger close error:', err.message));
     }
 
     onReady(cb) { cb(); }
