@@ -1,18 +1,23 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @file ExecutionTrace —— 按语句粒度输出执行 trace，便于 LLM 分析。
+ * @file ExecutionTrace —— 按指令（表达式语句）粒度输出执行 trace，便于 LLM 分析。
  *
- * 每条顶层表达式语句输出格式：
+ * 粒度说明：
+ *   - 仅在"指令边界"（变量写入 / 函数调用 / 表达式语句末尾）记录一条 trace 行。
+ *   - **不追踪**表达式内部的子操作（变量读取、二元运算、属性读取等），
+ *     以避免代码体积膨胀和运行时回调开销。
+ *   - 配合 pluginAnalyzer 自动推导的按需 Config，插桩代码中只存在
+ *     J$.W / J$.F / J$.M / J$.X1 等粗粒度钩子。
  *
- *   [row:col]  <indent>原始源码文本 ; var1=v1, var2=v2, ...
- *   [row:col]  <indent+1>→ call fn(n) ; arg0=v, ...
- *   [row:col]  <indent+2>内层语句 ; ...
- *   [row:col]  <indent+1>← return fn ; result=v
+ * 每条 trace 行输出格式：
  *
- * 所有普通 trace 行通过 TraceLogger.trace() 写入后端（IndexedDB / 文件）；
- * 重点事件（脚本开始/结束、异常）通过 TraceLogger.key() 同步输出到控制台，
- * 同时也写入后端作为边界标记。
+ *   [row:col]  <indent>原始源码文本 ; <key>=<value>
+ *
+ *   变量赋值：   [3:1]  let x = 1 ; x=1
+ *   函数调用：   [5:1]  → call foo(2 args) ; arg0=1, arg1=2
+ *               [5:1]  ← return foo ; result=3
+ *   表达式语句： [7:1]  obj.method()
  *
  * 用法：
  *   import { ExecutionTraceAnalysis } from './ExecutionTrace.js';
@@ -23,6 +28,15 @@
  *   J$.analysis = new ExecutionTraceAnalysis(J$, null, {
  *     useIdb: true, dbName: 'my-db', storeName: 'trace'
  *   });
+ *
+ * 自动配置推导（无需手写 Config）：
+ *   import { init } from '../instrument/esnstrument.js';
+ *   const analysis = new ExecutionTraceAnalysis(J$, src, opts);
+ *   init(null, undefined, undefined, undefined, [analysis]);
+ *   // 框架自动检测此插件只使用了 write / invokeFunPre / invokeFun /
+ *   // endExpression / functionEnter / functionExit / scriptEnter / scriptExit /
+ *   // _return / _throw / declare / endExecution，
+ *   // 并自动关闭 INSTR_READ / INSTR_BINARY / INSTR_GETFIELD 等高开销插桩。
  *
  * 诊断日志（直接输出到 console，不走 TraceLogger/IDB）：
  *  - JALANGI_DEBUG=1（Node.js）或 localStorage.jalangiDebug='1'（浏览器）开启 debug 级别
@@ -106,50 +120,23 @@ function extractSource(lines, loc) {
     return text.replace(/\s+/g, ' ').trim();
 }
 
-// ── 帧结构 ────────────────────────────────────────────────────────────────────
+// ── 帧结构（指令级：只追踪函数调用嵌套，不收集子操作值）─────────────────────
 
 class Frame {
     constructor(indent) {
         this.indent    = indent;
-        this._kvMap    = new Map();
-        this._firstIid = null;
-        this._children = [];
         this.doneLines = [];
     }
 
-    collect(iid, key, val) {
-        if (this._firstIid === null) this._firstIid = iid;
-        this._kvMap.set(key, val);
-    }
-
     addChild(callLine, innerLines, retLine) {
+        this._children = this._children ?? [];
         this._children.push({ callLine, innerLines, retLine });
     }
 
-    flushStmt(stmtIid, sb, lines) {
-        if (this._kvMap.size === 0 && this._firstIid === null && this._children.length === 0) {
-            return null;
-        }
-        const iid     = stmtIid ?? this._firstIid;
-        const loc     = getLocation(sb, iid);
-        const rc      = loc ? `${loc[0]}:${loc[1]}` : '?:?';
-        const indent  = INDENT_UNIT.repeat(this.indent);
-        const srcText = lines && loc ? extractSource(lines, loc) : `(iid=${iid})`;
-        const valStr  = [...this._kvMap.entries()].map(([k, v]) => `${k}=${serialize(v)}`).join(', ');
-        const stmtLine = `[${rc}] ${indent}${srcText}${valStr ? ' ; ' + valStr : ''}`;
-
-        const childLines = [];
-        for (const { callLine, innerLines, retLine } of this._children) {
-            if (callLine) childLines.push(callLine);
-            childLines.push(...innerLines);
-            if (retLine) childLines.push(retLine);
-        }
-
-        this._kvMap.clear();
-        this._firstIid = null;
+    flushChildren() {
+        const result = this._children ?? [];
         this._children = [];
-
-        return { stmtLine, childLines };
+        return result;
     }
 }
 
@@ -253,14 +240,12 @@ export class ExecutionTraceAnalysis {
         this._trace(`[${this._nextSeq()}] ${text}`);
     }
 
-    _flushTop(stmtIid) {
-        const frame = this._top();
-        if (!frame) return;
-        const result = frame.flushStmt(stmtIid, this._sb, this._lines);
-        if (!result) return;
-        const { stmtLine, childLines } = result;
-        this._emit(stmtLine);
-        for (const cl of childLines) this._emit(cl);
+    /** 根据 iid 生成带缩进的源码片段前缀 "[row:col] <indent>" */
+    _prefix(iid, indent) {
+        const loc    = getLocation(this._sb, iid);
+        const rc     = loc ? `${loc[0]}:${loc[1]}` : '?:?';
+        const indStr = INDENT_UNIT.repeat(indent);
+        return { rc, indStr, loc };
     }
 
     // ── 函数调用边界 ──────────────────────────────────────────────────────────
@@ -300,8 +285,6 @@ export class ExecutionTraceAnalysis {
             return { result };
         }
 
-        this._flushTop(iid);
-
         const frame    = this._stack.pop();
         const callInfo = this._callStack.pop();
 
@@ -309,17 +292,21 @@ export class ExecutionTraceAnalysis {
         const loc       = getLocation(this._sb, iid);
         const rc        = loc ? `${loc[0]}:${loc[1]}` : '?:?';
         const retIndent = INDENT_UNIT.repeat(frame.indent > 0 ? frame.indent - 1 : 0);
-        const retLineTemplate = `[${rc}] ${retIndent}← return ${name} ; result=${serialize(result)}`;
+        const retLine   = `[${rc}] ${retIndent}← return ${name} ; result=${serialize(result)}`;
 
         dbg.debug(`invokeFun: ← ${name} iid=${iid} stackDepth=${this._stack.length}`);
 
+        // 收集被调函数内部已产生的 doneLines（子函数内的指令 trace）
+        const innerLines = frame.doneLines;
+
         const parent = this._top();
         if (parent) {
-            parent.addChild(callInfo.callLineTemplate, [...frame.doneLines], retLineTemplate);
+            parent.addChild(callInfo.callLineTemplate, innerLines, retLine);
         } else {
+            // 顶层调用：立即 emit
             this._emit(callInfo.callLineTemplate);
-            for (const l of frame.doneLines) this._emit(l);
-            this._emit(retLineTemplate);
+            for (const l of innerLines) this._emit(l);
+            this._emit(retLine);
         }
 
         return { result };
@@ -329,22 +316,21 @@ export class ExecutionTraceAnalysis {
 
     scriptEnter(iid, instrumentedFileName, originalFileName) {
         dbg.debug(`scriptEnter: "${originalFileName}" iid=${iid} stackDepth=${this._stack.length}`);
-        // 脚本开始：重点日志 → 控制台 + 后端
         this._key('info', `▶ script: ${originalFileName}`);
         this._stack.push(new Frame(1));
         this._callStack.push({ callLineTemplate: null, innerLines: [] });
     }
 
     scriptExit(iid, wrappedExceptionVal) {
-        // 健壮性检查
         if (this._stack.length === 0) {
             dbg.error(`scriptExit: stack underflow (iid=${iid}) — no matching scriptEnter?`);
         } else {
-            this._flushTop(iid);
+            // Flush 残余的 doneLines（脚本顶层未被 endExpression flush 的行）
+            const frame = this._top();
+            for (const l of frame.doneLines) this._emit(l);
             this._stack.pop();
             this._callStack.pop();
         }
-        // 脚本结束：重点日志
         if (wrappedExceptionVal) {
             const exStr = serialize(wrappedExceptionVal.exception);
             dbg.debug(`scriptExit: exception iid=${iid} exception=${exStr}`);
@@ -361,70 +347,124 @@ export class ExecutionTraceAnalysis {
     functionExit(iid, returnVal, wrappedExceptionVal) {
         if (wrappedExceptionVal) {
             const exStr = serialize(wrappedExceptionVal.exception);
-            this._flushTop(iid);
             const loc    = getLocation(this._sb, iid);
             const rc     = loc ? `${loc[0]}:${loc[1]}` : '?:?';
             const indent = INDENT_UNIT.repeat(this._top()?.indent ?? 0);
             const text   = `[${rc}] ${indent}✗ throw ; exception=${exStr}`;
 
             dbg.debug(`functionExit: exception at iid=${iid}: ${exStr}`);
-            // 异常：重点日志（控制台）+ 普通 trace（后端，保留完整上下文）
             this._key('error', text);
-            this._emit(text);   // 同时记进序列（后端），便于关联前后 trace
+            this._emit(text);
         }
         return { returnVal, wrappedExceptionVal, isBacktrack: false };
     }
 
-    // ── 子操作收集 ────────────────────────────────────────────────────────────
+    // ── 指令级钩子：变量写入（赋值结果）─────────────────────────────────────
 
-    read(iid, name, val)  { this._top()?.collect(iid, name, val); return { result: val }; }
-    write(iid, name, val) { this._top()?.collect(iid, name, val); return { result: val }; }
+    /**
+     * 变量写入：每次赋值立即输出一条 trace 行。
+     * 这是指令级追踪的核心——只在真正的"赋值指令"处记录，
+     * 不追踪赋值右侧表达式内部的子操作值。
+     */
+    write(iid, name, val) {
+        const frame = this._top();
+        if (!frame) return { result: val };
 
+        const { rc, indStr, loc } = this._prefix(iid, frame.indent);
+        const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
+        const line = `[${rc}] ${indStr}${srcText} ; ${name}=${serialize(val)}`;
+
+        // 将写入行追加到当前帧的 doneLines，等待帧 flush 时按顺序输出
+        frame.doneLines.push(line);
+
+        return { result: val };
+    }
+
+    /**
+     * 变量声明初始化（仅非参数、非 catch 的声明）。
+     * 效果与 write 相同，但语义上是"第一次初始化"。
+     */
     declare(iid, name, val, isArgument, argumentIndex, isCatchParam) {
-        if (!isArgument && !isCatchParam) this._top()?.collect(iid, name, val);
-        return { result: val };
-    }
-
-    getField(iid, base, offset, val, isComputed) {
-        this._top()?.collect(iid, isComputed ? `[${serialize(offset)}]` : String(offset), val);
-        return { result: val };
-    }
-
-    putField(iid, base, offset, val, isComputed) {
-        this._top()?.collect(iid, isComputed ? `[${serialize(offset)}]` : String(offset), val);
-        return { result: val };
-    }
-
-    binary(iid, op, left, right, result)  { this._top()?.collect(iid, `(${op})`, result); return { result }; }
-    unary(iid, op, left, result)          { this._top()?.collect(iid, `(${op})`, result); return { result }; }
-
-    literal(iid, val) {
-        if (typeof val !== 'object' && typeof val !== 'function') {
-            this._top()?.collect(iid, '(lit)', val);
+        if (!isArgument && !isCatchParam) {
+            this.write(iid, name, val);
         }
         return { result: val };
     }
 
-    conditional(iid, result) { this._top()?.collect(iid, '(cond)', result); return { result }; }
-    _return(iid, val)        { this._top()?.collect(iid, '(return)', val); return { result: val }; }
-    _throw(iid, val)         { this._top()?.collect(iid, '(throw)',  val); return { result: val }; }
+    // ── 控制流钩子 ────────────────────────────────────────────────────────────
 
-    // ── 语句边界 ──────────────────────────────────────────────────────────────
+    _return(iid, val) {
+        const frame = this._top();
+        if (!frame) return { result: val };
+        const { rc, indStr, loc } = this._prefix(iid, frame.indent);
+        const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
+        frame.doneLines.push(`[${rc}] ${indStr}${srcText} ; (return)=${serialize(val)}`);
+        return { result: val };
+    }
 
+    _throw(iid, val) {
+        const frame = this._top();
+        if (!frame) return { result: val };
+        const { rc, indStr, loc } = this._prefix(iid, frame.indent);
+        const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
+        frame.doneLines.push(`[${rc}] ${indStr}${srcText} ; (throw)=${serialize(val)}`);
+        return { result: val };
+    }
+
+    // ── 表达式语句末尾（非赋值/非调用的纯副作用语句）─────────────────────────
+
+    /**
+     * endExpression（J$.X1）：在每条 ExpressionStatement 末尾触发。
+     *
+     * 指令级模式下，赋值和函数调用已分别在 write / invokeFun 中记录，
+     * 所以这里只处理"纯副作用语句"（如 `i++`、`delete obj.x` 等）。
+     *
+     * 同时负责 flush 当前帧已积累的 doneLines（包含本语句内产生的 write 行）。
+     */
     endExpression(iid) {
         const frame = this._top();
         if (!frame) return;
 
-        const result = frame.flushStmt(iid, this._sb, this._lines);
-        if (!result) return;
+        // Flush 本语句内积累的所有 write/return/throw 行
+        const lines = frame.doneLines.splice(0);
+        // 同时 flush 子函数调用行（invokeFun 已记录在 frame.addChild）
+        const children = frame.flushChildren();
 
-        const { stmtLine, childLines } = result;
+        // 若本语句什么都没产生（纯读取表达式，如 `x`），仍记录一条源码行作标记
+        const hasContent = lines.length > 0 || children.length > 0;
+
+        if (!hasContent) {
+            // 纯副作用/纯读语句：仅记录源码位置
+            const loc    = getLocation(this._sb, iid);
+            const rc     = loc ? `${loc[0]}:${loc[1]}` : '?:?';
+            const indStr = INDENT_UNIT.repeat(frame.indent);
+            const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
+            const line = `[${rc}] ${indStr}${srcText}`;
+            if (this._stack.length <= 1) {
+                this._emit(line);
+            } else {
+                this._top()?.doneLines.push(line);
+            }
+            return;
+        }
+
+        // 将积累的行送入输出（或父帧）
+        const allLines = [];
+        for (const l of lines) allLines.push(l);
+        for (const { callLine, innerLines, retLine } of children) {
+            if (callLine) allLines.push(callLine);
+            for (const l of innerLines) allLines.push(l);
+            if (retLine) allLines.push(retLine);
+        }
 
         if (this._stack.length <= 1) {
-            this._emit(stmtLine);
-            for (const cl of childLines) this._emit(cl);
+            // 顶层：直接 emit
+            for (const l of allLines) this._emit(l);
         } else {
-            frame.doneLines.push(stmtLine, ...childLines);
+            // 嵌套帧：放入父帧的 doneLines（等待父帧 flush）
+            for (const l of allLines) {
+                this._stack[this._stack.length - 1].doneLines.push(l);
+            }
         }
     }
 
@@ -438,12 +478,11 @@ export class ExecutionTraceAnalysis {
 
         // Flush 残余 pending 帧
         while (this._stack.length > 0) {
-            this._flushTop(null);
-            this._stack.pop();
+            const frame = this._stack.pop();
             this._callStack.pop();
+            for (const l of frame.doneLines) this._emit(l);
         }
 
-        // 汇总行：重点日志（控制台 + 后端）
         dbg.debug(`endExecution: total seq=${this._seq}`);
         this._key('info', `=== ExecutionTrace: total ${this._seq} events ===`);
 
