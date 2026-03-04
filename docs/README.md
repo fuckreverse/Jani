@@ -75,6 +75,7 @@ console.log(result.code);
 
 ```
 src/
+  types.d.ts           ← 共享基础类型声明（JalangiConfig、IAnalysisPlugin、LogEntry 等）
   instrument/          ← 插桩器核心（纯 ESM，无平台依赖）
     esnstrument.js     ← 主入口：init() + instrumentCode()
     astUtil.js         ← AST 遍历与上下文枚举（CONTEXT）
@@ -83,6 +84,7 @@ src/
     wrappers.js        ← AST 节点包装函数库（模板缓存优化）
     dataflow.js        ← 静态 SSA def-use 分析（Pass 0，决策表）
     pluginAnalyzer.js  ← 插件静态分析器（按需 Config 推导）
+    instrument.d.ts    ← 插桩器公开 API 类型声明
   runtime/             ← 运行时系统（含 Node.js 专有代码）
     JalangiRuntime.js  ← 运行时钩子实现（基类）
     JalangiSandbox.js  ← 完整沙盒对象（推荐使用）
@@ -91,6 +93,7 @@ src/
     analysisCallbackTemplate.js ← 分析插件接口模板
     DataFlowAnalyzer.js         ← 运行时 SSA 数据流分析器
     AntiDetection.js            ← 反插桩对抗工具
+    runtime.d.ts       ← 运行时公开 API 类型声明
   logger/              ← 统一日志系统（instrument + runtime 共用）
     logger.js          ← createLogger(domain) 工厂 + DOMAIN 常量 + debug 开关
     LogManager.js      ← 日志管理器，协调 RingBuffer 与后端

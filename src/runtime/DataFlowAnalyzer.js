@@ -1,4 +1,6 @@
 // JALANGI DO NOT INSTRUMENT
+// @ts-check
+/// <reference types="../types.d.ts" />
 
 /**
  * @file DataFlowAnalyzer — 运行时 SSA 数据流分析器。
@@ -42,7 +44,10 @@
 
 // ── 模块级常量 ────────────────────────────────────────────────────────────────
 
-/** 寄存器类型枚举 */
+/**
+ * 寄存器类型枚举
+ * @type {Readonly<{ WRITE: 'W', ARG: 'A', RETURN: 'R', PUTFIELD: 'P', UNKNOWN: 'U' }>}
+ */
 export const REG_TYPE = Object.freeze({
     WRITE:     'W',   // 变量赋值
     ARG:       'A',   // 函数参数传入
@@ -153,7 +158,7 @@ export class DataFlowAnalyzer {
         const sources = this.#pendingReadSources ?? new Set();
         this.#pendingReadSources = null;
 
-        /** @type {RegisterEntry} */
+        /** @type {import('../types.js').RegisterEntry} */
         const reg = {
             regId,
             type:      REG_TYPE.WRITE,
@@ -233,7 +238,7 @@ export class DataFlowAnalyzer {
             const regId  = ++this.#regIdCounter;
             const [kScopeId, kCallId, kName] = key.split(':');
 
-            /** @type {RegisterEntry} */
+            /** @type {import('../types.js').RegisterEntry} */
             const reg = {
                 regId,
                 type:     REG_TYPE.PUTFIELD,

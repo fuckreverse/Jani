@@ -1,4 +1,6 @@
 // JALANGI DO NOT INSTRUMENT
+// @ts-check
+/// <reference types="../types.d.ts" />
 
 /**
  * @file JalangiSandbox — Jalangi2 完整沙盒对象。

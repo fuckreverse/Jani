@@ -628,15 +628,19 @@ const slice = dfa.backwardSlice(targetReg);
 
 | 方法 | 说明 |
 |------|------|
-| `processWrite(entry)` | 处理 W 条目，创建新 SSA 寄存器 |
-| `processRead(entry)` | 处理 R/Rl 条目，暂存源寄存器（供下次 processWrite 消费） |
+| `processWrite(entry)` | 处理 W 条目，创建新 SSA 寄存器，返回新分配的寄存器 ID |
+| `processRead(entry)` | 处理 R/Rl 条目，暂存源寄存器（供下次 processWrite 消费），返回当前 active 寄存器 ID |
 | `processPutField(entry)` | 处理 P 条目，递增 OID 版本号，为所有别名变量创建版本寄存器 |
-| `processCallReturn(entry)` | 处理 F/M 条目，记录函数调用返回值寄存器 |
-| `processLog(entries)` | 批量处理 log 数组 |
-| `backwardSlice(regId)` | 从目标寄存器 BFS 回溯，返回按 iid 排序的依赖链 |
-| `getLastWrite(scopeId, callId, name)` | 查询变量最新的 SSA 寄存器 ID |
+| `processCallReturn(entry)` | 处理 F/M 条目，记录函数调用返回值寄存器，返回新建的寄存器 ID |
+| `processLog(entries)` | 批量处理 log 数组，按 `entry.type` 自动分发 |
+| `backwardSlice(regId)` | 从目标寄存器 BFS 回溯，返回按 iid 升序排列的依赖寄存器链 |
+| `getLastWrite(scopeId, callId, name)` | 查询变量最新的 SSA 寄存器 ID（未写入过则 `undefined`） |
+| `getRegister(regId)` | 返回指定寄存器 ID 的详情（`RegisterEntry`，未找到则 `undefined`） |
+| `getOidVersion(oid)` | 返回指定 OID 的当前版本号（0 = 从未被 putField 修改过） |
+| `getAlias(scopeId, callId, name)` | 返回变量当前持有的 OID（若无别名则 `undefined`） |
 | `getAliasesForOid(oid)` | 查询持有指定 OID 的所有变量（别名集合） |
-| `exportRegisters()` | 导出所有寄存器（sources 转为数组，可 JSON 序列化） |
+| `reset()` | 重置分析器状态，开始处理新一轮 log 序列 |
+| `exportRegisters()` | 导出所有寄存器为可序列化数组（`sources` 字段从 Set 转为数组） |
 
 ## AntiDetection — 反插桩对抗
 

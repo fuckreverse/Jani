@@ -1,4 +1,6 @@
 // JALANGI DO NOT INSTRUMENT
+// @ts-check
+/// <reference types="../types.d.ts" />
 
 /**
  * @file dataflow.js — 静态 SSA def-use 分析模块。

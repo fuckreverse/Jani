@@ -1,4 +1,6 @@
 // JALANGI DO NOT INSTRUMENT
+// @ts-check
+/// <reference types="../types.d.ts" />
 
 /**
  * @file Jalangi2 分析插件模板。

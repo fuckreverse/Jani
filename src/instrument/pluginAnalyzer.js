@@ -1,4 +1,6 @@
 // JALANGI DO NOT INSTRUMENT
+// @ts-check
+/// <reference types="../types.d.ts" />
 
 /**
  * @file pluginAnalyzer.js — 插件静态分析器 + 按需 Config 生成器
@@ -341,7 +343,7 @@ function _scanObjectForHooks(pluginOrClass, used) {
  * 未使用的 Hook → 对应 Config 字段设为 () => false（完全禁用插桩）。
  *
  * @param {Set<string>} usedHooks - 从 analyzePluginHooks 返回的 Hook 名称集合
- * @returns {object} Jalangi Config 对象
+ * @returns {import('../types.js').JalangiConfig} Jalangi Config 对象
  */
 export function buildConfigFromHooks(usedHooks) {
     // 收集需要开启的 Config 字段
@@ -368,7 +370,7 @@ export function buildConfigFromHooks(usedHooks) {
  * 分析插件 → 构建 Config 的一体化快捷函数。
  *
  * @param {Array<string|object>} plugins - 插件路径或实例列表
- * @returns {object} 按需 Config 对象
+ * @returns {import('../types.js').JalangiConfig} 按需 Config 对象
  *
  * @example
  * import { buildConfigFromPlugins } from './pluginAnalyzer.js';
@@ -387,7 +389,7 @@ export function buildConfigFromPlugins(plugins) {
 
 /**
  * 返回全量插桩的 Config（所有字段均为 null，与旧版默认行为一致）。
- * @returns {object}
+ * @returns {import('../types.js').JalangiConfig}
  */
 export function fullConfig() {
     return _fullConfig();

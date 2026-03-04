@@ -85,12 +85,16 @@ init(null, undefined, undefined, undefined, ['./src/plugins/dlint/CheckNaN.js'])
 
 ```ts
 {
-    code:            string,   // 插桩后的代码字符串
-    instAST:         object,   // 插桩后的 AST（可用于调试）
-    sourceMapObject: object,   // iid → [startLine, startCol, endLine, endCol] 映射
-    sourceMapString: string,   // sourceMapObject 的 JSON 字符串
+    code:            string,          // 插桩后的代码字符串
+    instAST:         object,          // 插桩后的 AST（可用于调试）
+    sourceMapObject: IidSourceMap,    // Jalangi 自有格式：iid → [startLine, startCol, endLine, endCol] + 元数据
+    sourceMapString: string,          // sourceMapObject 的 JSON 字符串
+    vlcqSourceMap:   VlcqSourceMap | null,  // 标准 v3 source map（可写为 .js.map，供 DevTools 调试器使用）
 }
 ```
+
+其中 `vlcqSourceMap` 是由 `@babel/generator` 生成的标准 VLCQ 格式 source map（v3），包含 `version`、`sources`、`mappings`、`sourcesContent` 等字段，可直接写入 `.js.map` 文件。  
+仅在代码被实际插桩时有值（若代码包含 `// JALANGI DO NOT INSTRUMENT` 则为 `null`）。
 
 #### 示例
 

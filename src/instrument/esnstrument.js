@@ -15,6 +15,8 @@
  */
 
 // JALANGI DO NOT INSTRUMENT
+// @ts-check
+/// <reference types="../types.d.ts" />
 
 /**
  * Jalangi2 插桩入口模块（浏览器 ESM 版）。
@@ -46,7 +48,9 @@ import { analyzePluginHooks, buildConfigFromHooks, buildConfigFromPlugins, fullC
 const { instrumentArrowFunctionBody } = W;
 
 // ─── Config 注入（由宿主在使用前调用 init() 设置）──────────────────────────────
+/** @type {import('../types.js').JalangiConfig | null} */
 let _config = null;
+/** @type {import('../types.js').IAnalysisPlugin | null} */
 let _analysis = null;   // 当前分析对象（J$.analysis 等价物）
 let _sid = null;        // 当前脚本 ID
 let _jalangiVar = JALANGI_VAR;  // 当前沙盒变量名（可自定义）
@@ -54,9 +58,9 @@ let _jalangiVar = JALANGI_VAR;  // 当前沙盒变量名（可自定义）
 /**
  * 初始化插桩器。必须在第一次调用 instrumentCode 之前调用。
  *
- * @param {object}         config      - Jalangi Config 对象。
+ * @param {import('../types.js').JalangiConfig | null} config - Jalangi Config 对象。
  *                                        若传入 null，且同时传入 plugins，则自动从插件推导 Config。
- * @param {object}         [analysis]  - 当前 analysis 对象（可选，用于 pre/post hook）
+ * @param {import('../types.js').IAnalysisPlugin | null} [analysis] - 当前 analysis 对象（可选，用于 pre/post hook）
  * @param {*}              [sid]       - 当前脚本 ID（用于 eval 的 source map）
  * @param {string}         [jalangiVar] - 沙盒变量名（默认 'J$'）。
  * @param {Array<string|object>} [plugins] - 插件路径或实例列表，用于按需推导 Config。
