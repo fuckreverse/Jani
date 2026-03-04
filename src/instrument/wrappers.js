@@ -70,7 +70,8 @@ let logSwitchRightFunName;
 let logLastFunName;
 let logX1FunName;
 let instrumentCodeFunName;
-let logReadLightFunName;  // TODO-8: J$.Rl 轻量变量读取钩子
+let logReadLightFunName;  // J$.Rl 轻量变量读取钩子
+let logAwaitResumeFunName;  // J$.Aw await 恢复点钩子
 
 /** 用给定的沙盒变量名重新生成所有运行时函数名常量 */
 function _rebuildNames(v) {
@@ -106,7 +107,8 @@ function _rebuildNames(v) {
     logLastFunName           = `${v}._`;
     logX1FunName             = `${v}.X1`;
     instrumentCodeFunName    = `${v}.instrumentEvalCode`;
-    logReadLightFunName      = `${v}.Rl`;  // TODO-8: 轻量变量读取钩子
+    logReadLightFunName      = `${v}.Rl`;  // 轻量变量读取钩子
+    logAwaitResumeFunName    = `${v}.Aw`;  // await 恢复点钩子
     // 模板缓存依赖占位符前缀，变量名变化时必须清空
     _templateCache.clear();
 }
@@ -400,7 +402,72 @@ function wrapReadWithUndefinedCheck(node, name) {
 }
 
 /**
- * TODO-8: 轻量变量读取钩子包装器。
+ * await 恢复点包装器。
+ *
+ * 将 `await expr` 转换为 `J$.Aw(iid, await expr, ctxId)`：
+ *   - 运行时在 await 恢复时收到通知（contextId 切换），
+ *   - 同时获得并透传 resolved value，不改变原始语义。
+ *   - ctxId 是在 async 函数入口处捕获的 callId（存储在 J$__ctx 变量中），
+ *     用于在并发 async 调用场景下正确区分不同的 async 调用实例。
+ *
+ * 签名: J$.Aw(iid, val, ctxId) → val
+ *
+ * Config.INSTR_AWAIT 控制是否插桩：
+ *   null / undefined → 全量插桩；() => false → 完全跳过。
+ *
+ * @param {object} node     - AwaitExpression AST 节点（用于位置信息）
+ * @param {object} argument - await 操作数（已插桩的子表达式）
+ */
+function wrapAwait(node, argument) {
+    if (!Config.INSTR_AWAIT || Config.INSTR_AWAIT(node)) {
+        IID.printIidToLoc(node);
+        // 手工构造 `J$.Aw(iid, await argument, J$__ctx)` AST 节点。
+        //
+        // 不能用 replaceInExpr 字符串模板，因为模板用 sourceType:'script' 解析，
+        // 而 `await` 在 script 顶层是非法的（只在 async 函数或 module 中合法）。
+        // 直接构造 AST 可绕过此限制，且更高效（无解析开销）。
+        //
+        // 第三个参数 J$__ctx 是在 async 函数入口处注入的局部变量，
+        // 存储了本次 async 函数调用的 callId，用于跨 await 恢复时识别 contextId。
+        //
+        // 构造的 AST 结构：
+        //   CallExpression {
+        //     callee: MemberExpression { object: J$, property: 'Aw' },
+        //     arguments: [iid, AwaitExpression { argument }, J$__ctx]
+        //   }
+        const iidNode = IID.getIid();
+
+        // 内层 AwaitExpression：await argument
+        // argument 已由子节点 visitor 完整插桩（J$.R / J$.G 等已注入）
+        const awaitNode = {
+            type: 'AwaitExpression',
+            argument,
+        };
+        if (node.loc) awaitNode.loc = node.loc;
+
+        // J$__ctx：async 函数入口处注入的局部变量（保存了本次调用的 callId）
+        const ctxVarNode = { type: 'Identifier', name: `${_jalangiVar}__ctx` };
+
+        // 外层 CallExpression：J$.Aw(iid, awaitNode, ctxVarNode)
+        const ret = {
+            type: 'CallExpression',
+            callee: {
+                type: 'MemberExpression',
+                object:   { type: 'Identifier', name: _jalangiVar },
+                property: { type: 'Identifier', name: 'Aw' },
+                computed: false,
+            },
+            arguments: [iidNode, awaitNode, ctxVarNode],
+        };
+        transferLoc(ret, node);
+        return ret;
+    }
+    // INSTR_AWAIT 禁用：保留原始 AwaitExpression（语义不变）
+    return node;
+}
+
+/**
+ * 轻量变量读取钩子包装器。
  * 不传实际值——运行时从 Shadow Frame 查找，减少插桩开销。
  * 签名: J$.Rl(iid, defScopeId, name) → value
  * @param {object} node     - 原 AST 节点（用于位置信息）
@@ -1011,7 +1078,42 @@ function instrumentFunctionEntryExit(node, ast) {
     const body = (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node))
         ? createCallAsFunEnterStatement(node, scopeId)
         : [];
-    return [...body, ...syncDefuns(node, _scope, false), ...ast];
+
+    // 对 async 函数：在 J$.Fe() 之后插入 `var __j$ctx = J$.currentCallId`，
+    // 以捕获本次 async 函数调用的唯一 callId。
+    // 由于 async 函数在 await 后恢复时，JS 运行时会恢复函数帧，
+    // 但 Jalangi2 的 #currentCallId 不会随协程上下文切换，
+    // 所以必须在函数入口时将 callId 存入局部变量，供 J$.Aw() 使用。
+    const asyncCtxCapture = (node.async && (!Config.INSTR_AWAIT || Config.INSTR_AWAIT(node)))
+        ? [_createAsyncCtxCaptureStatement()]
+        : [];
+
+    return [...body, ...asyncCtxCapture, ...syncDefuns(node, _scope, false), ...ast];
+}
+
+/**
+ * 构造 `var __j$ctx = J$.currentCallId` 的 AST 语句节点。
+ *
+ * 这条语句插入到 async 函数体的最前面（J$.Fe 调用之后），
+ * 将本次调用帧的 callId 存入局部变量 __j$ctx，供函数体内所有
+ * J$.Aw(iid, await expr, __j$ctx) 引用，保证跨 await 的 contextId 唯一。
+ */
+function _createAsyncCtxCaptureStatement() {
+    // var __j$ctx = J$.currentCallId;
+    return {
+        type: 'VariableDeclaration',
+        kind: 'var',
+        declarations: [{
+            type: 'VariableDeclarator',
+            id:   { type: 'Identifier', name: `${_jalangiVar}__ctx` },
+            init: {
+                type: 'MemberExpression',
+                object:   { type: 'Identifier', name: _jalangiVar },
+                property: { type: 'Identifier', name: 'currentCallId' },
+                computed: false,
+            },
+        }],
+    };
 }
 
 /**
@@ -1303,7 +1405,7 @@ export {
     wrapReturn, wrapThrow, wrapWithX1, wrapHash, wrapEvalArg,
     wrapUnaryOp, wrapBinaryOp, wrapLogicalAnd, wrapLogicalOr, wrapLogicalNullish,
     wrapSwitchDiscriminant, wrapSwitchTest, wrapWith, wrapConditional,
-    wrapLiteral, wrapForIn, wrapCatchClause,
+    wrapLiteral, wrapForIn, wrapCatchClause, wrapAwait,
     wrapScriptBodyWithTryCatch, wrapFunBodyWithTryCatch,
     // 高级函数
     instrumentStore, instrumentLoad, instrumentLoadModStore,

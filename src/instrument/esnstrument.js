@@ -415,6 +415,24 @@ const visitorRRPost = {
         node.expression = W.wrapWithX1(node, node.expression);
         return node;
     },
+
+    /**
+     * AwaitExpression 插桩：将 `await expr` 转换为 `J$.Aw(iid, await expr)`。
+     *
+     * 这里在 visitorRRPost（后序）中处理，因此 node.argument 已经被子节点
+     * visitor 完整插桩（子表达式的 J$.R、J$.G 等已注入）。
+     * wrapAwait() 将整个 AwaitExpression（含已插桩的 argument）内嵌为
+     * J$.Aw() 的第二个参数，JS 引擎仍在 argument 处挂起协程，
+     * 恢复后 resolved value 透传给 J$.Aw()，并由 J$.Aw() 返回，
+     * 保证语义与原始代码完全相同。
+     *
+     * 仅在 async 函数内部合法；顶层 await（module sourceType）同样适用。
+     */
+    AwaitExpression(node) {
+        // node.argument 已在后序遍历中被子 visitor 插桩。
+        // wrapAwait 内部检查 Config.INSTR_AWAIT，若禁用则原样返回节点。
+        return W.wrapAwait(node, node.argument);
+    },
 };
 
 // ─── visitor：运算符插桩（Post）──────────────────────────────────────────────

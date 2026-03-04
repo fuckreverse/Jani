@@ -38,6 +38,8 @@ const HOOKS = Object.freeze([
     'putField', 'read', 'runInstrumentedFunctionBody',
     'scriptEnter', 'scriptExit', 'unaryPre',
     'unary', 'write',
+    // async/await 恢复点钩子（J$.Aw 触发）
+    'awaitResume',
 ]);
 
 /**

@@ -108,6 +108,8 @@ mindmap
       scriptExit
       endExecution
       onReady
+    异步
+      awaitResume
     其他
       endExpression
       instrumentCodePre
@@ -270,6 +272,49 @@ mindmap
 #### `forinObject(iid, val)`
 
 `for-in` 循环迭代对象时触发。
+
+---
+
+### 异步
+
+#### `awaitResume(iid, contextId, val)`
+
+`await` 表达式恢复（Promise 就绪）时触发。
+
+| 参数 | 说明 |
+|------|---------|
+| `iid` | 指令 ID（`await` 表达式所在位置） |
+| `contextId` | 本次 async 函数调用的唯一上下文 ID（由插桩在 async 函数入口注入的 `J$__ctx` 局部变量带出） |
+| `val` | `await` 的 resolved value（注意：返回将被忧略，无法修改它） |
+
+返回将被忧略（`val` 由 `J$.Aw` 直接透传，不支持修改）。
+
+**常见用途**：在 `awaitResume` 中需要用 `contextId` 来关联同一次 async 函数调用中多次 await 的事件。同一次调用的所有 `awaitResume` 共享相同的 `contextId`；不同次调用（即使是同一函数）的 `contextId` 必不相同。
+
+```js
+// 示例：按 contextId 收集每次 async 调用的 await 轨迹
+class AsyncTraceAnalysis {
+    constructor() {
+        this._traces = new Map(); // contextId → [{iid, val}, ...]
+    }
+
+    awaitResume(iid, contextId, val) {
+        let events = this._traces.get(contextId);
+        if (!events) { events = []; this._traces.set(contextId, events); }
+        events.push({ iid, val });
+        // 不返回（无法修改 val）
+    }
+
+    endExecution() {
+        for (const [ctxId, events] of this._traces) {
+            console.log(`async 调用 #${ctxId}:`, events);
+        }
+    }
+}
+```
+
+> **插桩开关**：`awaitResume` 需要 `Config.INSTR_AWAIT` 不为 `() => false`。
+> 使用 `pluginAnalyzer.js` 自动推导配置时，常量内 `awaitResume` 函数名将自动开启 `INSTR_AWAIT`。
 
 #### `endExpression(iid)`
 

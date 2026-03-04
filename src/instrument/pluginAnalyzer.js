@@ -62,6 +62,7 @@ export const ALL_HOOKS = new Set([
     'endExecution',
     'runInstrumentedFunctionBody',
     'onReady',
+    'awaitResume',
 ]);
 
 // ─── Hook → Config 字段的映射关系 ─────────────────────────────────────────────
@@ -125,6 +126,9 @@ const HOOK_TO_CONFIG_FIELDS = {
     // 表达式末尾标记
     endExpression:  ['INSTR_END_EXPRESSION'],
 
+    // await 恢复点（async/await 场景）
+    awaitResume:    ['INSTR_AWAIT'],
+
     // 以下钩子不需要插桩支持（纯运行时事件），不映射 Config 字段
     endExecution:              [],
     runInstrumentedFunctionBody: [],
@@ -150,6 +154,7 @@ export const ALL_CONFIG_FIELDS = new Set([
     'INSTR_RETURN',
     'INSTR_THROW',
     'INSTR_FORIN',
+    'INSTR_AWAIT',
 ]);
 
 // ─── analyzePluginHooks：静态 AST 扫描 ───────────────────────────────────────

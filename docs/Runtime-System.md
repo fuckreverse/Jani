@@ -38,7 +38,7 @@ classDiagram
         +Se(iid, val, origFile)
         +Sr(iid)
         +N(iid, name, val, flags)
-        +Aw(iid)
+        +Aw(iid, val, ctxId?)
         +Rt(iid, val)
         +Th(iid, val)
         -#returnStack
@@ -177,7 +177,7 @@ const globalIid = J$.getGlobalIID(iid);
 | `Wi(iid, val)` | with 对象 | `_with` |
 | `H(iid, val)` | for-in 对象 | `forinObject` |
 | `X1(iid, val)` | 表达式语句末尾 | `endExpression` |
-| `Aw(iid)` | await 恢复点 | — |
+| `Aw(iid, val, ctxId?)` | await 恢复点（透传 resolved value，更新 `#currentContextId`） | `awaitResume(iid, contextId, val)` |
 
 ### 钩子执行三段式（以 G / getField 为例）
 
@@ -231,6 +231,7 @@ host.use(new SMemoryPlugin(smemory))
 
 ```
 _return, _throw, _with,
+awaitResume,
 binaryPre, binary, conditional,
 declare, endExecution, endExpression,
 forinObject, functionEnter, functionExit,
@@ -454,14 +455,24 @@ J$.activateContext(newCtxId);
 
 ### await 恢复点钩子（`J$.Aw`）
 
-插桩器在 `await expr` 后注入 `J$.Aw(iid)`，在 await 恢复时通知运行时：
+插桩器将 `await expr` 改写为 `J$.Aw(iid, await expr, J$__ctx)`：
 
 ```js
-// 插桩代码（由 esnstrument.js 生成）
-(await expr, J$.Aw(iid))
+// 插桩代码（由 wrappers.js 手工构造 AST 生成）
+J$.Aw(iid, await expr, J$__ctx)
+// J$__ctx 是 async 函数入口注入的局部变量：
+//   var J$__ctx = J$.currentCallId;
+// 用于在并发 async 调用时正确区分不同调用实例的 contextId。
 ```
 
-分析插件可通过 `awaitResume(iid, contextId)` 回调监听 await 恢复事件。
+**运行时处理流程**：
+1. JS 引擎在 `await expr` 处挂起协程，Promise 就绪后恢复
+2. resolved value 作为 `val` 参数传入 `Aw()`
+3. `Aw()` 将 `#currentContextId` 设为 `ctxId`（若提供）或 `#currentCallId`（兜底）
+4. `Aw()` 调用 `analysis.awaitResume(iid, contextId, val)`
+5. `Aw()` 返回 `val`，语义完全保留
+
+分析插件可通过 `awaitResume(iid, contextId, val)` 回调监听 await 恢复事件（详见 [Analysis-Development.md](./Analysis-Development.md)）。
 
 ### 包装异步回调（结合 AntiDetection.js）
 

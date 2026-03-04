@@ -129,6 +129,35 @@ export class JalangiRuntime {
     /** 调用 ID 栈，支持递归与嵌套调用 */
     #callIdStack = [];
 
+    /**
+     * 闭包捕获帧绑定表：Function → parentCallId
+     *
+     * 在 T()（函数字面量创建）时，将当时外层调用的 #currentCallId 绑定到函数对象上。
+     * 这样当内层函数在外层函数退出后才被调用时（外层 callId 已不在栈上），
+     * Fe() 仍能通过这个绑定找到外层帧对应的 callId，从而正确解析闭包变量。
+     *
+     * 使用 WeakMap 确保不阻止函数对象被 GC 回收。
+     */
+    #funcClosureCallId = new WeakMap();
+
+    /**
+     * 闭包引用集合：记录所有「拥有被闭包捕获的 Shadow Frame」的 (defScopeId, callId) 对。
+     *
+     * **注册时机**：在 T()（函数字面量创建）时，若当前正在某函数帧内，
+     * 则将 `"${currentFunDefScopeId}:${currentCallId}"` 写入此 Set。
+     * 这发生在外层帧还活着的时候，能保证 Fr() 检查时数据已就绪。
+     *
+     * **用途**：
+     * - Fr() 退出时检查 `"${leavingScopeId}:${leavingCallId}"` 是否在此 Set 中，
+     *   若是则**不清除**该帧的 Shadow Frame（允许内层闭包继续读取）。
+     * - #resolveCallId() 在调用栈中找不到 defScopeId 时，通过 capturedOuterCallId
+     *   精确定位（不再需要从此表回退，此表仅控制 Fr() 的清理行为）。
+     *
+     * 使用 `"scopeId:callId"` 字符串作为 key，每次工厂函数调用产生独立 callId，
+     * 多次调用不会相互覆盖，解决「工厂函数多实例互相覆盖」的问题。
+     */
+    #closureFrameSet = new Set();
+
     // ── TODO-11: Shadow Frame 机制 —— 按 (defScopeId, callId) 缓存变量值 ──────
 
     /**
@@ -255,6 +284,53 @@ export class JalangiRuntime {
      */
     #shadowClear(defScopeId, callId) {
         this.#shadowFrameMap.delete(`${defScopeId}:${callId}`);
+    }
+
+    /**
+     * 解析 defScopeId 对应的正确 callId。
+     *
+     * 有三种情况：
+     * 1. **当前帧**（defScopeId === #currentFunDefScopeId）：直接返回 #currentCallId。
+     * 2. **祖先帧（仍活着）**：在调用栈 #callIdStack 中回溯寻找匹配的 defScopeId。
+     * 3. **外层帧已退出（闭包）**：
+     *    a. 从当前帧（callIdStack 栈顶）取 capturedOuterCallId（Fe() 时通过 #funcClosureCallId 绑定）；
+     *    b. 若 shadowFrameMap 中存在 `defScopeId:capturedOuterCallId`，则返回该 callId；
+     *    c. 若找不到，尝试向上递推：从 capturedOuterCallId 对应的栈帧条目继续查找；
+     *    d. 安全降级：回退到 #currentCallId。
+     *
+     * **注意**：不再使用 #closureScopeCallId 回退，因为它是 Map（会被工厂函数多次调用覆盖）。
+     * 现在完全依赖 capturedOuterCallId 精确追踪每个闭包实例的外层 callId。
+     *
+     * @param {number} defScopeId  变量定义点的 Scope.id
+     * @returns {number}  对应的 callId；找不到时回退到 #currentCallId（安全降级）
+     */
+    #resolveCallId(defScopeId) {
+        // 情况 1：就是当前帧
+        if (defScopeId === this.#currentFunDefScopeId) {
+            return this.#currentCallId;
+        }
+        // 情况 2：在调用栈（祖先帧）中回溯（从栈顶到栈底）
+        for (let i = this.#callIdStack.length - 1; i >= 0; i--) {
+            const entry = this.#callIdStack[i];
+            if (entry.defScopeId === defScopeId) {
+                return entry.callId;
+            }
+        }
+        // 情况 3：外层帧已退出（闭包场景）。
+        // 沿 capturedOuterCallId 链往上追踪，直到找到 defScopeId 对应的 Shadow Frame。
+        // 每个闭包在 Fe() 时已将 capturedOuterCallId 存入栈帧条目，
+        // 这能精确区分工厂函数多次调用产生的不同闭包实例（各自 capturedOuterCallId 不同）。
+        if (this.#callIdStack.length > 0) {
+            const topEntry = this.#callIdStack[this.#callIdStack.length - 1];
+            const captured = topEntry.capturedOuterCallId;
+            if (captured !== null && captured !== undefined) {
+                if (this.#shadowFrameMap.has(`${defScopeId}:${captured}`)) {
+                    return captured;
+                }
+            }
+        }
+        // 安全降级：回退到当前 callId，避免引入 undefined
+        return this.#currentCallId;
     }
 
     /**
@@ -462,6 +538,18 @@ export class JalangiRuntime {
         // 通过 #getOrCreateOid 统一处理，非引用类型自动跳过
         this.#getOrCreateOid(val);
 
+        // TODO-13: 为函数字面量记录"创建时外层帧 callId"，用于闭包场景的 #resolveCallId。
+        // 同时将外层帧的 (defScopeId:callId) 注册到 #closureFrameSet，
+        // 告知 Fr() "该帧有闭包引用，退出时不要立即清除 Shadow Frame"。
+        if (typeof val === 'function') {
+            this.#funcClosureCallId.set(val, this.#currentCallId);
+            // 当前正在某函数帧内（而非顶层脚本）才需要注册
+            if (this.#currentFunDefScopeId !== undefined) {
+                // 使用 "scopeId:callId" 复合 key，每次工厂函数调用独立注册，互不覆盖
+                this.#closureFrameSet.add(`${this.#currentFunDefScopeId}:${this.#currentCallId}`);
+            }
+        }
+
         const analysis = this.analysis;
         if (analysis?.literal) {
             const aret = analysis.literal(iid, val, hasGetterSetter);
@@ -573,8 +661,9 @@ export class JalangiRuntime {
         const analysis = this.analysis;
 
         // TODO-11: 若有 defScopeId，同步更新 Shadow Frame（确保 Rl 能读到最新值）
+        // 使用 #resolveCallId 支持闭包访问外层作用域的情况
         if (!isGlobal && defScopeId !== undefined) {
-            this.#shadowSet(defScopeId, this.#currentCallId, name, val);
+            this.#shadowSet(defScopeId, this.#resolveCallId(defScopeId), name, val);
         }
 
         if (analysis?.read) {
@@ -596,7 +685,7 @@ export class JalangiRuntime {
      * @returns {*} 变量当前值
      */
     Rl(iid, defScopeId, name) {
-        const raw = this.#shadowLookup(defScopeId, this.#currentCallId, name);
+        const raw = this.#shadowLookup(defScopeId, this.#resolveCallId(defScopeId), name);
 
         // 检测 sentinel：与 undefined 相同的静默降级，但会留下可观测的诊断记录
         let val;
@@ -630,18 +719,18 @@ export class JalangiRuntime {
         }
 
         // TODO-11: 若有 defScopeId，同步写入 Shadow Frame（非全局变量才需要）
+        // 使用 #resolveCallId 支持闭包写回外层作用域变量
         if (!isGlobal && defScopeId !== undefined) {
-            this.#shadowSet(defScopeId, this.#currentCallId, name, val);
-        }
+            const resolvedCallId = this.#resolveCallId(defScopeId);
+            this.#shadowSet(defScopeId, resolvedCallId, name, val);
 
-        // TODO-14: 记录别名（右值是对象/数组/函数时，记录变量 → OID 映射）
-        if (!isGlobal && defScopeId !== undefined) {
+            // TODO-14: 记录别名（右值是对象/数组/函数时，记录变量 → OID 映射）
             const oid = this.#getOrCreateOid(val);
             if (oid !== null) {
-                this.#aliasTable.set(`${defScopeId}:${this.#currentCallId}:${name}`, oid);
+                this.#aliasTable.set(`${defScopeId}:${resolvedCallId}:${name}`, oid);
             } else {
                 // 右值变为非引用类型时，清除旧的别名记录
-                this.#aliasTable.delete(`${defScopeId}:${this.#currentCallId}:${name}`);
+                this.#aliasTable.delete(`${defScopeId}:${resolvedCallId}:${name}`);
             }
         }
 
@@ -705,9 +794,20 @@ export class JalangiRuntime {
         this.#wrappedExceptionVal = undefined;
         this.#updateSid(f);
 
+        // TODO-13 闭包修复：读取函数创建时外层帧的 callId（#funcClosureCallId 绑定）。
+        // 将此 capturedOuterCallId 存入栈帧，供 #resolveCallId 在找不到 defScopeId 时使用。
+        const capturedOuterCallId = typeof f === 'function'
+            ? (this.#funcClosureCallId.get(f) ?? null)
+            : null;
+
         // TODO-13: 分配新 callId，压栈保存旧值
         // 同时保存父帧的 defScopeId，供 Fr() 恢复
-        this.#callIdStack.push({ callId: this.#currentCallId, defScopeId: this.#currentFunDefScopeId });
+        // capturedOuterCallId：此函数在创建时外层帧的 callId（闭包绑定）
+        this.#callIdStack.push({
+            callId: this.#currentCallId,
+            defScopeId: this.#currentFunDefScopeId,
+            capturedOuterCallId,
+        });
         this.#currentCallId = ++this.#callIdCounter;
         // TODO-11: 记录当前函数的 defScopeId，供 N() 初始化形参到 Shadow Frame
         this.#currentFunDefScopeId = defScopeId;
@@ -733,15 +833,26 @@ export class JalangiRuntime {
         this.#rollBackSid();
 
         // TODO-13: 弹出 callId 栈，恢复调用方的 callId
-        // TODO-11: 同时清理本次调用的 Shadow Frame
         const frame = this.#callIdStack.pop();
         if (frame) {
-            const leavingCallId = this.#currentCallId;
+            const leavingCallId    = this.#currentCallId;
+            const leavingScopeId   = this.#currentFunDefScopeId;
             const { callId: parentCallId, defScopeId: parentDefScopeId } = frame;
-            // 清除刚离开的调用帧的 Shadow Frame（使用离开帧的 defScopeId）
-            if (this.#currentFunDefScopeId !== undefined) {
-                this.#shadowClear(this.#currentFunDefScopeId, leavingCallId);
+
+            // TODO-13 闭包修复：退出时不立即清除 Shadow Frame。
+            // 若该帧的 (scopeId:callId) 已被 #closureFrameSet 注册（说明有内层闭包在引用），
+            // 则保留 Shadow Frame 数据，让内层闭包函数能继续读取。
+            // 否则（无闭包引用）才立即清除，节省内存。
+            //
+            // 使用 Set 而非 Map，每次工厂函数调用的 callId 各自独立注册，
+            // 避免多实例调用时互相覆盖导致旧帧被误清除。
+            if (leavingScopeId !== undefined) {
+                const isReferencedByClosure = this.#closureFrameSet.has(`${leavingScopeId}:${leavingCallId}`);
+                if (!isReferencedByClosure) {
+                    this.#shadowClear(leavingScopeId, leavingCallId);
+                }
             }
+
             this.#currentCallId = parentCallId;
             // 恢复父帧的 defScopeId
             this.#currentFunDefScopeId = parentDefScopeId;
@@ -978,22 +1089,39 @@ export class JalangiRuntime {
     // ── TODO-15: 异步 ContextID 公开接口 ────────────────────────────────────
 
     /**
-     * TODO-15: await 恢复点钩子（J$.Aw）。
+     * await 恢复点钩子（J$.Aw）。
      *
-     * 在插桩代码的 `await expr` 之后注入：
-     *   `(await expr, J$.Aw(iid))`
+     * 插桩器将 `await expr` 改写为 `J$.Aw(iid, await expr, ctxId)`：
+     *   - JS 引擎在 `await expr` 处挂起协程（语义不变）
+     *   - Promise 兑现后，resolved value 作为第二参数传入 Aw()
+     *   - ctxId 是在 async 函数入口处捕获的 callId（存于局部变量 J$__ctx），
+     *     用于在并发 async 调用场景下正确区分不同的 async 实例
+     *   - Aw() 返回该 value，让外层表达式继续使用它
      *
-     * 当 await 恢复执行时，通知运行时当前异步上下文已切换回来。
-     * 分析插件可通过 `awaitResume(iid, contextId)` 回调监听。
+     * 除透传 value 外，Aw() 还负责：
+     *   1. 将 #currentContextId 更新为本次 async 调用的 ctxId，
+     *      使得 await 恢复后的后续操作（R/W/G/P 等）都归属到正确的异步上下文。
+     *   2. 回调分析器的 awaitResume(iid, contextId, val) 钩子。
      *
-     * @param {number} iid  指令 ID（await 表达式所在位置）
-     * @returns {void}
+     * @param {number} iid    指令 ID（await 表达式所在位置）
+     * @param {*}      val    await 的 resolved value（由 JS 引擎填入）
+     * @param {number} [ctxId] 本次 async 函数调用的 callId（由插桩注入，可选）
+     * @returns {*}           透传 val（保持语义不变）
      */
-    Aw(iid) {
+    Aw(iid, val, ctxId) {
+        // 将 #currentContextId 更新为本次 async 函数的上下文 ID。
+        // ctxId 由插桩器注入（async 函数入口处捕获的 callId），
+        // 确保在并发 async 调用时能正确区分不同的 async 实例。
+        // 若未提供 ctxId（兜底），则使用当前 callId（单次调用场景下仍正确）。
+        this.#currentContextId = ctxId ?? this.#currentCallId;
+
         const analysis = this.analysis;
         if (analysis?.awaitResume) {
-            analysis.awaitResume(iid, this.#currentContextId);
+            analysis.awaitResume(iid, this.#currentContextId, val);
         }
+
+        // 透传 resolved value，保持 await 表达式的语义
+        return val;
     }
 
     /**

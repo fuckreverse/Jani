@@ -35,15 +35,45 @@ const __dirname  = dirname(__filename);
 let passed = 0;
 let failed = 0;
 
+/**
+ * 挂起的异步测试 Promise 列表。
+ * 所有 async test 函数会将其 Promise 推入此数组，
+ * 最终在文件末尾的 _flushAsyncTests() 中统一 await。
+ */
+const _asyncTests = [];
+
+/**
+ * 注册并执行一个测试用例。支持同步函数和 async 函数。
+ * - 同步函数：直接捕获异常并打印结果
+ * - async 函数：推入 _asyncTests，由末尾 _flushAsyncTests() 统一等待
+ */
 function test(name, fn) {
+    let returnVal;
     try {
-        fn();
-        console.log(`  ✓  ${name}`);
-        passed++;
+        returnVal = fn();
     } catch (e) {
         console.error(`  ✗  ${name}`);
         console.error(`     ${e.message}`);
         failed++;
+        return;
+    }
+
+    if (returnVal && typeof returnVal.then === 'function') {
+        // async 函数返回 Promise，推迟统计
+        _asyncTests.push(
+            returnVal.then(() => {
+                console.log(`  ✓  ${name}`);
+                passed++;
+            }).catch((e) => {
+                console.error(`  ✗  ${name}`);
+                console.error(`     ${e?.message ?? String(e)}`);
+                failed++;
+            })
+        );
+    } else {
+        // 同步函数且无异常
+        console.log(`  ✓  ${name}`);
+        passed++;
     }
 }
 
@@ -73,6 +103,7 @@ const ALL_CONFIG = {
     INSTR_END_EXPRESSION:     null,
     INSTR_CONDITIONAL:        null,
     INSTR_TRY_CATCH_ARGUMENTS: null,
+    INSTR_AWAIT:              null,   // await 恢复点插桩
     ENABLE_SAMPLING:          false,
 };
 
@@ -210,10 +241,43 @@ test('解构函数参数', () => {
 // ════════════════════════════════════════════════════════════════
 console.log('\n── ES2017 ───────────────────────────────────────────────');
 
-test('async / await', () => {
+test('async / await — 插桩结构检查', () => {
     const r = instr('async function fetchData() { var data = await fetch("/api"); return data.json(); }');
     assertIncludes(r.code, 'J$.Fe(', 'async 函数应注入 J$.Fe');
     assertIncludes(r.code, 'J$.Fr(', 'async 函数应注入返回钩子 J$.Fr');
+    // 核心：await 表达式应被包裹为 J$.Aw(iid, await ...) 形式
+    assertIncludes(r.code, 'J$.Aw(', 'await 表达式应注入 J$.Aw 钩子');
+});
+
+test('async / await — J$.Aw 包含正确的 await 结构', () => {
+    // await expr 应被改写为 J$.Aw(iid, await expr)，而不是 (await expr, J$.Aw(iid))
+    const r = instr('async function f() { return await Promise.resolve(1); }');
+    // 检查 J$.Aw 的调用形式：第二个参数应是 await 表达式
+    assertIncludes(r.code, 'J$.Aw(', 'await 应被改写为 J$.Aw 钩子');
+    // resolved value 应由 J$.Aw 透传（函数返回值为 J$.Aw 的返回值）
+    // 验证 await 关键字仍在 J$.Aw 内部（保留了 await 语义）
+    const awIdx = r.code.indexOf('J$.Aw(');
+    const awContent = r.code.slice(awIdx, r.code.indexOf(')', awIdx + 10) + 1);
+    assert(awContent.includes('await'), 'J$.Aw 的参数中应包含 await 关键字（await 语义保留在钩子内部）');
+});
+
+test('async / await — 顶层 await（module 模式）注入 J$.Aw', () => {
+    const r = instr('const res = await Promise.resolve(42);', { sourceType: 'module' });
+    assertIncludes(r.code, 'J$.Aw(', '顶层 await 也应注入 J$.Aw 钩子');
+    assertIncludes(r.code, 'await', '顶层 await 的 await 关键字应保留');
+});
+
+test('async / await — 链式 await 每处均注入钩子', () => {
+    const r = instr(`
+        async function chain() {
+            const a = await Promise.resolve(1);
+            const b = await Promise.resolve(2);
+            return a + b;
+        }
+    `);
+    // 统计 J$.Aw 出现次数（应 ≥ 2，每个 await 一个）
+    const awCount = (r.code.match(/J\$\.Aw\(/g) || []).length;
+    assert(awCount >= 2, `链式 await 应注入 ≥2 个 J$.Aw 钩子，实际: ${awCount}`);
 });
 
 // ════════════════════════════════════════════════════════════════
@@ -1234,33 +1298,137 @@ test('动态：递归函数（阶乘）', () => {
     assertEqual(out.r, 120, 'fact(5) 应等于 120');
 });
 
-test('动态：闭包（通过 invokeFun 验证返回值）', () => {
-    // 闭包变量跨帧读取时 Rl（Shadow Frame 轻量路径）有已知限制，
-    // 这里改为通过 invokeFun 钩子验证内层函数每次调用的返回值来测试闭包语义。
-    init(ALL_CONFIG);
-    const { code } = instrumentCode({
-        code: `
-            function makeCounter() {
-                var count = 0;
-                return function() { count = count + 1; return count; };
+// ════════════════════════════════════════════════════════════════
+// 动态执行 — 闭包 Shadow Frame 场景（测试 #resolveCallId 修复）
+// 覆盖 7 种典型场景，确保 Rl 在外层帧退出后仍能正确读取外层变量
+// ════════════════════════════════════════════════════════════════
+console.log('\n── 动态执行：闭包 Shadow Frame 场景 ──────────────────');
+
+test('闭包场景 1：基础计数器（外层退出后闭包累加）', () => {
+    // 外层 makeCounter 退出后，内层 counter 持续访问 count
+    // 修复前：Rl 会 MISS（外层 callId 不在栈上）
+    const { out } = instrAndRun(`
+        function makeCounter() {
+            var count = 0;
+            return function() { count = count + 1; return count; };
+        }
+        var counter = makeCounter();
+        var a = counter(); var b = counter(); var c = counter();
+        $out.a=a; $out.b=b; $out.c=c;
+    `);
+    assertEqual(out.a, 1, '第 1 次调用 counter() 应返回 1');
+    assertEqual(out.b, 2, '第 2 次调用 counter() 应返回 2');
+    assertEqual(out.c, 3, '第 3 次调用 counter() 应返回 3');
+});
+
+test('闭包场景 2：工厂多实例独立（两个计数器互不干扰）', () => {
+    // 两次调用 makeCounter，各自返回独立闭包，capturedCallId 不同
+    // 修复前：#closureScopeCallId 会被第二次调用覆盖，导致 c1 的 count 读到 c2 的值
+    const { out } = instrAndRun(`
+        function makeCounter() {
+            var count = 0;
+            return function() { count = count + 1; return count; };
+        }
+        var c1 = makeCounter();
+        var c2 = makeCounter();
+        var a1 = c1(); var a2 = c1();   // c1: 1, 2
+        var b1 = c2();                   // c2: 1（独立！）
+        var a3 = c1();                   // c1: 3
+        $out.a1=a1; $out.a2=a2; $out.a3=a3; $out.b1=b1;
+    `);
+    assertEqual(out.a1, 1, 'c1 第 1 次应返回 1');
+    assertEqual(out.a2, 2, 'c1 第 2 次应返回 2');
+    assertEqual(out.a3, 3, 'c1 第 3 次应返回 3');
+    assertEqual(out.b1, 1, 'c2 独立计数，第 1 次应返回 1');
+});
+
+test('闭包场景 3：嵌套闭包两层（内层访问外层的外层）', () => {
+    // 三层嵌套：outer → middle → inner，inner 访问 outer 的变量
+    const { out } = instrAndRun(`
+        function outer(x) {
+            function middle(y) {
+                return function inner() { return x + y; };
             }
-            var counter = makeCounter();
-            var a = counter(); var b = counter(); var c = counter();
-            $out.a=a; $out.b=b; $out.c=c;
-        `,
-        origCodeFileName: 'closure-test.js',
-        instCodeFileName: 'closure-test_inst.js',
-        inlineSourceMap: true,
-    });
-    const J$inst = new JalangiSandbox();
-    const $out = {};
-    runInSandbox(code, J$inst, { $out });
-    // 注：闭包变量 count 通过 Shadow Frame 的跨帧访问有限制（已知 TODO-11 问题），
-    // 当前 Rl 路径在闭包跨帧场景下可能退化。此测试用于跟踪该行为，若修复后应更新期望值。
-    // 实际验证：$out.a/b/c 是否为有意义的数字（不是 undefined / NaN / null）
-    assert(typeof $out.a === 'number', '闭包 a 应为数字类型');
-    assert(typeof $out.b === 'number', '闭包 b 应为数字类型');
-    assert(typeof $out.c === 'number', '闭包 c 应为数字类型');
+            return middle;
+        }
+        var m = outer(10);
+        var f = m(5);
+        $out.r = f();
+    `);
+    assertEqual(out.r, 15, 'inner() 应返回 10+5=15');
+});
+
+test('闭包场景 4：闭包写回外层变量（多次修改后读取）', () => {
+    // 闭包写回外层作用域的变量，W() 需用 resolveCallId 写对 callId
+    const { out } = instrAndRun(`
+        function makeAccumulator(init) {
+            var total = init;
+            return {
+                add: function(n) { total = total + n; },
+                get: function() { return total; }
+            };
+        }
+        var acc = makeAccumulator(100);
+        acc.add(5);
+        acc.add(20);
+        $out.r = acc.get();
+    `);
+    assertEqual(out.r, 125, 'makeAccumulator(100).add(5).add(20).get() 应返回 125');
+});
+
+test('闭包场景 5：递归 + 闭包（递归函数本身是闭包）', () => {
+    // 外层函数返回递归闭包，递归时 callId 不断变化但外层 Shadow Frame 应稳定
+    const { out } = instrAndRun(`
+        function makeFactorialWithBase(base) {
+            return function fact(n) {
+                return n <= 1 ? base : n * fact(n - 1);
+            };
+        }
+        var factBase2 = makeFactorialWithBase(2);
+        $out.r = factBase2(4);  // 4 * 3 * 2 * base(2) = 24 * 2 = 48
+    `);
+    assertEqual(out.r, 48, 'factBase2(4) 应返回 48（递归到 base=2）');
+});
+
+test('闭包场景 6：闭包作为回调传递（延迟调用）', () => {
+    // 外层函数立即退出，闭包作为回调存入数组，稍后批量执行
+    const { out } = instrAndRun(`
+        function makeAdder(x) {
+            return function(y) { return x + y; };
+        }
+        var fns = [];
+        for (var i = 0; i < 3; i++) {
+            fns.push(makeAdder(i * 10));
+        }
+        // 外层帧全部退出后才调用
+        $out.r0 = fns[0](1);   // 0 + 1 = 1
+        $out.r1 = fns[1](1);   // 10 + 1 = 11
+        $out.r2 = fns[2](1);   // 20 + 1 = 21
+    `);
+    assertEqual(out.r0, 1,  'fns[0](1) 应等于 0+1=1');
+    assertEqual(out.r1, 11, 'fns[1](1) 应等于 10+1=11');
+    assertEqual(out.r2, 21, 'fns[2](1) 应等于 20+1=21');
+});
+
+test('闭包场景 7：IIFE 闭包捕获（立即调用中创建闭包）', () => {
+    // IIFE 本身立即执行，但返回的内层函数在 IIFE 退出后才被调用
+    const { out } = instrAndRun(`
+        var fns = (function() {
+            var results = [];
+            for (var j = 0; j < 3; j++) {
+                results.push((function(captured) {
+                    return function() { return captured * captured; };
+                })(j));
+            }
+            return results;
+        })();
+        $out.r0 = fns[0]();  // 0*0=0
+        $out.r1 = fns[1]();  // 1*1=1
+        $out.r2 = fns[2]();  // 2*2=4
+    `);
+    assertEqual(out.r0, 0, 'fns[0]() 应等于 0*0=0');
+    assertEqual(out.r1, 1, 'fns[1]() 应等于 1*1=1');
+    assertEqual(out.r2, 4, 'fns[2]() 应等于 2*2=4');
 });
 
 test('动态：对象属性读写', () => {
@@ -1435,6 +1603,128 @@ test('动态：Promise（基本 resolve）', async () => {
     runInSandbox(code, J$inst, { $out, Promise });
     const val = await $out.p;
     assertEqual(val, 42, 'Promise.resolve(42) 应 resolve 为 42');
+});
+
+test('动态：await 表达式语义正确，resolved value 被透传', async () => {
+    // 验证插桩后 J$.Aw(iid, await expr) 正确透传 resolved value。
+    // 若 Aw() 没有 return val，则 result 为 undefined。
+    init({ ...ALL_CONFIG, INSTR_AWAIT: null });
+    const { code } = instrumentCode({
+        code: `
+            async function getValue() {
+                var result = await Promise.resolve(99);
+                $out.result = result;
+                return result;
+            }
+            $out.p = getValue();
+        `,
+        origCodeFileName: 'await-semantic.js',
+        instCodeFileName: 'await-semantic_inst.js',
+        inlineSourceMap:  true,
+    });
+    const J$inst = new JalangiSandbox();
+    const $out = {};
+    runInSandbox(code, J$inst, { $out, Promise });
+    // 等待 async 函数完成
+    await $out.p;
+    assertEqual($out.result, 99, 'await 的 resolved value 应被正确透传（result 应等于 99）');
+});
+
+test('动态：awaitResume 钩子被调用，参数含 iid、contextId 和 val', async () => {
+    // 验证 J$.Aw 触发后会调用分析器的 awaitResume 回调，且参数正确。
+    init({ ...ALL_CONFIG, INSTR_AWAIT: null });
+    const { code } = instrumentCode({
+        code: `
+            async function task() {
+                var a = await Promise.resolve(11);
+                var b = await Promise.resolve(22);
+                $out.sum = a + b;
+            }
+            $out.p = task();
+        `,
+        origCodeFileName: 'await-hook.js',
+        instCodeFileName: 'await-hook_inst.js',
+        inlineSourceMap:  true,
+    });
+    const J$inst = new JalangiSandbox();
+    const awaitEvents = [];
+    J$inst.analysis.use({
+        awaitResume(iid, contextId, val) {
+            awaitEvents.push({ iid, contextId, val });
+        }
+    });
+    const $out = {};
+    runInSandbox(code, J$inst, { $out, Promise });
+    await $out.p;
+
+    // 应有两次 awaitResume（await Promise.resolve(11) 和 await Promise.resolve(22)）
+    assertEqual(awaitEvents.length, 2, 'awaitResume 应被调用 2 次（对应两个 await）');
+    assertEqual(awaitEvents[0].val, 11, '第一个 await 的 resolved value 应为 11');
+    assertEqual(awaitEvents[1].val, 22, '第二个 await 的 resolved value 应为 22');
+    // iid 应是非零数值
+    assert(typeof awaitEvents[0].iid === 'number' && awaitEvents[0].iid > 0, 'iid 应为正整数');
+    // contextId 在同一次 async 函数调用中应保持一致（复用 callId）
+    assertEqual(awaitEvents[0].contextId, awaitEvents[1].contextId,
+        '同一次 async 调用的两个 awaitResume 应有相同的 contextId');
+    // contextId 应为正整数（async 函数进入时 callId 已分配）
+    assert(typeof awaitEvents[0].contextId === 'number' && awaitEvents[0].contextId > 0,
+        'contextId 应为正整数');
+});
+
+test('动态：多次 async 调用的 awaitResume contextId 互相独立', async () => {
+    // 两次调用同一个 async 函数，每次的 contextId 应不同（callId 单调递增）。
+    init({ ...ALL_CONFIG, INSTR_AWAIT: null });
+    const { code } = instrumentCode({
+        code: `
+            async function work(n) {
+                return await Promise.resolve(n);
+            }
+            $out.p1 = work(1);
+            $out.p2 = work(2);
+        `,
+        origCodeFileName: 'await-ctx.js',
+        instCodeFileName: 'await-ctx_inst.js',
+        inlineSourceMap:  true,
+    });
+    const J$inst = new JalangiSandbox();
+    const awaitEvents = [];
+    J$inst.analysis.use({
+        awaitResume(iid, contextId, val) {
+            awaitEvents.push({ contextId, val });
+        }
+    });
+    const $out = {};
+    runInSandbox(code, J$inst, { $out, Promise });
+    await Promise.all([$out.p1, $out.p2]);
+
+    assertEqual(awaitEvents.length, 2, '应有 2 个 awaitResume 事件');
+    // 两次不同调用的 contextId 必须不同
+    assert(awaitEvents[0].contextId !== awaitEvents[1].contextId,
+        '不同次 async 调用的 contextId 应互相独立（不同）');
+});
+
+test('动态：INSTR_AWAIT=()=>false 时 await 语义仍正确', async () => {
+    // 禁用 await 插桩时，await 的值透传不受影响（无 J$.Aw 介入）。
+    init({ ...ALL_CONFIG, INSTR_AWAIT: () => false });
+    const { code } = instrumentCode({
+        code: `
+            async function noop() {
+                var v = await Promise.resolve(77);
+                $out.v = v;
+            }
+            $out.p = noop();
+        `,
+        origCodeFileName: 'await-disabled.js',
+        instCodeFileName: 'await-disabled_inst.js',
+        inlineSourceMap:  true,
+    });
+    // 验证代码中没有 J$.Aw
+    assert(!code.includes('J$.Aw'), 'INSTR_AWAIT=()=>false 时不应注入 J$.Aw');
+    const J$inst = new JalangiSandbox();
+    const $out = {};
+    runInSandbox(code, J$inst, { $out, Promise });
+    await $out.p;
+    assertEqual($out.v, 77, '禁用 await 插桩后，await 的值仍应正确为 77');
 });
 
 // ════════════════════════════════════════════════════════════════
@@ -1864,10 +2154,13 @@ test('端到端：iidToLocation 能解析插桩位置信息', () => {
 });
 
 
-console.log(`\n${'─'.repeat(52)}`);
-if (failed === 0) {
-    console.log(`✅  All ${passed} tests passed.`);
-} else {
-    console.log(`❌  ${failed} failed / ${passed + failed} total`);
-    process.exit(1);
-}
+// 等待所有异步测试完成，然后打印最终结果
+Promise.all(_asyncTests).then(() => {
+    console.log(`\n${'─'.repeat(52)}`);
+    if (failed === 0) {
+        console.log(`✅  All ${passed} tests passed.`);
+    } else {
+        console.log(`❌  ${failed} failed / ${passed + failed} total`);
+        process.exit(1);
+    }
+});

@@ -392,6 +392,31 @@ export class AnalysisTemplate {
         return { result: newCode };
     }
 
+    // ── async/await ──────────────────────────────────────────────────────────
+
+    /**
+     * await 表达式恢复执行时触发（J$.Aw 钩子）。
+     *
+     * 插桩器将 `await expr` 改写为 `J$.Aw(iid, await expr)`，
+     * Promise 兑现并协程恢复后，此回调被调用。
+     *
+     * 应用场景：
+     *  - 追踪异步数据流：contextId 标识了哪次 async 函数调用产生了这个恢复点
+     *  - 监测 await 的 resolved value（如污点传播、性能统计）
+     *  - 重建 async 执行时序（配合 functionEnter/functionExit 可还原完整 async 执行图）
+     *
+     * 注意：contextId 是 async 函数入口时捕获的 callId（由插桩注入到局部变量 J$__ctx），
+     * 因此在同一次 async 函数调用的所有 await 恢复点中保持不变，
+     * 在并发的多次 async 调用之间互相独立。
+     *
+     * @param {number} iid       - 指令 ID（await 表达式所在位置）
+     * @param {number} contextId - 当前 async 函数调用的唯一标识（复用 callId）
+     * @param {*}      val       - await 的 resolved value
+     */
+    awaitResume(iid, contextId, val) {
+        // 返回值被忽略（不影响 val 的透传）
+    }
+
     // ── 其他 ─────────────────────────────────────────────────────────────────
 
     /**

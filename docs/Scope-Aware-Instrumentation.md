@@ -226,7 +226,7 @@ function _findDefScope(scope, name) {
 | `J$.Fr` | `(iid)` → 返回 `isBacktrack`（不变） |
 | `J$.N`  | `(iid, name, val, flags, scopeId?)` |
 | `J$.Rl` | `(iid, defScopeId, name)`（**新增**） |
-| `J$.Aw` | `(iid)`（**新增**） |
+| `J$.Aw` | `(iid, val, ctxId)`（**新增**） |
 
 `scopeId` 来自 `_findDefScope()` 的结果：写入时取 def scope 的 id；函数入口处取 `_scope.id`。
 
@@ -574,25 +574,70 @@ activateContext(contextId) { this.#currentContextId = contextId; }
 **插桩端**（`wrappers.js`）对 `AwaitExpression` 包装，await 恢复后触发上下文切换：
 
 ```js
-AwaitExpression(node) {
-    IID.printIidToLoc(node);
-    const ret = replaceInExpr(
-        `(await ${RP}1, ${_jalangiVar}.Aw(${RP}2))`,
-        node.argument, IID.getIid()
-    );
-    return ret;
-},
+// wrappers.js — wrapAwait()：手工构造 AST，不走 replaceInExpr 模板
+// 因为 Babel parser 在 sourceType:'script' 模式下禁止顶层 await 语法，无法解析模板字符串。
+// await expr  →  J$.Aw(iid, await expr, J$__ctx)
+function wrapAwait(node, argument) {
+    if (!Config.INSTR_AWAIT || Config.INSTR_AWAIT(node)) {
+        IID.printIidToLoc(node);
+        const iidNode  = IID.getIid();
+        const awaitNode  = { type: 'AwaitExpression', argument };
+        const ctxVarNode = { type: 'Identifier', name: `${_jalangiVar}__ctx` };
+        const ret = {
+            type: 'CallExpression',
+            callee: {
+                type: 'MemberExpression',
+                object:   { type: 'Identifier', name: _jalangiVar },
+                property: { type: 'Identifier', name: 'Aw' },
+                computed: false,
+            },
+            arguments: [iidNode, awaitNode, ctxVarNode],
+        };
+        transferLoc(ret, node);
+        return ret;
+    }
+    return node;
+}
+```
+
+**async 函数入口**（`wrappers.js`）为每次 async 调用捕获唯一 callId：
+
+```js
+// instrumentFunctionEntryExit() 中，对 async 函数在 J$.Fe() 之后插入：
+// var J$__ctx = J$.currentCallId;
+// 作用：将本次 async 调用的 callId 持久化到局部变量，
+// 使 J$.Aw() 在 await 恢复时能正确识别异步上下文（#currentCallId 已被后续调用覆盖）。
+function _createAsyncCtxCaptureStatement() {
+    return {
+        type: 'VariableDeclaration',
+        kind: 'var',
+        declarations: [{ type: 'VariableDeclarator',
+            id:   { type: 'Identifier', name: `${_jalangiVar}__ctx` },
+            init: {
+                type: 'MemberExpression',
+                object:   { type: 'Identifier', name: _jalangiVar },
+                property: { type: 'Identifier', name: 'currentCallId' },
+                computed: false,
+            },
+        }],
+    };
+}
 ```
 
 需要注入 ContextID 管理的位置：
 
 | 位置 | 插桩操作 |
 |------|---------|
-| `async function` 入口 | `J$.Fe` 时同时分配新 ContextID |
-| `await expr` 处 | await 之前快照 contextId，之后恢复 |
+| `async function` 入口 | 注入 `var J$__ctx = J$.currentCallId`（捕获本次调用的 callId 作为 contextId） |
+| `await expr` 处 | `await expr` → `J$.Aw(iid, await expr, J$__ctx)`；恢复时透传 resolved value，同时更新 `#currentContextId` |
 | `setTimeout/setInterval` 回调 | 包装回调，入口分配新 ContextID |
 | `Promise.then/catch/finally` 回调 | 同上 |
 | `new Promise` 的 executor | 同上 |
+
+**Config.INSTR_AWAIT**：控制 await 插桩的开关字段（与其他 Config 字段用法一致）：
+- `null`（默认）— 全量插桩所有 `await` 表达式
+- `() => false` — 完全禁用 await 插桩（保留原始 await 语义，不注入 `J$.Aw`）
+- `(node) => boolean` — 细粒度控制（返回 `true` 则插桩该节点）
 
 **log 格式**：`[全局序号][ContextID][CallID] scopeId:name = value`。后处理时按 ContextID 分组，每组是一条独立的异步执行线。
 
@@ -768,7 +813,7 @@ const visitorAntiDetection = {
 | `J$.Fe` | `(iid, f, dis, args, scopeId?)` | 函数进入，增加可选 scopeId（Shadow Frame 压栈用） |
 | `J$.Fr` | `(iid)` → 返回 `isBacktrack` | Shadow Frame 弹栈在运行时内部处理，签名不变 |
 | `J$.N`  | `(iid, name, val, flags, scopeId?)` | 变量声明初始化，增加可选 scopeId |
-| `J$.Aw` | `(iid)` | **新增**：await 恢复点标记，通知运行时异步上下文已恢复 |
+| `J$.Aw` | `(iid, val, ctxId?)` | **新增**：await 恢复点，透传 resolved value，更新 `#currentContextId`，触发 `awaitResume` 回调 |
 
 **向后兼容**：所有新增参数均为**尾部追加可选参数**，现有分析插件不修改签名即可继续工作。
 
@@ -800,3 +845,279 @@ const visitorAntiDetection = {
 ### 5.5 调用栈深度检测
 
 恶意代码可能通过 `new Error().stack` 检查调用栈，发现大量 `J$` 相关调用帧后判定环境异常。轻量路径（`J$.Rl`）本身减少了调用层数，但 `J$.B`、`J$.G`、`J$.F` 等仍然存在。彻底解决需要 AntiDetection.js 的反插桩对抗。
+
+---
+
+## 第六部分：实现进度与待解决问题（截至 2026-03）
+
+> 本节记录截至 2026-03 月的实现现状、已完成的工作、以及尚未解决的问题，供下次继续开发时参考。
+
+### 6.1 已完成的工作
+
+#### 6.1.1 插桩端（`src/instrument/`）
+
+以下特性均已完整实现并通过测试：
+
+| 特性 | 文件 | 状态 |
+|------|------|------|
+| eval/with 检测与标记 | `scope.js` | ✅ 已实现并测试 |
+| Scope 唯一 ID（`_scopeIdCounter`） | `scope.js` | ✅ 已实现 |
+| `resetScopeCounter()` 幂等重置 | `scope.js` / `esnstrument.js` | ✅ 已实现 |
+| 变量声明 kind 记录（const/let/var） | `scope.js` | ✅ 已实现 |
+| `_findDefScope()` 沿链查找定义域 | `esnstrument.js` | ✅ 已实现 |
+| 向 `J$.R/W/Fe/N` 传入 `defScopeId` | `esnstrument.js` | ✅ 已实现 |
+| `J$.Rl` 轻量读取路径（插桩端生成） | `esnstrument.js` | ✅ 已实现 |
+| `dataflow.js` Pass 0 def-use 分析 | `dataflow.js` | ✅ 已实现 |
+| `pluginAnalyzer.js` 按需 Config | `pluginAnalyzer.js` | ✅ 已实现 |
+
+#### 6.1.2 运行时端（`src/runtime/JalangiRuntime.js`）
+
+以下机制已实现（**部分存在已知 bug，详见 6.2 节**）：
+
+| 机制 | 字段/方法 | 状态 |
+|------|---------|------|
+| CallID 分配与压/弹栈 | `#callIdCounter`、`#callIdStack`、`Fe()`、`Fr()` | ✅ 基础逻辑已实现 |
+| Shadow Frame 写入 | `#shadowFrameMap`、`#shadowSet()`、`W()`、`N()` | ✅ 已实现 |
+| Shadow Frame 读取 | `#shadowLookup()`、`Rl()` | ✅ 已实现 |
+| Shadow Miss 诊断 | `#shadowMissCount`、`#shadowMissLog`、`#onShadowMiss()` | ✅ 已实现 |
+| `_SHADOW_MISS` 哨兵 | 模块级常量 | ✅ 已实现 |
+| 闭包帧绑定 | `#funcClosureCallId`（WeakMap）、`T()` 中注册 | ✅ 已实现 |
+| 闭包帧保护 | `#closureFrameSet`（Set）、`Fr()` 中检查 | ✅ 已实现 |
+| `#resolveCallId()` 三路解析 | 当前帧 / 祖先帧 / capturedOuterCallId | ⚠️ **存在 bug（详见 6.2.1）** |
+| OID 分配与版本追踪 | `#oidMap`、`#objectVersions`、`T()`、`P()` | ✅ 已实现 |
+| 别名表 | `#aliasTable`、`W()` 中记录 | ✅ 已实现 |
+| 异步 ContextID | `#asyncContextIdCounter`、`#currentContextId` | ✅ 字段已添加（钩子未实现） |
+
+#### 6.1.3 单测覆盖（`test/instrument.test.mjs`）
+
+- 当前共 **149 个测试用例**（`node test/instrument.test.mjs`）
+- 142 个通过，**7 个闭包场景均失败**（见 6.2 节）
+- 闭包场景测试集中在文件 1301–1432 行
+
+---
+
+### 6.2 当前已知问题（待修复）
+
+#### 6.2.1 ⛔ 核心 Bug：闭包场景 7 个测试全部失败
+
+**现象**：所有 7 个闭包场景测试均失败，`Rl()` 返回 `null`（Shadow Frame 未命中）。
+
+```
+✗  闭包场景 1：基础计数器（外层退出后闭包累加）
+     第 1 次调用 counter() 应返回 1: null !== 1
+✗  闭包场景 2：工厂多实例独立（两个计数器互不干扰）
+     c1 第 1 次应返回 1: null !== 1
+✗  闭包场景 3：嵌套闭包两层（内层访问外层的外层）
+     inner() 应返回 10+5=15: null !== 15
+✗  闭包场景 4：闭包写回外层变量（多次修改后读取）
+     makeAccumulator(100).add(5).add(20).get() 应返回 125: null !== 125
+✗  闭包场景 5：递归 + 闭包
+     factBase2(4) 应返回 48: null !== 48
+✗  闭包场景 6：闭包作为回调传递
+     fns[0](1) 应等于 0+1=1: null !== 1
+✗  闭包场景 7：IIFE 闭包捕获
+     fns[0]() 应等于 0*0=0: null !== 0
+```
+
+**根因分析**（初步诊断）：
+
+问题出在以下执行链路中：
+
+```
+外层函数 makeCounter()（scopeId=S_outer, callId=C_outer）
+  ├── J$.W(count=0, defScopeId=S_outer)   → shadowSet(S_outer, C_outer, 'count', 0)  ✅
+  └── J$.T(内层函数)                       → funcClosureCallId.set(fn, C_outer)         ✅
+      ↓  makeCounter() 退出
+      Fr()：检测到 S_outer:C_outer 在 closureFrameSet 中 → 不清除 Shadow Frame        ✅（理论上）
+          但 closureFrameSet 注册可能不正确（见下文）
+内层函数 counter()（新 callId=C_inner）
+  ├── Fe()：capturedOuterCallId = funcClosureCallId.get(fn) = C_outer                 ✅
+  └── J$.Rl(defScopeId=S_outer, 'count')
+      → #resolveCallId(S_outer)
+        → 情况1：S_outer !== #currentFunDefScopeId（当前是 S_inner）               ✗
+        → 情况2：callIdStack 中有无 S_outer？                                     ？待查
+        → 情况3：topEntry.capturedOuterCallId = C_outer；
+                 检查 shadowFrameMap.has("S_outer:C_outer")？                     ？待查
+```
+
+**两个可能的根因**：
+
+**根因 A：`#closureFrameSet` 注册条件不正确**
+
+`T()` 中注册条件：
+```js
+if (this.#currentFunDefScopeId !== undefined) {
+    this.#closureFrameSet.add(`${this.#currentFunDefScopeId}:${this.#currentCallId}`);
+}
+```
+注册的是**外层函数**的 `(scopeId, callId)`。但此 `closureFrameSet` 的用途是告知 `Fr()` "退出时不要清除 Shadow Frame"。
+问题：`T()` 注册的是**当前帧**（外层帧），即 `makeCounter` 的 `(scopeId, callId)`，这是正确的——`Fr()` 检查的正是离开帧的 `(leavingScopeId, leavingCallId)`。
+**此处逻辑看起来是对的，需要进一步验证实际注册时机是否先于 `Fr()` 执行**。
+
+**根因 B：`#callIdStack` 中的 `defScopeId` 字段混淆**
+
+`Fe()` 压栈时：
+```js
+this.#callIdStack.push({
+    callId: this.#currentCallId,          // ← 保存的是「进入前的」callId（即父帧 callId）
+    defScopeId: this.#currentFunDefScopeId, // ← 保存的是「进入前的」defScopeId（即父帧 defScopeId）
+    capturedOuterCallId,
+});
+```
+此处 `defScopeId` 是**父帧**的，不是当前进入函数的。
+
+`#resolveCallId` 在情况 2 中遍历 `callIdStack`：
+```js
+for (let i = this.#callIdStack.length - 1; i >= 0; i--) {
+    const entry = this.#callIdStack[i];
+    if (entry.defScopeId === defScopeId) {   // ← 对比的是父帧的 defScopeId
+        return entry.callId;                  // ← 返回的是父帧的 callId
+    }
+}
+```
+如果我们在内层函数中查找 `S_outer`，栈中存储的是「父帧保存的旧 scopeId 和旧 callId」，不一定能对应上正确的 `(S_outer, C_outer)`。
+
+**最核心的问题**：`callIdStack` 里每个 entry 存储的是「**进栈时保存的父帧状态**」，不是当前帧本身的状态。
+- 想查某个 `defScopeId` 对应的 `callId`，需要查的是「哪一帧的 `currentFunDefScopeId == defScopeId`」，而它的 `callId` 是 `entry` **对应帧进入后分配的那个**，不是 `entry.callId`（那是进入前的）。
+
+具体来说，栈的语义是：
+```
+entry = { callId: 进入此帧前的callId, defScopeId: 进入此帧前的defScopeId, capturedOuterCallId }
+```
+要查「scopeId=S 的帧的 callId」，需要：
+- 找到栈中 `entry.defScopeId === 父帧的defScopeId`……这并不直接关联
+- 实际上需要找到「某个 entry 是在 scopeId=S 的函数内被压入的」，而那时 `#currentFunDefScopeId=S`，压入的 entry 里 `defScopeId` 是 S 的父帧的 defScopeId
+
+**结论**：`#resolveCallId` 的情况 2（祖先帧回溯）逻辑存在**语义错误**。栈中查询方式与栈的实际语义不匹配。
+
+**正确的修复方向**：在每个栈帧 entry 中**同时记录自身的 scopeId 和自身的 callId**：
+
+```js
+// Fe() 压栈时，改为记录「当前帧自身的信息」用于回溯
+// 在分配新 callId 之前先保存当前帧信息供将来查询
+this.#callIdStack.push({
+    // 父帧信息（用于 Fr() 恢复）
+    callId:       this.#currentCallId,
+    defScopeId:   this.#currentFunDefScopeId,
+    capturedOuterCallId,
+    // 自身信息（用于 #resolveCallId 情况 2 回溯）
+    // 注意：进入时 this.#currentFunDefScopeId 仍是「将要成为」的帧的 defScopeId（即 defScopeId 参数）
+    // 等 Fe() 执行完后 this.#currentFunDefScopeId = defScopeId，所以要记录 defScopeId（参数）
+    // 和下面分配的新 callId = ++this.#callIdCounter
+    // 问题：新 callId 还没分配…… 需要调整压栈顺序
+});
+this.#currentCallId = ++this.#callIdCounter;
+this.#currentFunDefScopeId = defScopeId;
+```
+
+更清晰的重构方案：
+
+```js
+Fe(iid, f, dis, args, defScopeId) {
+    const newCallId = ++this.#callIdCounter;
+    const capturedOuterCallId = typeof f === 'function'
+        ? (this.#funcClosureCallId.get(f) ?? null)
+        : null;
+
+    this.#callIdStack.push({
+        // === 父帧信息（供 Fr() 恢复） ===
+        parentCallId:    this.#currentCallId,
+        parentScopeId:   this.#currentFunDefScopeId,
+        capturedOuterCallId,
+        // === 自身帧信息（供 #resolveCallId 情况 2 查表） ===
+        selfCallId:  newCallId,
+        selfScopeId: defScopeId,
+    });
+    this.#currentCallId = newCallId;
+    this.#currentFunDefScopeId = defScopeId;
+    // ...
+}
+```
+
+```js
+// #resolveCallId 情况 2：遍历栈时，匹配 entry.selfScopeId
+for (let i = this.#callIdStack.length - 1; i >= 0; i--) {
+    const entry = this.#callIdStack[i];
+    if (entry.selfScopeId === defScopeId) {
+        return entry.selfCallId;   // ← 这才是正确的「该作用域这次调用分配到的 callId」
+    }
+}
+```
+
+---
+
+#### 6.2.2 ⚠️ 未实现：`AwaitExpression` 插桩
+
+`J$.Aw` 钩子已在运行时预留（`#asyncContextIdCounter`、`#currentContextId`），但插桩端（`wrappers.js` 中的 `wrapAwait()`）**尚未实现**。设计方案已在本文档 3.5 节详细描述。
+
+影响：
+- 异步函数的 `await` 表达式不产生 `J$.Aw` 调用
+- 异步执行上下文（ContextID）无法区分，log 会有交叉感染风险
+
+---
+
+#### 6.2.3 ℹ️ `#resolveCallId` 情况 3 只检查栈顶
+
+当前情况 3（外层帧已退出）只取栈顶的 `capturedOuterCallId`：
+
+```js
+if (this.#callIdStack.length > 0) {
+    const topEntry = this.#callIdStack[this.#callIdStack.length - 1];
+    const captured = topEntry.capturedOuterCallId;
+    // ...
+}
+```
+
+对于嵌套闭包（outer → middle → inner，inner 访问 outer 的变量），情况 3 只能向上追溯一层，无法递推追溯多层。
+
+**修复方向**：沿 capturedOuterCallId 链递推：
+1. 取当前帧的 `capturedOuterCallId = C1`
+2. 检查 `shadowFrameMap.has("defScopeId:C1")`，如命中则返回 C1
+3. 否则，找到 callId=C1 的栈帧，取其 `capturedOuterCallId = C2`，继续向上
+
+---
+
+### 6.3 下次继续工作的优先级
+
+| 优先级 | 任务 | 说明 |
+|--------|------|------|
+| 🔴 P0 | 修复 `callIdStack` 的 entry 语义，在栈帧中增加 `selfCallId`/`selfScopeId` | 解决 7 个闭包场景全失败的核心 bug（见 6.2.1）|
+| 🔴 P0 | 修复 `#resolveCallId` 情况 2 中的查表逻辑（改用 `entry.selfScopeId`）| 同上 |
+| 🟡 P1 | 修复 `#resolveCallId` 情况 3 支持多层嵌套闭包递推 | 解决嵌套闭包场景 3、7 |
+| 🟡 P1 | 验证 `closureFrameSet` 注册时机是否正确（T() 早于 Fr()？）| 检查闭包帧保护是否生效 |
+| 🟢 P2 | 实现 `wrapAwait()` 插桩端，补全 `J$.Aw` 支持 | 完成异步 ContextID 机制 |
+| 🟢 P2 | 为 `closureFrameSet` 增加 GC 策略（避免内存泄漏） | 长期稳定性 |
+
+---
+
+### 6.4 调试方法参考
+
+在测试中可用 `debugShadow: true` 启用 Shadow Frame 诊断模式：
+
+```js
+const J$inst = new JalangiSandbox({ debugShadow: true });
+runInSandbox(code, J$inst);
+// 失败后查看：
+console.log(J$inst.getShadowStats());
+// 输出：{ missCount: N, missLog: [{iid, defScopeId, name, callId}] }
+```
+
+另外，`instrAndRun()` 帮助函数默认不传 `debugShadow`，需要在闭包测试中临时修改为：
+```js
+const J$inst = new JalangiSandbox({ debugShadow: true });
+```
+来获取详细的 miss 日志。
+
+---
+
+### 6.5 关键代码位置速查
+
+| 内容 | 文件 | 行号（约）|
+|------|------|---------|
+| `Fe()` 压栈逻辑 | `src/runtime/JalangiRuntime.js` | ~791-816 |
+| `Fr()` 弹栈与 Shadow Frame 清理 | `src/runtime/JalangiRuntime.js` | ~819-871 |
+| `#resolveCallId()` | `src/runtime/JalangiRuntime.js` | ~307-334 |
+| `T()` 中注册 funcClosureCallId/closureFrameSet | `src/runtime/JalangiRuntime.js` | ~544-551 |
+| `Rl()` 轻量读取 | `src/runtime/JalangiRuntime.js` | ~687-708 |
+| `N()` 形参初始化到 Shadow Frame | `src/runtime/JalangiRuntime.js` | ~573-593 |
+| 闭包场景单测（7个）| `test/instrument.test.mjs` | 1301-1432 |
