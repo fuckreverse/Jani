@@ -20,7 +20,12 @@
  *   - 插桩幂等性（同文件多次插桩结果一致）
  */
 
-import { init, instrumentCode } from '../src/instrument/esnstrument.js';
+import { init, instrumentCode, analyzePluginHooks, buildConfigFromHooks, buildConfigFromPlugins, fullConfig } from '../src/instrument/esnstrument.js';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = dirname(__filename);
 
 // ─── 测试框架（极简，无外部依赖）────────────────────────────────────────────────
 
@@ -889,6 +894,226 @@ test('jalangiVar: 前缀 __jal_ 随机名格式插桩正确', () => {
     });
     assertIncludes(r.code, varName, `插桩输出应包含随机变量名 ${varName}`);
     assertIncludes(r.code, `${varName}.`, `钩子调用应使用 ${varName}. 前缀`);
+});
+
+// ════════════════════════════════════════════════════════════════
+// 按需插桩（pluginAnalyzer + buildConfigFromHooks）
+// ════════════════════════════════════════════════════════════════
+
+console.log('\n── 按需插桩（pluginAnalyzer）─────────────────────────');
+
+// ── buildConfigFromHooks：基本映射 ───────────────────────────────
+
+test('buildConfigFromHooks: 只用 binary 时只开启 INSTR_BINARY', () => {
+    const config = buildConfigFromHooks(new Set(['binary', 'binaryPre']));
+    assert(config.INSTR_BINARY === null, 'INSTR_BINARY 应为 null（开启）');
+    assert(typeof config.INSTR_READ === 'function', 'INSTR_READ 应为 () => false（禁用）');
+    assert(typeof config.INSTR_WRITE === 'function', 'INSTR_WRITE 应为 () => false（禁用）');
+    assert(typeof config.INSTR_GETFIELD === 'function', 'INSTR_GETFIELD 应为 () => false（禁用）');
+    assert(typeof config.INSTR_LITERAL === 'function', 'INSTR_LITERAL 应为 () => false（禁用）');
+    assert(config.ENABLE_SAMPLING === false, 'ENABLE_SAMPLING 应为 false');
+});
+
+test('buildConfigFromHooks: 只用 read 时只开启 INSTR_READ', () => {
+    const config = buildConfigFromHooks(new Set(['read']));
+    assert(config.INSTR_READ === null, 'INSTR_READ 应为 null');
+    assert(typeof config.INSTR_WRITE === 'function', 'INSTR_WRITE 应被禁用');
+    assert(typeof config.INSTR_BINARY === 'function', 'INSTR_BINARY 应被禁用');
+});
+
+test('buildConfigFromHooks: functionEnter 需要 INSTR_TRY_CATCH_ARGUMENTS', () => {
+    const config = buildConfigFromHooks(new Set(['functionEnter', 'functionExit']));
+    assert(config.INSTR_TRY_CATCH_ARGUMENTS === null, 'functionEnter 需要 INSTR_TRY_CATCH_ARGUMENTS');
+    assert(typeof config.INSTR_READ === 'function', 'INSTR_READ 不需要，应被禁用');
+});
+
+test('buildConfigFromHooks: declare 需要 INSTR_INIT + INSTR_TRY_CATCH_ARGUMENTS', () => {
+    const config = buildConfigFromHooks(new Set(['declare']));
+    assert(config.INSTR_INIT === null, 'declare 需要 INSTR_INIT');
+    assert(config.INSTR_TRY_CATCH_ARGUMENTS === null, 'declare 需要 INSTR_TRY_CATCH_ARGUMENTS');
+});
+
+test('buildConfigFromHooks: invokeFunPre/invokeFun 需要 INSTR_INVOKE', () => {
+    const config = buildConfigFromHooks(new Set(['invokeFunPre', 'invokeFun']));
+    assert(config.INSTR_INVOKE === null, 'invoke 钩子应开启 INSTR_INVOKE');
+    assert(typeof config.INSTR_READ === 'function', 'INSTR_READ 不需要，应被禁用');
+});
+
+test('buildConfigFromHooks: _return 需要 INSTR_RETURN', () => {
+    const config = buildConfigFromHooks(new Set(['_return']));
+    assert(config.INSTR_RETURN === null, '_return 钩子应开启 INSTR_RETURN');
+    assert(typeof config.INSTR_THROW === 'function', 'INSTR_THROW 不需要，应被禁用');
+});
+
+test('buildConfigFromHooks: _throw 需要 INSTR_THROW', () => {
+    const config = buildConfigFromHooks(new Set(['_throw']));
+    assert(config.INSTR_THROW === null, '_throw 钩子应开启 INSTR_THROW');
+    assert(typeof config.INSTR_RETURN === 'function', 'INSTR_RETURN 不需要，应被禁用');
+});
+
+test('buildConfigFromHooks: forinObject 需要 INSTR_FORIN', () => {
+    const config = buildConfigFromHooks(new Set(['forinObject']));
+    assert(config.INSTR_FORIN === null, 'forinObject 钩子应开启 INSTR_FORIN');
+    assert(typeof config.INSTR_READ === 'function', 'INSTR_READ 不需要，应被禁用');
+});
+
+test('buildConfigFromHooks: endExecution/onReady 不映射任何 Config 字段', () => {
+    const config = buildConfigFromHooks(new Set(['endExecution', 'onReady']));
+    // 所有 INSTR_* 字段都应被禁用
+    for (const [k, v] of Object.entries(config)) {
+        if (k.startsWith('INSTR_')) {
+            assert(typeof v === 'function', `${k} 应被禁用，得到 ${v}`);
+        }
+    }
+});
+
+test('fullConfig: 返回所有字段均为 null 的全量 Config', () => {
+    const config = fullConfig();
+    const fields = ['INSTR_READ','INSTR_WRITE','INSTR_GETFIELD','INSTR_PUTFIELD',
+        'INSTR_BINARY','INSTR_UNARY','INSTR_LITERAL','INSTR_INIT',
+        'INSTR_CONDITIONAL','INSTR_TRY_CATCH_ARGUMENTS','INSTR_END_EXPRESSION',
+        'INSTR_INVOKE','INSTR_RETURN','INSTR_THROW','INSTR_FORIN'];
+    for (const f of fields) {
+        assert(config[f] === null, `fullConfig 的 ${f} 应为 null`);
+    }
+});
+
+// ── analyzePluginHooks：从实际插件文件扫描 ───────────────────────
+
+test('analyzePluginHooks: 从 CheckNaN.js 扫描出 binary + endExecution', () => {
+    const pluginPath = join(__dirname, '../src/plugins/dlint/CheckNaN.js');
+    const hooks = analyzePluginHooks([pluginPath]);
+    assert(hooks.has('binary'), 'CheckNaN 应包含 binary');
+    assert(hooks.has('endExecution'), 'CheckNaN 应包含 endExecution');
+    // 不应包含其他高代价钩子
+    assert(!hooks.has('read'), 'CheckNaN 不应包含 read');
+    assert(!hooks.has('write'), 'CheckNaN 不应包含 write');
+    assert(!hooks.has('getField'), 'CheckNaN 不应包含 getField');
+});
+
+test('analyzePluginHooks: 从实例对象扫描（运行时反射）', () => {
+    // 构造一个只有 binary 和 endExecution 的简单插件实例
+    const pluginInstance = {
+        binary() {},
+        endExecution() {},
+    };
+    const hooks = analyzePluginHooks([pluginInstance]);
+    assert(hooks.has('binary'), '实例扫描应发现 binary');
+    assert(hooks.has('endExecution'), '实例扫描应发现 endExecution');
+    assert(!hooks.has('read'), '实例扫描不应发现 read');
+});
+
+test('analyzePluginHooks: 静态 usedHooks 声明优先', () => {
+    // 模拟带有 static usedHooks 声明的插件
+    class MyPlugin {
+        static usedHooks = ['invokeFunPre', 'invokeFun'];
+        // 注意：这里故意不定义 read 方法，但通过 usedHooks 声明
+    }
+    const hooks = analyzePluginHooks([new MyPlugin()]);
+    assert(hooks.has('invokeFunPre'), 'usedHooks 声明的 invokeFunPre 应被识别');
+    assert(hooks.has('invokeFun'), 'usedHooks 声明的 invokeFun 应被识别');
+});
+
+// ── buildConfigFromPlugins：端到端流程 ───────────────────────────
+
+test('buildConfigFromPlugins: CheckNaN.js → 只开启 INSTR_BINARY', () => {
+    const pluginPath = join(__dirname, '../src/plugins/dlint/CheckNaN.js');
+    const config = buildConfigFromPlugins([pluginPath]);
+    assert(config.INSTR_BINARY === null, 'CheckNaN 只需 INSTR_BINARY');
+    assert(typeof config.INSTR_READ === 'function', 'INSTR_READ 应被禁用');
+    assert(typeof config.INSTR_WRITE === 'function', 'INSTR_WRITE 应被禁用');
+    assert(typeof config.INSTR_GETFIELD === 'function', 'INSTR_GETFIELD 应被禁用');
+    assert(typeof config.INSTR_LITERAL === 'function', 'INSTR_LITERAL 应被禁用');
+});
+
+test('buildConfigFromPlugins: 空数组返回全量 Config', () => {
+    const config = buildConfigFromPlugins([]);
+    assert(config.INSTR_BINARY === null, '空数组应返回全量 Config');
+    assert(config.INSTR_READ === null, '空数组应返回全量 Config');
+});
+
+// ── 按需 Config 实际影响插桩输出 ───────────────────────────────
+
+test('按需插桩: 只开 INSTR_BINARY 时，输出不含 J$.R（read 钩子）', () => {
+    const config = buildConfigFromHooks(new Set(['binary', 'binaryPre']));
+    init(config);
+    const r = instrumentCode({
+        code: 'var x = 1 + 2; var y = x;',
+        origCodeFileName: 'on-demand.js',
+        instCodeFileName: 'on-demand_i.js',
+    });
+    // binary 操作应被插桩
+    assert(r.code.includes('J$.B(') || r.code.includes('J$.Bp('),
+        '二元运算应被插桩（J$.B 或 J$.Bp）');
+    // read 操作不应被插桩（J$.R）
+    assert(!r.code.includes('J$.R('), '变量读取不应被插桩（J$.R 应不存在）');
+    // 字面量不应被插桩（J$.T）
+    assert(!r.code.includes('J$.T('), '字面量不应被插桩（J$.T 应不存在）');
+});
+
+test('按需插桩: 只开 INSTR_READ 时，输出不含 J$.B（binary 钩子）', () => {
+    const config = buildConfigFromHooks(new Set(['read']));
+    init(config);
+    const r = instrumentCode({
+        code: 'var x = 1 + 2; var y = x;',
+        origCodeFileName: 'on-demand2.js',
+        instCodeFileName: 'on-demand2_i.js',
+    });
+    // read 应被插桩
+    assert(r.code.includes('J$.R('), '变量读取应被插桩（J$.R）');
+    // binary 不应被插桩
+    assert(!r.code.includes('J$.B('), '二元运算不应被插桩（J$.B 应不存在）');
+});
+
+test('按需插桩: 关闭 INSTR_INVOKE 时，函数调用不注入 J$.F/J$.M', () => {
+    const config = buildConfigFromHooks(new Set(['read']));  // 不含 invokeFunPre/invokeFun
+    init(config);
+    const r = instrumentCode({
+        code: 'function foo() {} foo(); var obj = { bar: function(){} }; obj.bar();',
+        origCodeFileName: 'invoke-off.js',
+        instCodeFileName: 'invoke-off_i.js',
+    });
+    assert(!r.code.includes('J$.F('), '关闭 INSTR_INVOKE 时 J$.F 不应出现');
+    assert(!r.code.includes('J$.M('), '关闭 INSTR_INVOKE 时 J$.M 不应出现');
+});
+
+test('按需插桩: 关闭 INSTR_RETURN 时，return 语句不注入 J$.Rt', () => {
+    const config = buildConfigFromHooks(new Set(['binary']));  // 不含 _return
+    init(config);
+    const r = instrumentCode({
+        code: 'function foo(x) { return x + 1; }',
+        origCodeFileName: 'return-off.js',
+        instCodeFileName: 'return-off_i.js',
+    });
+    assert(!r.code.includes('J$.Rt('), '关闭 INSTR_RETURN 时 J$.Rt 不应出现');
+});
+
+test('按需插桩: 关闭 INSTR_FORIN 时，for-in 不注入 J$.H/J$.I', () => {
+    const config = buildConfigFromHooks(new Set(['binary']));  // 不含 forinObject
+    init(config);
+    const r = instrumentCode({
+        code: 'for (var k in obj) { console.log(k); }',
+        origCodeFileName: 'forin-off.js',
+        instCodeFileName: 'forin-off_i.js',
+    });
+    assert(!r.code.includes('J$.H('), '关闭 INSTR_FORIN 时 J$.H 不应出现');
+});
+
+test('按需插桩: init() 传 plugins 参数自动推导 Config', () => {
+    // 模拟只有 binary 的插件实例
+    const pluginInst = { binary() {}, endExecution() {} };
+    // 传 null config + plugins，应自动推导
+    init(null, null, null, 'J$', [pluginInst]);
+    const r = instrumentCode({
+        code: 'var x = 1 + 2;',
+        origCodeFileName: 'auto-config.js',
+        instCodeFileName: 'auto-config_i.js',
+    });
+    assert(r.code.includes('J$.B(') || r.code.includes('J$.Bp('),
+        'plugins 推导后 binary 应被插桩');
+    assert(!r.code.includes('J$.R('), 'plugins 推导后 read 不应被插桩');
+    // 恢复全量 Config 供后续测试使用
+    init(ALL_CONFIG);
 });
 
 // ════════════════════════════════════════════════════════════════

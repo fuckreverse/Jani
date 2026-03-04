@@ -320,24 +320,31 @@ function wrapMethodCall(node, base, offset, isCtor, isComputed) {
     assertAstNode(node,   'wrapMethodCall/node');
     assertAstNode(base,   'wrapMethodCall/base');
     assertAstNode(offset, 'wrapMethodCall/offset');
-    IID.printIidToLoc(node);
-    IID.printSpecialIidToLoc(node.callee);
-    const ret = replaceInExpr(
-        `${logMethodCallFunName}(${RP}1, ${RP}2, ${RP}3, ${createBitPattern(isCtor, isComputed)})`,
-        IID.getIid(), base, offset
-    );
-    transferLoc(ret, node.callee);
-    return ret;
+    if (!Config.INSTR_INVOKE || Config.INSTR_INVOKE(node)) {
+        IID.printIidToLoc(node);
+        IID.printSpecialIidToLoc(node.callee);
+        const ret = replaceInExpr(
+            `${logMethodCallFunName}(${RP}1, ${RP}2, ${RP}3, ${createBitPattern(isCtor, isComputed)})`,
+            IID.getIid(), base, offset
+        );
+        transferLoc(ret, node.callee);
+        return ret;
+    }
+    // INSTR_INVOKE 禁用时：退回原始 callee，保留语义正确性
+    return base.type ? { type: 'MemberExpression', object: base, property: offset, computed: isComputed } : base;
 }
 
 function wrapFunCall(node, ast, isCtor) {
-    IID.printIidToLoc(node);
-    const ret = replaceInExpr(
-        `${logFunCallFunName}(${RP}1, ${RP}2, ${createBitPattern(isCtor)})`,
-        IID.getIid(), ast
-    );
-    transferLoc(ret, node.callee);
-    return ret;
+    if (!Config.INSTR_INVOKE || Config.INSTR_INVOKE(node)) {
+        IID.printIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logFunCallFunName}(${RP}1, ${RP}2, ${createBitPattern(isCtor)})`,
+            IID.getIid(), ast
+        );
+        transferLoc(ret, node.callee);
+        return ret;
+    }
+    return ast;
 }
 
 function wrapGetField(node, base, offset, isComputed) {
@@ -471,25 +478,31 @@ function wrapLHSOfModStore(node, left, right) {
 }
 
 function wrapReturn(node, expr) {
-    const lid = expr ?? node;
-    IID.printIidToLoc(lid);
-    const actualExpr = expr ?? createIdentifierAst('undefined');
-    const ret = replaceInExpr(
-        `${logReturnFunName}(${RP}1, ${RP}2)`,
-        IID.getIid(), actualExpr
-    );
-    transferLoc(ret, lid);
-    return ret;
+    if (!Config.INSTR_RETURN || Config.INSTR_RETURN(node)) {
+        const lid = expr ?? node;
+        IID.printIidToLoc(lid);
+        const actualExpr = expr ?? createIdentifierAst('undefined');
+        const ret = replaceInExpr(
+            `${logReturnFunName}(${RP}1, ${RP}2)`,
+            IID.getIid(), actualExpr
+        );
+        transferLoc(ret, lid);
+        return ret;
+    }
+    return expr;
 }
 
 function wrapThrow(node, expr) {
-    IID.printIidToLoc(expr);
-    const ret = replaceInExpr(
-        `${logThrowFunName}(${RP}1, ${RP}2)`,
-        IID.getIid(), expr
-    );
-    transferLoc(ret, expr);
-    return ret;
+    if (!Config.INSTR_THROW || Config.INSTR_THROW(node)) {
+        IID.printIidToLoc(expr);
+        const ret = replaceInExpr(
+            `${logThrowFunName}(${RP}1, ${RP}2)`,
+            IID.getIid(), expr
+        );
+        transferLoc(ret, expr);
+        return ret;
+    }
+    return expr;
 }
 
 function wrapWithX1(node, ast) {
@@ -507,13 +520,16 @@ function wrapWithX1(node, ast) {
 }
 
 function wrapHash(node, ast) {
-    IID.printIidToLoc(node);
-    const ret = replaceInExpr(
-        `${logHashFunName}(${RP}1, ${RP}2)`,
-        IID.getIid(), ast
-    );
-    transferLoc(ret, node);
-    return ret;
+    if (!Config.INSTR_FORIN || Config.INSTR_FORIN(node)) {
+        IID.printIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logHashFunName}(${RP}1, ${RP}2)`,
+            IID.getIid(), ast
+        );
+        transferLoc(ret, node);
+        return ret;
+    }
+    return ast;
 }
 
 function wrapEvalArg(ast) {
@@ -821,6 +837,7 @@ let labelCounter = 0;
 let tmpVarCounter = 0;
 
 function wrapForIn(node, left, right, body) {
+    if (Config.INSTR_FORIN && !Config.INSTR_FORIN(node)) return node;
     IID.printIidToLoc(node);
     const isDeclaration = (left.type === 'VariableDeclaration');
     let tmp, extra;

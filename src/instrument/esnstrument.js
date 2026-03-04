@@ -41,6 +41,7 @@ import { addScopes, resetScopeCounter } from './scope.js';
 import { analyzeDefUse }  from './dataflow.js';  // TODO-9/10: 静态 def-use 分析
 import * as IID            from './iid.js';
 import * as W              from './wrappers.js';
+import { analyzePluginHooks, buildConfigFromHooks, buildConfigFromPlugins, fullConfig } from './pluginAnalyzer.js';
 // ArrowFunctionExpression 专用初始化（仅做 syncDefuns，不注入 J$.Fe）
 const { instrumentArrowFunctionBody } = W;
 
@@ -53,15 +54,22 @@ let _jalangiVar = JALANGI_VAR;  // 当前沙盒变量名（可自定义）
 /**
  * 初始化插桩器。必须在第一次调用 instrumentCode 之前调用。
  *
- * @param {object} config      - Jalangi Config 对象
- * @param {object} [analysis]  - 当前 analysis 对象（可选，用于 pre/post hook）
- * @param {*}      [sid]       - 当前脚本 ID（用于 eval 的 source map）
- * @param {string} [jalangiVar] - 沙盒变量名（默认 'J$'）。
- *                                指定其他名称可避免与被分析页面已有的 J$ 变量冲突。
+ * @param {object}         config      - Jalangi Config 对象。
+ *                                        若传入 null，且同时传入 plugins，则自动从插件推导 Config。
+ * @param {object}         [analysis]  - 当前 analysis 对象（可选，用于 pre/post hook）
+ * @param {*}              [sid]       - 当前脚本 ID（用于 eval 的 source map）
+ * @param {string}         [jalangiVar] - 沙盒变量名（默认 'J$'）。
+ * @param {Array<string|object>} [plugins] - 插件路径或实例列表，用于按需推导 Config。
+ *                                            当 config 为 null 且提供了 plugins 时，
+ *                                            自动分析插件所用 Hook 并生成最小化 Config。
+ *                                            当 config 不为 null 时，plugins 被忽略。
  */
-function init(config, analysis, sid, jalangiVar) {
-    if (config == null || typeof config !== 'object') {
-        throw new TypeError('[jalangi] init(): config must be a non-null object');
+function init(config, analysis, sid, jalangiVar, plugins) {
+    // 若 config 为 null 但提供了 plugins，则从插件推导按需 Config
+    if (config == null && plugins != null) {
+        config = buildConfigFromPlugins(plugins);
+    } else if (config == null || typeof config !== 'object') {
+        throw new TypeError('[jalangi] init(): config must be a non-null object (or pass plugins to auto-derive config)');
     }
     _config     = config;
     _analysis   = analysis ?? null;
@@ -798,4 +806,4 @@ function instrumentEvalCode(code, iid, isDirect) {
     }).code;
 }
 
-export { init, instrumentCode, instrumentEvalCode };
+export { init, instrumentCode, instrumentEvalCode, analyzePluginHooks, buildConfigFromHooks, buildConfigFromPlugins, fullConfig };
