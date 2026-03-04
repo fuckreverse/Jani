@@ -103,13 +103,22 @@ function transformAst(object, visitorPost, visitorPre, context, noIgnore) {
                 key === 'callee' &&
                 (object.callee.type === 'MemberExpression' ||
                  (object.callee.type === 'Identifier' && object.callee.name === 'eval'))) ||
+            // OptionalCallExpression：optional call a?.()
+            (type === 'OptionalCallExpression' &&
+                key === 'callee' &&
+                (object.callee.type === 'OptionalMemberExpression' ||
+                 object.callee.type === 'MemberExpression')) ||
             (type === 'VariableDeclarator'      && key === 'id') ||
             (type === 'MemberExpression'        && !object.computed && key === 'property') ||
+            (type === 'OptionalMemberExpression' && !object.computed && key === 'property') ||
             (type === 'Property'                && key === 'key' && !object.computed) ||
             (type === 'RestElement'             && key === 'argument') ||
             (type === 'AssignmentPattern'       && key === 'left') ||
             (type === 'PropertyDefinition'      && key === 'key' && !object.computed) ||
-            (type === 'MethodDefinition'        && key === 'key' && !object.computed)
+            (type === 'MethodDefinition'        && key === 'key' && !object.computed) ||
+            (type === 'ClassMethod'             && key === 'key' && !object.computed) ||
+            (type === 'ClassPrivateProperty'    && key === 'key') ||
+            (type === 'PrivateName'             && key === 'id')
         ) {
             newContext = CONTEXT.IGNORE;
         } else if (type === 'ObjectExpression' && key === 'properties') {
@@ -118,6 +127,8 @@ function transformAst(object, visitorPost, visitorPre, context, noIgnore) {
             (type === 'FunctionExpression' || type === 'FunctionDeclaration' || type === 'ArrowFunctionExpression') &&
             key === 'params'
         ) {
+            newContext = CONTEXT.PARAMS;
+        } else if (type === 'ClassMethod' && key === 'params') {
             newContext = CONTEXT.PARAMS;
         } else if (context === CONTEXT.OEXP) {
             newContext = CONTEXT.OEXP2;
@@ -131,6 +142,10 @@ function transformAst(object, visitorPost, visitorPre, context, noIgnore) {
             newContext = CONTEXT.SETTER;
         } else if (type === 'MethodDefinition' && key === 'value') {
             newContext = CONTEXT.METHOD;
+        } else if (type === 'ClassMethod' && key === 'body') {
+            if (object.kind === 'get') newContext = CONTEXT.GETTER;
+            else if (object.kind === 'set') newContext = CONTEXT.SETTER;
+            else newContext = CONTEXT.METHOD;
         } else if (type === 'CallExpression' && key === 'callee' && child.type === 'Identifier' && child.name === 'eval') {
             newContext = CONTEXT.IGNORE;
         } else if (type === 'UnaryExpression' && key === 'argument' && object.operator === 'typeof' && child.type === 'Identifier') {

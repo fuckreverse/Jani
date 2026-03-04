@@ -4,16 +4,16 @@
   "description": "dynamic analysis framework for JavaScript",
   "type": "module",
   "dependencies": {
-    "acorn": "^8.16.0",
-    "astring": "^1.9.0",
+    "@babel/generator": "^7.29.1",
+    "@babel/parser": "^7.29.0",
     "codemirror": "5.1.0",
     "datatables": "1.10.6",
     "jquery": "3.5.0",
     "ws": "^8.19.0"
   },
   "bundledDependencies": [
-    "acorn",
-    "astring"
+    "@babel/parser",
+    "@babel/generator"
   ],
   "scripts": {
     "test": "node test/instrument.test.mjs",
@@ -33,9 +33,5 @@
     "mocha": "^10.0.0",
     "rollup": "^4.59.0"
   },
-  "main": "src/instrument/esnstrument.js",
-  "bundleDependencies": [
-    "acorn",
-    "astring"
-  ]
+  "main": "src/instrument/esnstrument.js"
 }

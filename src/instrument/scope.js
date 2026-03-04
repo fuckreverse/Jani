@@ -134,7 +134,7 @@ function collectParamNames(param, collected) {
  * 遍历 AST，为每个作用域节点附加 .scope 属性，并将 `arguments`
  * 标识符重命名为 `J$_arguments`，避免与插桩注入代码冲突。
  *
- * @param {object} ast - acorn 解析得到的 AST（Program 节点）
+ * @param {object} ast - 解析得到的 AST（Program 节点）
  */
 function addScopes(ast) {
     let currentScope = null;
@@ -170,6 +170,10 @@ function addScopes(ast) {
                 node.params.forEach(registerParam);
                 break;
             case 'ArrowFunctionExpression':
+                node.params.forEach(registerParam);
+                break;
+            case 'ClassMethod':
+                // ClassMethod 直接携带参数和函数体，注册形参即可。
                 node.params.forEach(registerParam);
                 break;
             // Program: currentScope 就是顶层全局作用域
@@ -212,6 +216,7 @@ function addScopes(ast) {
         FunctionDeclaration:     handleFun,
         FunctionExpression:      handleFun,
         ArrowFunctionExpression: handleFun,
+        ClassMethod:             handleFun,
         VariableDeclarator:      handleVar,
         CatchClause:             handleCatch,
     };
@@ -221,6 +226,7 @@ function addScopes(ast) {
         FunctionDeclaration:     popScope,
         FunctionExpression:      popScope,
         ArrowFunctionExpression: popScope,
+        ClassMethod:             popScope,
         CatchClause:             popScope,
 
         // 重命名 arguments → J$_arguments（RHS 读取场景）

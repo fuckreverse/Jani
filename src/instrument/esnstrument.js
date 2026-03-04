@@ -26,12 +26,14 @@
  *  4. 导出 instrumentEvalCode(code, iid, isDirect)  —— eval 插桩包装
  *
  * 依赖：
- *  - acorn   (npm，>= 8.0，ecmaVersion:'latest' 支持 ES2022+)
- *  - astring (npm，支持 ES2022+ 代码生成，替代旧版 esotope)
+ *  - @babel/parser    (npm，支持 ES2022+ 及实验性语法解析)
+ *  - @babel/generator  (npm，从 Babel AST 生成代码)
  */
 
-import * as acorn   from 'acorn';
-import { generate as astringGenerate } from 'astring';
+import * as babelParser from '@babel/parser';
+import _babelGenerate   from '@babel/generator';
+// @babel/generator 是 CJS 模块，ESM 导入需取 .default
+const babelGenerate = _babelGenerate.default ?? _babelGenerate;
 
 import { JALANGI_VAR }     from '../Constants.js';
 import { CONTEXT, transformAst, setJalangiVar as setAstUtilJalangiVar } from './astUtil.js';
@@ -126,7 +128,7 @@ function mergeBodies(node) {
     // 仅处理经过 Pass 0（visitorCloneBodyPre）存入了 bodyOrig 的函数节点。
     // wrapFunBodyWithTryCatch / wrapScriptBodyWithTryCatch 在 Pass 2 中注入了
     // 辅助性的 "function n() { ... }" wrapper，这些节点没有 bodyOrig，
-    // 在此直接跳过，不进行采样合并，否则会将 undefined 作为 consequent 传给 astring。
+    // 在此直接跳过，不进行采样合并，否则会将 undefined 作为 consequent。
     if (!node.bodyOrig) return node;
 
     IID.printIidToLoc(node);
@@ -185,26 +187,46 @@ const visitorRRPre = {
     // 必须在这里同步更新 _scope，否则遍历箭头函数体内的标识符时
     // _scope 仍指向父作用域，导致箭头参数和局部变量被错误识别为全局变量。
     ArrowFunctionExpression: W.setScope,
+    // Babel AST：ClassMethod 节点同时含 params 和 body，在 addScopes 阶段
+    // 已创建独立作用域（handleFun），需要在此同步更新 _scope。
+    ClassMethod:             W.setScope,
     CatchClause:             W.setScope,
 };
 
 // ─── visitor：主插桩变换（Post）──────────────────────────────────────────────
 
 const visitorRRPost = {
-    Literal(node, context) {
+    // Babel AST 将每种字面量表示为独立节点类型：
+    // NumericLiteral、StringLiteral、BooleanLiteral、NullLiteral、RegExpLiteral、BigIntLiteral
+
+    NumericLiteral(node, context) {
         if (context !== CONTEXT.RHS) return node;
-        switch (typeof node.value) {
-            case 'number':  return W.wrapLiteral(node, node, N_LOG_NUMBER_LIT);
-            case 'string':  return W.wrapLiteral(node, node, N_LOG_STRING_LIT);
-            case 'boolean': return W.wrapLiteral(node, node, N_LOG_BOOLEAN_LIT);
-            case 'object':
-                return W.wrapLiteral(node, node, node.value === null ? N_LOG_NULL_LIT : N_LOG_REGEXP_LIT);
-            case 'bigint':
-                // ES2020 BigInt 字面量（如 42n）：暂不插桩，返回原节点
-                return node;
-            default:
-                return node;
-        }
+        return W.wrapLiteral(node, node, N_LOG_NUMBER_LIT);
+    },
+
+    StringLiteral(node, context) {
+        if (context !== CONTEXT.RHS) return node;
+        return W.wrapLiteral(node, node, N_LOG_STRING_LIT);
+    },
+
+    BooleanLiteral(node, context) {
+        if (context !== CONTEXT.RHS) return node;
+        return W.wrapLiteral(node, node, N_LOG_BOOLEAN_LIT);
+    },
+
+    NullLiteral(node, context) {
+        if (context !== CONTEXT.RHS) return node;
+        return W.wrapLiteral(node, node, N_LOG_NULL_LIT);
+    },
+
+    RegExpLiteral(node, context) {
+        if (context !== CONTEXT.RHS) return node;
+        return W.wrapLiteral(node, node, N_LOG_REGEXP_LIT);
+    },
+
+    BigIntLiteral(node, context) {
+        // BigInt 字面量（如 42n）：暂不插桩，返回原节点
+        return node;
     },
 
     Program(node) {
@@ -288,6 +310,16 @@ const visitorRRPost = {
         return node;
     },
 
+    /**
+     * ClassMethod 节点直接携带 params 和 body（相当于 MethodDefinition 的函数体）。
+     * 在 body.body 中注入 J$.Fe 入口/出口钩子；方法定义本身不包装为字面量。
+     */
+    ClassMethod(node, context) {
+        node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
+        W.popScope();
+        return node;
+    },
+
     ArrowFunctionExpression(node) {
         // 箭头函数没有独立的 `arguments` / `this` / `callee`，
         // 不注入 J$.Fe / J$.Fr 入口出口钩子，但需要：
@@ -314,6 +346,18 @@ const visitorRRPost = {
 
     MemberExpression(node, context) {
         if (context === CONTEXT.RHS) return W.instrumentLoad(node, false);
+        return node;
+    },
+
+    // OptionalMemberExpression（a?.b）：在 RHS 上下文中注入 J$.G 属性读取钩子。
+    OptionalMemberExpression(node, context) {
+        if (context === CONTEXT.RHS) return W.instrumentLoad(node, false);
+        return node;
+    },
+
+    // OptionalCallExpression（a?.()）：注入 J$.M / J$.F 调用钩子。
+    OptionalCallExpression(node) {
+        node.callee = W.instrumentCall(node, false);
         return node;
     },
 
@@ -379,7 +423,6 @@ const visitorOps = {
     LogicalExpression(node) {
         if (node.operator === '&&') return W.wrapLogicalAnd(node, node.left, node.right);
         if (node.operator === '||') return W.wrapLogicalOr(node, node.left, node.right);
-        // ES2020: ?? (nullish coalescing) 在 acorn 中解析为 LogicalExpression
         if (node.operator === '??') return W.wrapLogicalNullish(node, node.left, node.right);
         return node;
     },
@@ -489,12 +532,39 @@ function hoistFunctionDeclaration(ast, hoistedFunctions) {
 
 // ─── AST 转换主流程 ────────────────────────────────────────────────────────────
 
-function transformString(code, visitorsPost, visitorsPre, sourceType) {
-    const newAst = acorn.parse(code, {
-        locations:   true,
-        ecmaVersion: 'latest',
+/**
+ * 解析代码字符串，返回 Program 节点。
+ * @babel/parser 返回 { type:'File', program: Program }，各 visitor 遍历 Program 节点。
+ */
+function babelParse(code, sourceType) {
+    const file = babelParser.parse(code, {
         sourceType,
+        // 启用 Babel 支持的所有稳定 + 提案语法
+        plugins: [
+            'classProperties',
+            'classPrivateMethods',
+            'classPrivateProperties',
+            'classStaticBlock',
+            'importAttributes',
+            'decorators-legacy',
+            'doExpressions',
+            'exportDefaultFrom',
+            'functionBind',
+            'logicalAssignment',
+            'nullishCoalescingOperator',
+            'optionalChaining',
+            'throwExpressions',
+            'topLevelAwait',
+        ],
+        // 保留位置信息（loc / start / end），后续 IID 记录依赖 .loc
+        // （Babel 默认开启，此处显式标注）
+        ranges: false,
     });
+    return file.program;
+}
+
+function transformString(code, visitorsPost, visitorsPre, sourceType) {
+    const newAst = babelParse(code, sourceType);
     addScopes(newAst);
     for (let i = 0; i < visitorsPost.length; i++) {
         transformAst(newAst, visitorsPost[i], visitorsPre[i], CONTEXT.RHS);
@@ -597,8 +667,7 @@ function instrumentCode(options) {
 
             newAst = hoistFunctionDeclaration(newAst, []);
 
-            // astring 支持 ES2022+，替代旧版 esotope
-            const newCode = astringGenerate(newAst);
+                    const newCode = babelGenerate(newAst).code;
             // 用 IIFE 将插桩代码包裹：沙盒变量（_jalangiVar，默认 'J$'）作为闭包参数传入，
             // 而非依赖全局访问，彻底消除插桩标识符与被分析代码自身变量名的冲突风险。
             // module 模式下 ESM 已自带私有作用域，改用 const 局部绑定即可。

@@ -21,10 +21,10 @@
  *
  * 负责将插桩钩子注入到各类 AST 节点中。
  * 核心优化：replaceInExpr / replaceInStatement 使用模板缓存，
- * 避免每次调用都重新执行 acorn.parse。
+ * 避免每次调用都重新执行 @babel/parser 解析。
  */
 
-import * as acorn from 'acorn';
+import * as babelParser from '@babel/parser';
 import { JALANGI_VAR, HOP } from '../Constants.js';
 import * as IID from './iid.js';
 
@@ -140,7 +140,21 @@ function assertAstNode(val, callerName) {
     }
 }
 
-const createLiteralAst    = (name) => ({ type: 'Literal',     value: name });
+/**
+ * 创建 Babel 字面量节点：string → StringLiteral，number → NumericLiteral，以此类推。
+ */
+const createLiteralAst = (name) => {
+    if (typeof name === 'string') {
+        return { type: 'StringLiteral', value: name };
+    } else if (typeof name === 'number') {
+        return { type: 'NumericLiteral', value: name };
+    } else if (typeof name === 'boolean') {
+        return { type: 'BooleanLiteral', value: name };
+    } else if (name === null) {
+        return { type: 'NullLiteral' };
+    }
+    return { type: 'StringLiteral', value: String(name) };
+};
 const createIdentifierAst = (name) => ({ type: 'Identifier',  name  });
 
 function transferLoc(toNode, fromNode) {
@@ -221,8 +235,15 @@ function replaceInStatement(code, ...args) {
     let cached = _templateCache.get(code);
     if (!cached) {
         try {
-            const parsed = acorn.parse(code, { ecmaVersion: 'latest' });
-            cached = JSON.parse(JSON.stringify(parsed.body));
+            const file = babelParser.parse(code, {
+                sourceType: 'script',
+                plugins: [
+                    'optionalChaining',
+                    'nullishCoalescingOperator',
+                    'logicalAssignment',
+                ],
+            });
+            cached = JSON.parse(JSON.stringify(file.program.body));
             _templateCache.set(code, cached);
         } catch (e) {
             throw new Error(
@@ -248,8 +269,19 @@ const getScope  = ()     => _scope;
 
 // ─── getPropertyAsAst ────────────────────────────────────────────────────────
 
-const getPropertyAsAst = (ast) =>
-    ast.computed ? ast.property : createLiteralAst(ast.property.name);
+/**
+ * 将 MemberExpression / OptionalMemberExpression 的属性部分转为字面量 AST。
+ * 非计算属性返回属性名字符串；计算属性返回原节点。
+ * PrivateName（如 this.#count）：提取 id.name 并加 '#' 前缀。
+ */
+const getPropertyAsAst = (ast) => {
+    if (ast.computed) return ast.property;
+    const prop = ast.property;
+    if (prop.type === 'PrivateName') {
+        return createLiteralAst(`#${prop.id.name}`);
+    }
+    return createLiteralAst(prop.name);
+};
 
 // ─── wrap 函数 ────────────────────────────────────────────────────────────────
 
@@ -325,8 +357,8 @@ function wrapGetField(node, base, offset, isComputed) {
 function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal) {
     assertAstNode(node, 'wrapRead/node');
     assertAstNode(name, 'wrapRead/name');
-    // Guard: Literal 名称必须是字符串，undefined 说明上游错误地把解构模式的 .name 传入了
-    if (name.type === 'Literal' && typeof name.value !== 'string') {
+    // Guard: 属性名必须是字符串，否则说明上游错误地把解构模式的 .name 传入了
+    if (name.type === 'StringLiteral' && typeof name.value !== 'string') {
         throw new Error(
             `[jalangi] wrapRead: name.value should be a string identifier name, got ${JSON.stringify(name.value)}. ` +
             `This usually means a destructuring pattern's .id.name (undefined) was passed instead of an Identifier.name.`
@@ -359,8 +391,8 @@ function wrapReadWithUndefinedCheck(node, name) {
 function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration) {
     assertAstNode(node, 'wrapWrite/node');
     assertAstNode(name, 'wrapWrite/name');
-    // Guard: Literal 名称必须是字符串，undefined 说明上游错误地把解构模式的 .name 传入了
-    if (name.type === 'Literal' && typeof name.value !== 'string') {
+    // Guard: 属性名必须是字符串，否则说明上游错误地把解构模式的 .name 传入了
+    if (name.type === 'StringLiteral' && typeof name.value !== 'string') {
         throw new Error(
             `[jalangi] wrapWrite: name.value should be a string identifier name, got ${JSON.stringify(name.value)}. ` +
             `This usually means a destructuring pattern's .id.name (undefined) was passed instead of an Identifier.name.`
@@ -524,7 +556,6 @@ function wrapLogicalOr(node, left, right) {
  * 插桩模板：将 left 存入临时变量，用 J$.C 记录分支，
  * 若非 nullish（J$._() 取回暂存值），否则取 right。
  *
- * 注意：`??` 在 acorn 中解析为 LogicalExpression { operator: '??' }
  */
 function wrapLogicalNullish(node, left, right) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('??', node)) {
@@ -615,9 +646,11 @@ function getLiteralValue(funId, node) {
     switch (funId) {
         case N_LOG_NUMBER_LIT:
         case N_LOG_STRING_LIT:
-        case N_LOG_NULL_LIT:
-        case N_LOG_REGEXP_LIT:
         case N_LOG_BOOLEAN_LIT:   return node.value;
+        case N_LOG_NULL_LIT:      return null;
+        // Babel RegExpLiteral：{ pattern, flags } 字段，用它们重建 RegExp 对象
+        case N_LOG_REGEXP_LIT:
+            try { return new RegExp(node.pattern, node.flags); } catch (_) { return null; }
         case N_LOG_ARRAY_LIT:     return dummyArray;
         case N_LOG_FUNCTION_LIT:  return dummyFun;
         case N_LOG_OBJECT_LIT:    return dummyObject;
@@ -761,8 +794,7 @@ function wrapForIn(node, left, right, body) {
     const isDeclaration = (left.type === 'VariableDeclaration');
     let tmp, extra;
     if (isDeclaration) {
-        // Guard: for-in 只支持单个普通标识符声明，不支持解构模式
-        // （如 for (var {a} in obj)）。acorn 在马上报语法错误，但防御性地确认。
+        // Guard: for-in 只支持单个普通标识符声明，不支持解构模式（如 for (var {a} in obj)）。
         const decl = node.left.declarations[0];
         if (!decl || decl.id.type !== 'Identifier') {
             throw new Error(
@@ -941,12 +973,11 @@ function instrumentFunctionEntryExit(node, ast) {
  *  - 不插入 `arguments` 的 J$.N 同步语句（箭头函数无 arguments 对象）
  * 但其参数（arg）和局部 var 声明仍通过 J$.N 注册给运行时分析工具。
  *
- * 表达式体箭头（expression=true）的 body 是单个表达式，无法插入语句，
- * 直接跳过，不修改 node。
+ * 表达式体（body 不是 BlockStatement）直接跳过。
  */
 function instrumentArrowFunctionBody(node) {
-    // 表达式体（e.g. x => x + 1）：body 是表达式，无法插语句
-    if (node.expression) return;
+    // 表达式体（e.g. x => x + 1）：body 不是 BlockStatement，无法插入语句。
+    if (node.body.type !== 'BlockStatement') return;
     // 块体（e.g. x => { return x + 1; }）：只插入 arg/var 同步，跳过 arguments 同步
     // syncDefuns 以 isScript=true 调用可跳过 arguments 初始化段，
     // 但会导致跳过 try-catch 包裹检查；此处手动过滤更安全：
@@ -1040,6 +1071,9 @@ function instrumentLoad(ast, isTypeof) {
         }
     } else if (ast.type === 'MemberExpression') {
         return wrapGetField(ast, ast.object, getPropertyAsAst(ast), ast.computed);
+    } else if (ast.type === 'OptionalMemberExpression') {
+        // Babel AST：可选链 a?.b，语义与 MemberExpression 相同，注入 J$.G 属性读取钩子
+        return wrapGetField(ast, ast.object, getPropertyAsAst(ast), ast.computed);
     }
     return ast;
 }
@@ -1079,6 +1113,9 @@ function adjustIncDec(op, ast) {
 function instrumentCall(callAst, isCtor) {
     const ast = callAst.callee;
     if (ast.type === 'MemberExpression') {
+        return wrapMethodCall(callAst, ast.object, getPropertyAsAst(ast), isCtor, ast.computed);
+    } else if (ast.type === 'OptionalMemberExpression') {
+        // Babel AST：可选链方法调用 a?.b()，callee 是 OptionalMemberExpression
         return wrapMethodCall(callAst, ast.object, getPropertyAsAst(ast), isCtor, ast.computed);
     } else if (ast.type === 'Identifier' && ast.name === 'eval') {
         return ast;

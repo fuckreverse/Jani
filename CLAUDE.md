@@ -16,7 +16,7 @@ Jalangi2 是一个 **JavaScript 动态分析框架**，核心功能是对 JS 源
 - **模块系统**：从旧式 IIFE + 全局 `J$` 对象迁移到标准 **ESM**（`import` / `export`）
 - **语法**：全部使用 `const` / `let`，箭头函数，模板字符串，`class`，可选链 `?.`，空值合并 `??`，rest/spread
 - **无全局污染**：不再向 `window` / `globalThis` 写入任何属性
-- **依赖**：`acorn ^8.16`（解析，支持 ES2022+），`astring ^1.9`（代码生成，替代旧版 esotope）
+- **依赖**：`@babel/parser ^7.29`（解析，支持 ES2022+ 及实验性语法），`@babel/generator ^7.29`（代码生成，支持 Babel 原生 AST）
 - **package.json**：已加 `"type": "module"`
 
 ### 核心模块依赖关系
@@ -153,9 +153,13 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 后续通过 `deepCloneAndReplace` 深拷贝复用，避免重复 parse 开销。
 占位符约定：模板中用 `J$_1`、`J$_2` … 作占位符（`RP` 前缀 = `"J$_"`）。
 
-### `astring` 注意事项
+### `@babel/parser` 与 `@babel/generator` 注意事项
 
-- `astring.generate(ast)` 不支持带 `loc`/`start`/`end` 以外的自定义字段（会忽略），行为正常
+- **Babel 原生 AST**：与 ESTree 有差异，字面量用独立类型（`NumericLiteral`、`StringLiteral`、`BooleanLiteral`、`NullLiteral`、`RegExpLiteral`、`BigIntLiteral`），而非统一的 `Literal`
+- **ClassMethod**：Babel 用 `ClassMethod` 节点（含 `params`、`body`），而 ESTree 用 `MethodDefinition` + `FunctionExpression`，需要在 `scope.js`/`astUtil.js`/`esnstrument.js` 中单独处理
+- **OptionalMemberExpression / OptionalCallExpression**：可选链 `a?.b` 和 `a?.()` 在 Babel AST 中是独立类型，不同于 acorn 的带 `optional: true` 的 `MemberExpression`
+- **PrivateName**：私有字段 `#count` 的 `property` 是 `PrivateName { id: Identifier }` 而非直接包含 `name`
+- **根节点**：`@babel/parser` 返回 `File { program: Program }`，需取 `file.program` 才能与旧版 acorn 的行为一致
 - 插桩产生的 `// JALANGI DO NOT INSTRUMENT` 注释追加在输出代码末尾，防止二次插桩
 
 ---

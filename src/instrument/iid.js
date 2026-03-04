@@ -42,9 +42,8 @@ let origCodeFileName;
 /** iid -> [startLine, startCol, endLine, endCol] 的映射表 */
 let iidSourceInfo;
 
-// ─── Literal AST helper ──────────────────────────────────────────────────────
-
-const createLiteralAst = (name) => ({ type: 'Literal', value: name });
+// IID 值是整数，用 Babel NumericLiteral 节点。
+const createLiteralAst = (name) => ({ type: 'NumericLiteral', value: name });
 
 // ─── 源码位置记录 ─────────────────────────────────────────────────────────────
 
