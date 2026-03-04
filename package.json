@@ -19,9 +19,13 @@
     "test": "node test/instrument.test.mjs",
     "test:logging": "node test/logging.test.mjs",
     "trace-server": "node tools/trace-server/server.mjs",
-    "trace:instrument": "node bin/instrument-for-browser.mjs",
-    "instrument": "node bin/instrument.mjs",
-    "jalangi": "node bin/jalangi.mjs"
+    "jalangi": "node bin/jalangi.mjs",
+    "instrument": "node bin/jalangi.mjs instrument",
+    "instrument:browser": "node bin/jalangi.mjs instrument --target browser",
+    "instrument:split": "node bin/jalangi.mjs instrument --split-runtime",
+    "instrument:browser:split": "node bin/jalangi.mjs instrument --target browser --split-runtime",
+    "run": "node bin/jalangi.mjs run",
+    "instrument-and-run": "node bin/jalangi.mjs instrument-and-run"
   },
   "license": "Apache-2.0",
   "repository": {
