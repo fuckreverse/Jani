@@ -665,6 +665,9 @@ function instrumentCode(options) {
     }
 
     let newAst;
+    // 标准 VLCQ source map（v3 格式），仅在成功插桩时生成
+    let vlcqSourceMap = null;
+
     if (!skip && typeof code === 'string' && !code.includes(NO_INSTR)) {
         try {
             if (_config?.ENABLE_SAMPLING) {
@@ -681,15 +684,48 @@ function instrumentCode(options) {
 
             newAst = hoistFunctionDeclaration(newAst, []);
 
-                    const newCode = babelGenerate(newAst).code;
+            // 同时生成代码和标准 VLCQ source map（sourceMaps: true）。
+            // sourceFileName 告知 @babel/generator 原始文件名，写入 sources 字段。
+            const genResult = babelGenerate(newAst, {
+                sourceMaps:   true,
+                sourceFileName: options.origCodeFileName ?? 'unknown',
+            });
+            const newCode    = genResult.code;
+            const rawVlcqMap = genResult.map;   // { version:3, sources, mappings, ... }
+
             // 用 IIFE 将插桩代码包裹：沙盒变量（_jalangiVar，默认 'J$'）作为闭包参数传入，
             // 而非依赖全局访问，彻底消除插桩标识符与被分析代码自身变量名的冲突风险。
             // module 模式下 ESM 已自带私有作用域，改用 const 局部绑定即可。
             const jv = _jalangiVar;
             if (sourceType === 'module') {
+                // module 模式头部：1 行（`const J$ = globalThis.J$;\n`）
                 code = `const ${jv} = globalThis.${jv};\n${newCode}\n${NO_INSTR}\n`;
             } else {
+                // script 模式头部：1 行（`(function(J$){\n`）
                 code = `(function(${jv}){\n${newCode}\n}(typeof ${jv}!=='undefined'?${jv}:{}));\n${NO_INSTR}\n`;
+            }
+
+            // ── VLCQ source map 行偏移补偿 ──────────────────────────────────
+            // babelGenerate 生成的 map 中，插桩代码的起始行为第 1 行。
+            // 但最终输出文件在这段代码前面还有：
+            //   • 第 1 行：`(globalThis.J$=...);J$.smap=...;\n`（smap 注入头，1 行）
+            //   • 第 2 行：IIFE 包裹 `(function(J$){\n` 或 module const 绑定（1 行）
+            //
+            // 因此实际偏移 = smap注入头(1行) + 包裹前缀(1行) = 2 行（script）或 2 行（module）。
+            // 在 VLCQ mappings 字符串前插入 N 个 ';'（每个 ';' 代表跳过一个生成行），
+            // 使调试器能正确将生成行号映射回原始代码行。
+            //
+            // 注意：smap 注入头始终是 1 行（无论 inlineSourceMap 还是精简版，都是单行字符串）。
+            // 包裹前缀（IIFE 开头 / module const）也是 1 行。合计固定偏移 2 行。
+            const HEADER_LINES = 2;   // smap 注入头(1) + 包裹前缀(1)
+
+            if (rawVlcqMap) {
+                vlcqSourceMap = {
+                    ...rawVlcqMap,
+                    file:    options.instCodeFileName ?? undefined,
+                    // 在 mappings 前插入 HEADER_LINES 个 ';' 补偿行偏移
+                    mappings: ';'.repeat(HEADER_LINES) + (rawVlcqMap.mappings ?? ''),
+                };
             }
         } catch (ex) {
             const fileName = options.origCodeFileName ?? '(unknown)';
@@ -741,6 +777,10 @@ function instrumentCode(options) {
         instAST:         newAst,
         sourceMapObject: sourceInfo,
         sourceMapString,
+        // 标准 VLCQ source map（v3 格式），可直接写为 <file>.js.map，
+        // 供浏览器 DevTools / VS Code 调试器定位插桩后代码对应的原始代码位置。
+        // 仅在代码被实际插桩（非 skip / DO NOT INSTRUMENT）时有值，否则为 null。
+        vlcqSourceMap,
     };
 }
 

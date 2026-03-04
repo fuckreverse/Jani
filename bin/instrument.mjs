@@ -16,6 +16,7 @@
  *   --inline-iid          将 iid→位置 map 内联到输出文件头部
  *   --inline-source       将原始源码内联到 source map
  *   --no-source-map       不写 .map.json 文件
+ *   --vlcq-source-map     额外生成标准 Source Map v3（.js.map），供调试器使用
  *   --sandbox-var <v>     沙盒变量名（默认 J$）
  *   --dry-run             只打印，不写文件
  *   --debug               详细日志
@@ -25,6 +26,7 @@
  *   node bin/instrument.mjs src/app.js
  *   node bin/instrument.mjs --output dist/app.inst.js src/app.js
  *   node bin/instrument.mjs --inline-iid --source-type module src/app.mjs
+ *   node bin/instrument.mjs --vlcq-source-map src/app.js
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
@@ -49,28 +51,30 @@ const log = {
 
 function parseArgs(argv) {
     const opts = {
-        output:       null,
-        sourceType:   'script',
-        inlineIid:    false,
-        inlineSource: false,
-        noSourceMap:  false,
-        sandboxVar:   'J$',
-        dryRun:       false,
-        debug:        false,
-        file:         null,
+        output:         null,
+        sourceType:     'script',
+        inlineIid:      false,
+        inlineSource:   false,
+        noSourceMap:    false,
+        vlcqSourceMap:  false,
+        sandboxVar:     'J$',
+        dryRun:         false,
+        debug:          false,
+        file:           null,
     };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         switch (a) {
             case '--help': case '-h':   printHelp(); process.exit(0); break;
-            case '--output':            opts.output       = argv[++i]; break;
-            case '--source-type':       opts.sourceType   = argv[++i]; break;
-            case '--inline-iid':        opts.inlineIid    = true;      break;
-            case '--inline-source':     opts.inlineSource = true;      break;
-            case '--no-source-map':     opts.noSourceMap  = true;      break;
-            case '--sandbox-var':       opts.sandboxVar   = argv[++i]; break;
-            case '--dry-run':           opts.dryRun       = true;      break;
-            case '--debug':             opts.debug        = true;      break;
+            case '--output':            opts.output        = argv[++i]; break;
+            case '--source-type':       opts.sourceType    = argv[++i]; break;
+            case '--inline-iid':        opts.inlineIid     = true;      break;
+            case '--inline-source':     opts.inlineSource  = true;      break;
+            case '--no-source-map':     opts.noSourceMap   = true;      break;
+            case '--vlcq-source-map':   opts.vlcqSourceMap = true;      break;
+            case '--sandbox-var':       opts.sandboxVar    = argv[++i]; break;
+            case '--dry-run':           opts.dryRun        = true;      break;
+            case '--debug':             opts.debug         = true;      break;
             default:
                 if (a.startsWith('--')) { log.error(`未知选项: ${a}`); process.exit(1); }
                 if (opts.file)          { log.error('只支持单个输入文件。'); process.exit(1); }
@@ -92,6 +96,7 @@ function printHelp() {
   --inline-iid          将 iid→位置 map 内联到输出文件头部
   --inline-source       将原始源码内联到 source map
   --no-source-map       不写 .map.json 文件
+  --vlcq-source-map     额外生成标准 Source Map v3（<输出文件>.js.map），供 DevTools/VS Code 调试
   --sandbox-var <v>     沙盒变量名（默认 J$）
   --dry-run             只打印，不写文件
   --debug               输出详细日志（等价于 JALANGI_DEBUG=1）
@@ -132,9 +137,11 @@ async function main() {
         INSTR_END_EXPRESSION:      null,
     }, null, null, opts.sandboxVar);
 
-    const inputPath = opts.file;
-    const outPath   = opts.output ? resolve(opts.output) : defaultOutFile(inputPath);
-    const mapPath   = outPath.replace(/\.js$/, '.map.json');
+    const inputPath   = opts.file;
+    const outPath     = opts.output ? resolve(opts.output) : defaultOutFile(inputPath);
+    const mapPath     = outPath.replace(/\.js$/, '.map.json');
+    // 标准 Source Map v3 路径：在输出文件名后追加 .map（如 foo_jalangi_.js → foo_jalangi_.js.map）
+    const vlcqMapPath = outPath + '.map';
 
     // 读取源文件
     if (!existsSync(inputPath)) {
@@ -174,6 +181,11 @@ async function main() {
         const preview = result.code.slice(0, 800) + (result.code.length > 800 ? '\n...(截断)' : '');
         console.log(`\n=== [dry-run] 输出文件: ${outPath} ===\n`);
         console.log(preview);
+        if (opts.vlcqSourceMap && result.vlcqSourceMap) {
+            console.log(`\n=== [dry-run] VLCQ Source Map: ${vlcqMapPath} ===`);
+            const mapPreview = JSON.stringify(result.vlcqSourceMap, null, 2);
+            console.log(mapPreview.slice(0, 400) + (mapPreview.length > 400 ? '\n...(截断)' : ''));
+        }
         return;
     }
 
@@ -185,11 +197,17 @@ async function main() {
     if (!opts.noSourceMap && result.sourceMapString) {
         writeFileSync(mapPath, result.sourceMapString, 'utf8');
     }
+    // 写标准 VLCQ source map（--vlcq-source-map 时）
+    if (opts.vlcqSourceMap && result.vlcqSourceMap) {
+        writeFileSync(vlcqMapPath, JSON.stringify(result.vlcqSourceMap), 'utf8');
+        log.debug(`VLCQ source map 已写出: ${vlcqMapPath} (${(JSON.stringify(result.vlcqSourceMap).length / 1024).toFixed(1)} KB)`);
+    }
 
     console.log(`✓ 插桩完成`);
     console.log(`  输入    : ${inputPath}`);
     console.log(`  输出    : ${outPath}`);
-    if (!opts.noSourceMap) console.log(`  Source map : ${mapPath}`);
+    if (!opts.noSourceMap) console.log(`  IID map    : ${mapPath}`);
+    if (opts.vlcqSourceMap && result.vlcqSourceMap) console.log(`  Source map : ${vlcqMapPath}`);
     console.log(`  IID 数量: ${iidCount}`);
     console.log(`  沙盒变量: ${opts.sandboxVar}`);
 }

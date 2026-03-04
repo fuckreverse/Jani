@@ -749,6 +749,81 @@ test('Guard: wrapFunBodyWithTryCatch 的 generator/async 守卫能被 visitorOps
 });
 
 // ════════════════════════════════════════════════════════════════
+// 标准 VLCQ Source Map v3 生成（vlcqSourceMap 字段）
+// ════════════════════════════════════════════════════════════════
+
+console.log('\n── VLCQ Source Map ──────────────────────────────────────');
+
+init(ALL_CONFIG);
+
+test('vlcqSourceMap: 普通插桩时 vlcqSourceMap 字段存在且格式正确', () => {
+    const r = instr('var x = 1 + 2;');
+    assert(r.vlcqSourceMap !== null && r.vlcqSourceMap !== undefined,
+        'vlcqSourceMap 应为非空对象');
+    assertEqual(r.vlcqSourceMap.version, 3,
+        'vlcqSourceMap.version 应为 3（Source Map v3）');
+    assert(Array.isArray(r.vlcqSourceMap.sources),
+        'vlcqSourceMap.sources 应为数组');
+    assert(typeof r.vlcqSourceMap.mappings === 'string',
+        'vlcqSourceMap.mappings 应为字符串');
+});
+
+test('vlcqSourceMap: sources 数组包含原始文件名', () => {
+    const r = instrumentCode({
+        code:             'var x = 1;',
+        origCodeFileName: 'hello.js',
+        instCodeFileName: 'hello_inst.js',
+    });
+    assert(r.vlcqSourceMap.sources.some(s => s.includes('hello.js')),
+        'vlcqSourceMap.sources 应包含原始文件名 hello.js');
+});
+
+test('vlcqSourceMap: mappings 以若干 ";" 开头（行偏移补偿）', () => {
+    // 最终输出头部有 2 行（smap 注入行 + IIFE 包裹行），
+    // 因此 mappings 应以至少 2 个 ";" 开头
+    const r = instr('function f() { return 1; }');
+    assert(r.vlcqSourceMap.mappings.startsWith(';;'),
+        `mappings 应以 ";;" 开头（2 行偏移），实际为: ${JSON.stringify(r.vlcqSourceMap.mappings.slice(0, 10))}`);
+});
+
+test('vlcqSourceMap: JALANGI DO NOT INSTRUMENT 代码不生成 vlcqSourceMap', () => {
+    const r = instrumentCode({
+        code:             '// JALANGI DO NOT INSTRUMENT\nvar x = 1;',
+        origCodeFileName: 'skip.js',
+        instCodeFileName: 'skip_inst.js',
+    });
+    assert(r.vlcqSourceMap === null,
+        '包含 DO NOT INSTRUMENT 标记的代码，vlcqSourceMap 应为 null');
+});
+
+test('vlcqSourceMap: module 模式下行偏移补偿同样正确', () => {
+    const r = instrumentCode({
+        code:             'export const x = 1;',
+        origCodeFileName: 'mod.mjs',
+        instCodeFileName: 'mod_inst.mjs',
+        sourceType:       'module',
+    });
+    assert(r.vlcqSourceMap !== null, 'module 模式下 vlcqSourceMap 应存在');
+    assertEqual(r.vlcqSourceMap.version, 3, 'version 应为 3');
+    assert(r.vlcqSourceMap.mappings.startsWith(';;'),
+        `module 模式 mappings 应以 ";;" 开头，实际: ${JSON.stringify(r.vlcqSourceMap.mappings.slice(0, 10))}`);
+});
+
+test('vlcqSourceMap: 多行代码 mappings 中包含多个 ";" 分隔符（覆盖多行映射）', () => {
+    const multiLineCode = [
+        'function add(a, b) {',
+        '  return a + b;',
+        '}',
+        'var result = add(1, 2);',
+    ].join('\n');
+    const r = instr(multiLineCode);
+    // 插桩后的代码行数远多于 2，mappings 中 ';' 的数量应远大于 2
+    const semicolonCount = (r.vlcqSourceMap.mappings.match(/;/g) ?? []).length;
+    assert(semicolonCount > 2,
+        `多行代码的 mappings 应包含多个 ";" (实际 ${semicolonCount})`);
+});
+
+// ════════════════════════════════════════════════════════════════
 // 自定义沙盒变量名（--sandbox-var / jalangiVar 参数）
 // ════════════════════════════════════════════════════════════════
 
