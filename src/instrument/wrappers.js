@@ -70,6 +70,7 @@ let logSwitchRightFunName;
 let logLastFunName;
 let logX1FunName;
 let instrumentCodeFunName;
+let logReadLightFunName;  // TODO-8: J$.Rl 轻量变量读取钩子
 
 /** 用给定的沙盒变量名重新生成所有运行时函数名常量 */
 function _rebuildNames(v) {
@@ -105,6 +106,7 @@ function _rebuildNames(v) {
     logLastFunName           = `${v}._`;
     logX1FunName             = `${v}.X1`;
     instrumentCodeFunName    = `${v}.instrumentEvalCode`;
+    logReadLightFunName      = `${v}.Rl`;  // TODO-8: 轻量变量读取钩子
     // 模板缓存依赖占位符前缀，变量名变化时必须清空
     _templateCache.clear();
 }
@@ -354,7 +356,7 @@ function wrapGetField(node, base, offset, isComputed) {
     return node;
 }
 
-function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal) {
+function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal, scopeId) {
     assertAstNode(node, 'wrapRead/node');
     assertAstNode(name, 'wrapRead/name');
     // Guard: 属性名必须是字符串，否则说明上游错误地把解构模式的 .name 传入了
@@ -366,8 +368,10 @@ function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal) {
     }
     if (!Config.INSTR_READ || Config.INSTR_READ(name, node)) {
         IID.printIidToLoc(node);
+        // TODO-7: 若有 scopeId，追加为第五个参数，帮助运行时同步 Shadow Frame
+        const scopeArg = (scopeId !== undefined && scopeId !== null) ? `, ${scopeId}` : '';
         const ret = replaceInExpr(
-            `${logReadFunName}(${RP}1, ${RP}2, ${RP}3,${createBitPattern(isGlobal, isScriptLocal)})`,
+            `${logReadFunName}(${RP}1, ${RP}2, ${RP}3,${createBitPattern(isGlobal, isScriptLocal)}${scopeArg})`,
             isReUseIid ? IID.getPrevIidNoInc() : IID.getIid(),
             name, val
         );
@@ -388,7 +392,30 @@ function wrapReadWithUndefinedCheck(node, name) {
     return ret;
 }
 
-function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration) {
+/**
+ * TODO-8: 轻量变量读取钩子包装器。
+ * 不传实际值——运行时从 Shadow Frame 查找，减少插桩开销。
+ * 签名: J$.Rl(iid, defScopeId, name) → value
+ * @param {object} node     - 原 AST 节点（用于位置信息）
+ * @param {object} name     - StringLiteral 节点（变量名）
+ * @param {number} defScopeId - 变量定义点的 Scope.id
+ */
+function wrapReadLightweight(node, name, defScopeId) {
+    if (!Config.INSTR_READ || Config.INSTR_READ(name, node)) {
+        IID.printIidToLoc(node);
+        const ret = replaceInExpr(
+            `${logReadLightFunName}(${RP}1, ${defScopeId}, ${RP}2)`,
+            IID.getIid(),
+            name
+        );
+        transferLoc(ret, node);
+        return ret;
+    }
+    // 若 INSTR_READ 禁用该节点，退回插桩标识符本身（保持语义正确）
+    return node;
+}
+
+function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration, scopeId) {
     assertAstNode(node, 'wrapWrite/node');
     assertAstNode(name, 'wrapWrite/name');
     // Guard: 属性名必须是字符串，否则说明上游错误地把解构模式的 .name 传入了
@@ -400,8 +427,10 @@ function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration)
     }
     if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name, node)) {
         IID.printIidToLoc(node);
+        // TODO-7: 若有 scopeId，追加为第六个参数，帮助运行时更新 Shadow Frame
+        const scopeArg = (scopeId !== undefined && scopeId !== null) ? `, ${scopeId}` : '';
         const ret = replaceInExpr(
-            `${logWriteFunName}(${RP}1, ${RP}2, ${RP}3, ${RP}4,${createBitPattern(isGlobal, isScriptLocal, isDeclaration)})`,
+            `${logWriteFunName}(${RP}1, ${RP}2, ${RP}3, ${RP}4,${createBitPattern(isGlobal, isScriptLocal, isDeclaration)}${scopeArg})`,
             IID.getIid(), name, val, lhs
         );
         transferLoc(ret, node);
@@ -760,11 +789,13 @@ function createCallInitAsStatement(node, name, val, isArgumentSync, lhs, isCatch
     return ret;
 }
 
-function createCallAsFunEnterStatement(node) {
+function createCallAsFunEnterStatement(node, scopeId) {
     IID.printIidToLoc(node);
     // arguments.callee 在严格模式下会抛出 TypeError，使用 try-catch 安全降级为 undefined
+    // TODO-7: scopeId 作为第五个参数传给 J$.Fe，运行时用于创建 Shadow Frame
+    const scopeArg = (scopeId !== undefined && scopeId !== null) ? `, ${scopeId}` : '';
     const ret = replaceInStatement(
-        `${logFunctionEnterFunName}(${RP}1,(function(){try{return arguments.callee}catch(e){return undefined}}()), this, arguments)`,
+        `${logFunctionEnterFunName}(${RP}1,(function(){try{return arguments.callee}catch(e){return undefined}}()), this, arguments${scopeArg})`,
         IID.getIid()
     );
     transferLoc(ret[0].expression, node);
@@ -958,8 +989,10 @@ function syncDefuns(node, scopeArg, isScript) {
 }
 
 function instrumentFunctionEntryExit(node, ast) {
+    // TODO-7: 将当前作用域的 scopeId 传给 Fe，以便运行时创建 Shadow Frame
+    const scopeId = _scope?.id;
     const body = (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node))
-        ? createCallAsFunEnterStatement(node)
+        ? createCallAsFunEnterStatement(node, scopeId)
         : [];
     return [...body, ...syncDefuns(node, _scope, false), ...ast];
 }
@@ -1045,13 +1078,29 @@ function instrumentScriptEntryExit(node, body0, instFile, origFile) {
 
 // ─── instrumentStore / instrumentLoad / instrumentLoadModStore / instrumentPreIncDec
 
+/**
+ * TODO-5: 沿作用域链向上查找变量实际定义的 Scope。
+ * 闭包引用时，读取点和定义点不在同一个作用域，必须用定义点的 scopeId。
+ */
+function _findDefScope(scope, name) {
+    for (let s = scope; s !== null; s = s.parent) {
+        if (s.hasOwnVar(name)) return s;
+    }
+    return null;
+}
+
 function instrumentStore(node, isDeclaration) {
     if (node.left.type === 'Identifier') {
         const hasVar = _scope.hasVar(node.left.name);
-        node.right = hasVar
-            ? wrapWrite(node.right, createLiteralAst(node.left.name), node.right, node.left,
-                false, _scope.isGlobal(node.left.name), isDeclaration)
-            : wrapWriteWithUndefinedCheck(node.right, createLiteralAst(node.left.name), node.right, node.left);
+        if (hasVar) {
+            // TODO-7: 传入 scopeId（定义点的 Scope.id）
+            const defScope = _findDefScope(_scope, node.left.name);
+            const scopeId  = defScope?.id;
+            node.right = wrapWrite(node.right, createLiteralAst(node.left.name), node.right, node.left,
+                false, _scope.isGlobal(node.left.name), isDeclaration, scopeId);
+        } else {
+            node.right = wrapWriteWithUndefinedCheck(node.right, createLiteralAst(node.left.name), node.right, node.left);
+        }
         return node;
     }
     return wrapPutField(node, node.left.object, getPropertyAsAst(node.left), node.right, node.left.computed);
@@ -1063,7 +1112,25 @@ function instrumentLoad(ast, isTypeof) {
         if (ast.name === 'NaN' || ast.name === 'Infinity') return wrapLiteral(ast, ast, N_LOG_NUMBER_LIT);
         if (ast.name === _jalangiVar) return ast;  // 沙盒变量自身不插桩
         if (_scope.hasVar(ast.name)) {
-            return wrapRead(ast, createLiteralAst(ast.name), ast, false, false, _scope.isGlobal(ast.name));
+            // TODO-5: 沿作用域链向上查找实际定义点（闭包支持）
+            const defScope = _findDefScope(_scope, ast.name);
+            const isGlobal = _scope.isGlobal(ast.name);
+
+            // TODO-8: 判断是否可以走轻量读取路径
+            const canUseLightweight =
+                defScope !== null &&
+                !isGlobal &&
+                !_scope.usesEval() &&
+                !_scope.usesWith() &&
+                defScope.hasOwnVar(ast.name) !== 'catch' &&
+                ast.name !== 'arguments';
+
+            if (canUseLightweight) {
+                // 轻量读取路径：不传 value，运行时从 Shadow Frame 查值
+                return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id);
+            }
+            // 全量读取路径（包括 scopeId 以支持 Shadow Frame 同步）
+            return wrapRead(ast, createLiteralAst(ast.name), ast, false, false, isGlobal, defScope?.id);
         } else if (isTypeof) {
             return wrapReadWithUndefinedCheck(ast, ast.name);
         } else {
@@ -1084,9 +1151,10 @@ function instrumentLoadModStore(node, isNumber) {
         if (isNumber) tmp0 = makeNumber(node, instrumentLoad(tmp0, false));
         const tmp1 = wrapRHSOfModStore(node.right, tmp0, node.right,
             node.operator.slice(0, -1));
-        const tmp2 = _scope.hasVar(node.left.name)
+        const _defScope2 = _scope.hasVar(node.left.name) ? _findDefScope(_scope, node.left.name) : null;
+        const tmp2 = _defScope2 !== null
             ? wrapWrite(node, createLiteralAst(node.left.name), tmp1, node.left,
-                false, _scope.isGlobal(node.left.name), false)
+                false, _scope.isGlobal(node.left.name), false, _defScope2?.id)
             : wrapWriteWithUndefinedCheck(node, createLiteralAst(node.left.name), tmp1, node.left);
         return wrapLHSOfModStore(node, node.left, tmp2);
     }
@@ -1149,10 +1217,29 @@ function resetPerFile() {
     tmpVarCounter = 0;
 }
 
+// ─── TODO-9: 插桩决策表（由 dataflow.js analyzeDefUse 生成，供 instrumentLoad 查询）
+
+/**
+ * 当前文件的插桩决策表（Map<nodeKey, Decision>）。
+ * null 表示未注入（不使用静态分析优化，全量插桩）。
+ * 由 esnstrument.js 的 transformString 调用 setInstrDecisions 注入。
+ */
+let _instrDecisions = null;
+
+/**
+ * 注入插桩决策表（由 esnstrument.js 在 Pass 0 后调用）。
+ * 传 null 表示清除（Pass 结束后防止跨文件污染）。
+ *
+ * @param {Map<string, string>|null} decisions  analyzeDefUse 的输出
+ */
+function setInstrDecisions(decisions) {
+    _instrDecisions = decisions;
+}
+
 // ─── 导出 ──────────────────────────────────────────────────────────────────────
 
 export {
-    init, resetPerFile,
+    init, resetPerFile, setInstrDecisions,
     // scope 状态管理
     setScope, popScope, getScope,
     // AST 辅助
@@ -1164,7 +1251,7 @@ export {
     N_LOG_NULL_LIT, N_LOG_REGEXP_LIT, N_LOG_UNDEFINED_LIT,
     // wrap 函数
     wrapPutField, wrapModAssign, wrapMethodCall, wrapFunCall,
-    wrapGetField, wrapRead, wrapReadWithUndefinedCheck,
+    wrapGetField, wrapRead, wrapReadWithUndefinedCheck, wrapReadLightweight,
     wrapWrite, wrapWriteWithUndefinedCheck,
     wrapReturn, wrapThrow, wrapWithX1, wrapHash, wrapEvalArg,
     wrapUnaryOp, wrapBinaryOp, wrapLogicalAnd, wrapLogicalOr, wrapLogicalNullish,
@@ -1176,4 +1263,6 @@ export {
     instrumentPreIncDec, adjustIncDec, instrumentCall,
     instrumentFunctionEntryExit, instrumentArrowFunctionBody, instrumentScriptEntryExit,
     createCallAsFunEnterStatement, createCallAsScriptEnterStatement,
+    // 内部工具（测试用）
+    _findDefScope,
 };

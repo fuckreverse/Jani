@@ -19,6 +19,16 @@
 import { HOP, JALANGI_VAR } from '../Constants.js';
 import { CONTEXT, transformAst } from './astUtil.js';
 
+// ─── ScopeID 计数器（TODO-3）────────────────────────────────────────────────────
+// 每次 instrumentCode 调用前通过 resetScopeCounter() 重置，保证插桩幂等性
+
+let _scopeIdCounter = 0;
+
+/** 每次 instrumentCode 调用前重置，保证 ScopeID 幂等性 */
+function resetScopeCounter() {
+    _scopeIdCounter = 0;
+}
+
 // ─── Scope 类 ─────────────────────────────────────────────────────────────────
 
 /**
@@ -29,6 +39,7 @@ import { CONTEXT, transformAst } from './astUtil.js';
  */
 class Scope {
     constructor(parent, isCatch) {
+        this.id       = _scopeIdCounter++;  // TODO-3: 唯一词法作用域 ID
         this.vars     = {};     // name -> 'var' | 'arg' | 'defun' | 'lambda' | 'catch'
         this.funLocs  = {};     // name -> AST loc（仅 defun）
         this.funNodes = {};     // name -> AST node（仅 defun）
@@ -36,22 +47,40 @@ class Scope {
         this.hasArguments = false;
         this.parent  = parent;
         this.isCatch = isCatch;
+        this.hasWith_ = false;  // TODO-2: with 语句标志
+        // TODO-4: 变量声明 kind 存储（按需创建）
+        // this.varKinds = {};  // 延迟创建
     }
 
     /**
      * 在作用域中注册一个变量。
      * catch 内部声明的非 catch 变量需要提升到父作用域。
+     *
+     * TODO-4: 新增 kind 参数（'const' | 'let' | 'var' | undefined）
      */
-    addVar(name, type, loc, node) {
+    addVar(name, type, loc, node, kind) {
         const target = (this.isCatch && type !== 'catch') ? this.parent : this;
         // 一旦被标记为 arg，不允许降级为其他类型
         if (target.vars[name] !== 'arg') {
             target.vars[name] = type;
         }
+        // TODO-4: 记录声明 kind（'const' | 'let' | 'var'）
+        if (kind) {
+            target.varKinds = target.varKinds ?? {};
+            target.varKinds[name] = kind;
+        }
         if (type === 'defun') {
             target.funLocs[name]  = loc;
             target.funNodes[name] = node;
         }
+    }
+
+    /** TODO-4: 返回变量的声明 kind，沿作用域链向上查找，找不到返回 null */
+    getVarKind(name) {
+        for (let s = this; s !== null; s = s.parent) {
+            if (s.varKinds?.[name]) return s.varKinds[name];
+        }
+        return null;
     }
 
     /** 只在当前作用域中查找（不向上）。*/
@@ -83,8 +112,15 @@ class Scope {
         for (let s = this; s !== null; s = s.parent) s.hasArguments = true;
     }
 
+    /** TODO-2: 标记整条作用域链使用了 with 语句 */
+    addWith() {
+        for (let s = this; s !== null; s = s.parent) s.hasWith_ = true;
+    }
+
     usesEval()      { return this.hasEval; }
     usesArguments() { return this.hasArguments; }
+    /** TODO-2: 检查作用域链是否含 with 语句 */
+    usesWith()      { return this.hasWith_; }
 }
 
 // ─── addScopes ────────────────────────────────────────────────────────────────
@@ -139,6 +175,9 @@ function collectParamNames(param, collected) {
 function addScopes(ast) {
     let currentScope = null;
 
+    // TODO-4: 当前 VariableDeclaration 的 kind（'const' | 'let' | 'var'）
+    let _currentDeclKind = null;
+
     /**
      * 处理一个函数参数节点：
      *  1. 简单 Identifier 且名为 `arguments` → 重命名
@@ -183,12 +222,14 @@ function addScopes(ast) {
     function handleVar(node) {
         if (!node.id) return;
         if (node.id.type === 'Identifier') {
-            currentScope.addVar(node.id.name, 'var');
+            // TODO-4: 传递当前声明 kind
+            currentScope.addVar(node.id.name, 'var', undefined, undefined, _currentDeclKind);
         } else {
             // 解构声明：收集所有绑定名称
             const names = [];
             collectParamNames(node.id, names);
-            for (const n of names) currentScope.addVar(n, 'var');
+            // TODO-4: 解构声明中的所有变量也记录 kind
+            for (const n of names) currentScope.addVar(n, 'var', undefined, undefined, _currentDeclKind);
         }
     }
 
@@ -217,6 +258,10 @@ function addScopes(ast) {
         FunctionExpression:      handleFun,
         ArrowFunctionExpression: handleFun,
         ClassMethod:             handleFun,
+        // TODO-4: VariableDeclaration pre-visitor 记录当前 kind
+        VariableDeclaration(node) {
+            _currentDeclKind = node.kind;  // 'const' | 'let' | 'var'
+        },
         VariableDeclarator:      handleVar,
         CatchClause:             handleCatch,
     };
@@ -229,13 +274,30 @@ function addScopes(ast) {
         ClassMethod:             popScope,
         CatchClause:             popScope,
 
+        // TODO-4: VariableDeclaration post-visitor 重置 _currentDeclKind
+        VariableDeclaration(node) {
+            _currentDeclKind = null;
+            return node;
+        },
+
         // 重命名 arguments → J$_arguments（RHS 读取场景）
+        // TODO-1: 同时检测 eval 标识符，标记整条作用域链
         Identifier(node, context) {
             if (context === CONTEXT.RHS
                     && node.name === FROM_NAME
                     && currentScope?.hasOwnVar(TO_NAME)) {
                 node.name = TO_NAME;
             }
+            // TODO-1: 检测 eval 出现（即使作为参数传递也标记，因为可能在外部被调用）
+            if (node.name === 'eval') {
+                currentScope?.addEval();
+            }
+            return node;
+        },
+
+        // TODO-2: 检测 WithStatement，标记当前作用域链使用了 with
+        WithStatement(node) {
+            currentScope?.addWith();
             return node;
         },
 
@@ -263,4 +325,4 @@ function addScopes(ast) {
     transformAst(ast, visitorPost, visitorPre);
 }
 
-export { Scope, addScopes, collectParamNames };
+export { Scope, addScopes, collectParamNames, resetScopeCounter };

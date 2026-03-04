@@ -69,17 +69,22 @@ iid.js         astUtil.js
     └──── wrappers.js ─── scope.js
                     ↓
             esnstrument.js（主入口）
+                    ↑
+            dataflow.js（静态 SSA def-use 分析，可选注入）
 ```
 
 ### 运行时（`src/runtime/`）
 
 | 模块 | 职责 |
 |------|------|
-| `JalangiRuntime.js` | 所有 J$ 钩子函数的核心实现（基类） |
+| `JalangiRuntime.js` | 所有 J$ 钩子函数的核心实现（基类），含 OID、ContextID、Shadow Frame |
 | `JalangiSandbox.js` | 完整沙盒对象，继承 `JalangiRuntime`（推荐使用） |
 | `AnalysisHost.js` | 多插件链式调度器，`.use()` 注册分析 |
 | `SMemory.js` | Shadow Memory 影子内存服务，为对象关联唯一 ID |
 | `analysisCallbackTemplate.js` | 分析插件接口模板（`AnalysisTemplate` 基类） |
+| `DataFlowAnalyzer.js` | 运行时 SSA 数据流分析器，消费 log 条目，支持 backward slicing |
+| `AntiDetection.js` | 反插桩对抗工具，`toString` Hook / 全局变量检测 / 异步上下文包装 |
+| `logging/backends/TypedArrayBackend.js` | 高性能 TypedArray 环形缓冲区日志后端，零 GC、高吞吐量 |
 
 ## 插桩钩子一览
 
@@ -87,8 +92,9 @@ iid.js         astUtil.js
 
 | 钩子 | 触发场景 | 对应分析回调 |
 |------|---------|-------------|
-| `J$.R(iid, name, val, flags)` | 变量读取 | `read` |
-| `J$.W(iid, name, val, lhs, flags)` | 变量写入 | `write` |
+| `J$.R(iid, name, val, flags, defScopeId?)` | 变量读取（全量路径，含 Shadow Frame 同步） | `read` |
+| `J$.Rl(iid, defScopeId, name)` | 变量读取（**轻量路径**，从 Shadow Frame 查值，不传 value） | `read` |
+| `J$.W(iid, name, val, lhs, flags, defScopeId?)` | 变量写入（兼更新 Shadow Frame） | `write` |
 | `J$.G(iid, base, offset, flags)` | 属性读取 | `getFieldPre` / `getField` |
 | `J$.P(iid, base, offset, val, flags)` | 属性写入 | `putFieldPre` / `putField` |
 | `J$.F(iid, f, flags)` | 函数调用 | `invokeFunPre` / `invokeFun` |
@@ -102,6 +108,7 @@ iid.js         astUtil.js
 | `J$.Se(iid, val, origFile)` | 脚本进入 | `scriptEnter` |
 | `J$.Sr(iid)` | 脚本退出 | `scriptExit` |
 | `J$.N(iid, name, val, flags)` | 变量声明初始化 | `declare` |
+| `J$.Aw(iid)` | `await` 恢复点，通知运行时当前异步上下文已恢复 | — |
 
 ## 技术栈
 
@@ -109,6 +116,8 @@ iid.js         astUtil.js
 |------|------|
 | `acorn ^8.16` | JavaScript 解析器，支持 ES2022+ |
 | `astring ^1.9` | 代码生成器（替代旧版 esotope），支持 ES2022+ |
+| `@babel/parser ^7.29` | 备用解析器，支持 TS / Flow / 实验性语法（可选） |
+| `@babel/generator ^7.29` | 配合 Babel AST 的代码生成器（可选） |
 
 ## 模块系统
 
@@ -172,3 +181,11 @@ npm run trace-server
 3. **模板缓存**：`wrappers.js` 中 `replaceInStatement` 对模板 acorn.parse 结果缓存，大幅提升性能
 4. **IID 步长 8**：同一 AST 节点的多个子操作共享一段 IID，如方法调用 `iid+2` 为内部 getField
 5. **采样模式**：`ENABLE_SAMPLING: true` 时，每个函数在"插桩版本"和"原始版本"之间动态切换
+6. **作用域感知插桩**：`scope.js` 为每个词法作用域分配唯一 `ScopeID`，`J$.W` / `J$.Fe` 传递 `defScopeId`，精确区分同名变量
+7. **Shadow Frame + 轻量读取**：运行时按 `(defScopeId, callId)` 缓存变量值；对静态可信局部变量改用 `J$.Rl` 不传值路径，大幅降低代码膨胀
+8. **CallID 递归隔离**：`J$.Fe` 每次函数进入生成新 `callId`，递归调用与并发任务的 Shadow Frame 互不干扰
+9. **对象 OID 机制**：`J$.T` 字面量创建时为引用类型分配全局唯一 OID，通过 `J$.P` 写属性时自动递增版本号，支持别名追踪
+10. **异步 ContextID**：`J$.Aw` 恢复点钩子 + `newAsyncContext()` / `activateContext()` API，彻底解决异步 log 交叉感染问题
+11. **静态 SSA def-use 分析**：`dataflow.js` 在插桩前对 AST 进行两阶段分析，生成插桩决策表（FULL / LIGHTWEIGHT / DEAD），指导第三 AST Pass 选择最优钩子
+12. **高性能日志后端**：`TypedArrayBackend` 使用 `Float64Array` 环形缓冲区，单条写入无 GC，峰值吞吐量显著优于普通对象数组
+13. **反插桩对抗**：`AntiDetection` 提供 `Function.prototype.toString` Hook、全局泄露检测、异步上下文包装等隐蔽性增强机制

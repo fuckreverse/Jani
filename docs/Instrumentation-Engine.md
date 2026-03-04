@@ -10,19 +10,26 @@
 ```
 JavaScript 源代码
        │
-       ▼  acorn.parse()（支持 ES2022+）
+       ▼  @babel/parser（支持 ES2022+ 及实验性语法）
+AST（带 loc 信息）
+       │
+       ▼  addScopes() — 作用域分析（附 .scope，含 ScopeID / hasWith / hasEval / varKind）
 AST（带 loc/scope 信息）
        │
-       ▼  Pass 0（可选）：visitorCloneBodyPre — 采样模式克隆函数体
-       │  Pass 1：visitorRRPre（前序）+ visitorRRPost（后序）— 主插桩
-       │  Pass 2：visitorOps（后序）— 运算符/控制流插桩
-       │  Pass 3（可选）：visitorMergeBodyPre — 采样模式合并
+       ▼  analyzeDefUse() — Pass 0 静态 def-use 分析（生成插桩决策表）
+插桩决策表（Map<nodeKey, 'full'|'lightweight'>）
+       │
+       ▼  Pass 1（可选，采样模式）：visitorCloneBodyPre — 克隆函数体
+       │  Pass 2：visitorRRPre（前序）+ visitorRRPost（后序）— 主插桩
+       │             ↳ 查决策表：局部变量走 J$.Rl，全局/不安全走 J$.R
+       │  Pass 3：visitorOps（后序）— 运算符/控制流插桩
+       │  Pass 4（可选，采样模式）：visitorMergeBodyPre — 合并
        ▼
 插桩后 AST
        │
        ▼  hoistFunctionDeclaration() — 函数声明提升（Firefox 兼容）
        │
-       ▼  astring.generate()（支持 ES2022+）
+       ▼  @babel/generator（支持 Babel 原生 AST）
 插桩后 JavaScript 代码（含 IIFE 包裹 / module 绑定）
 ```
 
@@ -113,20 +120,38 @@ const instrCode = instrumentEvalCode('var x = 1;', 42, true);
 
 ### 变量读写
 
+变量读取有**两条路径**，插桩器在静态分析阶段决定走哪条：
+
+**全量读取路径**（全局变量、含 `eval`/`with` 的作用域、`catch` 参数、`arguments`）：
+
 ```js
 // 原始代码
 x
 
-// 插桩后
-J$.R(iid, 'x', x, flags)
+// 插桩后（全量路径 — 含 scopeId 参数）
+J$.R(iid, 'x', x, flags, defScopeId)
+// 其中：flags = bitPattern(isGlobal, isScriptLocal)；全局变量无 defScopeId
 ```
+
+**轻量读取路径**（静态可确认的局部变量：非全局、无 eval/with、非 catch 参数、非 arguments）：
+
+```js
+// 原始代码
+x
+
+// 插桩后（轻量路径 — 不传 value，运行时从 Shadow Frame 查值）
+J$.Rl(iid, defScopeId, 'x')
+```
+
+变量写入（带 `scopeId` 参数，供运行时更新 Shadow Frame）：
 
 ```js
 // 原始代码
 x = expr
 
 // 插桩后
-J$.W(iid, 'x', J$.R(iid2, 'x', x, flags), expr, flags)
+J$.W(iid, 'x', expr, x, flags, defScopeId)
+// 其中：flags = bitPattern(isGlobal, isScriptLocal, isDeclaration)
 ```
 
 ### 属性读写
@@ -217,12 +242,12 @@ if (J$.C(iid, cond)) { ... }
 
 ### 函数进入/退出
 
-每个（非箭头）函数体自动注入：
+每个（非箭头）函数体自动注入。`J$.Fe` 第五个参数 `defScopeId` 为函数定义点的静态作用域 ID，供运行时创建 Shadow Frame：
 
 ```js
 function foo(a, b) {
-    // 插桩后头部
-    J$.Fe(iid, foo, this, arguments);
+    // 插桩后头部（defScopeId = 函数所在 Scope 的 id，由插桩器静态注入）
+    J$.Fe(iid, foo, this, arguments, defScopeId);
     try {
         // ... 原函数体（插桩后）
         return J$.Rt(iid2, returnVal);
@@ -254,9 +279,12 @@ function foo(a, b) {
 ## 作用域分析
 
 插桩前，`scope.js` 的 `addScopes()` 会对 AST 进行一遍预扫描，
-为每个作用域节点（Program / Function / CatchClause）附加 `.scope` 属性：
+为每个作用域节点（Program / Function / CatchClause）附加 `.scope` 属性。
+
+### Scope 对象结构
 
 ```js
+// scope.vars：变量名 → 声明类型（string）
 scope.vars = {
     'x':   'var',    // var 声明
     'a':   'arg',    // 函数参数
@@ -264,10 +292,91 @@ scope.vars = {
     'bar': 'lambda', // 函数表达式（var bar = function() {}）
     'e':   'catch',  // catch 子句参数
 }
+
+// scope.varKinds：变量名 → 声明关键字（用于 const dead-read 消除等优化）
+scope.varKinds = {
+    'x':   'var',   // var 声明
+    'y':   'let',   // let 声明
+    'z':   'const', // const 声明（值不可变，可做 dead-read 消除）
+}
 ```
 
-插桩时，`wrappers.js` 通过 `getScope().isGlobal(name)` 判断变量是否为全局变量，
-从而在 `J$.R` / `J$.W` 调用中设置 `isGlobal` 标志位。
+### Scope 关键属性
+
+| 属性/方法 | 说明 |
+|-----------|------|
+| `scope.id` | 本作用域的唯一整数 ID（每次 `instrumentCode` 重置，跨调用单调递增） |
+| `scope.hasEval_` / `scope.usesEval()` | 作用域链内出现过 `eval` 标识符时为 `true`，禁用轻量读取路径 |
+| `scope.hasWith_` / `scope.usesWith()` | 作用域链内出现过 `with` 语句时为 `true`，禁用轻量读取路径 |
+| `scope.hasVar(name)` | 查询作用域链中是否存在该变量 |
+| `scope.hasOwnVar(name)` | 仅查询本层作用域（用于 `_findDefScope` 遍历） |
+| `scope.isGlobal(name)` | 判断变量是否为全局变量（设置 `isGlobal` 标志） |
+| `scope.getVarKind(name)` | 获取变量的声明关键字（`'var'`/`'let'`/`'const'` 或 `undefined`） |
+
+### 轻量路径判断条件（`_findDefScope`）
+
+`wrappers.js` 的 `_findDefScope(scope, name)` 沿作用域链向上查找变量实际定义点（支持闭包），
+并结合以下条件决定是否走轻量读取路径：
+
+```
+可以走 J$.Rl 轻量路径，当且仅当：
+  1. defScope !== null（能静态确定定义点）
+  2. !isGlobal（不是全局变量）
+  3. !scope.usesEval()（作用域链无 eval）
+  4. !scope.usesWith()（作用域链无 with）
+  5. defScope.hasOwnVar(name) !== 'catch'（不是 catch 参数）
+  6. name !== 'arguments'（不是 arguments 对象）
+```
+
+其余情况走 `J$.R` 全量路径，并携带 `defScopeId` 参数供运行时同步 Shadow Frame。
+
+## 静态 Def-Use 分析（`dataflow.js`）
+
+`src/instrument/dataflow.js` 实现了 **Pass 0 静态 SSA def-use 分析**，
+在 `addScopes()` 之后、`transformAst()` 之前对原始 AST 执行，产出**插桩决策表**。
+
+### 决策类型
+
+| 决策 | 说明 | 对应插桩钩子 |
+|------|------|-----------|
+| `'full'` | 全量插桩（全局变量、含 eval/with、catch 参数等） | `J$.R(...)` |
+| `'lightweight'` | 轻量插桩（静态确认的局部变量） | `J$.Rl(...)` |
+| `'dead'` | 可省略的 dead read（当前保守实现降级为 lightweight，保留供未来扩展） | — |
+
+### 分析算法（两阶段）
+
+**阶段 1：Def-Sites 收集**
+
+对每个函数作用域，扫描所有 `AssignmentExpression`、`UpdateExpression` 和变量声明，
+构建 `Map<name, DefInfo>`，记录每个变量的赋值点数量、是否在条件分支内、声明类型（`const`/`let`/`var`/`param`）。
+
+**阶段 2：Use-Sites 决策**
+
+对每个 RHS 上下文的 Identifier：
+- 作用域含 `eval`/`with` 或变量是全局变量 → `'full'`
+- `const` 参数/无重赋值的 `param` → `'lightweight'`
+- 有重赋值/多 def-site/条件赋值 → `'lightweight'`
+
+### 使用方式
+
+```js
+import { analyzeDefUse, Decision } from './src/instrument/dataflow.js';
+
+// 通常由 esnstrument.js 的 transformString 自动调用
+const decisions = analyzeDefUse(ast);     // ast 已经过 addScopes 处理
+
+// 查询某个 use-site 的决策
+// nodeKey = `${scopeId}:${name}:${line}:${col}`
+const key = `0:x:2:8`;
+const decision = decisions.get(key);      // → 'full' | 'lightweight' | undefined
+```
+
+### 保守近似原则
+
+宁可错判成 `lightweight`，也不错判成 `dead`：
+- 变量被传入函数（可能被修改）→ `lightweight`
+- 变量在 `try` 块内 → `lightweight`
+- 作用域内有任何 `eval` 或 `with` → `full`
 
 ## 输出格式
 

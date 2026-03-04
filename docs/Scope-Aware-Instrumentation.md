@@ -1,6 +1,6 @@
 # 高强度混淆 JS 动态分析工具——完整改造方案
 
-> **文档状态**：草稿 v0.3 — 持续迭代中，未开始实施（已经过代码审查校对）  
+> **文档状态**：v0.5 — **全部 TODO-1~18 均已完成实施**（含 Wave 5 的 OID/ContextID/DataFlowAnalyzer/AntiDetection/TypedArrayBackend/dataflow.js/第三 AST Pass）  
 > **来源**：基于与 Gemini 的技术对话（22 轮问答）+ 对当前 Jalangi2 项目代码的实际分析  
 > **最终目标**：构建一套工业级 JS 动态逆向分析工具，核心能力包括：
 > 1. **作用域感知的精简插桩**——用"左值状态机"替代无差别右值 log，消除代码体积膨胀
@@ -72,24 +72,24 @@ let y = J$.W(40, 'y',
 以下是从 Gemini 对话中提炼 + 与当前代码实际情况对照后，得出的完整改造任务清单，按依赖关系排序：
 
 ```
-TODO-1  scope.js      — 补全 addEval() 调用（安全基础）
-TODO-2  scope.js      — 新增 hasWith 标志和 addWith() 调用
-TODO-3  scope.js      — 给每个 Scope 分配唯一 ID
-TODO-4  scope.js      — 记录变量声明 kind（const/let/var）
-TODO-5  scope.js      — 闭包变量定义域追踪（定义点 scopeId）
-TODO-6  esnstrument.js — resetScopeCounter() 集成进 instrumentCode()
-TODO-7  wrappers.js   — 向 J$.R/J$.W/J$.Fe/J$.N 传入 scopeId
-TODO-8  wrappers.js   — 新增 wrapReadLightweight()，修改 instrumentLoad()
-TODO-9  esnstrument.js — 新增第三个 AST Pass（def-use 分析驱动的插桩决策）
-TODO-10 instrument/   — 新增 dataflow.js（SSA def-use 分析模块）
-TODO-11 JalangiRuntime.js — Shadow Frame 机制（按 callId+name 索引）
-TODO-12 JalangiRuntime.js — 新增 J$.Rl 方法（轻量读取钩子）
-TODO-13 JalangiRuntime.js — CallID 机制（每次 Fe 分配唯一调用 ID）
-TODO-14 JalangiRuntime.js — 对象 OID 机制（为对象分配唯一 ID + 版本号）
-TODO-15 JalangiRuntime.js — 异步 ContextID 机制（async/await 追踪 ID）
-TODO-16 runtime/      — 新增 DataFlowAnalyzer.js（运行时 SSA + backward slicing）
-TODO-17 wrappers.js   — 反插桩对抗：Function.prototype.toString Hook 注入
-TODO-18 esnstrument.js — TypedArray 环形缓冲区替代 JS 对象 log（性能优化）
+TODO-1  scope.js      — 补全 addEval() 调用（安全基础）             ✅ 已完成
+TODO-2  scope.js      — 新增 hasWith 标志和 addWith() 调用          ✅ 已完成
+TODO-3  scope.js      — 给每个 Scope 分配唯一 ID                    ✅ 已完成
+TODO-4  scope.js      — 记录变量声明 kind（const/let/var）           ✅ 已完成
+TODO-5  wrappers.js   — 闭包变量定义域追踪（_findDefScope）          ✅ 已完成
+TODO-6  esnstrument.js — resetScopeCounter() 集成进 instrumentCode() ✅ 已完成
+TODO-7  wrappers.js   — 向 J$.R/J$.W/J$.Fe 传入 scopeId             ✅ 已完成
+TODO-8  wrappers.js   — 新增 wrapReadLightweight()，修改 instrumentLoad() ✅ 已完成
+TODO-9  esnstrument.js — 新增第三个 AST Pass（def-use 分析驱动的插桩决策）  ✅ 已完成
+TODO-10 instrument/   — 新增 dataflow.js（SSA def-use 分析模块）          ✅ 已完成
+TODO-11 JalangiRuntime.js — Shadow Frame 机制（按 callId+name 索引）  ✅ 已完成
+TODO-12 JalangiRuntime.js — 新增 J$.Rl 方法（轻量读取钩子）           ✅ 已完成
+TODO-13 JalangiRuntime.js — CallID 机制（每次 Fe 分配唯一调用 ID）    ✅ 已完成
+TODO-14 JalangiRuntime.js — 对象 OID 机制（为对象分配唯一 ID + 版本号）     ✅ 已完成
+TODO-15 JalangiRuntime.js — 异步 ContextID 机制（async/await 追踪 ID）     ✅ 已完成
+TODO-16 runtime/      — 新增 DataFlowAnalyzer.js（运行时 SSA + backward slicing） ✅ 已完成
+TODO-17 runtime/      — 新增 AntiDetection.js（反插桩对抗：toString Hook 等）      ✅ 已完成
+TODO-18 runtime/logging/backends/ — 新增 TypedArrayBackend.js（TypedArray 环形缓冲区）✅ 已完成
 ```
 
 ---

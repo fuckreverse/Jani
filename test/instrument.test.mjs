@@ -129,8 +129,10 @@ test('箭头函数 + 默认参数', () => {
 test('箭头函数（表达式体）', () => {
     const r = instr('var add = (a, b) => a + b;');
     // 表达式体箭头函数无 arguments，不注入 J$.Fe；但变量写入和读取应有钩子
+    // NOTE: 箭头参数 a/b 是局部变量，满足轻量读取路径条件，会走 J$.Rl 而不是 J$.R
     assertIncludes(r.code, 'J$.W(', '箭头函数赋值应注入写入钩子 J$.W');
-    assertIncludes(r.code, 'J$.R(', '参数应注入读取钩子 J$.R');
+    // 确认存在读取钩子（轻量路径 Rl 或全量路径 R）
+    assert(r.code.includes('J$.Rl(') || r.code.includes('J$.R('), '参数应注入读取钩子（J$.Rl 或 J$.R）');
 });
 
 test('class（constructor + 普通方法）', () => {
@@ -554,28 +556,41 @@ test('BUG2b: ENABLE_SAMPLING 辅助函数 wrapper 不应被 mergeBodies 错误�
 });
 
 test('BUG3: 箭头函数参数不应被错误标记为全局变量', () => {
-    // 修复前：visitorRRPre 缺少 ArrowFunctionExpression → _scope 不更新到箭头的 scope
-    //         导致箭头参数 hasVar() 返回 null → wrapRead 以 isGlobal=true 处理
-    // 修复后：添加 ArrowFunctionExpression: W.setScope + 对应的 popScope
-    // 验证方式：检查 J$.R 的第 4 个参数 bitPattern：
-    //   isGlobal=true  → 2，isGlobal=false → 0
-    const r = instr('var f = (x) => x + 1;');
-    // J$.R(iid, "x", x, <bitPattern>) - bitPattern for local = 0
+// 修复前：visitorRRPre 缺少 ArrowFunctionExpression → _scope 不更新到箭头的 scope
+//         导致箭头参数 hasVar() 返回 null → wrapRead 以 isGlobal=true 处理
+// 修复后：添加 ArrowFunctionExpression: W.setScope + 对应的 popScope
+// 验证方式：箭头参数 x 是局部变量，现在走轻量路径 J$.Rl（天然不是全局变量），
+//           或者走全量路径 J$.R 时 bitPattern 应为 0（isGlobal=false）
+const r = instr('var f = (x) => x + 1;');
+// 优先检查轻量路径（Rl 出现说明已正确识别为局部变量）
+const rlMatch = r.code.match(/J\$\.Rl\(\s*\d+\s*,\s*\d+\s*,\s*"x"\s*\)/);
+if (rlMatch) {
+    // 走了轻量路径：Rl 天然只对局部变量生效，断言成立
+    assert(true, '箭头参数 x 走轻量路径 J$.Rl，证明是局部变量');
+} else {
+    // 退回全量路径：检查 bitPattern
     const match = r.code.match(/J\$\.R\(\s*\d+\s*,\s*"x"\s*,[^,]+,\s*(\d+)\s*\)/);
     assert(match !== null, '应存在对 x 的读取插桩 J$.R');
     assertEqual(parseInt(match[1]), 0, '箭头参数 x 的 isGlobal 应为 false（bitPattern=0）');
+}
 });
 
 test('BUG3b: 嵌套箭头函数各自独立作用域不相互污染', () => {
-    // 修复后：外层箭头 x、内层箭头 y 都应在各自 scope 中正确识别为局部变量
-    const r = instr('var f = (x) => (y) => x + y;');
-    // 两个参数 x 和 y 的 bitPattern 都应为 0
-    const xMatch = r.code.match(/J\$\.R\(\s*\d+\s*,\s*"x"\s*,[^,]+,\s*(\d+)\s*\)/);
-    const yMatch = r.code.match(/J\$\.R\(\s*\d+\s*,\s*"y"\s*,[^,]+,\s*(\d+)\s*\)/);
-    assert(xMatch !== null, '应存在对 x 的读取插桩');
-    assert(yMatch !== null, '应存在对 y 的读取插桩');
-    assertEqual(parseInt(xMatch[1]), 0, '外层箭头参数 x 应为局部变量（bitPattern=0）');
-    assertEqual(parseInt(yMatch[1]), 0, '内层箭头参数 y 应为局部变量（bitPattern=0）');
+// 修复后：外层箭头 x、内层箭头 y 都应在各自 scope 中正确识别为局部变量
+// NOTE: 现在局部变量走轻量读取路径 J$.Rl，不再有 J$.R for local vars
+const r = instr('var f = (x) => (y) => x + y;');
+// 检查 x 的读取钩子（Rl 或 R）
+const xRlMatch = r.code.match(/J\$\.Rl\(\s*\d+\s*,\s*\d+\s*,\s*"x"\s*\)/);
+const xRMatch  = r.code.match(/J\$\.R\(\s*\d+\s*,\s*"x"\s*,[^,]+,\s*(\d+)\s*\)/);
+// 检查 y 的读取钩子（Rl 或 R）
+const yRlMatch = r.code.match(/J\$\.Rl\(\s*\d+\s*,\s*\d+\s*,\s*"y"\s*\)/);
+const yRMatch  = r.code.match(/J\$\.R\(\s*\d+\s*,\s*"y"\s*,[^,]+,\s*(\d+)\s*\)/);
+assert(xRlMatch !== null || xRMatch !== null, '应存在对 x 的读取插桩');
+assert(yRlMatch !== null || yRMatch !== null, '应存在对 y 的读取插桩');
+// 若走全量路径，验证不是全局变量（bitPattern=0）
+if (xRMatch) assertEqual(parseInt(xRMatch[1]), 0, '外层箭头参数 x 应为局部变量（bitPattern=0）');
+if (yRMatch) assertEqual(parseInt(yRMatch[1]), 0, '内层箭头参数 y 应为局部变量（bitPattern=0）');
+// 若走轻量路径（Rl），天然证明是局部变量，无需额外检查
 });
 
 test('BUG4: strict mode 函数中 arguments 初始化不应产生赋值语句', () => {

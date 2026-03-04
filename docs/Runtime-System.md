@@ -79,8 +79,9 @@ const globalIid = J$.getGlobalIID(iid);
 
 | 钩子 | 触发场景 | 分析回调 |
 |------|---------|---------|
-| `R(iid, name, val, flags)` | 变量读取 | `read(iid, name, val, isGlobal, isScriptLocal)` |
-| `W(iid, name, val, lhs, flags)` | 变量写入 | `write(iid, name, val, lhs, isGlobal, isScriptLocal)` |
+| `R(iid, name, val, flags, defScopeId?)` | 变量读取（全量路径，兼更新 Shadow Frame） | `read(iid, name, val, isGlobal, isScriptLocal)` |
+| `Rl(iid, defScopeId, name)` | 变量读取（**轻量路径**，从 Shadow Frame 查值） | `read(iid, name, val, false, false)` |
+| `W(iid, name, val, lhs, flags, defScopeId?)` | 变量写入（兼更新 Shadow Frame） | `write(iid, name, val, lhs, isGlobal, isScriptLocal)` |
 | `G(iid, base, offset, flags)` | 属性读取 | `getFieldPre` → `getField` |
 | `P(iid, base, offset, val, flags)` | 属性写入 | `putFieldPre` → `putField` |
 | `F(iid, f, flags)` | 函数调用 | `invokeFunPre` → `invokeFun` |
@@ -91,8 +92,8 @@ const globalIid = J$.getGlobalIID(iid);
 | `C(iid, cond)` | 条件判断 | `conditional` |
 | `C1(iid, val)` | switch 键值 | — |
 | `C2(iid, val)` | case 标签值 | — |
-| `Fe(iid, f, dis, args)` | 函数进入 | `functionEnter` |
-| `Fr(iid)` | 函数退出 | `functionExit` |
+| `Fe(iid, f, dis, args, defScopeId?)` | 函数进入（分配 CallID，创建 Shadow Frame） | `functionEnter` |
+| `Fr(iid)` | 函数退出（弹出 CallID 栈，清除 Shadow Frame） | `functionExit` |
 | `Se(iid, val, origFile)` | 脚本进入 | `scriptEnter` |
 | `Sr(iid)` | 脚本退出 | `scriptExit` |
 | `N(iid, name, val, flags)` | 变量声明 | `declare` |
@@ -106,7 +107,9 @@ const globalIid = J$.getGlobalIID(iid);
 
 `flags` 是一个整数，通过位字段编码多个布尔值，可用 `decodeBitPattern` 解码：
 
-- `R` / `W` 的 flags：`[isGlobal, isScriptLocal, isArguments]`
+- `R` 的 flags：`[isGlobal, isScriptLocal]`；可选第五参数 `defScopeId`（插桩器静态注入）
+- `W` 的 flags：`[isGlobal, isScriptLocal, isDeclaration]`；可选第六参数 `defScopeId`
+- `Fe` 的可选第五参数：`defScopeId`（函数定义点的 Scope.id）
 - `G` 的 flags：`[isComputed, isOpAssign, isMethodCall]`
 - `P` 的 flags：`[isComputed, isOpAssign]`
 - `F` / `M` 的 flags：`[isConstructor, isMethod]`
@@ -220,6 +223,106 @@ const orig = smemory.getOriginalObject(id);
 *J$A*   → 原始对象反向引用
 ```
 
+## CallID 机制与 Shadow Frame（轻量变量读取）
+
+### CallID
+
+`JalangiRuntime` 为每次函数调用分配一个唯一的 **CallID**（整数，全局单调递增），
+解决同一函数在递归、闭包、异步并发场景下局部变量的区分问题：
+
+- `Fe(iid, f, dis, args, defScopeId)` — 分配新 CallID，将 `(旧 callId, defScopeId)` 压栈
+- `Fr(iid)` — 弹出栈顶，恢复调用方的 CallID，同时清除本次调用的 Shadow Frame
+
+### Shadow Frame
+
+`JalangiRuntime` 内部维护一张 **Shadow Frame 映射表**，索引格式为 `"defScopeId:callId"`，
+每个条目是 `Map<name, value>`。其作用是让 `J$.Rl` 轻量读取钩子能够在不接收 `value` 参数的情况下，
+仍能正确获取变量当前值，避免将变量值通过表达式传递（减少插桩开销）。
+
+**数据流向**：
+
+```
+J$.W(iid, name, val, lhs, flags, defScopeId)
+   ↓ 写入时同步
+Shadow Frame["defScopeId:callId"][name] = val
+
+J$.R(iid, name, val, flags, defScopeId)
+   ↓ 读取时同步（全量路径也更新 Shadow Frame）
+Shadow Frame["defScopeId:callId"][name] = val
+
+J$.Rl(iid, defScopeId, name)
+   ↓ 直接从 Shadow Frame 查值，不接收 value 参数
+val = Shadow Frame["defScopeId:callId"][name]
+```
+
+**适用条件**（插桩器静态判断）：局部变量、无 `eval`/`with`、非 `catch` 参数、非 `arguments`。
+
+## 对象 OID 机制（TODO-14）
+
+`JalangiRuntime` 为每个对象/数组/函数分配唯一的 **OID（Object ID）**，支持别名追踪和对象版本管理：
+
+- **分配时机**：`J$.T()`（字面量创建）时，通过 `WeakMap` 为引用类型对象分配 OID
+- **别名记录**：`J$.W()` 中，当右值是对象时，记录 `"scopeId:callId:name" → OID` 的映射
+- **版本递增**：`J$.P()`（属性写入）时，对 base 对象的 OID 版本号 +1
+
+### 公开 API
+
+```js
+// 查询对象的 OID（不分配新 OID）
+const oid = J$.getOid(obj);        // → number | null
+
+// 查询对象的版本号（每次 putField 递增）
+const ver = J$.getObjectVersion(obj); // → number（0 = 从未被修改）
+```
+
+### 用途
+
+```
+let a = {};       // T() 中分配 OID_1
+let b = a;        // W() 中记录 b → OID_1
+b.x = 1;          // P() 中 OID_1 版本号 +1；通过 aliasTable 可知 a 也受影响
+```
+
+## 异步 ContextID 机制（TODO-15）
+
+`JalangiRuntime` 为不同的异步任务分配独立的 **ContextID**，解决异步 log 交叉感染问题：
+
+- **顶层同步代码**：ContextID = 0
+- **async function / setTimeout 等**：通过 `newAsyncContext()` 分配新 ContextID
+
+### 公开 API
+
+```js
+// 查询当前异步上下文 ID
+const ctxId = J$.currentContextId;  // → number（0 = 顶层同步）
+
+// 为新异步任务分配 ContextID
+const newCtxId = J$.newAsyncContext(); // → number（唯一递增）
+
+// 激活指定的异步上下文（在回调入口调用）
+J$.activateContext(newCtxId);
+```
+
+### await 恢复点钩子（`J$.Aw`）
+
+插桩器在 `await expr` 后注入 `J$.Aw(iid)`，在 await 恢复时通知运行时：
+
+```js
+// 插桩代码（由 esnstrument.js 生成）
+(await expr, J$.Aw(iid))
+```
+
+分析插件可通过 `awaitResume(iid, contextId)` 回调监听 await 恢复事件。
+
+### 包装异步回调（结合 AntiDetection.js）
+
+```js
+import { createContextWrapper } from './src/runtime/AntiDetection.js';
+
+// 确保 setTimeout 回调在独立异步上下文中运行
+setTimeout(createContextWrapper(originalCallback, J$), delay);
+```
+
 ## 脚本 ID 管理
 
 运行时维护 `sidStack`（脚本 ID 栈）以支持多脚本/eval 嵌套执行：
@@ -263,6 +366,7 @@ eval('var x = 1;');
 | `NodeStreamBackend` | Node.js 流（写文件、stdout）|
 | `WsBackend` | WebSocket 后端（传输到 trace server）|
 | `IdbWorkerBackend` | IndexedDB Worker 后端（浏览器持久化）|
+| `TypedArrayBackend` | **高性能 TypedArray 环形缓冲区**后端（零 GC、可导出 `.bin`）|
 
 ```js
 // 使用 WebSocket 后端（配合 npm run trace-server）
@@ -271,3 +375,100 @@ const J$ = globalThis.J$ = new JalangiSandbox({
     // 需要手动配置 WsBackend
 });
 ```
+
+### TypedArrayBackend — 高性能环形缓冲区
+
+`TypedArrayBackend` 实现了与 `MemoryBackend` 相同的接口，但内部使用预分配的 `Float64Array`
+环形缓冲区写入，写入速度比 `Array.push(obj)` 快 10-100 倍，且不产生 GC 压力。
+
+```js
+import { TypedArrayBackend } from './src/runtime/logging/backends/TypedArrayBackend.js';
+
+const backend = new TypedArrayBackend({ capacity: 1_000_000 });
+
+// 作为 TraceLogger 的后端使用
+// await backend.write([ { type: 'W', iid: 8, scopeId: 0, callId: 1, ... } ]);
+
+// 导出二进制（用于离线分析）
+const buf = backend.exportBinary();
+
+// 调试读取（最近 100 条）
+const events = backend.getEvents(100);
+```
+
+每条 log 条目编码为 5 个 Float64（40 字节），字段含义：`entryType | iid | scopeId:callId(packed) | contextId | valueKey`。
+
+## DataFlowAnalyzer — 运行时 SSA 数据流分析（TODO-16）
+
+`DataFlowAnalyzer`（`src/runtime/DataFlowAnalyzer.js`）是一个**后处理分析器**，
+消费运行时产生的 log 条目，对其做 SSA 化并支持 backward slicing。
+
+```js
+import { DataFlowAnalyzer } from './src/runtime/DataFlowAnalyzer.js';
+
+const dfa = new DataFlowAnalyzer();
+
+// 实时处理（在分析插件回调中调用）
+dfa.processWrite({ iid: 8,  scopeId: 0, callId: 1, name: 'x', value: 1 });
+dfa.processRead( { scopeId: 0, callId: 1, name: 'x' });
+dfa.processWrite({ iid: 24, scopeId: 0, callId: 1, name: 'y', value: 2 });
+
+// 也可以批量处理 log 数组
+dfa.processLog(logEntries);   // 按 entry.type 自动分发
+
+// Backward Slicing：从终点寄存器回溯所有影响它的赋值链
+const targetReg = dfa.getLastWrite(0, 1, 'y');
+const slice = dfa.backwardSlice(targetReg);
+// slice → [{ iid: 8, name: 'x', value: 1 }, { iid: 24, name: 'y', value: 2 }]
+```
+
+### 核心 API
+
+| 方法 | 说明 |
+|------|------|
+| `processWrite(entry)` | 处理 W 条目，创建新 SSA 寄存器 |
+| `processRead(entry)` | 处理 R/Rl 条目，暂存源寄存器（供下次 processWrite 消费） |
+| `processPutField(entry)` | 处理 P 条目，递增 OID 版本号，为所有别名变量创建版本寄存器 |
+| `processCallReturn(entry)` | 处理 F/M 条目，记录函数调用返回值寄存器 |
+| `processLog(entries)` | 批量处理 log 数组 |
+| `backwardSlice(regId)` | 从目标寄存器 BFS 回溯，返回按 iid 排序的依赖链 |
+| `getLastWrite(scopeId, callId, name)` | 查询变量最新的 SSA 寄存器 ID |
+| `getAliasesForOid(oid)` | 查询持有指定 OID 的所有变量（别名集合） |
+| `exportRegisters()` | 导出所有寄存器（sources 转为数组，可 JSON 序列化） |
+
+## AntiDetection — 反插桩对抗（TODO-17）
+
+`AntiDetection`（`src/runtime/AntiDetection.js`）提供针对恶意脚本常见插桩检测手段的对策。
+
+```js
+import {
+    installToStringHook,
+    registerOriginalCode,
+    detectGlobalLeaks,
+    createContextWrapper,
+    benchmarkCallOverhead,
+} from './src/runtime/AntiDetection.js';
+
+// 1. 安装 Function.toString 拦截器（在 J$.Se 之前调用）
+installToStringHook();
+
+// 2. 注册函数的原始代码（让 toString() 返回插桩前的代码）
+registerOriginalCode(instrumentedFn, originalSourceCode);
+
+// 3. 检查全局变量是否泄露（自检用）
+const leaks = detectGlobalLeaks(); // 正常情况下返回 []
+
+// 4. 包装异步回调，分配独立 ContextID（配合 TODO-15）
+const wrappedCb = createContextWrapper(originalCallback, J$);
+setTimeout(wrappedCb, delay);
+
+// 5. 基准测试：检测当前环境的插桩调用开销
+const { avgUs, acceptable } = benchmarkCallOverhead(1000, 10);
+```
+
+### toString Hook 原理
+
+恶意脚本常通过 `fn.toString()` 检测函数体是否被注入了追踪代码。
+`installToStringHook()` 在 `Function.prototype.toString` 上安装拦截器：
+若目标函数已通过 `registerOriginalCode()` 注册了原始代码，则返回原始代码；
+否则，透传给原始 `toString`，行为完全正常。

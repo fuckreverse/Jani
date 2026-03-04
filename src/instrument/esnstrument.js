@@ -37,7 +37,8 @@ const babelGenerate = _babelGenerate.default ?? _babelGenerate;
 
 import { JALANGI_VAR }     from '../Constants.js';
 import { CONTEXT, transformAst, setJalangiVar as setAstUtilJalangiVar } from './astUtil.js';
-import { addScopes }       from './scope.js';
+import { addScopes, resetScopeCounter } from './scope.js';
+import { analyzeDefUse }  from './dataflow.js';  // TODO-9/10: 静态 def-use 分析
 import * as IID            from './iid.js';
 import * as W              from './wrappers.js';
 // ArrowFunctionExpression 专用初始化（仅做 syncDefuns，不注入 J$.Fe）
@@ -469,6 +470,8 @@ const visitorOps = {
     },
 
     WithStatement(node) {
+        // TODO-2: 标记当前作用域使用了 with
+        W.getScope()?.addWith();
         node.object = W.wrapWith(node.object);
         return node;
     },
@@ -566,9 +569,19 @@ function babelParse(code, sourceType) {
 function transformString(code, visitorsPost, visitorsPre, sourceType) {
     const newAst = babelParse(code, sourceType);
     addScopes(newAst);
+
+    // TODO-9/10: Pass 0 — 静态 def-use 分析，生成插桩决策表
+    // 分析结果注入 wrappers 模块，后续 instrumentLoad 查表决定插桩级别
+    const instrDecisions = analyzeDefUse(newAst);
+    W.setInstrDecisions(instrDecisions);
+
     for (let i = 0; i < visitorsPost.length; i++) {
         transformAst(newAst, visitorsPost[i], visitorsPre[i], CONTEXT.RHS);
     }
+
+    // Pass 结束后清理决策表（避免内存泄漏和跨文件污染）
+    W.setInstrDecisions(null);
+
     return newAst;
 }
 
@@ -642,6 +655,7 @@ function instrumentCode(options) {
     // 初始化 IID 计数器及文件名，并重置文件级可变状态（保证插桩幂等性）
     IID.initialize(isEval, options.instCodeFileName, options.origCodeFileName);
     W.resetPerFile();
+    resetScopeCounter();  // TODO-6: 保证 ScopeID 幂等性（每次插桩前重置计数器）
 
     // pre-hook（允许分析修改代码或跳过插桩）
     let skip = false;
