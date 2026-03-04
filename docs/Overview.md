@@ -76,7 +76,8 @@ flowchart TD
 | `analysisCallbackTemplate.js` | 分析插件接口模板（`AnalysisTemplate` 基类） |
 | `DataFlowAnalyzer.js` | 运行时 SSA 数据流分析器，消费 log 条目，支持 backward slicing |
 | `AntiDetection.js` | 反插桩对抗工具，`toString` Hook / 全局变量检测 / 异步上下文包装 |
-| `logging/backends/TypedArrayBackend.js` | 高性能 TypedArray 环形缓冲区日志后端，零 GC、高吞吐量 |
+
+> 日志系统已独立为 `src/logger/`，供 `src/runtime/` 与 `src/instrument/` 共同使用，详见 [Runtime-System.md — 日志系统](./Runtime-System.md#日志系统--srclogger)。
 
 **运行时组件关系**：
 
@@ -88,7 +89,7 @@ flowchart TD
     Plugin["分析插件\n(实现 read/write/getField/... 等钩子)"]
     SMemory["SMemory\n(影子内存，对象 ID 追踪)"]
     DFA["DataFlowAnalyzer\n(SSA 化 + Backward Slicing)"]
-    Logger["TraceLogger\n(日志系统)"]
+    Logger["src/logger/\n(统一日志系统)\ncreateLogger · DOMAIN · LogManager\nTraceLogger · 可插拔后端"]
     Backend["日志后端\nMemory / NodeStream / WsBackend\nIdbWorker / TypedArray"]
 
     Sandbox -->|"继承"| Runtime
@@ -213,5 +214,6 @@ npm run trace-server
 10. **异步 ContextID**：`J$.Aw` 恢复点钩子 + `newAsyncContext()` / `activateContext()` API，彻底解决异步 log 交叉感染问题
 11. **静态 SSA def-use 分析**：`dataflow.js` 在插桩前对 AST 进行两阶段分析，生成插桩决策表（FULL / LIGHTWEIGHT / DEAD），指导第三 AST Pass 选择最优钩子
 12. **按需 Config 推导**：`pluginAnalyzer.js` 静态扫描插件代码，自动推导最小化插桩 Config，减少不必要的插桩开销
-13. **高性能日志后端**：`TypedArrayBackend` 使用 `Float64Array` 环形缓冲区，单条写入无 GC，峰值吞吐量显著优于普通对象数组
-14. **反插桩对抗**：`AntiDetection` 提供 `Function.prototype.toString` Hook、全局泄露检测、异步上下文包装等隐蔽性增强机制
+13. **统一日志工厂**：`src/logger/logger.js` 提供 `createLogger(domain)` + `DOMAIN` 常量，插桩器与运行时的诊断日志统一走两级（域 + 级别）分类，`debug` 级别受 `JALANGI_DEBUG` / `localStorage.jalangiDebug` 开关控制
+14. **高性能日志后端**：`TypedArrayBackend` 使用 `Float64Array` 环形缓冲区，单条写入无 GC，峰值吞吐量显著优于普通对象数组
+15. **反插桩对抗**：`AntiDetection` 提供 `Function.prototype.toString` Hook、全局泄露检测、异步上下文包装等隐蔽性增强机制

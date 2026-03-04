@@ -20,6 +20,9 @@
 import * as babelParser from '@babel/parser';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createLogger, DOMAIN } from '../logger/logger.js';
+
+const log = createLogger(DOMAIN.INSTRUMENT);
 
 // ─── 所有已知 Hook 名称 ────────────────────────────────────────────────────────
 
@@ -185,7 +188,7 @@ function _scanFileForHooks(filePath, used) {
     try {
         code = fs.readFileSync(filePath, 'utf-8');
     } catch (e) {
-        console.warn(`[pluginAnalyzer] Cannot read plugin file: ${filePath} (${e.message})`);
+        log.warn(`Cannot read plugin file: ${filePath} (${e.message})`);
         return;
     }
 
@@ -203,7 +206,7 @@ function _scanFileForHooks(filePath, used) {
             ],
         });
     } catch (e) {
-        console.warn(`[pluginAnalyzer] Parse error in plugin file: ${filePath} (${e.message})`);
+        log.warn(`Parse error in plugin file: ${filePath} (${e.message})`);
         return;
     }
 

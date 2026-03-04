@@ -20,6 +20,10 @@
  *       .use(new LogAllAnalysis(smemory));
  */
 
+import { createLogger, DOMAIN } from '../logger/logger.js';
+
+const log = createLogger(DOMAIN.FRAMEWORK);
+
 /** 所有可能的钩子名称（与 JalangiRuntime.js 运行时保持一致）。 */
 const HOOKS = Object.freeze([
     '_return', '_throw', '_with',
@@ -114,8 +118,8 @@ class AnalysisHost {
  * @param {Error}  e
  */
 function _defaultOnError(hookName, e) {
-    console.error(`[AnalysisHost] exception in plugin hook "${hookName}":`);
-    console.error(e.stack ?? e);
+    log.error(`exception in plugin hook "${hookName}":`);
+    log.error(e.stack ?? e);
     if (typeof process !== 'undefined' && process.exit) {
         process.exit(1);
     }

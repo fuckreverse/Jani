@@ -443,14 +443,91 @@ eval('var x = 1;');
 // 3. EVAL_ORG(code)  ← 执行插桩后的代码
 ```
 
-## Logging 子系统
+## 日志系统（`src/logger/`）
 
-`src/runtime/logging/` 提供可插拔的事件日志后端：
+日志系统已从 `src/runtime/logging/` 迁移并重构为独立模块 `src/logger/`，
+同时供 `src/runtime/` 和 `src/instrument/` 使用。
+
+### 统一日志工厂（`logger.js`）
+
+所有诊断日志均通过 `createLogger(domain)` 工厂函数创建，实现两级分类：
+
+| 维度 | 说明 |
+|------|------|
+| **域（domain）** | 代码所属模块，如 `'framework'`、`'instrument'`、`'backend:ws'` |
+| **级别（level）** | `error` / `warn` / `info` — 始终输出；`debug` — 受开关控制 |
+
+```js
+import { createLogger, DOMAIN } from './src/logger/logger.js';
+
+const log = createLogger(DOMAIN.FRAMEWORK);
+
+log.error('未预期的错误:', err);  // 始终输出到 console.error
+log.warn('重试中...');            // 始终输出到 console.warn
+log.info('沙盒已就绪');           // 始终输出到 console.log
+log.debug('flush 完成, size=', n); // 仅 debug 开关开启时输出
+```
+
+### DOMAIN 常量
+
+```js
+import { DOMAIN } from './src/logger/logger.js';
+
+// DOMAIN.FRAMEWORK    → 'framework'   （JalangiRuntime / JalangiSandbox / AnalysisHost）
+// DOMAIN.INSTRUMENT   → 'instrument'  （astUtil / pluginAnalyzer / esnstrument）
+// DOMAIN.LOGGING      → 'logging'     （LogManager / TraceLogger）
+// DOMAIN.BACKEND_IDB  → 'backend:idb' （IdbWorkerBackend / idb-worker）
+// DOMAIN.BACKEND_WS   → 'backend:ws'  （WsBackend）
+// DOMAIN.BACKEND_NODE → 'backend:node'（NodeStreamBackend）
+// DOMAIN.BACKEND_MEM  → 'backend:mem' （MemoryBackend）
+// DOMAIN.ANALYSIS     → 'analysis'    （分析插件业务日志）
+```
+
+### Debug 开关
+
+**Node.js** 通过 `JALANGI_DEBUG` 环境变量控制：
+
+```bash
+JALANGI_DEBUG=1 node bin/jalangi.mjs instrument src/app.js   # 开启所有域
+JALANGI_DEBUG=framework,instrument node ...                   # 只开启指定域
+JALANGI_DEBUG=backend node ...                                # 前缀匹配（匹配 backend:ws 等）
+```
+
+**浏览器** 通过 `localStorage.jalangiDebug` 控制：
+
+```js
+localStorage.setItem('jalangiDebug', '1');           // 开启所有域
+localStorage.setItem('jalangiDebug', 'backend:idb'); // 只开启指定域
+```
+
+**`--debug` 命令行参数**（`bin/jalangi.mjs`）：使用 `--debug` 生成浏览器 bundle 时，
+Rollup 会在 bundle 头部自动注入以下代码，等价于在浏览器中预设 `localStorage.jalangiDebug = '1'`：
+
+```js
+// ─── Jalangi debug 模式（由 --debug 注入）
+if (typeof localStorage !== 'undefined' && !localStorage.getItem('jalangiDebug')) {
+    localStorage.setItem('jalangiDebug', '1');
+}
+```
+
+> 注意：若用户已手动设置 `localStorage.jalangiDebug`，`--debug` 注入不会覆盖（`getItem` 先检查）。
+
+### Trace 事件与诊断日志的区别
+
+| 类型 | 路径 | 用途 |
+|------|------|------|
+| **诊断日志**（`createLogger`）| 同步输出到控制台 | 框架运行状态、错误、警告 |
+| **Trace 事件**（`TraceLogger.trace()`）| 走 `LogManager → RingBuffer → 后端` 缓冲 | 高频插桩事件（read/write/getField/...）|
+
+高频 trace 数据**不经过** `createLogger`，直接走 `LogManager` 缓冲后端，不会阻塞主线程。
+
+### 模块结构
 
 ```mermaid
 flowchart TD
-    RT["JalangiRuntime\n(产生事件)"]
-    TL["TraceLogger\n(日志管理器，协调 RingBuffer 和后端)"]
+    LOGGER["logger.js\ncreateLogger(domain) + DOMAIN 常量\n+ isDebugEnabled(domain)"]
+    TL["TraceLogger\n(trace 事件门面)"]
+    LM["LogManager\n(协调 RingBuffer 与后端)"]
     RB["RingBuffer\n(无锁环形缓冲区)"]
     ES["EventSerializer\n(事件序列化)"]
 
@@ -462,8 +539,10 @@ flowchart TD
         TA["TypedArrayBackend\n(Float64Array 环形缓冲区\n零 GC，高吞吐量)"]
     end
 
-    RT -->|"write(entries)"| TL
-    TL --> RB
+    LOGGER -.->|"各模块 import"| TL
+    LOGGER -.->|"各模块 import"| LM
+    TL --> LM
+    LM --> RB
     RB --> ES
     ES --> MB
     ES --> NS
@@ -472,16 +551,18 @@ flowchart TD
     ES --> TA
 ```
 
-| 组件 | 说明 |
-|------|------|
-| `TraceLogger` | 日志管理器，协调 RingBuffer 和后端 |
-| `RingBuffer` | 环形缓冲区，无锁高性能暂存 |
-| `EventSerializer` | 事件序列化器 |
-| `MemoryBackend` | 纯内存后端（测试用） |
-| `NodeStreamBackend` | Node.js 流（写文件、stdout）|
-| `WsBackend` | WebSocket 后端（传输到 trace server）|
-| `IdbWorkerBackend` | IndexedDB Worker 后端（浏览器持久化）|
-| `TypedArrayBackend` | **高性能 TypedArray 环形缓冲区**后端（零 GC、可导出 `.bin`）|
+| 组件 | 文件 | 说明 |
+|------|------|------|
+| `logger.js` | `logger.js` | 统一日志工厂，`createLogger` + `DOMAIN` + debug 开关 |
+| `LogManager` | `LogManager.js` | 日志管理器，协调 RingBuffer 和后端 |
+| `TraceLogger` | `TraceLogger.js` | trace 事件门面（高频走缓冲，`key` 事件直输出）|
+| `RingBuffer` | `RingBuffer.js` | 环形缓冲区，无锁高性能暂存 |
+| `EventSerializer` | `EventSerializer.js` | 事件序列化器 |
+| `MemoryBackend` | `backends/MemoryBackend.js` | 纯内存后端（测试用）|
+| `NodeStreamBackend` | `backends/NodeStreamBackend.js` | Node.js 流（写文件、stdout）|
+| `WsBackend` | `backends/WsBackend.js` | WebSocket 后端（传输到 trace server）|
+| `IdbWorkerBackend` | `backends/IdbWorkerBackend.js` | IndexedDB Worker 后端（浏览器持久化）|
+| `TypedArrayBackend` | `backends/TypedArrayBackend.js` | **高性能 TypedArray 环形缓冲区**后端（零 GC、可导出 `.bin`）|
 
 ### TypedArrayBackend — 高性能环形缓冲区
 
@@ -489,7 +570,7 @@ flowchart TD
 环形缓冲区写入，写入速度比 `Array.push(obj)` 快 10-100 倍，且不产生 GC 压力。
 
 ```js
-import { TypedArrayBackend } from './src/runtime/logging/backends/TypedArrayBackend.js';
+import { TypedArrayBackend } from './src/logger/backends/TypedArrayBackend.js';
 
 const backend = new TypedArrayBackend({ capacity: 1_000_000 });
 

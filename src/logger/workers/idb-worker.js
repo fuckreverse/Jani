@@ -14,7 +14,7 @@
  * 写入 IndexedDB。主线程不会被 IDB 操作阻塞。
  *
  * 消息协议（主线程 → Worker）：
- *   { cmd: 'init', dbName: string, storeName: string, version: number }
+ *   { cmd: 'init', dbName: string, storeName: string, version: number, debugDomain?: string|null }
  *     → 打开/升级数据库，完成后回复 { type: 'ready' }
  *
  *   { cmd: 'write', batch: Array, batchId: number }
@@ -38,24 +38,27 @@
  *   record 结构：{ ts: DOMHighResTimeStamp, ...event }
  *
  * 诊断日志：
- *   Worker 内使用 console.debug/warn/error 直接输出到浏览器 DevTools Console，
- *   受 localStorage.jalangiDebug='1' 控制（debug 级别），
+ *   Worker 内使用 console.debug/warn/error 直接输出到浏览器 DevTools Console。
+ *   通过 init 消息中的 debugDomain 字段控制 debug 级别开关
+ *   （由 IdbWorkerBackend 根据 isDebugEnabled('backend:idb') 决定是否传入）；
  *   warn/error 始终输出。
+ *
+ * 注意：Worker 内无法直接 import src/logger/logger.js（Worker 上下文路径问题），
+ * 因此使用内联的轻量 dbg 对象，行为与 createLogger 一致。
  */
 
 // ── 诊断日志工具（Worker 内，直接到 console）──────────────────────────────────
 //
-// 注意：Worker 内无法访问主线程的 localStorage，
-// 所以在 init 时由主线程传入 debug 开关（通过 msg.debug）；
+// debug 开关由主线程在 init 消息中传入（debugDomain 非 null 即开启）；
 // 初始化前默认关闭，以减少噪声。
 let _debugEnabled = false;
 
 const dbg = {
     debug(...args) {
-        if (_debugEnabled) console.debug('[Jalangi:idb-worker]', ...args);
+        if (_debugEnabled) console.debug('[Jalangi:backend:idb]', ...args);
     },
-    warn(...args)  { console.warn( '[Jalangi:idb-worker]', ...args); },
-    error(...args) { console.error('[Jalangi:idb-worker]', ...args); },
+    warn(...args)  { console.warn( '[Jalangi:backend:idb]', ...args); },
+    error(...args) { console.error('[Jalangi:backend:idb]', ...args); },
 };
 
 // ─── IndexedDB 辅助 ────────────────────────────────────────────────────────────
@@ -206,8 +209,8 @@ self.onmessage = async (evt) => {
         switch (msg.cmd) {
 
             case 'init': {
-                // 读取主线程传来的 debug 开关（可选）
-                if (msg.debug === true) _debugEnabled = true;
+                // 读取主线程传来的 debug 开关
+                if (msg.debugDomain != null) _debugEnabled = true;
                 dbName    = msg.dbName    ?? dbName;
                 storeName = msg.storeName ?? storeName;
                 const ver = msg.version   ?? 1;
@@ -319,5 +322,5 @@ self.onmessage = async (evt) => {
 
 // Worker 错误兜底
 self.onerror = (evt) => {
-    console.error('[Jalangi:idb-worker] Uncaught Worker error:', evt.message, `(${evt.filename}:${evt.lineno})`);
+    console.error('[Jalangi:backend:idb] Uncaught Worker error:', evt.message, `(${evt.filename}:${evt.lineno})`);
 };

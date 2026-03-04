@@ -13,7 +13,7 @@
  *
  * 使用方式（Node.js analysis 中）：
  *
- *   import { NodeStreamBackend } from '.../logging/backends/NodeStreamBackend.js';
+ *   import { NodeStreamBackend } from '.../logger/backends/NodeStreamBackend.js';
  *   const backend = new NodeStreamBackend({ path: 'my-trace.ndjson' });
  *   // 与 LogManager 配合：
  *   const mgr = new LogManager({ backends: [backend] });
@@ -25,6 +25,9 @@
 
 import { createWriteStream } from 'node:fs';
 import { serializeBatchToNDJSON } from '../EventSerializer.js';
+import { createLogger, DOMAIN } from '../logger.js';
+
+const log = createLogger(DOMAIN.BACKEND_NODE);
 
 export class NodeStreamBackend {
     /**
@@ -64,7 +67,7 @@ export class NodeStreamBackend {
 
         this._stream.on('error', (err) => {
             this.stats.errors++;
-            console.error('[NodeStreamBackend] stream error:', err.message);
+            log.error('stream error:', err.message);
         });
 
         // 背压：记录 stream 是否可写

@@ -23,6 +23,9 @@
  */
 
 import { serializeBatchToBinary, serializeBatchToNDJSON } from '../EventSerializer.js';
+import { createLogger, DOMAIN } from '../logger.js';
+
+const log = createLogger(DOMAIN.BACKEND_WS);
 
 // 连接状态
 const State = Object.freeze({
@@ -249,7 +252,7 @@ export class WsBackend {
 
     _scheduleRetry() {
         if (this._maxRetries !== -1 && this._retryCount >= this._maxRetries) {
-            console.error('[WsBackend] Max retries reached, giving up');
+            log.error('Max retries reached, giving up');
             this._state = State.CLOSED;
             // 拒绝所有等待连接的 waiters
             for (const w of this._connectWaiters) {
@@ -298,8 +301,8 @@ export class WsBackend {
     _serialize(batchId, batch) {
         if (this._format === 'binary') {
             // 头部加 batchId（4 字节） + 标准批次二进制
-            const { serializeBatchToBinary } = this._getSerializer();
-            const batchBuf = serializeBatchToBinary(batch);
+            const { serializeBatchToBinary: serialize } = this._getSerializer();
+            const batchBuf = serialize(batch);
             const out      = new ArrayBuffer(4 + batchBuf.byteLength);
             const view     = new DataView(out);
             view.setUint32(0, batchId, true);
@@ -326,7 +329,7 @@ export class WsBackend {
                 this.stats.byteSent += typeof data === 'string' ? data.length * 2 : data.byteLength;
             } catch (err) {
                 this.stats.errors++;
-                console.error('[WsBackend] send error:', err);
+                log.error('send error:', err);
             }
         }
     }
@@ -338,36 +341,33 @@ export class WsBackend {
         });
     }
 
-    /**
-     * 等待 in-flight 窗口有空位（背压）。
-     * 使用轮询（微任务），不挂起 Worker 线程。
-     */
     _waitForWindow() {
-        return new Promise((resolve) => {
-            const poll = () => {
-                if (this._inFlight.size < this._windowSize) {
-                    resolve();
-                } else {
-                    queueMicrotask(poll);
-                }
-            };
-            poll();
+        // 等待 in-flight 中任意一个完成
+        return new Promise(resolve => {
+            const entries = [...this._inFlight.values()];
+            let done = false;
+            for (const entry of entries) {
+                const origResolve = entry.resolve;
+                entry.resolve = (...args) => {
+                    origResolve(...args);
+                    if (!done) { done = true; resolve(); }
+                };
+            }
         });
     }
 }
 
-/** 将事件对象中的 JS 值转为 JSON 安全形式（NDJSON 格式用） */
-function safeEventForJSON(event) {
-    const out = {};
-    for (const [k, v] of Object.entries(event)) {
-        if (v === undefined)    { out[k] = '__undefined__'; continue; }
-        if (typeof v === 'function') { out[k] = `[Function:${v.name ?? ''}]`; continue; }
-        try {
-            JSON.stringify(v);
-            out[k] = v;
-        } catch {
-            out[k] = '[object]';
-        }
+// ── NDJSON 序列化辅助（WsBackend 内部用）──────────────────────────────────────
+function safeEventForJSON(ev) {
+    const safe = {};
+    for (const key of Object.keys(ev)) {
+        const v = ev[key];
+        if (v === undefined)  { safe[key] = '__undefined__'; continue; }
+        if (v === null)       { safe[key] = null; continue; }
+        const t = typeof v;
+        if (t === 'boolean' || t === 'number' || t === 'string') { safe[key] = v; continue; }
+        if (t === 'function') { safe[key] = `[Function:${v.name ?? ''}]`; continue; }
+        try { safe[key] = JSON.parse(JSON.stringify(v)); } catch { safe[key] = '[object]'; }
     }
-    return out;
+    return safe;
 }

@@ -39,32 +39,18 @@
  *   // 并自动关闭 INSTR_READ / INSTR_BINARY / INSTR_GETFIELD 等高开销插桩。
  *
  * 诊断日志（直接输出到 console，不走 TraceLogger/IDB）：
- *  - JALANGI_DEBUG=1（Node.js）或 localStorage.jalangiDebug='1'（浏览器）开启 debug 级别
+ *  - JALANGI_DEBUG=analysis（Node.js）或 localStorage.jalangiDebug='analysis'（浏览器）开启 debug 级别
+ *  - JALANGI_DEBUG=1 或 * 开启所有域
  *  - error/warn 级别（栈帧不匹配、未预期异常等）始终输出
  */
 
-import { TraceLogger } from '../runtime/logging/TraceLogger.js';
+import { TraceLogger } from '../logger/TraceLogger.js';
+import { createLogger, DOMAIN } from '../logger/logger.js';
 
 const MAX_BYTES  = 100;
 const INDENT_UNIT = '  ';
 
-// ── 诊断日志工具（直接到 console）─────────────────────────────────────────────
-const IS_BROWSER = typeof window !== 'undefined' || typeof globalThis.self !== 'undefined';
-
-function _isDebugEnabled() {
-    if (!IS_BROWSER) {
-        return (typeof process !== 'undefined') && process?.env?.JALANGI_DEBUG === '1';
-    }
-    try { return localStorage?.getItem?.('jalangiDebug') === '1'; } catch { return false; }
-}
-
-const dbg = {
-    debug(...args) {
-        if (_isDebugEnabled()) console.debug('[Jalangi:ExecutionTrace]', ...args);
-    },
-    warn(...args)  { console.warn( '[Jalangi:ExecutionTrace]', ...args); },
-    error(...args) { console.error('[Jalangi:ExecutionTrace]', ...args); },
-};
+const dbg = createLogger(DOMAIN.ANALYSIS);
 
 // ── 工具 ─────────────────────────────────────────────────────────────────────
 

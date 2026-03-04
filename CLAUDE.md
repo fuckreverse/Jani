@@ -53,7 +53,24 @@ esnstrument.js        ← 所有上述模块 + @babel/parser + @babel/generator
 | `analysisCallbackTemplate.js` | 分析插件接口基类模板 `AnalysisTemplate` |
 | `DataFlowAnalyzer.js` | 运行时 SSA 数据流分析器，支持 backward slicing |
 | `AntiDetection.js` | 反插桩对抗工具（toString Hook / 全局泄露检测 / 异步上下文包装）|
-| `logging/` | 可插拔日志后端（MemoryBackend / NodeStream / WsBackend / IdbWorker / TypedArray）|
+
+日志系统已独立为 `src/logger/`，不再属于 `src/runtime/`，参见下方「日志系统」表格。
+
+### 日志系统（`src/logger/`）
+
+| 文件 | 说明 |
+|------|------|
+| `logger.js` | 统一日志工厂：`createLogger(domain)` + `DOMAIN` 常量 + `isDebugEnabled(domain)` |
+| `LogManager.js` | 日志管理器，协调 RingBuffer 与后端 |
+| `TraceLogger.js` | trace 事件门面（高频走缓冲，`key` 事件直输出）|
+| `RingBuffer.js` | 环形缓冲区（无锁暂存）|
+| `EventSerializer.js` | 事件序列化器 |
+| `backends/MemoryBackend.js` | 纯内存后端（测试用）|
+| `backends/NodeStreamBackend.js` | Node.js 流（写文件、stdout）|
+| `backends/WsBackend.js` | WebSocket 后端（传输到 trace server）|
+| `backends/IdbWorkerBackend.js` | IndexedDB Worker 后端（浏览器持久化）|
+| `backends/TypedArrayBackend.js` | 高性能 TypedArray 后端（零 GC）|
+| `workers/idb-worker.js` | IndexedDB Worker 脚本（Blob URL 内联）|
 
 ---
 
@@ -189,7 +206,7 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 | `docs/README.md` | 项目入口、快速上手、目录结构 |
 | `docs/Overview.md` | 整体架构、钩子一览、使用方式 |
 | `docs/Instrumentation-Engine.md` | `src/instrument/` 全部模块 |
-| `docs/Runtime-System.md` | `src/runtime/` 全部模块 |
+| `docs/Runtime-System.md` | `src/runtime/` 全部模块 + `src/logger/` 日志系统 |
 | `docs/Analysis-Development.md` | 分析插件接口（`analysisCallbackTemplate.js`）|
 | `docs/Configuration.md` | `init(config)` 的 Config 对象 |
 | `docs/Sample-Analyses.md` | `src/plugins/` 全部示例插件 |

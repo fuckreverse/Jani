@@ -462,7 +462,7 @@ async function buildBrowserRuntimeBundle(opts) {
 
     const doneReadWorker = log.phase('读取 idb-worker.js');
     const idbWorkerSrc = readFileSync(
-        SRC('runtime', 'logging', 'workers', 'idb-worker.js'), 'utf8'
+        SRC('logger', 'workers', 'idb-worker.js'), 'utf8'
     ).replace(/^\/\/ JALANGI DO NOT INSTRUMENT\s*\n?/m, '').trim();
     doneReadWorker(`(${(idbWorkerSrc.length / 1024).toFixed(1)} KB)`);
 
@@ -483,8 +483,8 @@ ${sandboxVar}.analysis.use(new ExecutionTraceAnalysis(${sandboxVar}, null, {
 `;
 
     const DYNAMIC_IMPORT_MAP = {
-        './backends/IdbWorkerBackend.js':  SRC('runtime', 'logging', 'backends', 'IdbWorkerBackend.js'),
-        './LogManager.js':                 SRC('runtime', 'logging', 'LogManager.js'),
+        './backends/IdbWorkerBackend.js':  SRC('logger', 'backends', 'IdbWorkerBackend.js'),
+        './LogManager.js':                 SRC('logger', 'LogManager.js'),
         '../plugins/ExecutionTrace.js':    '\0stub:ExecutionTrace',
         './backends/WsBackend.js':         '\0stub:WsBackend',
         './backends/NodeStreamBackend.js': '\0stub:NodeStreamBackend',
@@ -544,6 +544,12 @@ ${sandboxVar}.analysis.use(new ExecutionTraceAnalysis(${sandboxVar}, null, {
     const { output } = await bundle.generate({
         format: 'iife', name: '__jalangi__', inlineDynamicImports: true,
         intro: [
+            ...(opts.debug ? [
+                '// ─── Jalangi debug 模式（由 --debug 注入）',
+                "if (typeof localStorage !== 'undefined' && !localStorage.getItem('jalangiDebug')) {",
+                "    localStorage.setItem('jalangiDebug', '1');",
+                '}',
+            ] : []),
             '// ─── IDB Worker: 内联为 Blob URL（classic worker，兼容所有浏览器）',
             `var __idbWorkerSrc  = ${JSON.stringify(idbWorkerSrc)};`,
             `var __idbWorkerBlob = (typeof Blob !== 'undefined')`,
@@ -715,7 +721,7 @@ async function _writeBrowserOutput({ instrOpts, inputPath, outPath, result, iidC
         log.info('正在用 rollup 打包浏览器运行时（split 模式）...');
         let runtimeBundle;
         try {
-            runtimeBundle = await buildBrowserRuntimeBundle({ ...instrOpts, sandboxVar });
+            runtimeBundle = await buildBrowserRuntimeBundle({ ...instrOpts, sandboxVar, debug: _debug });
         } catch (err) {
             log.error('rollup 打包失败:', err.message);
             if (err.stack) log.error(err.stack);
@@ -758,7 +764,7 @@ async function _writeBrowserOutput({ instrOpts, inputPath, outPath, result, iidC
         log.info('正在用 rollup 打包运行时...');
         let runtimeBundle;
         try {
-            runtimeBundle = await buildBrowserRuntimeBundle({ ...instrOpts, sandboxVar });
+            runtimeBundle = await buildBrowserRuntimeBundle({ ...instrOpts, sandboxVar, debug: _debug });
         } catch (err) {
             log.error('rollup 打包失败:', err.message);
             if (err.stack) log.error(err.stack);

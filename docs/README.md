@@ -91,20 +91,24 @@ src/
     analysisCallbackTemplate.js ← 分析插件接口模板
     DataFlowAnalyzer.js         ← 运行时 SSA 数据流分析器
     AntiDetection.js            ← 反插桩对抗工具
-    logging/           ← 可插拔日志后端
-      TraceLogger.js
-      RingBuffer.js
-      EventSerializer.js
-      backends/
-        MemoryBackend.js
-        NodeStreamBackend.js
-        WsBackend.js
-        IdbWorkerBackend.js
-        TypedArrayBackend.js   ← 高性能 Float64Array 环形缓冲区
+  logger/              ← 统一日志系统（instrument + runtime 共用）
+    logger.js          ← createLogger(domain) 工厂 + DOMAIN 常量 + debug 开关
+    LogManager.js      ← 日志管理器，协调 RingBuffer 与后端
+    TraceLogger.js     ← trace 事件门面（高频走缓冲，key 事件直输出）
+    RingBuffer.js      ← 环形缓冲区（无锁暂存）
+    EventSerializer.js ← 事件序列化器
+    backends/
+      MemoryBackend.js
+      NodeStreamBackend.js
+      WsBackend.js
+      IdbWorkerBackend.js
+      TypedArrayBackend.js   ← 高性能 Float64Array 环形缓冲区
+    workers/
+      idb-worker.js    ← IndexedDB Worker（Blob URL 内联）
   plugins/             ← 示例分析插件
   Constants.js         ← 全局常量
 test/
-  instrument.test.mjs  ← 插桩器端到端集成测试（56 个用例）
+  instrument.test.mjs  ← 插桩器端到端集成测试（98 个用例）
 docs/                  ← 项目文档
 bin/                   ← 命令行工具
 ```
