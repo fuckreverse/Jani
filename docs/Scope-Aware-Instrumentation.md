@@ -283,7 +283,7 @@ function wrapReadLightweight(node, name, defScopeId, varKind) {
 }
 ```
 
-`instrumentLoad` 中的决策逻辑：
+`instrumentLoad` 中的决策逻辑（优先查静态决策表，再退化为 fallback）：
 
 ```js
 function instrumentLoad(ast, isTypeof) {
@@ -291,18 +291,39 @@ function instrumentLoad(ast, isTypeof) {
         if (_scope.hasVar(ast.name)) {
             const defScope = _findDefScope(_scope, ast.name);
             const isGlobal = _scope.isGlobal(ast.name);
-            const varKind  = defScope?.getVarKind(ast.name);
 
-            const canUseLightweight =
+            // 1. 查静态决策表（dataflow.js 产出）
+            let decision = null;
+            if (_instrDecisions !== null && ast.loc) {
+                const loc = ast.loc.start;
+                const key = `${_scope.id}:${ast.name}:${loc.line}:${loc.column}`;
+                decision = _instrDecisions.get(key) ?? null;
+            }
+
+            // 安全兜底条件（catch 参数和 arguments 强制全量）
+            const isSafeForLightweight =
                 defScope !== null && !isGlobal &&
-                !_scope.usesEval() && !_scope.usesWith() &&
                 defScope.hasOwnVar(ast.name) !== 'catch' &&
                 ast.name !== 'arguments';
 
-            if (canUseLightweight) {
-                return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id, varKind);
+            if (decision === 'lightweight' && isSafeForLightweight) {
+                return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id);
             }
-            return wrapRead(ast, createLiteralAst(ast.name), ast, false, false, isGlobal);
+
+            // 2. Fallback 保守判断（决策表无记录，如闭包变量）
+            if (decision === null) {
+                const canUseLightweight =
+                    defScope !== null && !isGlobal &&
+                    !_scope.usesEval() && !_scope.usesWith() &&
+                    defScope.hasOwnVar(ast.name) !== 'catch' &&
+                    ast.name !== 'arguments';
+                if (canUseLightweight) {
+                    return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id);
+                }
+            }
+
+            // 3. 全量路径
+            return wrapRead(ast, createLiteralAst(ast.name), ast, false, false, isGlobal, defScope?.id);
         }
     }
 }
@@ -328,14 +349,15 @@ function transformString(code, visitorsPost, visitorsPre, sourceType) {
 }
 ```
 
-**决策表格式**（`Map<nodeKey, 'full' | 'lightweight' | 'dead'>`）：
+**决策表格式**（`Map<nodeKey, 'full' | 'lightweight'>`）：
 
 ```js
 // nodeKey = `${scopeId}:${name}:${line}:${col}`
+// 闭包引用的变量不在表中（交 instrumentLoad fallback 处理）
 const instrDecisions = new Map([
-    ['0:x:2:8',  'dead'],        // const x，读取可省略
-    ['0:y:3:8',  'lightweight'], // let y，读取轻量
-    ['1:a:10:5', 'full'],        // 有 eval 的作用域，全量
+    ['1:b:5:14', 'lightweight'], // 函数内 const b，读取轻量
+    ['1:a:4:12', 'lightweight'], // 函数参数 a，无重赋值，读取轻量
+    ['2:z:2:8',  'full'],        // 有 eval 的作用域，全量
 ]);
 ```
 
@@ -351,31 +373,34 @@ const instrDecisions = new Map([
 
 ```
 对每个 FunctionDeclaration / FunctionExpression / ArrowFunctionExpression：
-  构建 defSites: Map<name, List<{node, kind, isConditional}>>
-    - kind: 'param' | 'var' | 'const' | 'let' | 'assign'
-    - isConditional: 该赋值是否在分支内（if/while/try 等）
+  构建 defSites: Map<name, DefInfo>
+    - defs[]: { kind: 'param'|'var'|'const'|'let'|'assign'|'update', isConditional }
+    - hasReassign: 是否声明后有重赋值
+    - hasMutation: 作用域内是否存在 obj.prop = ... 且 obj 就是该变量
 ```
 
 **阶段 2：对每个 use-site 做决策**
+
+> `dataflow.js` 在 `transformAst` **之前**运行（Pass 0），节点上还没有 `_isRHS` 标注。模块通过 `_isIgnoreContext()` 自行重现 `astUtil.js` 的 IGNORE 上下文判断。
 
 ```
 对每个 Identifier（RHS 上下文）：
   1. 作用域含 eval 或 with → 'full'
   2. 全局变量 → 'full'
   3. 查 defSites[name]：
-     a. defSites 为空 → 'full'（未知来源）
-     b. 只有一个 def，且 isConditional=false：
-        - kind='const' 且值是基础类型 → 'dead'
-        - kind='const' 且值是引用类型 → 'lightweight'（防 Proxy）
+     a. defSites 为空（变量来自父作用域，即闭包引用）
+        → 不记录到决策表，交 instrumentLoad fallback 判断
+     b. hasMutation = true → 'full'（属性变动轻量路径感知不到）
+     c. 只有一个 def，且 isConditional=false：
+        - kind='const' → 'lightweight'
         - kind='param' 且无重赋值 → 'lightweight'
         - 其他 → 'lightweight'
-     c. 多个 def（任何分支赋值）→ 'lightweight'
-  4. 对象引用安全检查：
-     - 作用域内存在 MemberExpression 写入 →
-       持有该对象的所有变量降级为 'lightweight'（不 'dead'）
+     d. 多个 def（任何分支赋值）→ 'lightweight'
 ```
 
-**保守近似原则**：宁可错判成 `lightweight`，也不错判成 `dead`。以下情况一律保守：变量被传入函数、在 `try` 块内、是 `arguments[N]` 的别名、作用域内有 `eval` 或 `with`。
+> **注**：`'dead'` 决策当前保守实现不生成（降级为 `lightweight`），保留供未来扩展。
+
+**保守近似原则**：宁可错判成 `lightweight`，也不错判成 `dead`。以下情况一律保守：变量被传入函数、在 `try` 块内、`hasMutation=true`、作用域内有 `eval` 或 `with`。闭包引用不入表，交 fallback 判断。
 
 ---
 

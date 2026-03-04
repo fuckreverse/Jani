@@ -1129,23 +1129,49 @@ function instrumentLoad(ast, isTypeof) {
         if (ast.name === 'NaN' || ast.name === 'Infinity') return wrapLiteral(ast, ast, N_LOG_NUMBER_LIT);
         if (ast.name === _jalangiVar) return ast;  // 沙盒变量自身不插桩
         if (_scope.hasVar(ast.name)) {
-            // TODO-5: 沿作用域链向上查找实际定义点（闭包支持）
             const defScope = _findDefScope(_scope, ast.name);
             const isGlobal = _scope.isGlobal(ast.name);
 
-            // TODO-8: 判断是否可以走轻量读取路径
-            const canUseLightweight =
+            // 查询静态 def-use 分析的决策表（由 dataflow.js analyzeDefUse 生成）
+            // key 格式：${scopeId}:${name}:${line}:${col}
+            // 使用点（use-site）所在作用域 ID（_scope.id）+ Identifier 位置
+            let decision = null;
+            if (_instrDecisions !== null && ast.loc) {
+                const loc = ast.loc.start;
+                const key = `${_scope.id}:${ast.name}:${loc.line}:${loc.column}`;
+                decision = _instrDecisions.get(key) ?? null;
+            }
+
+            // 根据决策表结果判断是否走轻量路径
+            // - 'lightweight' → 走轻量（前提：defScope 存在且非 catch 变量、非 arguments）
+            // - 'full' 或 null（表中没有记录）→ 走全量
+            // - 兜底安全检查：catch 变量和 arguments 强制走全量（语义特殊）
+            const isSafeForLightweight =
                 defScope !== null &&
                 !isGlobal &&
-                !_scope.usesEval() &&
-                !_scope.usesWith() &&
                 defScope.hasOwnVar(ast.name) !== 'catch' &&
                 ast.name !== 'arguments';
 
-            if (canUseLightweight) {
+            if (decision === 'lightweight' && isSafeForLightweight) {
                 // 轻量读取路径：不传 value，运行时从 Shadow Frame 查值
                 return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id);
             }
+
+            if (decision === null) {
+                // 决策表中没有记录（如 _instrDecisions 为 null 或节点没有位置信息）
+                // 退化为旧版保守判断：无 eval/with、非全局、非 catch、非 arguments → 轻量
+                const canUseLightweight =
+                    defScope !== null &&
+                    !isGlobal &&
+                    !_scope.usesEval() &&
+                    !_scope.usesWith() &&
+                    defScope.hasOwnVar(ast.name) !== 'catch' &&
+                    ast.name !== 'arguments';
+                if (canUseLightweight) {
+                    return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id);
+                }
+            }
+
             // 全量读取路径（包括 scopeId 以支持 Shadow Frame 同步）
             return wrapRead(ast, createLiteralAst(ast.name), ast, false, false, isGlobal, defScope?.id);
         } else if (isTypeof) {

@@ -26,6 +26,14 @@
  *
  * `${scopeId}:${name}:${line}:${col}`（对应 Babel AST 中 node.loc.start）
  *
+ * ### _isRHS 时序说明
+ *
+ * dataflow.js 在 transformAst 之前运行（Pass 0），此时 Identifier 节点上还没有
+ * _isRHS 标注（那是 transformAst 执行时由 astUtil 的 context 机制打上的）。
+ * 因此本模块自行维护一套 "ignoreContext" 判断逻辑，对照 astUtil.js 中的
+ * IGNORE 条件表，在 _walkNode 遍历时携带 isIgnore 标志，避免对非 RHS 位置
+ * 的 Identifier 生成错误决策。
+ *
  * @module dataflow
  */
 
@@ -127,7 +135,7 @@ function _visitScope(node, decisions) {
  * {
  *   defs: Array<{node, kind, isConditional}>,
  *   hasReassign: boolean,     // 是否在声明后有 = 赋值
- *   hasMutation: boolean,     // 是否有对该变量做过对象属性写入（通过 P 路径）
+ *   hasMutation: boolean,     // 是否有对该变量做过对象属性写入（变量被用作赋值目标的 object）
  * }
  * ```
  */
@@ -137,15 +145,18 @@ function _collectDefSites(scopeNode, scope) {
     // 为作用域内声明的每个变量初始化条目
     for (const [name, type] of Object.entries(scope.vars)) {
         const kind = scope.varKinds?.[name] ?? null;
+        // 参数类型 'arg' 对应 kind = 'param'，其余沿用 varKinds 或 type
+        const effectiveKind = (type === 'arg') ? 'param' : (kind ?? type);
         defSites.set(name, {
-            defs:        [{ kind: kind ?? type, isConditional: false }],
+            defs:        [{ kind: effectiveKind, isConditional: false }],
             hasReassign: false,
             hasMutation: false,
         });
     }
 
     // 遍历 body，检测重赋值（AssignmentExpression / UpdateExpression）
-    _walkNode(scopeNode, (node, inConditional) => {
+    // 以及对象属性写入（MemberExpression 赋值，左侧 object 是该变量）
+    _walkNode(scopeNode, (node, _isIgnore, inConditional) => {
         // 越过子作用域（不深入分析）
         if (node !== scopeNode && _isScopeNode(node)) return 'skip';
 
@@ -155,6 +166,15 @@ function _collectDefSites(scopeNode, scope) {
                 const info = defSites.get(lhs.name);
                 info.hasReassign = true;
                 info.defs.push({ kind: 'assign', isConditional: inConditional });
+            }
+            // 对象属性写入：obj.prop = ... 或 obj[key] = ...
+            // 当赋值目标是 MemberExpression 且 object 是本作用域变量时，
+            // 标记该变量 hasMutation（对象内容可能被修改，需要全量读取才能感知）
+            if (lhs.type === 'MemberExpression' && lhs.object.type === 'Identifier') {
+                const objName = lhs.object.name;
+                if (defSites.has(objName)) {
+                    defSites.get(objName).hasMutation = true;
+                }
             }
         }
 
@@ -183,12 +203,12 @@ function _collectDefSites(scopeNode, scope) {
  * @param {Map}    decisions  结果决策表（就地写入）
  */
 function _collectUseSites(scopeNode, scope, isUnsafe, defSites, decisions) {
-    _walkNode(scopeNode, (node) => {
+    _walkNode(scopeNode, (node, isIgnore) => {
         // 越过子作用域
         if (node !== scopeNode && _isScopeNode(node)) return 'skip';
 
         if (node.type !== 'Identifier') return;
-        if (!node._isRHS) return;  // 只处理 RHS 上下文（由 addScopes/astUtil 标注）
+        if (isIgnore) return;  // 非 RHS 上下文（赋值左侧、声明 id、标签等）
 
         const name     = node.name;
         const isGlobal = scope.isGlobal(name);
@@ -201,8 +221,11 @@ function _collectUseSites(scopeNode, scope, isUnsafe, defSites, decisions) {
         } else {
             const info = defSites.get(name);
             if (!info) {
-                // 变量未在此作用域声明（来自父作用域）→ 全量
-                decision = Decision.FULL;
+                // 变量未在此作用域声明（来自父作用域，即闭包引用）
+                // 不记录到决策表，交由 instrumentLoad 的 fallback 逻辑处理：
+                // 父作用域的 eval/with 信息已传播到子作用域链（scope.usesEval() 沿链
+                // 向上传播），fallback 判断是安全的。
+                return;
             } else {
                 decision = _decideForUse(info);
             }
@@ -219,7 +242,13 @@ function _collectUseSites(scopeNode, scope, isUnsafe, defSites, decisions) {
  * @returns {Decision}
  */
 function _decideForUse(info) {
-    const { defs, hasReassign } = info;
+    const { defs, hasReassign, hasMutation } = info;
+
+    // 如果对该变量持有的对象做过属性写入，说明其内容会变，必须全量读取
+    // （轻量路径只能感知变量本身的重赋值，感知不到属性变动）
+    if (hasMutation) {
+        return Decision.FULL;
+    }
 
     // 只有一个 def-site，且不在条件分支内，且是 const 声明
     if (!hasReassign && defs.length === 1) {
@@ -279,22 +308,93 @@ function _isScopeNode(node) {
 }
 
 /**
+ * 判断父节点 `parent` 的 `key` 子节点是否处于"忽略（非 RHS）"上下文。
+ *
+ * 对照 astUtil.js 中 transformAst 的 IGNORE 条件表（第 88-125 行），
+ * 确保 dataflow.js 在 transformAst 之前运行时也能正确识别非 RHS 位置。
+ *
+ * @param {object} parent  父节点
+ * @param {string} key     子节点在父节点中的属性名
+ * @param {object} child   子节点
+ * @returns {boolean}  true 表示该位置是 IGNORE 上下文（不插桩）
+ */
+function _isIgnoreContext(parent, key, child) {
+    if (!parent) return false;
+    const type = parent.type;
+
+    // 直接对应 astUtil.js transformAst 中的 IGNORE 条件列表
+    if (
+        (type === 'AssignmentExpression'  && key === 'left') ||
+        (type === 'UpdateExpression'      && key === 'argument') ||
+        (type === 'UnaryExpression'       && key === 'argument' && parent.operator === 'delete') ||
+        (type === 'ForInStatement'        && key === 'left') ||
+        (type === 'ForOfStatement'        && key === 'left') ||
+        ((type === 'FunctionExpression' || type === 'FunctionDeclaration') && key === 'id') ||
+        (type === 'ArrowFunctionExpression' && key === 'id') ||
+        ((type === 'ClassDeclaration' || type === 'ClassExpression') && key === 'id') ||
+        (type === 'ImportSpecifier'         && (key === 'local' || key === 'imported')) ||
+        (type === 'ImportDefaultSpecifier'  && key === 'local') ||
+        (type === 'ImportNamespaceSpecifier'&& key === 'local') ||
+        (type === 'ExportSpecifier'         && (key === 'local' || key === 'exported')) ||
+        (type === 'LabeledStatement'        && key === 'label') ||
+        (type === 'BreakStatement'          && key === 'label') ||
+        (type === 'CatchClause'             && key === 'param') ||
+        (type === 'ContinueStatement'       && key === 'label') ||
+        // callee 中的 MemberExpression 或 eval Identifier 都是 IGNORE
+        ((type === 'CallExpression' || type === 'NewExpression') &&
+            key === 'callee' &&
+            (child?.type === 'MemberExpression' ||
+             (child?.type === 'Identifier' && child?.name === 'eval'))) ||
+        (type === 'OptionalCallExpression' &&
+            key === 'callee' &&
+            (child?.type === 'OptionalMemberExpression' ||
+             child?.type === 'MemberExpression')) ||
+        (type === 'VariableDeclarator'      && key === 'id') ||
+        (type === 'MemberExpression'        && !parent.computed && key === 'property') ||
+        (type === 'OptionalMemberExpression' && !parent.computed && key === 'property') ||
+        (type === 'Property'                && key === 'key' && !parent.computed) ||
+        (type === 'RestElement'             && key === 'argument') ||
+        (type === 'AssignmentPattern'       && key === 'left') ||
+        (type === 'PropertyDefinition'      && key === 'key' && !parent.computed) ||
+        (type === 'MethodDefinition'        && key === 'key' && !parent.computed) ||
+        (type === 'ClassMethod'             && key === 'key' && !parent.computed) ||
+        (type === 'ClassPrivateProperty'    && key === 'key') ||
+        (type === 'PrivateName'             && key === 'id') ||
+        // params 列表内所有子节点都是 IGNORE（声明位置）
+        ((type === 'FunctionExpression' || type === 'FunctionDeclaration' ||
+          type === 'ArrowFunctionExpression' || type === 'ClassMethod') && key === 'params') ||
+        // eval 作为直接调用目标是 IGNORE
+        (type === 'CallExpression' && key === 'callee' &&
+            child?.type === 'Identifier' && child?.name === 'eval')
+    ) {
+        return true;
+    }
+
+    return false;
+}
+
+/**
  * 简单的深度优先 AST 遍历（访问所有节点）。
  * visitor 返回 `'skip'` 时跳过该节点的所有子节点。
  *
+ * visitor 签名：(node, isIgnore, inConditional) => void | 'skip'
+ *   - isIgnore      当前节点是否处于"忽略（非 RHS）"上下文
+ *   - inConditional 当前是否在条件分支内
+ *
  * @param {object}   node     起始节点
- * @param {Function} visitor  (node, inConditional) => void | 'skip'
+ * @param {Function} visitor  (node, isIgnore, inConditional) => void | 'skip'
+ * @param {boolean}  [isIgnore=false]       当前节点是否处于忽略上下文
  * @param {boolean}  [inConditional=false]  当前是否在条件分支内
  */
-function _walkNode(node, visitor, inConditional = false) {
+function _walkNode(node, visitor, isIgnore = false, inConditional = false) {
     if (!node || typeof node !== 'object') return;
     if (Array.isArray(node)) {
-        for (const child of node) _walkNode(child, visitor, inConditional);
+        for (const child of node) _walkNode(child, visitor, isIgnore, inConditional);
         return;
     }
     if (!node.type) return;
 
-    const result = visitor(node, inConditional);
+    const result = visitor(node, isIgnore, inConditional);
     if (result === 'skip') return;
 
     // 追踪条件分支
@@ -318,7 +418,8 @@ function _walkNode(node, visitor, inConditional = false) {
         }
         const child = node[key];
         if (child && typeof child === 'object') {
-            _walkNode(child, visitor, newInConditional);
+            const childIsIgnore = _isIgnoreContext(node, key, child);
+            _walkNode(child, visitor, childIsIgnore, newInConditional);
         }
     }
 }

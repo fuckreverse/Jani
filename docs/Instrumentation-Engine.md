@@ -320,22 +320,33 @@ scope.varKinds = {
 | `scope.isGlobal(name)` | 判断变量是否为全局变量（设置 `isGlobal` 标志） |
 | `scope.getVarKind(name)` | 获取变量的声明关键字（`'var'`/`'let'`/`'const'` 或 `undefined`） |
 
-### 轻量路径判断条件（`_findDefScope`）
+### 轻量路径判断（`instrumentLoad` 决策流程）
 
-`wrappers.js` 的 `_findDefScope(scope, name)` 沿作用域链向上查找变量实际定义点（支持闭包），
-并结合以下条件决定是否走轻量读取路径：
+`wrappers.js` 的 `instrumentLoad` 优先查询 `dataflow.js` 生成的静态决策表，再结合安全兜底条件判断是否走轻量路径：
 
 ```
-可以走 J$.Rl 轻量路径，当且仅当：
-  1. defScope !== null（能静态确定定义点）
-  2. !isGlobal（不是全局变量）
-  3. !scope.usesEval()（作用域链无 eval）
-  4. !scope.usesWith()（作用域链无 with）
-  5. defScope.hasOwnVar(name) !== 'catch'（不是 catch 参数）
-  6. name !== 'arguments'（不是 arguments 对象）
+1. 查 _instrDecisions（静态决策表）：
+   - decision === 'lightweight' 且满足安全兜底条件 → J$.Rl
+   - decision === 'full' → J$.R
+   - decision === null（决策表无记录，如闭包变量）→ 退化为 fallback 判断（见下）
+
+2. Fallback 保守判断（决策表无记录时）：
+   满足以下全部条件 → J$.Rl，否则 J$.R：
+   - defScope !== null（能静态确定定义点）
+   - !isGlobal（不是全局变量）
+   - !scope.usesEval()（作用域链无 eval）
+   - !scope.usesWith()（作用域链无 with）
+   - defScope.hasOwnVar(name) !== 'catch'（不是 catch 参数）
+   - name !== 'arguments'（不是 arguments 对象）
+
+3. 安全兜底条件（decision === 'lightweight' 时仍需满足）：
+   - defScope !== null
+   - !isGlobal
+   - defScope.hasOwnVar(name) !== 'catch'
+   - name !== 'arguments'
 ```
 
-其余情况走 `J$.R` 全量路径，并携带 `defScopeId` 参数供运行时同步 Shadow Frame。
+全量路径 `J$.R` 携带 `defScopeId` 参数供运行时同步 Shadow Frame。
 
 ## 静态 Def-Use 分析（`dataflow.js`）
 
@@ -355,11 +366,12 @@ scope.varKinds = {
 ```mermaid
 flowchart TD
     SCOPE_NODE["作用域节点\n(Program / Function / ClassMethod)"]
-    PHASE1["阶段 1：Def-Sites 收集\n扫描 AssignmentExpression / UpdateExpression\n构建 Map&lt;name, DefInfo&gt;\n记录赋值点数量、是否条件分支、声明类型"]
-    PHASE2["阶段 2：Use-Sites 决策\n遍历所有 RHS 上下文的 Identifier"]
+    PHASE1["阶段 1：Def-Sites 收集\n扫描 AssignmentExpression / UpdateExpression\n构建 Map&lt;name, DefInfo&gt;\n记录赋值点数量、是否条件分支、声明类型、hasMutation"]
+    PHASE2["阶段 2：Use-Sites 决策\n遍历所有 RHS 上下文的 Identifier\n（自行判断 IGNORE 上下文，不依赖 _isRHS 标注）"]
     UNSAFE{"含 eval / with\n或是全局变量?"}
     DEFINFO["查 DefInfo\n(阶段 1 产出)"]
-    NODEF{"未在此作用域\n声明?"}
+    NODEF{"未在此作用域\n声明?\n（闭包引用）"}
+    FALLBACK["不记录决策\n→ instrumentLoad fallback 判断"]
     FULL["Decision.FULL\n→ J$.R(...)"]
     LIGHT["Decision.LIGHTWEIGHT\n→ J$.Rl(...)"]
     RECURSE["递归处理\n所有子作用域"]
@@ -369,7 +381,7 @@ flowchart TD
     UNSAFE -->|"是"| FULL
     UNSAFE -->|"否"| DEFINFO
     DEFINFO --> NODEF
-    NODEF -->|"是（来自父作用域）"| FULL
+    NODEF -->|"是（来自父作用域）"| FALLBACK
     NODEF -->|"否"| LIGHT
     PHASE2 --> RECURSE
 ```
@@ -377,13 +389,19 @@ flowchart TD
 **阶段 1：Def-Sites 收集**
 
 对每个函数作用域，扫描所有 `AssignmentExpression`、`UpdateExpression` 和变量声明，
-构建 `Map<name, DefInfo>`，记录每个变量的赋值点数量、是否在条件分支内、声明类型（`const`/`let`/`var`/`param`）。
+构建 `Map<name, DefInfo>`，记录：
+- 赋值点数量、是否在条件分支内、声明类型（`const`/`let`/`var`/`param`）
+- `hasMutation`：作用域内是否有以该变量为对象的属性写入（`obj.prop = ...`），若有则无论声明类型均强制 `'full'`（轻量路径感知不到对象属性变动）
+
+> **`_isRHS` 时序注意**：`dataflow.js` 在 `transformAst` 之前运行（Pass 0），此时节点上还没有 `_isRHS` 标注。模块内部通过 `_isIgnoreContext(parent, key, child)` 自行重现 `astUtil.js` 的 IGNORE 上下文判断，避免对赋值左侧、声明 id、标签等非 RHS 位置生成错误决策。
 
 **阶段 2：Use-Sites 决策**
 
 对每个 RHS 上下文的 Identifier：
 - 作用域含 `eval`/`with` 或变量是全局变量 → `'full'`
-- `const` 参数/无重赋值的 `param` → `'lightweight'`
+- 变量来自父作用域（闭包引用）→ **不记录到决策表**，交由 `instrumentLoad` 的 fallback 逻辑处理
+- `hasMutation = true` → `'full'`
+- `const` 声明 / 无重赋值的 `param` → `'lightweight'`
 - 有重赋值/多 def-site/条件赋值 → `'lightweight'`
 
 ### 使用方式
@@ -406,6 +424,8 @@ const decision = decisions.get(key);      // → 'full' | 'lightweight' | undefi
 - 变量被传入函数（可能被修改）→ `lightweight`
 - 变量在 `try` 块内 → `lightweight`
 - 作用域内有任何 `eval` 或 `with` → `full`
+- 变量作为对象被做属性写入（`hasMutation`）→ `full`
+- 闭包引用（变量来自父作用域）→ 不记录，交 fallback 判断
 
 ## 插件静态分析器（`pluginAnalyzer.js`）
 
