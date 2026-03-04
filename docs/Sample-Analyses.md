@@ -3,10 +3,51 @@
 `src/plugins/` 目录下提供了多个示例分析插件，涵盖不同的动态分析场景，
 既可直接使用，也是编写自定义分析的参考范本。
 
+## 插件分类概览
+
+```mermaid
+mindmap
+  root((src/plugins/))
+    tutorial 入门示例
+      LogAll.js
+      BranchCoverage.js
+      BacktrackLoop.js
+    pldi16 论文示例
+      TraceAll.js
+      LogLoadStore.js
+      LogLoadStoreAlloc.js
+      BranchCoverage.js
+      SkipFunction.js
+      ChangeSematicsOfMult.js
+      CountObjectsPerAllocationSite.js
+      BackTrackLoop.js
+    dlint 代码质量检测
+      CheckNaN.js
+      UndefinedOffset.js
+      ConcatUndefinedToString.js
+      FunCalledWithMoreArguments.js
+      ShadowProtoProperty.js
+      CompareFunctionWithPrimitives.js
+    frames 帧分析
+      FrameAnalysis.js
+      Frames.js
+    datatraces 数据流跟踪
+      LogData.js
+      TraceWriter.js
+    coverage 代码覆盖率
+      AddCoverage.js
+      ProcessCoverage.js
+    根目录
+      ExecutionTrace.js
+      ScriptLocal.js
+```
+
 ## 插件目录
 
 ```
 src/plugins/
+  ExecutionTrace.js      ← 完整执行跟踪分析（内置，JalangiSandbox 可直接启用）
+  ScriptLocal.js         ← 脚本局部变量分析工具
   tutorial/              ← 入门教程级别的示例
     LogAll.js            ← 记录所有运行时事件
     BranchCoverage.js    ← 分支覆盖率统计
@@ -17,15 +58,15 @@ src/plugins/
     LogLoadStoreAlloc.js ← 分配点感知的内存读写跟踪（需 SMemory）
     BranchCoverage.js    ← 分支覆盖（PLDI 版本）
     SkipFunction.js      ← 跳过函数执行示例
-    ChangeSematicsOfMult.js ← 修改乘法语义示例
-    TraceAll.js          ← 完整跟踪
+    ChangeSematicsOfMult.js    ← 修改乘法语义示例
+    BackTrackLoop.js           ← 回溯循环（PLDI 版本）
     CountObjectsPerAllocationSite.js ← 按分配点统计对象数
   dlint/                 ← 代码质量检测（DLint）
     CheckNaN.js          ← NaN 比较检测
     UndefinedOffset.js   ← undefined 属性访问检测
     ConcatUndefinedToString.js ← undefined 字符串拼接检测
     FunCalledWithMoreArguments.js ← 参数过多检测
-    ShadowProtoProperty.js ← 原型属性遮蔽检测
+    ShadowProtoProperty.js     ← 原型属性遮蔽检测
     CompareFunctionWithPrimitives.js ← 函数与原始值比较检测
   frames/                ← 帧分析
     FrameAnalysis.js
@@ -36,6 +77,7 @@ src/plugins/
   coverage/              ← 代码覆盖率
     AddCoverage.js
     ProcessCoverage.js
+    SpecialCoverage.js
 ```
 
 ---

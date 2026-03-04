@@ -31,8 +31,13 @@ scope.js              ← Constants.js + astUtil.js
     ↓
 wrappers.js           ← Constants.js + iid.js（需 init(config) 注入 Config）
     ↓
-esnstrument.js        ← 所有上述模块 + acorn + astring
-                        （需 init(config, analysis?, sid?) 后才能调用 instrumentCode）
+dataflow.js           ← 无外部依赖，静态 SSA def-use 分析（Pass 0）
+    ↓
+pluginAnalyzer.js     ← @babel/parser（静态扫描插件代码，生成按需 Config）
+    ↓
+esnstrument.js        ← 所有上述模块 + @babel/parser + @babel/generator
+                        （需 init(config, analysis?, sid?, jalangiVar?, plugins?) 后
+                         才能调用 instrumentCode）
 ```
 
 ### 运行时模块（`src/runtime/`）
@@ -41,12 +46,14 @@ esnstrument.js        ← 所有上述模块 + acorn + astring
 
 | 文件 | 说明 |
 |------|------|
-| `JalangiRuntime.js` | 所有 J$ 钩子函数核心实现（基类） |
+| `JalangiRuntime.js` | 所有 J$ 钩子函数核心实现（基类），含 OID / CallID / Shadow Frame / ContextID |
 | `JalangiSandbox.js` | 完整沙盒对象，继承 `JalangiRuntime`（推荐使用） |
 | `AnalysisHost.js` | 多插件链式调度器，`.use()` 注册分析 |
 | `SMemory.js` | Shadow Memory 影子内存服务 |
 | `analysisCallbackTemplate.js` | 分析插件接口基类模板 `AnalysisTemplate` |
-| `logging/` | 可插拔日志后端（MemoryBackend / NodeStream / WsBackend / IdbWorker）|
+| `DataFlowAnalyzer.js` | 运行时 SSA 数据流分析器，支持 backward slicing |
+| `AntiDetection.js` | 反插桩对抗工具（toString Hook / 全局泄露检测 / 异步上下文包装）|
+| `logging/` | 可插拔日志后端（MemoryBackend / NodeStream / WsBackend / IdbWorker / TypedArray）|
 
 ---
 
@@ -68,7 +75,7 @@ npm test
 
 | 文件 | 状态 | 内容 |
 |------|------|------|
-| `test/instrument.test.mjs` | ✅ 当前主测试 | 插桩器端到端集成测试，覆盖 ES5～ES2022、source map、Config 禁用等（当前 56 个用例）|
+| `test/instrument.test.mjs` | ✅ 当前主测试 | 插桩器端到端集成测试，覆盖 ES5～ES2022、source map、Config 禁用等（当前 98 个用例）|
 | `test/_legacy_astring.js` | ⚠️ 废弃（保留备查） | 重构前验证 astring 本身的临时脚本，用 CommonJS + 旧式全局加载 |
 | `test/_legacy_class_debug.js` | ⚠️ 废弃（保留备查） | 重构前调试 class 插桩的单次脚本，用 CommonJS |
 | `test/_legacy_modern_syntax.js` | ⚠️ 废弃（保留备查） | 重构前现代语法冒烟测试，已合并进主测试 |
@@ -89,11 +96,14 @@ import { init, instrumentCode } from '../src/instrument/esnstrument.js';
 // 在测试文件 test/ 目录下路径前缀为 ../src/
 // 在项目根目录脚本中路径前缀为 ./src/
 
-// 1. 必须先初始化（传入 Config 对象）
+// 方式一：手动传入 Config
 const Config = { ENABLE_SAMPLING: false /* 其余字段 null 表示"全部插桩" */ };
 init(Config);
 
-// 2. 调用插桩
+// 方式二：传入 plugins，自动推导按需 Config（config 传 null）
+init(null, undefined, undefined, undefined, ['./src/plugins/dlint/CheckNaN.js']);
+
+// 调用插桩
 const result = instrumentCode({
     code:             '<JS 源代码字符串>',
     origCodeFileName: 'foo.js',        // 原始文件名（source map 用）
@@ -111,22 +121,28 @@ const result = instrumentCode({
 ### Config 字段说明
 
 Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示**全部插桩**该类型；
-设为函数 `(ast) => boolean` 可细粒度控制：
+设为函数 `(ast) => boolean` 可细粒度控制；设为 `() => false` 完全禁用：
 
 | 字段 | 控制范围 |
 |------|---------|
-| `INSTR_READ` | 变量读取 |
-| `INSTR_WRITE` | 变量写入 |
-| `INSTR_GETFIELD` | 属性读取 |
-| `INSTR_PUTFIELD` | 属性写入 |
-| `INSTR_BINARY` | 二元运算 |
-| `INSTR_UNARY` | 一元运算 |
-| `INSTR_LITERAL` | 字面量 |
-| `INSTR_INIT` | 变量声明初始化 |
-| `INSTR_CONDITIONAL` | 条件表达式 / switch |
+| `INSTR_READ` | 变量读取（`J$.R` / `J$.Rl`）|
+| `INSTR_WRITE` | 变量写入（`J$.W`）|
+| `INSTR_GETFIELD` | 属性读取（`J$.G`）|
+| `INSTR_PUTFIELD` | 属性写入（`J$.P`）|
+| `INSTR_BINARY` | 二元运算（`J$.B`）|
+| `INSTR_UNARY` | 一元运算（`J$.U`）|
+| `INSTR_LITERAL` | 字面量（`J$.T`）|
+| `INSTR_INIT` | 变量声明初始化（`J$.N`）|
+| `INSTR_CONDITIONAL` | 条件表达式 / switch（`J$.C`）|
 | `INSTR_TRY_CATCH_ARGUMENTS` | 函数/脚本 try-catch 包裹 |
-| `INSTR_END_EXPRESSION` | 表达式语句末尾标记 |
+| `INSTR_END_EXPRESSION` | 表达式语句末尾标记（`J$.X1`）|
+| `INSTR_INVOKE` | 函数/方法调用（`J$.F` / `J$.M`）|
+| `INSTR_RETURN` | return 语句（`J$.Rt`）|
+| `INSTR_THROW` | throw 语句（`J$.Th`）|
+| `INSTR_FORIN` | for-in 循环（`J$.H`）|
 | `ENABLE_SAMPLING` | 是否启用采样模式 |
+
+> 快捷方式：`import { fullConfig } from './src/instrument/pluginAnalyzer.js'` 可获得所有字段均为 `null` 的全量 Config。
 
 ---
 
@@ -149,7 +165,7 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 
 ### 模板缓存（wrappers.js）
 
-`replaceInStatement(templateStr, ...args)` 第一次会 `acorn.parse` 模板字符串并缓存，
+`replaceInStatement(templateStr, ...args)` 第一次会用 `@babel/parser` 解析模板字符串并缓存，
 后续通过 `deepCloneAndReplace` 深拷贝复用，避免重复 parse 开销。
 占位符约定：模板中用 `J$_1`、`J$_2` … 作占位符（`RP` 前缀 = `"J$_"`）。
 
@@ -166,7 +182,7 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 
 ## 文档维护规范
 
-项目文档统一存放在 `docs/` 目录下，共 7 个 Markdown 文件：
+项目文档统一存放在 `docs/` 目录下，共 8 个 Markdown 文件：
 
 | 文档 | 对应代码范围 |
 |------|------------|
@@ -177,6 +193,7 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 | `docs/Analysis-Development.md` | 分析插件接口（`analysisCallbackTemplate.js`）|
 | `docs/Configuration.md` | `init(config)` 的 Config 对象 |
 | `docs/Sample-Analyses.md` | `src/plugins/` 全部示例插件 |
+| `docs/Scope-Aware-Instrumentation.md` | 作用域感知插桩技术设计文档 |
 
 ### 何时需要同步更新文档
 

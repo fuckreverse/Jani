@@ -5,56 +5,61 @@
 ## 概述
 
 插桩引擎是 Jalangi2 的核心组件，负责将普通 JavaScript 源代码转换为带有分析钩子的插桩代码。
-整个过程分为四步：**解析 → AST 变换 → 代码生成 → 输出**。
+整个过程分为多个 Pass：**解析 → 作用域分析 → 静态 def-use 分析（Pass 0）→ AST 变换 → 代码生成 → 输出**。
 
-```
-JavaScript 源代码
-       │
-       ▼  @babel/parser（支持 ES2022+ 及实验性语法）
-AST（带 loc 信息）
-       │
-       ▼  addScopes() — 作用域分析（附 .scope，含 ScopeID / hasWith / hasEval / varKind）
-AST（带 loc/scope 信息）
-       │
-       ▼  analyzeDefUse() — Pass 0 静态 def-use 分析（生成插桩决策表）
-插桩决策表（Map<nodeKey, 'full'|'lightweight'>）
-       │
-       ▼  Pass 1（可选，采样模式）：visitorCloneBodyPre — 克隆函数体
-       │  Pass 2：visitorRRPre（前序）+ visitorRRPost（后序）— 主插桩
-       │             ↳ 查决策表：局部变量走 J$.Rl，全局/不安全走 J$.R
-       │  Pass 3：visitorOps（后序）— 运算符/控制流插桩
-       │  Pass 4（可选，采样模式）：visitorMergeBodyPre — 合并
-       ▼
-插桩后 AST
-       │
-       ▼  hoistFunctionDeclaration() — 函数声明提升（Firefox 兼容）
-       │
-       ▼  @babel/generator（支持 Babel 原生 AST）
-插桩后 JavaScript 代码（含 IIFE 包裹 / module 绑定）
+```mermaid
+flowchart TD
+    SRC["JavaScript 源代码"]
+    PARSE["@babel/parser 解析\n支持 ES2022+ 及实验性语法"]
+    AST1["AST（含 loc 信息）"]
+    SCOPE["addScopes()\n作用域分析\n附 .scope（ScopeID / hasWith / hasEval / varKind）"]
+    AST2["AST（含 loc / scope 信息）"]
+    DU["analyzeDefUse() — Pass 0\n静态 def-use 分析"]
+    DMAP["插桩决策表 Map&lt;nodeKey,'full'|'lightweight'&gt;"]
+    P1["Pass 1（可选）\nvisitorCloneBodyPre — 克隆函数体"]
+    P2["Pass 2\nvisitorRRPre + visitorRRPost — 主插桩\n查决策表：局部变量走 J$.Rl，其余走 J$.R"]
+    P3["Pass 3\nvisitorOps — 运算符 / 控制流插桩"]
+    P4["Pass 4（可选）\nvisitorMergeBodyPre — 合并"]
+    IAST["插桩后 AST"]
+    HOIST["hoistFunctionDeclaration()\n函数声明提升（Firefox 兼容）"]
+    GEN["@babel/generator 代码生成"]
+    OUTPUT["插桩后 JavaScript 代码"]
+
+    SRC --> PARSE --> AST1 --> SCOPE --> AST2
+    AST2 --> DU --> DMAP
+    AST2 --> P1
+    DMAP --> P2
+    P1 --> P2 --> P3 --> P4 --> IAST
+    IAST --> HOIST --> GEN --> OUTPUT
 ```
 
 ## 对外 API
 
-### `init(config, analysis?, sid?, jalangiVar?)`
+### `init(config, analysis?, sid?, jalangiVar?, plugins?)`
 
 初始化插桩器，**必须在第一次调用 `instrumentCode` 之前调用**。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `config` | `object` | Jalangi Config 对象，见 [Configuration.md](./Configuration.md) |
+| `config` | `object \| null` | Jalangi Config 对象，见 [Configuration.md](./Configuration.md)；若传 `null` 且提供 `plugins`，则自动推导 Config |
 | `analysis` | `object?` | 当前分析对象（可选），用于 `instrumentCodePre` / `instrumentCode` 钩子 |
 | `sid` | `*?` | 当前脚本 ID（eval 场景下的 source map） |
 | `jalangiVar` | `string?` | 沙盒变量名，默认 `'J$'`，可自定义避免冲突 |
+| `plugins` | `Array<string\|object>?` | 插件路径或实例列表；当 `config` 为 `null` 时，自动静态分析插件所用 Hook，生成最小化 Config |
 
 ```js
 import { init } from './src/instrument/esnstrument.js';
 
+// 方式一：手动传入 Config
 init({
     INSTR_READ: null,         // null = 全部插桩
     INSTR_WRITE: null,
     ENABLE_SAMPLING: false,
     // ... 其余 Config 字段
 });
+
+// 方式二：传入 plugins，自动推导 Config（config 传 null）
+init(null, undefined, undefined, undefined, ['./src/plugins/dlint/CheckNaN.js']);
 ```
 
 ### `instrumentCode(options)`
@@ -154,28 +159,42 @@ J$.W(iid, 'x', expr, x, flags, defScopeId)
 // 其中：flags = bitPattern(isGlobal, isScriptLocal, isDeclaration)
 ```
 
+**读取路径决策流程**：
+
+```mermaid
+flowchart TD
+    Q1{"作用域含 eval 或 with?"}
+    Q2{"是全局变量?"}
+    Q3{"是 catch 参数\n或 arguments?"}
+    Q4{"能静态确定\n定义作用域?"}
+    FULL["全量路径\nJ$.R(iid, name, val, flags, defScopeId)"]
+    LIGHT["轻量路径\nJ$.Rl(iid, defScopeId, name)"]
+
+    Q1 -->|"是"| FULL
+    Q1 -->|"否"| Q2
+    Q2 -->|"是"| FULL
+    Q2 -->|"否"| Q3
+    Q3 -->|"是"| FULL
+    Q3 -->|"否"| Q4
+    Q4 -->|"否"| FULL
+    Q4 -->|"是"| LIGHT
+```
+
 ### 属性读写
 
 ```js
 // 原始代码：点表达式
 obj.prop
-
 // 插桩后
 J$.G(iid, obj, 'prop', flags)
-```
 
-```js
 // 原始代码：计算属性
 obj[key]
-
 // 插桩后
 J$.G(iid, obj, J$.R(iid2, 'key', key, flags), flags)
-```
 
-```js
-// 原始代码
+// 原始代码：属性写入
 obj.prop = val
-
 // 插桩后
 J$.P(iid, obj, 'prop', val, flags)
 ```
@@ -185,15 +204,11 @@ J$.P(iid, obj, 'prop', val, flags)
 ```js
 // 原始代码：普通函数调用
 func(args)
-
 // 插桩后
 J$.F(iid, func, flags)(args)
-```
 
-```js
 // 原始代码：方法调用
 obj.method(args)
-
 // 插桩后
 J$.M(iid, obj, 'method', flags)(args)
 ```
@@ -201,31 +216,19 @@ J$.M(iid, obj, 'method', flags)(args)
 ### 字面量
 
 ```js
-// 原始代码
-42
-'hello'
-{}
-[]
-function() {}
-
-// 插桩后（分别）
-J$.T(iid, 42, J$.N_LOG_NUMBER_LIT, false)
-J$.T(iid, 'hello', J$.N_LOG_STRING_LIT, false)
-J$.T(iid, {}, J$.N_LOG_OBJECT_LIT, false)
-J$.T(iid, [], J$.N_LOG_ARRAY_LIT, false)
-J$.T(iid, function() { J$.Fe(iid2, ...); ... J$.Fr(iid3); }, J$.N_LOG_FUNCTION_LIT, false)
+// 原始代码 → 插桩后
+42            → J$.T(iid, 42, J$.N_LOG_NUMBER_LIT, false)
+'hello'       → J$.T(iid, 'hello', J$.N_LOG_STRING_LIT, false)
+{}            → J$.T(iid, {}, J$.N_LOG_OBJECT_LIT, false)
+[]            → J$.T(iid, [], J$.N_LOG_ARRAY_LIT, false)
+function() {} → J$.T(iid, function() { J$.Fe(iid2, ...); ... J$.Fr(iid3); }, J$.N_LOG_FUNCTION_LIT, false)
 ```
 
 ### 二元/一元运算
 
 ```js
-// 原始代码
-a + b
-!x
-
-// 插桩后
-J$.B(iid, '+', a, b, flags)
-J$.U(iid, '!', x)
+a + b  →  J$.B(iid, '+', a, b, flags)
+!x     →  J$.U(iid, '!', x)
 ```
 
 ### 条件表达式
@@ -345,6 +348,28 @@ scope.varKinds = {
 
 ### 分析算法（两阶段）
 
+```mermaid
+flowchart TD
+    SCOPE_NODE["作用域节点\n(Program / Function / ClassMethod)"]
+    PHASE1["阶段 1：Def-Sites 收集\n扫描 AssignmentExpression / UpdateExpression\n构建 Map&lt;name, DefInfo&gt;\n记录赋值点数量、是否条件分支、声明类型"]
+    PHASE2["阶段 2：Use-Sites 决策\n遍历所有 RHS 上下文的 Identifier"]
+    UNSAFE{"含 eval / with\n或是全局变量?"}
+    DEFINFO["查 DefInfo\n(阶段 1 产出)"]
+    NODEF{"未在此作用域\n声明?"}
+    FULL["Decision.FULL\n→ J$.R(...)"]
+    LIGHT["Decision.LIGHTWEIGHT\n→ J$.Rl(...)"]
+    RECURSE["递归处理\n所有子作用域"]
+
+    SCOPE_NODE --> PHASE1 --> PHASE2
+    PHASE2 --> UNSAFE
+    UNSAFE -->|"是"| FULL
+    UNSAFE -->|"否"| DEFINFO
+    DEFINFO --> NODEF
+    NODEF -->|"是（来自父作用域）"| FULL
+    NODEF -->|"否"| LIGHT
+    PHASE2 --> RECURSE
+```
+
 **阶段 1：Def-Sites 收集**
 
 对每个函数作用域，扫描所有 `AssignmentExpression`、`UpdateExpression` 和变量声明，
@@ -377,6 +402,65 @@ const decision = decisions.get(key);      // → 'full' | 'lightweight' | undefi
 - 变量被传入函数（可能被修改）→ `lightweight`
 - 变量在 `try` 块内 → `lightweight`
 - 作用域内有任何 `eval` 或 `with` → `full`
+
+## 插件静态分析器（`pluginAnalyzer.js`）
+
+`src/instrument/pluginAnalyzer.js` 提供**自动推导按需 Config** 的能力，
+避免手动为每个插件维护 Config 对象。
+
+### 对外 API
+
+| 函数 | 说明 |
+|------|------|
+| `analyzePluginHooks(plugins)` | 从插件路径或实例提取使用的 Hook 名称集合 `Set<string>` |
+| `buildConfigFromHooks(usedHooks)` | 根据 Hook 集合构建最小化 Config 对象 |
+| `buildConfigFromPlugins(plugins)` | 两者的组合快捷函数 |
+| `fullConfig()` | 返回全量插桩的 Config（所有字段均为 `null`）|
+
+```mermaid
+flowchart LR
+    PLUGINS["插件列表\n(路径字符串 / 实例对象)"]
+    ANALYZE["analyzePluginHooks()\n静态 AST 扫描或运行时反射\n提取 Hook 方法名"]
+    HOOKS["Set&lt;hookName&gt;\ne.g. {'binary', 'read'}"]
+    BUILD["buildConfigFromHooks()\n已使用 Hook → 对应 Config 字段 = null\n未使用 Hook → 对应 Config 字段 = () => false"]
+    CONFIG["最小化 Config 对象"]
+
+    PLUGINS --> ANALYZE --> HOOKS --> BUILD --> CONFIG
+```
+
+**Hook → Config 字段映射（摘要）**：
+
+| Hook | 需要开启的 Config 字段 |
+|------|---------------------|
+| `read` | `INSTR_READ` |
+| `write` | `INSTR_WRITE` |
+| `getFieldPre` / `getField` | `INSTR_GETFIELD` |
+| `putFieldPre` / `putField` | `INSTR_PUTFIELD` |
+| `binaryPre` / `binary` | `INSTR_BINARY` |
+| `unaryPre` / `unary` | `INSTR_UNARY` |
+| `literal` | `INSTR_LITERAL` |
+| `declare` | `INSTR_INIT`, `INSTR_TRY_CATCH_ARGUMENTS` |
+| `conditional` | `INSTR_CONDITIONAL` |
+| `functionEnter` / `functionExit` | `INSTR_TRY_CATCH_ARGUMENTS` |
+| `endExpression` | `INSTR_END_EXPRESSION` |
+| `invokeFunPre` / `invokeFun` | `INSTR_INVOKE` |
+| `_return` | `INSTR_RETURN` |
+| `_throw` | `INSTR_THROW` |
+| `forinObject` | `INSTR_FORIN` |
+
+### 示例
+
+```js
+import { buildConfigFromPlugins } from './src/instrument/pluginAnalyzer.js';
+import { init, instrumentCode }  from './src/instrument/esnstrument.js';
+
+// 自动分析插件，推导最小化 Config
+const config = buildConfigFromPlugins(['./src/plugins/dlint/CheckNaN.js']);
+init(config);
+
+// 或通过 init() 直接传入 plugins（config 传 null）
+init(null, undefined, undefined, undefined, ['./src/plugins/dlint/CheckNaN.js']);
+```
 
 ## 输出格式
 
@@ -431,7 +515,7 @@ const J$ = globalThis.J$;
 
 `wrappers.js` 中的 `replaceInStatement(templateStr, ...args)` 函数：
 
-1. 第一次调用时，用 `acorn.parse` 解析模板字符串并缓存 AST
+1. 第一次调用时，用 `@babel/parser` 解析模板字符串并缓存 AST
 2. 后续调用通过 `deepCloneAndReplace` 深拷贝缓存的 AST，替换占位符
 3. 占位符格式：`J$_1`、`J$_2`（RP 前缀 = `"J$_"`，可随沙盒变量名变化）
 

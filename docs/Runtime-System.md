@@ -14,6 +14,77 @@
 | `AnalysisHost` | `AnalysisHost.js` | 多插件链式调度器 |
 | `SMemory` | `SMemory.js` | Shadow Memory 影子内存服务 |
 | `AnalysisTemplate` | `analysisCallbackTemplate.js` | 分析插件接口基类模板 |
+| `DataFlowAnalyzer` | `DataFlowAnalyzer.js` | 运行时 SSA 数据流分析器，支持 backward slicing |
+| `AntiDetection` | `AntiDetection.js` | 反插桩对抗工具 |
+
+**运行时组件层次**：
+
+```mermaid
+classDiagram
+    class JalangiRuntime {
+        +R(iid, name, val, flags, defScopeId?)
+        +Rl(iid, defScopeId, name)
+        +W(iid, name, val, lhs, flags, defScopeId?)
+        +G(iid, base, offset, flags)
+        +P(iid, base, offset, val, flags)
+        +F(iid, f, flags)
+        +M(iid, base, offset, flags)
+        +T(iid, val, type, hasGS)
+        +B(iid, op, left, right, flags)
+        +U(iid, op, left)
+        +C(iid, cond)
+        +Fe(iid, f, dis, args, defScopeId?)
+        +Fr(iid)
+        +Se(iid, val, origFile)
+        +Sr(iid)
+        +N(iid, name, val, flags)
+        +Aw(iid)
+        +Rt(iid, val)
+        +Th(iid, val)
+        -#returnStack
+        -#switchKeyStack
+        -#sidStack
+        -#callIdCounter
+        -#shadowFrames
+        -#oidMap
+    }
+
+    class JalangiSandbox {
+        +smap
+        +sid
+        +iids
+        +analysis: AnalysisHost
+        +tracer: TraceLogger
+        +Constants
+        +smemory: SMemory
+        +iidToLocation(iid)
+        +getGlobalIID(iid)
+        +newAsyncContext()
+        +activateContext(ctxId)
+        +currentContextId
+    }
+
+    class AnalysisHost {
+        +use(plugin): AnalysisHost
+        +read(iid, name, val, ...)
+        +write(iid, name, val, ...)
+        +getField(iid, base, offset, ...)
+        +binary(iid, op, left, right, ...)
+        -_chains: Map
+    }
+
+    class SMemory {
+        +getShadowObjectOfObject(obj)
+        +getIDFromShadowObjectOrFrame(shadow)
+        +getShadowFrame(varName)
+        +getOriginalObject(id)
+    }
+
+    JalangiSandbox --|> JalangiRuntime : 继承
+    JalangiSandbox "1" --> "1" AnalysisHost : analysis
+    JalangiSandbox "1" --> "0..1" SMemory : smemory
+    AnalysisHost "1" --> "*" Plugin : use()
+```
 
 ## JalangiSandbox — 完整沙盒
 
@@ -102,6 +173,29 @@ const globalIid = J$.getGlobalIID(iid);
 | `Wi(iid, val)` | with 对象 | `_with` |
 | `H(iid, val)` | for-in 对象 | `forinObject` |
 | `X1(iid, val)` | 表达式语句末尾 | `endExpression` |
+| `Aw(iid)` | await 恢复点 | — |
+
+### 钩子执行三段式（以 G / getField 为例）
+
+```mermaid
+sequenceDiagram
+    participant Code as 插桩代码
+    participant RT as JalangiRuntime
+    participant Host as AnalysisHost
+    participant Plugin as 分析插件
+
+    Code->>RT: J$.G(iid, base, offset, flags)
+    RT->>Host: getFieldPre(iid, base, offset, isComputed, ...)
+    Host->>Plugin: getFieldPre(...) [按注册顺序依次调用]
+    Plugin-->>Host: { base, offset, skip } 或 undefined
+    Host-->>RT: 合并后的参数
+    RT->>RT: result = base[offset]（实际读取）
+    RT->>Host: getField(iid, base, offset, result, ...)
+    Host->>Plugin: getField(...) [按注册顺序依次调用]
+    Plugin-->>Host: { result } 或 undefined
+    Host-->>RT: 最终 result
+    RT-->>Code: 返回 result
+```
 
 ### flags 位字段
 
@@ -113,28 +207,6 @@ const globalIid = J$.getGlobalIID(iid);
 - `G` 的 flags：`[isComputed, isOpAssign, isMethodCall]`
 - `P` 的 flags：`[isComputed, isOpAssign]`
 - `F` / `M` 的 flags：`[isConstructor, isMethod]`
-
-### Pre/Post 钩子模式
-
-以属性读取（`G`）为例，展示三段式执行模式：
-
-```
-instrumented code calls J$.G(iid, base, offset, flags)
-         │
-         ▼
-   analysis.getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall)
-   → 可修改 base / offset，可返回 { skip: true } 跳过操作
-         │
-         ▼
-   执行实际属性读取: result = base[offset]
-         │
-         ▼
-   analysis.getField(iid, base, offset, result, isComputed, isOpAssign, isMethodCall)
-   → 可修改 result（返回 { result: newVal }）
-         │
-         ▼
-   返回最终结果给插桩代码
-```
 
 ## AnalysisHost — 多插件调度器
 
@@ -241,23 +313,26 @@ const orig = smemory.getOriginalObject(id);
 
 **数据流向**：
 
-```
-J$.W(iid, name, val, lhs, flags, defScopeId)
-   ↓ 写入时同步
-Shadow Frame["defScopeId:callId"][name] = val
+```mermaid
+flowchart LR
+    W["J$.W(iid, name, val, lhs, flags, defScopeId)\n变量写入"]
+    R["J$.R(iid, name, val, flags, defScopeId)\n变量读取（全量路径）"]
+    Rl["J$.Rl(iid, defScopeId, name)\n变量读取（轻量路径）"]
+    SF["Shadow Frame\nMap&lt;'defScopeId:callId', Map&lt;name,value&gt;&gt;"]
+    HOOK_W["analysis.write(iid, name, val, ...)"]
+    HOOK_R["analysis.read(iid, name, val, ...)"]
 
-J$.R(iid, name, val, flags, defScopeId)
-   ↓ 读取时同步（全量路径也更新 Shadow Frame）
-Shadow Frame["defScopeId:callId"][name] = val
-
-J$.Rl(iid, defScopeId, name)
-   ↓ 直接从 Shadow Frame 查值，不接收 value 参数
-val = Shadow Frame["defScopeId:callId"][name]
+    W -->|"写入时同步\nShadowFrame[key][name] = val"| SF
+    R -->|"读取时同步\nShadowFrame[key][name] = val"| SF
+    Rl -->|"查 Shadow Frame 获取值\nval = ShadowFrame[key][name]"| SF
+    W --> HOOK_W
+    R --> HOOK_R
+    Rl --> HOOK_R
 ```
 
 **适用条件**（插桩器静态判断）：局部变量、无 `eval`/`with`、非 `catch` 参数、非 `arguments`。
 
-## 对象 OID 机制（TODO-14）
+## 对象 OID 机制
 
 `JalangiRuntime` 为每个对象/数组/函数分配唯一的 **OID（Object ID）**，支持别名追踪和对象版本管理：
 
@@ -269,21 +344,35 @@ val = Shadow Frame["defScopeId:callId"][name]
 
 ```js
 // 查询对象的 OID（不分配新 OID）
-const oid = J$.getOid(obj);        // → number | null
+const oid = J$.getOid(obj);           // → number | null
 
 // 查询对象的版本号（每次 putField 递增）
 const ver = J$.getObjectVersion(obj); // → number（0 = 从未被修改）
 ```
 
-### 用途
+### 别名追踪示例
 
-```
-let a = {};       // T() 中分配 OID_1
-let b = a;        // W() 中记录 b → OID_1
-b.x = 1;          // P() 中 OID_1 版本号 +1；通过 aliasTable 可知 a 也受影响
+```mermaid
+sequenceDiagram
+    participant Code as 用户代码
+    participant RT as JalangiRuntime
+
+    Code->>RT: J$.T(iid, {}, N_LOG_OBJECT_LIT, false)
+    RT->>RT: 分配 OID_1，写入 WeakMap
+    RT-->>Code: 返回 {} (OID_1)
+
+    Code->>RT: J$.W(iid, 'a', {}, ...) — a = {}
+    RT->>RT: a → OID_1 写入 aliasTable
+
+    Code->>RT: J$.W(iid, 'b', a, ...) — b = a
+    RT->>RT: b → OID_1 写入 aliasTable
+
+    Code->>RT: J$.P(iid, b, 'x', 1, ...) — b.x = 1
+    RT->>RT: OID_1 版本号 +1
+    Note over RT: a 与 b 共享 OID_1，均被标记为"已修改"
 ```
 
-## 异步 ContextID 机制（TODO-15）
+## 异步 ContextID 机制
 
 `JalangiRuntime` 为不同的异步任务分配独立的 **ContextID**，解决异步 log 交叉感染问题：
 
@@ -294,7 +383,7 @@ b.x = 1;          // P() 中 OID_1 版本号 +1；通过 aliasTable 可知 a 也
 
 ```js
 // 查询当前异步上下文 ID
-const ctxId = J$.currentContextId;  // → number（0 = 顶层同步）
+const ctxId = J$.currentContextId;   // → number（0 = 顶层同步）
 
 // 为新异步任务分配 ContextID
 const newCtxId = J$.newAsyncContext(); // → number（唯一递增）
@@ -358,23 +447,41 @@ eval('var x = 1;');
 
 `src/runtime/logging/` 提供可插拔的事件日志后端：
 
+```mermaid
+flowchart TD
+    RT["JalangiRuntime\n(产生事件)"]
+    TL["TraceLogger\n(日志管理器，协调 RingBuffer 和后端)"]
+    RB["RingBuffer\n(无锁环形缓冲区)"]
+    ES["EventSerializer\n(事件序列化)"]
+
+    subgraph Backends["可插拔后端"]
+        MB["MemoryBackend\n(纯内存，测试用)"]
+        NS["NodeStreamBackend\n(Node.js 流 / 写文件)"]
+        WS["WsBackend\n(WebSocket，传输到 trace server)"]
+        IDB["IdbWorkerBackend\n(IndexedDB Worker，浏览器持久化)"]
+        TA["TypedArrayBackend\n(Float64Array 环形缓冲区\n零 GC，高吞吐量)"]
+    end
+
+    RT -->|"write(entries)"| TL
+    TL --> RB
+    RB --> ES
+    ES --> MB
+    ES --> NS
+    ES --> WS
+    ES --> IDB
+    ES --> TA
+```
+
 | 组件 | 说明 |
 |------|------|
 | `TraceLogger` | 日志管理器，协调 RingBuffer 和后端 |
 | `RingBuffer` | 环形缓冲区，无锁高性能暂存 |
+| `EventSerializer` | 事件序列化器 |
 | `MemoryBackend` | 纯内存后端（测试用） |
 | `NodeStreamBackend` | Node.js 流（写文件、stdout）|
 | `WsBackend` | WebSocket 后端（传输到 trace server）|
 | `IdbWorkerBackend` | IndexedDB Worker 后端（浏览器持久化）|
 | `TypedArrayBackend` | **高性能 TypedArray 环形缓冲区**后端（零 GC、可导出 `.bin`）|
-
-```js
-// 使用 WebSocket 后端（配合 npm run trace-server）
-const J$ = globalThis.J$ = new JalangiSandbox({
-    useIdb: false,
-    // 需要手动配置 WsBackend
-});
-```
 
 ### TypedArrayBackend — 高性能环形缓冲区
 
@@ -386,9 +493,6 @@ import { TypedArrayBackend } from './src/runtime/logging/backends/TypedArrayBack
 
 const backend = new TypedArrayBackend({ capacity: 1_000_000 });
 
-// 作为 TraceLogger 的后端使用
-// await backend.write([ { type: 'W', iid: 8, scopeId: 0, callId: 1, ... } ]);
-
 // 导出二进制（用于离线分析）
 const buf = backend.exportBinary();
 
@@ -398,10 +502,27 @@ const events = backend.getEvents(100);
 
 每条 log 条目编码为 5 个 Float64（40 字节），字段含义：`entryType | iid | scopeId:callId(packed) | contextId | valueKey`。
 
-## DataFlowAnalyzer — 运行时 SSA 数据流分析（TODO-16）
+## DataFlowAnalyzer — 运行时 SSA 数据流分析
 
 `DataFlowAnalyzer`（`src/runtime/DataFlowAnalyzer.js`）是一个**后处理分析器**，
 消费运行时产生的 log 条目，对其做 SSA 化并支持 backward slicing。
+
+```mermaid
+flowchart LR
+    LOG["运行时 log 条目\n(W / R / P / G / F / M)"]
+    DFA["DataFlowAnalyzer"]
+    SSA["SSA 化\n每次赋值 → 唯一 RegisterID\n维护 LastWrite 表"]
+    ALIAS["别名追踪\n通过 OID 关联同一对象的所有变量"]
+    BS["Backward Slicing\n从目标寄存器出发\n回溯所有影响其值的赋值链"]
+    RESULT["依赖链\n[{iid, name, value}, ...]"]
+
+    LOG --> DFA
+    DFA --> SSA
+    DFA --> ALIAS
+    SSA --> BS
+    ALIAS --> BS
+    BS --> RESULT
+```
 
 ```js
 import { DataFlowAnalyzer } from './src/runtime/DataFlowAnalyzer.js';
@@ -436,7 +557,7 @@ const slice = dfa.backwardSlice(targetReg);
 | `getAliasesForOid(oid)` | 查询持有指定 OID 的所有变量（别名集合） |
 | `exportRegisters()` | 导出所有寄存器（sources 转为数组，可 JSON 序列化） |
 
-## AntiDetection — 反插桩对抗（TODO-17）
+## AntiDetection — 反插桩对抗
 
 `AntiDetection`（`src/runtime/AntiDetection.js`）提供针对恶意脚本常见插桩检测手段的对策。
 
@@ -458,7 +579,7 @@ registerOriginalCode(instrumentedFn, originalSourceCode);
 // 3. 检查全局变量是否泄露（自检用）
 const leaks = detectGlobalLeaks(); // 正常情况下返回 []
 
-// 4. 包装异步回调，分配独立 ContextID（配合 TODO-15）
+// 4. 包装异步回调，分配独立 ContextID（配合异步 ContextID 机制）
 const wrappedCb = createContextWrapper(originalCallback, J$);
 setTimeout(wrappedCb, delay);
 

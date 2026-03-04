@@ -14,12 +14,12 @@
 | 值 | 含义 |
 |----|------|
 | `null` / `undefined` | **全部插桩**该类型的操作（默认行为）|
-| `false` | **完全禁用**该类型的插桩 |
+| `false` / `() => false` | **完全禁用**该类型的插桩 |
 | `(ast) => boolean` | **细粒度控制**：函数返回 `true` 时插桩，`false` 时跳过 |
 
 | 字段 | 控制范围 | 分析钩子 |
 |------|---------|---------|
-| `INSTR_READ` | 变量读取（`J$.R`）| `read` |
+| `INSTR_READ` | 变量读取（`J$.R` / `J$.Rl`）| `read` |
 | `INSTR_WRITE` | 变量写入（`J$.W`）| `write` |
 | `INSTR_GETFIELD` | 属性读取（`J$.G`）| `getFieldPre` / `getField` |
 | `INSTR_PUTFIELD` | 属性写入（`J$.P`）| `putFieldPre` / `putField` |
@@ -28,14 +28,75 @@
 | `INSTR_LITERAL` | 字面量（`J$.T`）| `literal` |
 | `INSTR_INIT` | 变量声明初始化（`J$.N`）| `declare` |
 | `INSTR_CONDITIONAL` | 条件表达式 / switch（`J$.C`）| `conditional` |
-| `INSTR_TRY_CATCH_ARGUMENTS` | 函数/脚本 try-catch 包裹 | `functionExit` / `scriptExit` |
+| `INSTR_TRY_CATCH_ARGUMENTS` | 函数/脚本 try-catch 包裹 | `functionEnter` / `functionExit` / `scriptEnter` / `scriptExit` |
 | `INSTR_END_EXPRESSION` | 表达式语句末尾标记（`J$.X1`）| `endExpression` |
+| `INSTR_INVOKE` | 函数/方法调用（`J$.F` / `J$.M`）| `invokeFunPre` / `invokeFun` |
+| `INSTR_RETURN` | return 语句（`J$.Rt`）| `_return` |
+| `INSTR_THROW` | throw 语句（`J$.Th`）| `_throw` |
+| `INSTR_FORIN` | for-in 循环（`J$.H`）| `forinObject` |
 
 ### 采样模式字段
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
 | `ENABLE_SAMPLING` | `boolean` | `false` | 启用采样模式，每个函数可在插桩/非插桩版本间切换 |
+
+## Config 字段与钩子对应关系
+
+```mermaid
+flowchart LR
+    subgraph Config["Config 字段"]
+        RD["INSTR_READ"]
+        WR["INSTR_WRITE"]
+        GF["INSTR_GETFIELD"]
+        PF["INSTR_PUTFIELD"]
+        BN["INSTR_BINARY"]
+        UN["INSTR_UNARY"]
+        LT["INSTR_LITERAL"]
+        IN["INSTR_INIT"]
+        CD["INSTR_CONDITIONAL"]
+        TC["INSTR_TRY_CATCH_ARGUMENTS"]
+        EE["INSTR_END_EXPRESSION"]
+        IV["INSTR_INVOKE"]
+        RT["INSTR_RETURN"]
+        TH["INSTR_THROW"]
+        FI["INSTR_FORIN"]
+    end
+
+    subgraph Hooks["分析钩子"]
+        read["read"]
+        write["write"]
+        getField["getFieldPre / getField"]
+        putField["putFieldPre / putField"]
+        binary["binaryPre / binary"]
+        unary["unaryPre / unary"]
+        literal["literal"]
+        declare["declare"]
+        cond["conditional"]
+        fnLife["functionEnter / functionExit\nscriptEnter / scriptExit"]
+        endExpr["endExpression"]
+        invoke["invokeFunPre / invokeFun"]
+        ret["_return"]
+        thr["_throw"]
+        forin["forinObject"]
+    end
+
+    RD --> read
+    WR --> write
+    GF --> getField
+    PF --> putField
+    BN --> binary
+    UN --> unary
+    LT --> literal
+    IN --> declare
+    CD --> cond
+    TC --> fnLife
+    EE --> endExpr
+    IV --> invoke
+    RT --> ret
+    TH --> thr
+    FI --> forin
+```
 
 ## 常用 Config 组合
 
@@ -54,28 +115,37 @@ const Config = {
     INSTR_CONDITIONAL:        null,
     INSTR_TRY_CATCH_ARGUMENTS: null,
     INSTR_END_EXPRESSION:     null,
+    INSTR_INVOKE:             null,
+    INSTR_RETURN:             null,
+    INSTR_THROW:              null,
+    INSTR_FORIN:              null,
     ENABLE_SAMPLING:          false,
 };
+
+// 简便写法：使用 pluginAnalyzer.fullConfig()
+import { fullConfig } from './src/instrument/pluginAnalyzer.js';
+const Config = fullConfig();
 ```
 
-### 最小插桩（只关注函数调用）
-
-函数调用（`J$.F` / `J$.M`）没有独立的 Config 开关，始终插桩。
-以下配置关闭所有其他类型：
+### 最小插桩（只关注函数进出）
 
 ```js
 const Config = {
-    INSTR_READ:               false,
-    INSTR_WRITE:              false,
-    INSTR_GETFIELD:           false,
-    INSTR_PUTFIELD:           false,
-    INSTR_BINARY:             false,
-    INSTR_UNARY:              false,
-    INSTR_LITERAL:            false,
-    INSTR_INIT:               false,
-    INSTR_CONDITIONAL:        false,
-    INSTR_TRY_CATCH_ARGUMENTS: false,
-    INSTR_END_EXPRESSION:     false,
+    INSTR_READ:               () => false,
+    INSTR_WRITE:              () => false,
+    INSTR_GETFIELD:           () => false,
+    INSTR_PUTFIELD:           () => false,
+    INSTR_BINARY:             () => false,
+    INSTR_UNARY:              () => false,
+    INSTR_LITERAL:            () => false,
+    INSTR_INIT:               () => false,
+    INSTR_CONDITIONAL:        () => false,
+    INSTR_TRY_CATCH_ARGUMENTS: null,   // 保留函数进出
+    INSTR_END_EXPRESSION:     () => false,
+    INSTR_INVOKE:             null,    // 保留函数调用
+    INSTR_RETURN:             () => false,
+    INSTR_THROW:              () => false,
+    INSTR_FORIN:              () => false,
     ENABLE_SAMPLING:          false,
 };
 ```
@@ -84,17 +154,21 @@ const Config = {
 
 ```js
 const Config = {
-    INSTR_READ:               false,
-    INSTR_WRITE:              false,
+    INSTR_READ:               () => false,
+    INSTR_WRITE:              () => false,
     INSTR_GETFIELD:           null,   // 开启属性读取
     INSTR_PUTFIELD:           null,   // 开启属性写入
-    INSTR_BINARY:             false,
-    INSTR_UNARY:              false,
-    INSTR_LITERAL:            false,
-    INSTR_INIT:               false,
-    INSTR_CONDITIONAL:        false,
-    INSTR_TRY_CATCH_ARGUMENTS: false,
-    INSTR_END_EXPRESSION:     false,
+    INSTR_BINARY:             () => false,
+    INSTR_UNARY:              () => false,
+    INSTR_LITERAL:            () => false,
+    INSTR_INIT:               () => false,
+    INSTR_CONDITIONAL:        () => false,
+    INSTR_TRY_CATCH_ARGUMENTS: () => false,
+    INSTR_END_EXPRESSION:     () => false,
+    INSTR_INVOKE:             () => false,
+    INSTR_RETURN:             () => false,
+    INSTR_THROW:              () => false,
+    INSTR_FORIN:              () => false,
     ENABLE_SAMPLING:          false,
 };
 ```
@@ -120,9 +194,26 @@ const Config = {
 };
 ```
 
-> **注意**：细粒度控制函数接收 AST 节点对象。
-> `acorn` 解析产生的节点含 `type`、`operator`、`computed`、`loc` 等字段，
-> 可据此做任意筛选。
+> **注意**：细粒度控制函数接收 Babel AST 节点对象，含 `type`、`operator`、`computed`、`loc` 等字段。
+
+### 自动推导 Config（推荐）
+
+最简便的方式是通过 `pluginAnalyzer.js` 自动从插件代码中推导所需 Config：
+
+```js
+import { init } from './src/instrument/esnstrument.js';
+
+// 方式一：直接传入 plugins（config 传 null）
+init(null, undefined, undefined, undefined, [
+    './src/plugins/dlint/CheckNaN.js',
+    './src/plugins/tutorial/BranchCoverage.js',
+]);
+
+// 方式二：手动调用 pluginAnalyzer
+import { buildConfigFromPlugins } from './src/instrument/pluginAnalyzer.js';
+const config = buildConfigFromPlugins(['./src/plugins/dlint/CheckNaN.js']);
+init(config);
+```
 
 ## 使用方式
 
@@ -157,5 +248,6 @@ const result = instrumentCode({
 **新版（当前）区别**：
 1. Config 通过 `init(config)` 参数注入，无全局状态
 2. 移除了 `DEBUG` / `WARN` / `MAX_BUF_SIZE` / `LOG_ALL_READS_AND_BRANCHES` 等非核心字段
-3. 新增 `INSTR_INIT`（对应 `J$.N` 声明钩子）和 `INSTR_END_EXPRESSION`（对应 `J$.X1`）
+3. 新增 `INSTR_INIT`（对应 `J$.N` 声明钩子）、`INSTR_END_EXPRESSION`（对应 `J$.X1`）、`INSTR_INVOKE`（对应 `J$.F`/`J$.M`）、`INSTR_RETURN`（对应 `J$.Rt`）、`INSTR_THROW`（对应 `J$.Th`）、`INSTR_FORIN`（对应 `J$.H`）
 4. 细粒度控制函数签名统一为 `(ast) => boolean`，旧版为 `(name/operator, ast) => boolean`
+5. 新增 `pluginAnalyzer.js` 支持自动推导按需 Config

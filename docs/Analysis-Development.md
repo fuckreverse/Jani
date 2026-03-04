@@ -6,6 +6,24 @@ Jalangi2 允许开发者通过编写**分析插件（Analysis Plugin）**来监�
 每个分析插件是一个普通的 JavaScript 类，实现一组钩子（hook）方法。
 当插桩代码执行到相应操作时，运行时会调用对应的钩子。
 
+**插件生命周期**：
+
+```mermaid
+flowchart TD
+    INIT["初始化\nnew JalangiSandbox()\nJ$.analysis = new AnalysisHost()"]
+    REG["注册插件\nJ$.analysis.use(new MyAnalysis(J$))"]
+    SE["onReady(cb) — 异步初始化完成\nscriptEnter — 脚本开始执行"]
+    HOOKS["运行时事件循环\n每次操作触发对应钩子\nread / write / getField / binary / ..."]
+    FN_LIFE["函数生命周期\nfunctionEnter → [函数体执行] → functionExit"]
+    SR["scriptExit — 脚本执行完毕"]
+    END["endExecution — 程序结束\n输出分析结果"]
+
+    INIT --> REG --> SE --> HOOKS
+    HOOKS --> FN_LIFE
+    FN_LIFE --> HOOKS
+    HOOKS --> SR --> END
+```
+
 ## 快速开始
 
 ### 1. 创建分析插件类
@@ -53,6 +71,49 @@ J$.analysis.use(new ReadCountAnalysis(J$));
 ## 所有可用钩子
 
 以下所有钩子方法均可选实现，未实现的方法不影响程序语义（被动观测模式）。
+
+```mermaid
+mindmap
+  root((分析钩子))
+    函数调用
+      invokeFunPre
+      invokeFun
+    属性访问
+      getFieldPre
+      getField
+      putFieldPre
+      putField
+    变量读写
+      read
+      write
+    字面量与声明
+      literal
+      declare
+    运算
+      binaryPre
+      binary
+      unaryPre
+      unary
+    条件与控制流
+      conditional
+      _return
+      _throw
+      _with
+      forinObject
+    函数生命周期
+      functionEnter
+      functionExit
+    脚本生命周期
+      scriptEnter
+      scriptExit
+      endExecution
+      onReady
+    其他
+      endExpression
+      instrumentCodePre
+      instrumentCode
+      runInstrumentedFunctionBody
+```
 
 ### 函数调用
 

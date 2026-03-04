@@ -13,6 +13,7 @@ Jalangi2 是一个面向 JavaScript 的**动态分析框架**，通过 AST 插�
 | [Analysis-Development.md](./Analysis-Development.md) | 编写自定义分析插件的完整指南 |
 | [Configuration.md](./Configuration.md) | Config 配置字段参考 |
 | [Sample-Analyses.md](./Sample-Analyses.md) | 内置示例分析插件介绍 |
+| [Scope-Aware-Instrumentation.md](./Scope-Aware-Instrumentation.md) | 作用域感知插桩技术设计文档 |
 
 ## 快速开始
 
@@ -39,6 +40,7 @@ const Config = {
     INSTR_READ: null, INSTR_WRITE: null, INSTR_GETFIELD: null, INSTR_PUTFIELD: null,
     INSTR_BINARY: null, INSTR_UNARY: null, INSTR_LITERAL: null, INSTR_INIT: null,
     INSTR_CONDITIONAL: null, INSTR_TRY_CATCH_ARGUMENTS: null, INSTR_END_EXPRESSION: null,
+    INSTR_INVOKE: null, INSTR_RETURN: null, INSTR_THROW: null, INSTR_FORIN: null,
     ENABLE_SAMPLING: false,
 };
 init(Config);
@@ -53,24 +55,56 @@ const result = instrumentCode({
 console.log(result.code);
 ```
 
+### 自动推导 Config（推荐）
+
+```js
+import { init, instrumentCode } from './src/instrument/esnstrument.js';
+
+// 不传 config，改传 plugins：自动静态分析插件所用 Hook，生成最小化 Config
+init(null, undefined, undefined, undefined, ['./src/plugins/dlint/CheckNaN.js']);
+
+const result = instrumentCode({
+    code: 'var x = 1 + 2;',
+    origCodeFileName: 'example.js',
+    instCodeFileName: 'example_inst.js',
+});
+console.log(result.code);
+```
+
 ## 目录结构概览
 
 ```
 src/
   instrument/          ← 插桩器核心（纯 ESM，无平台依赖）
     esnstrument.js     ← 主入口：init() + instrumentCode()
-    astUtil.js         ← AST 遍历与上下文枚举
-    scope.js           ← 词法作用域分析
+    astUtil.js         ← AST 遍历与上下文枚举（CONTEXT）
+    scope.js           ← 词法作用域分析（Scope 类，ScopeID）
     iid.js             ← IID 计数器与源码位置映射
-    wrappers.js        ← AST 节点包装函数库
+    wrappers.js        ← AST 节点包装函数库（模板缓存优化）
+    dataflow.js        ← 静态 SSA def-use 分析（Pass 0，决策表）
+    pluginAnalyzer.js  ← 插件静态分析器（按需 Config 推导）
   runtime/             ← 运行时系统（含 Node.js 专有代码）
     JalangiRuntime.js  ← 运行时钩子实现（基类）
     JalangiSandbox.js  ← 完整沙盒对象（推荐使用）
     AnalysisHost.js    ← 多插件链式调度器
     SMemory.js         ← Shadow Memory 影子内存服务
     analysisCallbackTemplate.js ← 分析插件接口模板
+    DataFlowAnalyzer.js         ← 运行时 SSA 数据流分析器
+    AntiDetection.js            ← 反插桩对抗工具
+    logging/           ← 可插拔日志后端
+      TraceLogger.js
+      RingBuffer.js
+      EventSerializer.js
+      backends/
+        MemoryBackend.js
+        NodeStreamBackend.js
+        WsBackend.js
+        IdbWorkerBackend.js
+        TypedArrayBackend.js   ← 高性能 Float64Array 环形缓冲区
   plugins/             ← 示例分析插件
   Constants.js         ← 全局常量
 test/
   instrument.test.mjs  ← 插桩器端到端集成测试（56 个用例）
+docs/                  ← 项目文档
+bin/                   ← 命令行工具
 ```
