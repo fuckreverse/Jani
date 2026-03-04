@@ -268,8 +268,11 @@ const visitorRRPost = {
                 );
             }
             if (def.init !== null && def.id.type === 'Identifier') {
+                const scope    = W.getScope();
+                const defScope = W._findDefScope(scope, def.id.name);
+                const scopeId  = defScope?.id;
                 let init = W.wrapWrite(def.init, W.createLiteralAst(def.id.name), def.init, def.id,
-                    false, W.getScope().isGlobal(def.id.name), true);
+                    false, scope.isGlobal(def.id.name), true, scopeId);
                 init = W.wrapWithX1(def.init, init);
                 def.init = init;
             }

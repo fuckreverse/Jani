@@ -41,11 +41,38 @@ const HOOKS = Object.freeze([
 ]);
 
 /**
+ * 各钩子中 `result` 字段对应的参数位置（0-based）。
+ *
+ * 当某个插件返回 `{ result }` 时，调度器会将 `args[RESULT_ARG_INDEX[hookName]]`
+ * 更新为新的 result 值，使后续插件能看到上一个插件修改后的值。
+ *
+ * 未列出的钩子（如 `declare`、`scriptEnter` 等）返回值语义不是 `result`，
+ * 不进行此传递。
+ */
+const RESULT_ARG_INDEX = Object.freeze({
+    binary:      4,   // binary(iid, op, left, right, result, ...)
+    unary:       2,   // unary(iid, op, val, ...)
+    write:       2,   // write(iid, name, val, ...)
+    read:        2,   // read(iid, name, val, ...)
+    getField:    3,   // getField(iid, base, offset, val, ...)
+    putField:    3,   // putField(iid, base, offset, val, ...)
+    invokeFun:   4,   // invokeFun(iid, f, base, args, result, ...)
+    literal:     1,   // literal(iid, val, ...)
+    conditional: 1,   // conditional(iid, result, ...)
+    forinObject: 1,   // forinObject(iid, val, ...)
+    declare:     2,   // declare(iid, name, val, ...)
+    _return:     1,   // _return(iid, val, ...)
+    _throw:      1,   // _throw(iid, val, ...)
+});
+
+/**
  * AnalysisHost —— 多插件链式调度器。
  *
  * 每个 hook 方法在被调用时，会依次调用所有注册了该 hook 的插件。
  * 若某个插件的 hook 返回值中含 Array 类型的 `args` 字段，
  * 则该数组会替换分发器的参数列表，后续插件将看到更新后的参数。
+ * 若返回值含 `result` 字段，且该钩子在 RESULT_ARG_INDEX 中有定义，
+ * 则对应位置的 args 会被更新，后续插件可见修改后的值。
  */
 class AnalysisHost {
     /**
@@ -93,15 +120,22 @@ class AnalysisHost {
 
     /** @private 为指定 hook 名生成分发函数 */
     _makeDispatcher(name) {
-        const chain   = this._chains[name];
-        const onError = () => this._onError;  // 惰性读取，允许构造后替换
+        const chain        = this._chains[name];
+        const onError      = () => this._onError;  // 惰性读取，允许构造后替换
+        const resultArgIdx = RESULT_ARG_INDEX[name] ?? -1;
         return function dispatchHook(...args) {
             let ret;
             for (let i = 0; i < chain.fns.length; i++) {
                 try {
                     const r = chain.fns[i].apply(chain.thisArgs[i], args);
                     if (r !== undefined && r !== null && typeof r === 'object') {
-                        if (Array.isArray(r.args)) args = r.args;
+                        if (Array.isArray(r.args)) {
+                            args = r.args;
+                        } else if ('result' in r && resultArgIdx >= 0) {
+                            // 将 result 更新到对应参数位置，使后续插件可见修改后的值
+                            args = args.slice();
+                            args[resultArgIdx] = r.result;
+                        }
                         ret = r;
                     }
                 } catch (e) {

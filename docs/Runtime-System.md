@@ -121,7 +121,8 @@ J$.analysis.use(new AnotherAnalysis(J$));
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `smap` | `object` | iid → 源码位置映射表 `{ [sid]: { [iid]: [sl,sc,el,ec] } }` |
-| `sid` | `number` | 当前脚本 ID |
+| `sid` | `number` | 当前脚本 ID（`Sr()` 执行后会回滚，脚本结束后为 0） |
+| `lastSid` | `number` | 最后执行的脚本 ID（不随 `Sr()` 回滚，脚本执行完成后仍可用于查询位置映射）|
 | `iids` | `object\|null` | 当前脚本的 iid 映射（由插桩代码在 Se() 前写入） |
 | `analysis` | `AnalysisHost` | 当前分析插件调度器，支持 `.use()` 链式注册 |
 | `tracer` | `TraceLogger\|null` | TraceLogger 实例（由 ExecutionTraceAnalysis 写入） |
@@ -165,8 +166,8 @@ const globalIid = J$.getGlobalIID(iid);
 | `C2(iid, val)` | case 标签值 | — |
 | `Fe(iid, f, dis, args, defScopeId?)` | 函数进入（分配 CallID，创建 Shadow Frame） | `functionEnter` |
 | `Fr(iid)` | 函数退出（弹出 CallID 栈，清除 Shadow Frame） | `functionExit` |
-| `Se(iid, val, origFile)` | 脚本进入 | `scriptEnter` |
-| `Sr(iid)` | 脚本退出 | `scriptExit` |
+| `Se(iid, val, origFile)` | 脚本进入（同时记录 `J$.lastSid`，不随 `Sr()` 回滚） | `scriptEnter` |
+| `Sr(iid)` | 脚本退出（回滚 `sid`，但 `lastSid` 保留，可在脚本完成后仍能查询位置映射） | `scriptExit` |
 | `N(iid, name, val, flags)` | 变量声明 | `declare` |
 | `Rt(iid, val)` | return 值 | `_return` |
 | `Th(iid, val)` | throw 值 | `_throw` |
@@ -204,7 +205,7 @@ sequenceDiagram
 - `R` 的 flags：`[isGlobal, isScriptLocal]`；可选第五参数 `defScopeId`（插桩器静态注入）
 - `W` 的 flags：`[isGlobal, isScriptLocal, isDeclaration]`；可选第六参数 `defScopeId`
 - `Fe` 的可选第五参数：`defScopeId`（函数定义点的 Scope.id）
-- `G` 的 flags：`[isComputed, isOpAssign, isMethodCall]`
+- `G` 的 flags：`[isComputed, isOpAssign, isMethodCall, isOptional]`（第 4 位 `isOptional=1` 时为可选链 `?.`，`base` 为 `null`/`undefined` 直接短路返回 `undefined`）
 - `P` 的 flags：`[isComputed, isOpAssign]`
 - `F` / `M` 的 flags：`[isConstructor, isMethod]`
 
@@ -240,8 +241,27 @@ unary, write
 
 ### 参数传递机制
 
-若某插件的钩子方法返回含 `args` 字段（Array 类型）的对象，
-后续插件将看到更新后的参数列表，实现插件间的数据传递与修改。
+`AnalysisHost` 支持两种插件间数据传递方式：
+
+1. **全量 args 替换**：若插件返回含 `args` 字段（Array 类型）的对象，后续插件将使用该新参数数组。
+
+2. **精确 result 传递**（推荐）：若插件仅返回 `{ result }` 对象，调度器会根据内置的 `RESULT_ARG_INDEX` 表自动将 `result` 更新到对应参数位置，后续插件可直接看到修改后的值。支持的钩子及其 `result` 位置如下：
+
+| 钩子 | result 在 args 中的位置（0-based） |
+|------|------------------------------------|
+| `binary` | 4（binary(iid, op, left, right, **result**, ...)）|
+| `unary` | 2（unary(iid, op, **val**, ...)）|
+| `write` | 2（write(iid, name, **val**, ...)）|
+| `read` | 2（read(iid, name, **val**, ...)）|
+| `getField` | 3（getField(iid, base, offset, **val**, ...)）|
+| `putField` | 3（putField(iid, base, offset, **val**, ...)）|
+| `invokeFun` | 4（invokeFun(iid, f, base, args, **result**, ...)）|
+| `literal` | 1（literal(iid, **val**, ...)）|
+| `conditional` | 1（conditional(iid, **result**, ...)）|
+| `forinObject` | 1（forinObject(iid, **val**, ...)）|
+| `declare` | 2（declare(iid, name, **val**, ...)）|
+| `_return` | 1（_return(iid, **val**, ...)）|
+| `_throw` | 1（_throw(iid, **val**, ...)）|
 
 ### 错误处理
 
@@ -330,7 +350,7 @@ flowchart LR
     Rl --> HOOK_R
 ```
 
-**适用条件**（插桩器静态判断）：局部变量、无 `eval`/`with`、非 `catch` 参数、非 `arguments`。
+**适用条件**（插桩器静态判断）：局部变量、无 `eval`/`with`、非 `catch` 参数、非 `arguments`、**非箭头函数参数**（箭头函数无 `Fe`/`Fr` 钩子，Shadow Frame 不会初始化其形参，因此强制走全量 `R` 路径）。
 
 ## 对象 OID 机制
 

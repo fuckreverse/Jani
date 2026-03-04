@@ -209,6 +209,8 @@ function addScopes(ast) {
                 node.params.forEach(registerParam);
                 break;
             case 'ArrowFunctionExpression':
+                // 标记为箭头函数作用域：运行时不注入 Fe/Fr，Rl 不可用
+                currentScope.isArrow = true;
                 node.params.forEach(registerParam);
                 break;
             case 'ClassMethod':

@@ -142,7 +142,7 @@ J$.R(iid, 'x', x, flags, defScopeId)
 // 其中：flags = bitPattern(isGlobal, isScriptLocal)；全局变量无 defScopeId
 ```
 
-**轻量读取路径**（静态可确认的局部变量：非全局、无 eval/with、非 catch 参数、非 arguments）：
+**轻量读取路径**（静态可确认的局部变量：非全局、无 eval/with、非 catch 参数、非 arguments、**非箭头函数形参**）：
 
 ```js
 // 原始代码
@@ -181,7 +181,9 @@ flowchart TD
     Q3 -->|"是"| FULL
     Q3 -->|"否"| Q4
     Q4 -->|"否"| FULL
-    Q4 -->|"是"| LIGHT
+    Q4 -->|"是"| Q5{{"是箭头函数形参?\ndefScope.isArrow"}}
+    Q5 -->|"是"| FULL
+    Q5 -->|"否"| LIGHT
 ```
 
 ### 属性读写
@@ -190,12 +192,18 @@ flowchart TD
 // 原始代码：点表达式
 obj.prop
 // 插桩后
-J$.G(iid, obj, 'prop', flags)
+J$.G(iid, obj, 'prop', flags)  // flags[3]=isOptional=0
 
 // 原始代码：计算属性
 obj[key]
 // 插桩后
 J$.G(iid, obj, J$.R(iid2, 'key', key, flags), flags)
+
+// 原始代码：可选链属性读取
+obj?.prop
+// 插桩后（isOptional=true 编入 flags 第 4 位）
+J$.G(iid, obj, 'prop', flags)  // flags[3]=isOptional=1
+// 运行时：若 obj 为 null/undefined，直接短路返回 undefined，不触发 getFieldPre/getField
 
 // 原始代码：属性写入
 obj.prop = val
@@ -344,6 +352,7 @@ scope.varKinds = {
    - !isGlobal
    - defScope.hasOwnVar(name) !== 'catch'
    - name !== 'arguments'
+   - !defScope.isArrow（箭头函数形参强制走全量路径）
 ```
 
 全量路径 `J$.R` 携带 `defScopeId` 参数供运行时同步 Shadow Frame。

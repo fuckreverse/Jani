@@ -100,6 +100,12 @@ export class JalangiRuntime {
     /** 当前函数帧已处理的参数计数（用于 declare 中计算 argumentIndex） */
     #argIndex;
 
+    /**
+     * 当前函数帧的 defScopeId（由 Fe() 写入，供 N() 在初始化形参时写入 Shadow Frame）。
+     * 顶层脚本作用域值为 undefined（不需要 Shadow Frame）。
+     */
+    #currentFunDefScopeId = undefined;
+
     // ── TODO-13: CallID 机制 —— 区分同一函数的不同调用（递归/闭包/异步） ────
 
     /** 调用 ID 全局单调计数器 */
@@ -413,14 +419,27 @@ export class JalangiRuntime {
             const aret = analysis.declare(iid, name, val, isArgument, idx, isCatchParam);
             if (aret) val = aret.result;
         }
+
+        // TODO-11: 形参/局部变量初始化时，将值写入 Shadow Frame，确保 Rl() 能读到正确值。
+        // isLocalSync=true 的变量（如闭包变量同步）已有其他机制处理，此处跳过避免重复。
+        // name === 'arguments' 的情况不写入 Shadow Frame（不需要按名查找 arguments）。
+        if (!isLocalSync && name !== 'arguments' && this.#currentFunDefScopeId !== undefined) {
+            this.#shadowSet(this.#currentFunDefScopeId, this.#currentCallId, name, val);
+        }
+
         return val;
     }
 
     /** 属性读取 */
     G(iid, base, offset, flags) {
-        const [isComputed, isOpAssign, isMethodCall] = decodeBitPattern(flags, 3);
+        const [isComputed, isOpAssign, isMethodCall, isOptional] = decodeBitPattern(flags, 4);
         const analysis = this.analysis;
         let aret, skip = false, val;
+
+        // 可选链短路：当 base 为 null 或 undefined 时，直接返回 undefined（等同于原始 ?. 语义）
+        if (isOptional && (base == null)) {
+            return (this.#lastComputedValue = undefined);
+        }
 
         if (analysis?.getFieldPre) {
             aret = analysis.getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall);
@@ -603,8 +622,11 @@ export class JalangiRuntime {
         this.#updateSid(f);
 
         // TODO-13: 分配新 callId，压栈保存旧值
-        this.#callIdStack.push({ callId: this.#currentCallId, defScopeId });
+        // 同时保存父帧的 defScopeId，供 Fr() 恢复
+        this.#callIdStack.push({ callId: this.#currentCallId, defScopeId: this.#currentFunDefScopeId });
         this.#currentCallId = ++this.#callIdCounter;
+        // TODO-11: 记录当前函数的 defScopeId，供 N() 初始化形参到 Shadow Frame
+        this.#currentFunDefScopeId = defScopeId;
 
         this.analysis?.functionEnter?.(iid, f, dis, args);
     }
@@ -631,12 +653,14 @@ export class JalangiRuntime {
         const frame = this.#callIdStack.pop();
         if (frame) {
             const leavingCallId = this.#currentCallId;
-            const { callId: parentCallId, defScopeId } = frame;
-            // 清除刚离开的调用帧的 Shadow Frame
-            if (defScopeId !== undefined) {
-                this.#shadowClear(defScopeId, leavingCallId);
+            const { callId: parentCallId, defScopeId: parentDefScopeId } = frame;
+            // 清除刚离开的调用帧的 Shadow Frame（使用离开帧的 defScopeId）
+            if (this.#currentFunDefScopeId !== undefined) {
+                this.#shadowClear(this.#currentFunDefScopeId, leavingCallId);
             }
             this.#currentCallId = parentCallId;
+            // 恢复父帧的 defScopeId
+            this.#currentFunDefScopeId = parentDefScopeId;
         }
 
         if (!isBacktrack) this.#returnStack.push(returnVal);
@@ -654,6 +678,9 @@ export class JalangiRuntime {
     /** 脚本进入 */
     Se(iid, val, origFileName) {
         this.#createAndAssignNewSid();
+        // 保存最近一次进入的脚本 sid（Se() 完成后 sid 指向当前脚本，但 Sr() 之后会 rollback）
+        // lastSid 不随 Sr() 回滚，可在脚本执行完后通过 J$.lastSid 获取最后执行的脚本 ID
+        this.lastSid = this.sid;
         this.analysis?.scriptEnter?.(iid, val, origFileName);
         this.#lastComputedValue = undefined;
     }

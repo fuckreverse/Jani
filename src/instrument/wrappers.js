@@ -347,20 +347,20 @@ function wrapFunCall(node, ast, isCtor) {
     return ast;
 }
 
-function wrapGetField(node, base, offset, isComputed) {
-    assertAstNode(node,   'wrapGetField/node');
-    assertAstNode(base,   'wrapGetField/base');
-    assertAstNode(offset, 'wrapGetField/offset');
-    if (!Config.INSTR_GETFIELD || Config.INSTR_GETFIELD(node.computed ? null : offset.value, node)) {
-        IID.printIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logGetFieldFunName}(${RP}1, ${RP}2, ${RP}3,${createBitPattern(isComputed, false, false)})`,
-            IID.getIid(), base, offset
-        );
-        transferLoc(ret, node);
-        return ret;
-    }
-    return node;
+function wrapGetField(node, base, offset, isComputed, isOptional) {
+assertAstNode(node,   'wrapGetField/node');
+assertAstNode(base,   'wrapGetField/base');
+assertAstNode(offset, 'wrapGetField/offset');
+if (!Config.INSTR_GETFIELD || Config.INSTR_GETFIELD(node.computed ? null : offset.value, node)) {
+IID.printIidToLoc(node);
+const ret = replaceInExpr(
+`${logGetFieldFunName}(${RP}1, ${RP}2, ${RP}3,${createBitPattern(isComputed, false, false, !!isOptional)})`,
+IID.getIid(), base, offset
+);
+transferLoc(ret, node);
+return ret;
+}
+return node;
 }
 
 function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal, scopeId) {
@@ -1146,9 +1146,12 @@ function instrumentLoad(ast, isTypeof) {
             // - 'lightweight' → 走轻量（前提：defScope 存在且非 catch 变量、非 arguments）
             // - 'full' 或 null（表中没有记录）→ 走全量
             // - 兜底安全检查：catch 变量和 arguments 强制走全量（语义特殊）
+            // - 箭头函数作用域（isArrow=true）：不注入 Fe/Fr，Shadow Frame 不会初始化形参，
+            //   因此其参数必须走全量路径（无法用 Rl 从 Shadow Frame 查值）
             const isSafeForLightweight =
                 defScope !== null &&
                 !isGlobal &&
+                !defScope.isArrow &&
                 defScope.hasOwnVar(ast.name) !== 'catch' &&
                 ast.name !== 'arguments';
 
@@ -1163,6 +1166,7 @@ function instrumentLoad(ast, isTypeof) {
                 const canUseLightweight =
                     defScope !== null &&
                     !isGlobal &&
+                    !defScope.isArrow &&
                     !_scope.usesEval() &&
                     !_scope.usesWith() &&
                     defScope.hasOwnVar(ast.name) !== 'catch' &&
@@ -1179,12 +1183,12 @@ function instrumentLoad(ast, isTypeof) {
         } else {
             return wrapRead(ast, createLiteralAst(ast.name), ast, false, true, false);
         }
-    } else if (ast.type === 'MemberExpression') {
-        return wrapGetField(ast, ast.object, getPropertyAsAst(ast), ast.computed);
-    } else if (ast.type === 'OptionalMemberExpression') {
-        // Babel AST：可选链 a?.b，语义与 MemberExpression 相同，注入 J$.G 属性读取钩子
-        return wrapGetField(ast, ast.object, getPropertyAsAst(ast), ast.computed);
-    }
+} else if (ast.type === 'MemberExpression') {
+return wrapGetField(ast, ast.object, getPropertyAsAst(ast), ast.computed, false);
+} else if (ast.type === 'OptionalMemberExpression') {
+// Babel AST：可选链 a?.b，isOptional=true → J$.G 在 base 为 null/undefined 时短路返回 undefined
+return wrapGetField(ast, ast.object, getPropertyAsAst(ast), ast.computed, ast.optional);
+}
     return ast;
 }
 
