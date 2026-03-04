@@ -729,30 +729,32 @@ const visitorAntiDetection = {
 };
 ```
 
-### 3.8 TypedArray 环形缓冲区 log
+### 3.8 高性能 log 缓冲——已由现有 logger 架构覆盖
 
-**文件**：`src/runtime/logging/backends/TypedArrayBackend.js`
+> **结论**：`TypedArrayBackend.js`（`SharedArrayBuffer + Float64Array` 方案）**不再需要实现**。
+> 现有 logger 系统已通过架构层面的设计解决了同等问题，且实用性更好。
 
-普通 JS 对象数组 log（每次 `J$.W` push 一个对象）会产生大量 GC 压力，在异步场景下事件循环阻塞严重。
+原始设计动机（GC 压力、写入速度、序列化开销）已被如下已有机制覆盖：
 
-**方案**：用 `SharedArrayBuffer` + `Float64Array` 作为环形缓冲区，将 log 条目编码为定长二进制格式：
+| 原始问题 | 已有解决方案 |
+|---------|------------|
+| JS 对象数组 push 产生 GC 压力 | `RingBuffer.js` 预分配固定长度数组（默认 65536 槽），写入时直接赋值到槽位，drain 时清空引用，**无动态分配** |
+| 主线程写入阻塞 | `LogManager.log()` 只做 `ring.push()` + 可能调度一次 `scheduleAsync()`，实际序列化/I/O 全部**异步批量**完成，主线程（即 `J$.W/R/G` 调用路径）完全不阻塞 |
+| 序列化/持久化开销 | `NodeStreamBackend` 批量 NDJSON 写文件（带 OS 级写缓冲和背压控制）；`IdbWorkerBackend` 在独立 Worker 中操作 IndexedDB；`WsBackend` 支持 `format: 'binary'` 二进制传输 |
 
-```
-每条 log 条目 = 4 × Float64（32 字节）：
-  [0] = iid（uint32，作为 float64 存储）
-  [1] = scopeId（uint32）+ callId（uint32，高低位打包）
-  [2] = value（float64，仅限数值；对象存 OID）
-  [3] = metadata（操作类型 + flags，bit-packed）
-```
+**为什么不用 `SharedArrayBuffer`**：SAB 在浏览器中需要 `COOP + COEP` 安全 header，而本项目的核心使用场景（在浏览器内分析第三方/混淆代码）几乎无法满足该 header 要求（`RingBuffer.js` 注释中已说明此约束）。
 
-对非数值类型（字符串、对象），在 buffer 旁边维护一个小型的 `valueTable: Map<uint32, any>`，buffer 中存 valueTable 的 key。
+**现有 logger 模块**（`src/logger/`）：
 
-**收益**：
-- 零 GC 压力（预分配 buffer，循环复用）
-- 写入速度提升 10–100 倍（直接写 typed array 比 push 对象快得多）
-- 可直接序列化为 `.bin` 文件，无需 JSON 序列化
-
-**注意**：`RingBuffer.js` 已存在（普通 Array 版本）。`TypedArrayBackend.js` 是 `backends/` 目录下的可插拔替代后端，不修改现有 `RingBuffer.js`。
+| 文件 | 作用 |
+|------|------|
+| `RingBuffer.js` | 预分配环形缓冲区，主线程同步写入（极低开销） |
+| `LogManager.js` | 缓冲调度器：达到阈值时异步 drain → 分发给后端 |
+| `TraceLogger.js` | 按环境自动选择后端的门面（浏览器/Node.js） |
+| `backends/NodeStreamBackend.js` | Node.js 文件写入（NDJSON，带背压控制） |
+| `backends/IdbWorkerBackend.js` | 浏览器 IndexedDB（Worker 线程，不阻塞主线程） |
+| `backends/WsBackend.js` | WebSocket 传输（支持二进制格式） |
+| `backends/MemoryBackend.js` | 测试用内存后端 |
 
 ---
 
