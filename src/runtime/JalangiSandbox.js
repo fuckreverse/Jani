@@ -84,7 +84,7 @@ export class JalangiSandbox extends JalangiRuntime {
     };
 
     constructor(options = {}) {
-        super();
+        super({ debugShadow: options.debugShadow ?? false });
         this.analysis = new AnalysisHost();
 
         if (options.withExecutionTrace) {

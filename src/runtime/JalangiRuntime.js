@@ -25,6 +25,18 @@
 // 在模块加载时捕获原生 eval，防止被插桩代码污染
 const EVAL_ORG = eval; // eslint-disable-line no-eval
 
+/**
+ * Shadow Frame 缺失哨兵（Sentinel）。
+ *
+ * `#shadowLookup` 在 key 不存在时返回此对象，而非 `undefined`。
+ * 这样 `Rl()` 能区分两种情况：
+ *   - 返回 `_SHADOW_MISS`  → 变量从未被写入 Shadow Frame（真正的缺失）
+ *   - 返回普通值（含 `undefined`）→ 变量值本身就是 undefined
+ *
+ * 使用模块级私有对象而非 Symbol，确保外部代码无法伪造。
+ */
+const _SHADOW_MISS = Object.freeze({ __jalangiShadowMiss: true });
+
 // ── 模块级无状态工具函数 ─────────────────────────────────────────────────────
 
 function getPropSafe(base, prop) {
@@ -125,6 +137,26 @@ export class JalangiRuntime {
      */
     #shadowFrameMap = new Map();
 
+    /**
+     * Shadow Frame 缺失计数器。
+     * 每次 Rl() 查表命中 _SHADOW_MISS 哨兵时递增。
+     * 可通过 getShadowStats() 查询，用于快速判断是否存在覆盖漏洞。
+     */
+    #shadowMissCount = 0;
+
+    /**
+     * Shadow Frame 缺失日志（仅在 debugShadow=true 时填充）。
+     * 每条记录：{ iid, defScopeId, name, callId }
+     */
+    #shadowMissLog = [];
+
+    /**
+     * 是否开启 Shadow Frame 调试模式。
+     * true → 记录每次缺失到 #shadowMissLog，并向 console.warn 输出诊断信息。
+     * 由构造函数选项 `debugShadow` 控制，默认 false。
+     */
+    #debugShadow = false;
+
     // ── TODO-14: 对象 OID 机制 —— 为对象/数组/函数分配唯一 ID，支持别名追踪 ──
 
     /** OID 单调递增计数器（0 保留，表示"非对象"） */
@@ -163,6 +195,21 @@ export class JalangiRuntime {
     /** 原生 eval 引用（供插桩代码使用） */
     EVAL_ORG = EVAL_ORG;
 
+    /**
+     * @param {object}  [options]
+     * @param {boolean} [options.debugShadow=false]
+     *   是否开启 Shadow Frame 调试模式。
+     *   开启后，每次 Rl() 查表未命中时会：
+     *     1. 递增内部 miss 计数器
+     *     2. 将 { iid, defScopeId, name, callId } 追加到 miss 日志
+     *     3. 向 console.warn 输出诊断信息
+     *   可通过 getShadowStats() 查询统计结果。
+     */
+    constructor(options = {}) {
+        // 注意：字段初始化器在 super() 之后执行，此处 super() 隐式完成（无父类）
+        this.#debugShadow = options.debugShadow === true;
+    }
+
     // ── 私有工具方法 ─────────────────────────────────────────────────────────
 
     #pushSwitchKey() { this.#switchKeyStack.push(this.#switchLeft); }
@@ -172,14 +219,16 @@ export class JalangiRuntime {
 
     /**
      * 查找 Shadow Frame 中变量的值。
+     *
      * @param {number} defScopeId  变量定义点的 Scope.id
      * @param {number} callId      对应调用帧的 callId
      * @param {string} name        变量名
-     * @returns {*} 存储的值，若不存在则返回 undefined
+     * @returns {*} 存储的值；若 key 不存在则返回 `_SHADOW_MISS`（哨兵，表示从未写入）
      */
     #shadowLookup(defScopeId, callId, name) {
         const frame = this.#shadowFrameMap.get(`${defScopeId}:${callId}`);
-        return frame?.get(name);
+        if (!frame || !frame.has(name)) return _SHADOW_MISS;
+        return frame.get(name);
     }
 
     /**
@@ -206,6 +255,31 @@ export class JalangiRuntime {
      */
     #shadowClear(defScopeId, callId) {
         this.#shadowFrameMap.delete(`${defScopeId}:${callId}`);
+    }
+
+    /**
+     * Shadow Frame 缺失处理器。
+     *
+     * 每次 Rl() 查表命中 _SHADOW_MISS 哨兵时调用：
+     *  1. 无论是否开启 debugShadow，都递增 miss 计数器（低开销，可随时查询）
+     *  2. 仅在 debugShadow=true 时记录详细日志并向 console.warn 输出
+     *
+     * @param {number} iid        - 触发缺失的指令 ID
+     * @param {number} defScopeId - 变量定义点的 Scope.id
+     * @param {string} name       - 变量名
+     */
+    #onShadowMiss(iid, defScopeId, name) {
+        this.#shadowMissCount++;
+        if (this.#debugShadow) {
+            const entry = { iid, defScopeId, name, callId: this.#currentCallId };
+            this.#shadowMissLog.push(entry);
+            console.warn(
+                `[Jalangi] Shadow Frame MISS: name="${name}" iid=${iid} ` +
+                `defScopeId=${defScopeId} callId=${this.#currentCallId} — ` +
+                `Rl() 返回 undefined（Shadow Frame 中没有此变量的记录）。` +
+                `可能是写入路径漏插桩或 callId 对不上。`
+            );
+        }
     }
 
     // ── TODO-14: OID 工具方法 ────────────────────────────────────────────────
@@ -514,7 +588,7 @@ export class JalangiRuntime {
     /**
      * TODO-12: 轻量变量读取钩子（J$.Rl）。
      * 不接收 value 参数，直接从 Shadow Frame 查找变量值。
-     * 当 Shadow Frame 中没有缓存时，退回全量行为（返回 undefined 并记录日志）。
+     * 当 Shadow Frame 中没有缓存时，通过 #onShadowMiss 记录诊断信息并返回 undefined。
      *
      * @param {number} iid         - 指令 ID
      * @param {number} defScopeId  - 变量定义点的 Scope.id（插桩器静态注入）
@@ -522,7 +596,17 @@ export class JalangiRuntime {
      * @returns {*} 变量当前值
      */
     Rl(iid, defScopeId, name) {
-        const val = this.#shadowLookup(defScopeId, this.#currentCallId, name);
+        const raw = this.#shadowLookup(defScopeId, this.#currentCallId, name);
+
+        // 检测 sentinel：与 undefined 相同的静默降级，但会留下可观测的诊断记录
+        let val;
+        if (raw === _SHADOW_MISS) {
+            this.#onShadowMiss(iid, defScopeId, name);
+            val = undefined;
+        } else {
+            val = raw;
+        }
+
         const analysis = this.analysis;
 
         // 通知分析插件（若有 read 钩子，用 isGlobal=false/isScriptLocal=false）
@@ -956,5 +1040,46 @@ export class JalangiRuntime {
      */
     get currentCallId() {
         return this.#currentCallId;
+    }
+
+    // ── Shadow Frame 诊断 API ─────────────────────────────────────────────────
+
+    /**
+     * 返回 Shadow Frame 的运行时统计信息。
+     *
+     * 可在被分析程序执行完毕后调用，用于判断轻量路径是否存在覆盖漏洞：
+     *
+     * ```js
+     * const J$ = new JalangiSandbox({ debugShadow: true });
+     * // ... 运行被分析代码 ...
+     * const stats = J$.getShadowStats();
+     * if (stats.missCount > 0) {
+     *     console.error('发现 Shadow Frame 缺失！', stats.missLog);
+     * }
+     * ```
+     *
+     * @returns {{
+     *   missCount:  number,                // Rl() 查表未命中的总次数
+     *   missLog:    Array<{iid:number, defScopeId:number, name:string, callId:number}>,
+     *                                      // 每次缺失的详细记录（仅 debugShadow=true 时有内容）
+     *   frameCount: number,                // 当前 #shadowFrameMap 中存活的帧数（调试内存泄漏用）
+     *   debugShadow: boolean,              // 是否处于调试模式
+     * }}
+     */
+    getShadowStats() {
+        return {
+            missCount:   this.#shadowMissCount,
+            missLog:     this.#shadowMissLog.slice(),   // 返回副本，防止外部修改
+            frameCount:  this.#shadowFrameMap.size,
+            debugShadow: this.#debugShadow,
+        };
+    }
+
+    /**
+     * 重置 Shadow Frame 统计计数器和日志（用于多轮测试之间清空状态）。
+     */
+    resetShadowStats() {
+        this.#shadowMissCount = 0;
+        this.#shadowMissLog   = [];
     }
 }

@@ -62,6 +62,8 @@ classDiagram
         +newAsyncContext()
         +activateContext(ctxId)
         +currentContextId
+        +getShadowStats()
+        +resetShadowStats()
     }
 
     class AnalysisHost {
@@ -115,6 +117,7 @@ J$.analysis.use(new AnotherAnalysis(J$));
 | `storeName` | `string` | — | IndexedDB ObjectStore 名 |
 | `withExecutionTrace` | `boolean` | `false` | 是否自动注册内置 ExecutionTraceAnalysis 插件 |
 | `sourceCode` | `string` | — | 原始源码（ExecutionTrace 用，可选） |
+| `debugShadow` | `boolean` | `false` | 是否开启 Shadow Frame 调试模式。开启后每次 `Rl()` 查表未命中时，递增 miss 计数器并写入 miss 日志，同时向 `console.warn` 输出诊断信息。可通过 `getShadowStats()` 查询结果 |
 
 ### 公开字段
 
@@ -351,6 +354,43 @@ flowchart LR
 ```
 
 **适用条件**（插桩器静态判断）：局部变量、无 `eval`/`with`、非 `catch` 参数、非 `arguments`、**非箭头函数参数**（箭头函数无 `Fe`/`Fr` 钩子，Shadow Frame 不会初始化其形参，因此强制走全量 `R` 路径）。
+
+### Shadow Frame 诊断 API
+
+`JalangiRuntime` 内部使用 **Sentinel 哨兵对象**（`_SHADOW_MISS`）区分两种情况：
+
+- `#shadowLookup` 返回哨兵 → 该变量**从未被写入** Shadow Frame（真正的缺失，可能是写入路径漏插桩或 `callId` 对不上）
+- `#shadowLookup` 返回普通值（含 `undefined`）→ 变量值本身就是 `undefined`
+
+过去这两种情况无法区分，`Rl()` 在两者均会静默返回 `undefined` 并影响被分析代码的实际运行结果。引入哨兵后，所有真正的缺失均可被观测到。
+
+```js
+// 开启调试模式
+const J$ = new JalangiSandbox({ debugShadow: true });
+
+// ... 运行被分析代码 ...
+// 每次 Rl() 查表未命中，console.warn 会实时打印：
+// [Jalangi] Shadow Frame MISS: name="x" iid=42 defScopeId=3 callId=7 — ...
+
+// 执行完毕后查询统计
+const stats = J$.getShadowStats();
+// stats.missCount   → 总 miss 次数（总是可用，与 debugShadow 无关）
+// stats.missLog     → 每次 miss 的详细记录（仅 debugShadow=true 时有内容）
+// stats.frameCount  → 当前存活的 Shadow Frame 帧数（调试内存泄漏用）
+// stats.debugShadow → 是否处于调试模式
+
+// 用 iidToLocation 将 iid 转成源码位置
+stats.missLog.forEach(({ iid, name }) => {
+    console.log(`  ${name} @ ${J$.iidToLocation(J$.lastSid, iid)}`);
+});
+
+// 多轮测试之间清空状态
+J$.resetShadowStats();
+```
+
+> **注意**：生产环境下 `debugShadow` 默认为 `false`，miss 计数器仍然递增（开销极低），
+> 但 `missLog` 为空，不写日志，不调用 `console.warn`。
+> 只有在需要定位问题时才开启 `debugShadow: true`。
 
 ## 对象 OID 机制
 
