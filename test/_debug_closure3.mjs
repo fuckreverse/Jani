@@ -1,74 +1,74 @@
+// 调试：嵌套两层闭包 + IIFE 闭包场景
 import { init, instrumentCode } from '../src/instrument/esnstrument.js';
-import { JalangiSandbox } from '../src/runtime/JalangiSandbox.js';
+import { JalangiSandbox }       from '../src/runtime/JalangiSandbox.js';
 import vm from 'vm';
 
 const ALL_CONFIG = {
     INSTR_READ: null, INSTR_WRITE: null, INSTR_GETFIELD: null, INSTR_PUTFIELD: null,
     INSTR_BINARY: null, INSTR_UNARY: null, INSTR_LITERAL: null, INSTR_INIT: null,
     INSTR_END_EXPRESSION: null, INSTR_CONDITIONAL: null, INSTR_TRY_CATCH_ARGUMENTS: null,
-    ENABLE_SAMPLING: false,
+    INSTR_AWAIT: null, ENABLE_SAMPLING: false,
 };
-init(ALL_CONFIG);
 
-let depth = 0;
-function indent() { return '  '.repeat(depth); }
+async function runTest(name, src) {
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`测试：${name}`);
+    console.log('='.repeat(60));
 
-const code = instrumentCode({
-    code: `
-        function makeAdder(x) { return function(y) { return x + y; }; }
-        var f1 = makeAdder(10);
-        var f2 = makeAdder(20);
-        $out.r1 = f1(1);
-        $out.r2 = f2(1);
-    `,
-    origCodeFileName: 'debug-simple.js',
-    instCodeFileName: 'debug-simple_inst.js',
-    inlineSourceMap: true,
-}).code;
+    init({ ...ALL_CONFIG });
+    const { code } = instrumentCode({
+        code: src,
+        origCodeFileName: 'test.js',
+        instCodeFileName: 'test_inst.js',
+        inlineSourceMap: true,
+    });
 
-class DebugRuntime extends JalangiSandbox {
-    N(iid, name, val, flags) {
-        const result = super.N(iid, name, val, flags);
-        if (name === 'x' || name === 'y') {
-            console.log(`${indent()}N(name=${name}, val=${val}, callId=${this.currentCallId})`);
+    const J$ = new JalangiSandbox({ debugShadow: true });
+    const $out = {};
+    const sandbox = vm.createContext({
+        J$, console, Error, TypeError, Math, JSON, Date,
+        Object, Array, Function, String, Number, Boolean,
+        parseInt, parseFloat, isNaN, NaN, Infinity, undefined,
+        $out,
+    });
+
+    try {
+        vm.runInContext(code, sandbox, { timeout: 5000 });
+        console.log('结果：', JSON.stringify($out));
+        const stats = J$.getShadowStats();
+        if (stats.missCount > 0) {
+            console.log('Shadow MISS:', stats.missLog);
+        } else {
+            console.log('Shadow MISS: 0');
         }
-        return result;
-    }
-    T(iid, val, type, hasGetterSetter, internalIid) {
-        const result = super.T(iid, val, type, hasGetterSetter, internalIid);
-        if (typeof val === 'function') {
-            console.log(`${indent()}T(func) callId=${this.currentCallId}`);
-        }
-        return result;
-    }
-    Rl(iid, defScopeId, name) {
-        if (name === 'x') {
-            const result = super.Rl(iid, defScopeId, name);
-            console.log(`${indent()}Rl(scopeId=${defScopeId}, name='${name}') → ${result}, callId=${this.currentCallId}`);
-            return result;
-        }
-        return super.Rl(iid, defScopeId, name);
-    }
-    Fe(iid, f, dis, args, defScopeId) {
-        depth++;
-        console.log(`${indent()}Fe(scopeId=${defScopeId}, prevCallId=${this.currentCallId})`);
-        super.Fe(iid, f, dis, args, defScopeId);
-    }
-    Fr(iid) {
-        console.log(`${indent()}Fr(callId=${this.currentCallId})`);
-        const r = super.Fr(iid);
-        depth--;
-        return r;
+    } catch (e) {
+        console.error('错误:', e.message);
     }
 }
 
-const J$inst = new DebugRuntime();
-const $out = {};
-const sandbox = vm.createContext({ J$: J$inst, console, $out, Error, Math, Object, Array, Function, String, Number, Boolean, parseInt, isNaN, undefined, NaN });
-try {
-    vm.runInContext(code, sandbox, { timeout: 3000 });
-    console.log('\nout:', $out);
-} catch (e) {
-    console.error('ERROR:', e.message);
-    console.error(e.stack);
+await runTest('嵌套两层闭包', `
+function outer(x) {
+    function middle(y) {
+        return function inner() { return x + y; };
+    }
+    return middle;
 }
+var m = outer(10);
+var f = m(5);
+$out.r = f();
+`);
+
+await runTest('IIFE 闭包捕获', `
+var fns = (function() {
+    var results = [];
+    for (var j = 0; j < 3; j++) {
+        results.push((function(captured) {
+            return function() { return captured * captured; };
+        })(j));
+    }
+    return results;
+})();
+$out.r0 = fns[0]();
+$out.r1 = fns[1]();
+$out.r2 = fns[2]();
+`);

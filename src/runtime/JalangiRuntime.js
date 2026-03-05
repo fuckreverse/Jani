@@ -158,7 +158,29 @@ export class JalangiRuntime {
      */
     #closureFrameSet = new Set();
 
-    // ── TODO-11: Shadow Frame 机制 —— 按 (defScopeId, callId) 缓存变量值 ──────
+    /**
+     * callId → 其外层帧的 capturedOuterCallId（闭包链追踪）。
+     *
+     * 在 Fe() 时记录：`newCallId → capturedOuterCallId`。
+     * 这样当一个闭包帧退出后，#resolveCallId 仍能通过这个链向上追踪：
+     *   内层 callId → middle callId → outer callId → ...
+     *
+     * 用于解决多层嵌套闭包场景（内层闭包访问祖父层及以上的变量）。
+     */
+    #callIdToOuterCallId = new Map();
+
+    /**
+     * 调用侧预传递的 capturedOuterCallId。
+     *
+     * **问题根源**：Fe() 的 `f` 参数是 probe 函数（arguments.callee 探针）的返回值，
+     * 而非实际被调用的函数。因此 `funcClosureCallId.get(f)` 无法获取正确的外层 callId。
+     *
+     * **解决方案**：在 #invokeFun() 中调用函数前，预先从 funcClosureCallId 查出正确的
+     * capturedOuterCallId 并存入此字段；Fe() 从这里读取（一次性消费后立即清空）。
+     *
+     * null 表示无预传递值（非闭包函数调用，或外层帧仍在栈中不需要此机制）。
+     */
+    #pendingCapturedOuterCallId = null;
 
     /**
      * Shadow Frame 映射：`${defScopeId}:${callId}` → Map<name, value>
@@ -317,16 +339,23 @@ export class JalangiRuntime {
             }
         }
         // 情况 3：外层帧已退出（闭包场景）。
-        // 沿 capturedOuterCallId 链往上追踪，直到找到 defScopeId 对应的 Shadow Frame。
-        // 每个闭包在 Fe() 时已将 capturedOuterCallId 存入栈帧条目，
-        // 这能精确区分工厂函数多次调用产生的不同闭包实例（各自 capturedOuterCallId 不同）。
+        // 沿 capturedOuterCallId 链往上递推追踪，支持多层嵌套闭包。
+        //
+        // 链条：当前帧的 capturedOuterCallId → 该 callId 的 capturedOuterCallId → ...
+        // 在 #callIdToOuterCallId 中记录了每个 callId 的外层 callId。
+        //
+        // 从当前栈帧的 capturedOuterCallId 开始递推，逐层向上查找，
+        // 直到找到包含 `defScopeId:callId` 的 Shadow Frame 或链条断裂。
         if (this.#callIdStack.length > 0) {
             const topEntry = this.#callIdStack[this.#callIdStack.length - 1];
-            const captured = topEntry.capturedOuterCallId;
-            if (captured !== null && captured !== undefined) {
-                if (this.#shadowFrameMap.has(`${defScopeId}:${captured}`)) {
-                    return captured;
+            let walkCallId = topEntry.capturedOuterCallId;
+            const MAX_DEPTH = 64;   // 防止循环引用导致死循环
+            for (let depth = 0; depth < MAX_DEPTH && walkCallId != null; depth++) {
+                if (this.#shadowFrameMap.has(`${defScopeId}:${walkCallId}`)) {
+                    return walkCallId;
                 }
+                // 沿链向上追溯
+                walkCallId = this.#callIdToOuterCallId.get(walkCallId) ?? null;
             }
         }
         // 安全降级：回退到当前 callId，避免引入 undefined
@@ -481,7 +510,16 @@ export class JalangiRuntime {
         }
 
         if (!skip) {
+            // 在调用函数前，预先查出被调用函数的 capturedOuterCallId（闭包修复）。
+            // Fe() 的 `f` 参数是 probe fn（arguments.callee 探针），不是被调用函数本身，
+            // 导致 funcClosureCallId.get(probe_fn) 无法取到正确值。
+            // 通过此字段将正确的 callId "预传递" 给紧随其后的 Fe() 调用。
+            this.#pendingCapturedOuterCallId = typeof f === 'function'
+                ? (this.#funcClosureCallId.get(f) ?? null)
+                : null;
             result = this.#callFun(f, base, args, isConstructor, iid);
+            // 函数执行完毕后清空（防止非预期的跨调用泄漏）
+            this.#pendingCapturedOuterCallId = null;
         }
 
         if (analysis?.invokeFun) {
@@ -794,11 +832,16 @@ export class JalangiRuntime {
         this.#wrappedExceptionVal = undefined;
         this.#updateSid(f);
 
-        // TODO-13 闭包修复：读取函数创建时外层帧的 callId（#funcClosureCallId 绑定）。
-        // 将此 capturedOuterCallId 存入栈帧，供 #resolveCallId 在找不到 defScopeId 时使用。
-        const capturedOuterCallId = typeof f === 'function'
-            ? (this.#funcClosureCallId.get(f) ?? null)
-            : null;
+        // 闭包修复：从 #pendingCapturedOuterCallId 读取外层帧 callId（由 #invokeFun 预传递）。
+        //
+        // 背景：Fe() 的 `f` 参数是 probe fn（arguments.callee 探针）的返回值，不是被调用函数。
+        // probe fn 在函数体执行时才被创建，没有被 T() 记录，所以 funcClosureCallId.get(probe_fn)
+        // 取不到正确的外层 callId。
+        //
+        // 修复：#invokeFun() 在调用函数前已将正确的 capturedOuterCallId 存入
+        // #pendingCapturedOuterCallId，在此一次性读取并清空（避免跨调用泄漏）。
+        const capturedOuterCallId = this.#pendingCapturedOuterCallId;
+        this.#pendingCapturedOuterCallId = null;
 
         // TODO-13: 分配新 callId，压栈保存旧值
         // 同时保存父帧的 defScopeId，供 Fr() 恢复
@@ -809,6 +852,10 @@ export class JalangiRuntime {
             capturedOuterCallId,
         });
         this.#currentCallId = ++this.#callIdCounter;
+        // 记录 callId → capturedOuterCallId 的链式映射，用于多层嵌套闭包的 #resolveCallId 递推。
+        if (capturedOuterCallId !== null && capturedOuterCallId !== undefined) {
+            this.#callIdToOuterCallId.set(this.#currentCallId, capturedOuterCallId);
+        }
         // TODO-11: 记录当前函数的 defScopeId，供 N() 初始化形参到 Shadow Frame
         this.#currentFunDefScopeId = defScopeId;
 

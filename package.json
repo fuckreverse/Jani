@@ -16,8 +16,10 @@
     "@babel/generator"
   ],
   "scripts": {
-    "test": "node test/instrument.test.mjs",
-    "test:logging": "node test/logging.test.mjs",
+    "test": "node --test test/unit/instrument.test.mjs test/integration/runtime.test.mjs test/integration/e2e.test.mjs test/integration/hooks.test.mjs test/logging.test.mjs",
+    "test:unit": "node --test test/unit/instrument.test.mjs",
+    "test:integration": "node --test test/integration/runtime.test.mjs test/integration/e2e.test.mjs test/integration/hooks.test.mjs",
+    "test:logging": "node --test test/logging.test.mjs",
     "trace-server": "node tools/trace-server/server.mjs",
     "jalangi": "node bin/jalangi.mjs",
     "instrument": "node bin/jalangi.mjs instrument",

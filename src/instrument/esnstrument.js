@@ -491,6 +491,9 @@ const visitorOps = {
         // Guard: generator/async FunctionExpression 不应进入 wrapFunBodyWithTryCatch
         // wrapFunBodyWithTryCatch 内部也有相同 guard，此处提前拦截提供更清晰的调用栈
         if (node.generator || node.async) return node;
+        // Guard: probe fn（由 createCallAsFunEnterStatement 生成）已被标记 __j_probe=true，
+        // 跳过 wrapFunBodyWithTryCatch，防止 probe fn 只有 Fr 没有 Fe（callIdStack 不平衡）。
+        if (node.__j_probe) return node;
         node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
         return node;
     },

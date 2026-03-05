@@ -882,6 +882,20 @@ function createCallAsFunEnterStatement(node, scopeId) {
         IID.getIid()
     );
     transferLoc(ret[0].expression, node);
+    // 对于【非 async】函数：给 probe fn 添加 __j_probe 标记，
+    // 使 Pass 2 的 wrapFunBodyWithTryCatch 跳过它，防止 probe fn 获得 Fr 却没有 Fe
+    // （否则 callIdStack 会多 pop 一次，破坏闭包 Shadow Frame 的 capturedOuterCallId 追踪）。
+    //
+    // 对于【async】函数：probe fn 必须经过 wrapFunBodyWithTryCatch，
+    // 因为 async 函数自身不被 wrapFunBodyWithTryCatch 包裹（避免破坏 await 语义），
+    // probe fn 的 Fr 承担了 async 函数退出钩子的职责。
+    if (!node.async) {
+        const callExpr = ret[0].expression;
+        const probeFn = callExpr.arguments?.[1]?.callee;
+        if (probeFn && probeFn.type === 'FunctionExpression') {
+            probeFn.__j_probe = true;
+        }
+    }
     return ret;
 }
 
