@@ -910,6 +910,14 @@ function createCallAsFunEnterStatement(node, scopeId) {
     // arguments.callee 在严格模式下会抛出 TypeError，使用 try-catch 安全降级为 undefined
     // TODO-7: scopeId 作为第五个参数传给 J$.Fe，运行时用于创建 Shadow Frame
 
+    // BUG-11A 修复：scope.js 在函数有名为 'arguments' 的形参时会将其重命名为
+    // '${jalangiVar}_arguments'，并注册到作用域表中。此处需要检查当前作用域是否有
+    // 该重命名变量，有则使用重命名后的标识符，否则使用原始 'arguments'。
+    const renamedArg = `${_jalangiVar}_arguments`;
+    const argumentsIdent = (_scope && _scope.hasOwnVar(renamedArg))
+        ? t.identifier(renamedArg)
+        : t.identifier('arguments');
+
     // 构建 probe fn：(function(){try{return arguments.callee}catch(e){return undefined}}())
     // try { return arguments.callee }
     const tryBlock = t.blockStatement([
@@ -928,11 +936,12 @@ function createCallAsFunEnterStatement(node, scopeId) {
     const probeCall = t.callExpression(probeFn, []);
 
     // J$.Fe(iid, probeCall, this, arguments [, scopeId])
+    // 注意：argumentsIdent 已根据当前作用域正确选择原始或重命名的 arguments
     const args = [
         IID.getIid(),
         probeCall,
         t.thisExpression(),
-        t.identifier('arguments'),
+        argumentsIdent,
     ];
     if (scopeId !== undefined && scopeId !== null) {
         args.push(t.numericLiteral(scopeId));
@@ -1218,9 +1227,17 @@ function syncDefuns(node, scopeArg, isScript) {
         if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
             if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
                 // BUG-1 fix: 不对 arguments 直接赋值（严格模式下赋值 arguments 为语法错误）。
-                const ident = createIdentifierAst('arguments');
+                // BUG-11A 修复：若函数有名为 'arguments' 的形参，scope.js 已将其重命名为
+                // '${jalangiVar}_arguments'。此处 J$.N 钩子的第三个参数（变量值）必须
+                // 使用重命名后的标识符，否则读到的是 undefined 而非实参值。
+                // 钩子名称字段（第二个参数）始终使用原始 'arguments' 字符串，
+                // 保证运行时 Shadow Frame 通过标准名称 'arguments' 查找。
+                const renamedArg = `${_jalangiVar}_arguments`;
+                const argumentsIdent = (_scope && _scope.hasOwnVar(renamedArg))
+                    ? createIdentifierAst(renamedArg)
+                    : createIdentifierAst('arguments');
                 ret.push(...createCallInitAsStatement(node,
-                    createLiteralAst('arguments'), ident, true, undefined, false, false));
+                    createLiteralAst('arguments'), argumentsIdent, true, undefined, false, false));
             }
         }
     }

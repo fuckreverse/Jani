@@ -183,14 +183,18 @@ function _isParamOfScope(name, jalScope) {
 /**
  * 检查一个绑定是否存在对象属性 mutation。
  *
- * 对象属性 mutation 是指：有代码对以该变量为 object 的 MemberExpression 做赋值。
- * 例如：`obj.prop = val` 或 `obj[key] = val`。
+ * 对象属性 mutation 是指：有代码对以该变量为 object 的 MemberExpression 做写入。
+ * 覆盖以下形式：
+ *  - `obj.prop = val`  / `obj[key] = val`   — AssignmentExpression
+ *  - `obj.prop++`      / `++obj.prop`        — UpdateExpression
+ *  - `obj.prop += val` / `obj.prop -= val`   — AssignmentExpression（复合赋值，left 为 MemberExpression）
  *
  * 在这种情况下，轻量路径（J$.Rl）只能感知变量引用本身的变化，
  * 无法感知到属性层面的变化，因此必须走全量路径（J$.R）。
  *
- * 实现：检查 binding 的所有引用路径（binding.referencePaths），
- * 看是否有某个引用是赋值表达式中的 MemberExpression.object。
+ * BUG-4 修复：原实现只检测 AssignmentExpression.left 为 MemberExpression 的情形，
+ * 遗漏了 UpdateExpression（`++obj.prop`）形式的属性 mutation。
+ * 现在同时检测 UpdateExpression.argument 是 MemberExpression.object 的情形。
  *
  * @param {import('@babel/traverse').Binding} binding
  * @returns {boolean}
@@ -201,12 +205,20 @@ function _checkMutation(binding) {
         const parentPath = refPath.parentPath;
         if (!parent || !parentPath) continue;
 
-        // 检查：refPath 是否是 MemberExpression.object
-        // 且该 MemberExpression 是赋值表达式的 left
+        // 检查：refPath 是 MemberExpression.object
         if (parent.type === 'MemberExpression' && parent.object === refPath.node) {
             const grandParent = parentPath.parent;
-            if (grandParent?.type === 'AssignmentExpression'
+            if (!grandParent) continue;
+
+            // 形式 1：obj.prop = val（含复合赋值 obj.prop += val）
+            if (grandParent.type === 'AssignmentExpression'
                     && grandParent.left === parent) {
+                return true;
+            }
+
+            // 形式 2：++obj.prop / obj.prop++
+            if (grandParent.type === 'UpdateExpression'
+                    && grandParent.argument === parent) {
                 return true;
             }
         }

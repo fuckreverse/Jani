@@ -298,6 +298,29 @@ function foo(a, b) {
 > **注意**：`addScopes` 接受 `@babel/parser` 返回的 **`File` 节点**（`{ type: 'File', program: Program }`），
 > 内部使用 `@babel/traverse` 遍历，不再接受裸 `Program` 节点。
 
+#### `arguments` 重命名
+
+`addScopes` 会对函数参数中出现的 `arguments` 标识符进行**就地 AST 重命名**：将其改为
+`${jalangiVar}_arguments`（如默认的 `J$_arguments`），同时在作用域表中以新名称注册。
+目的是防止插桩产生的 `arguments` 引用与用户传入的 `arguments` 形参互相遮蔽。
+
+此重命名处理覆盖以下所有参数形式：
+
+| 参数形式 | 示例 | 是否重命名 |
+|---------|------|-----------|
+| 简单标识符 | `function f(arguments)` | ✅ 重命名 |
+| 解构对象参数 | `function f({arguments})` | ✅ 重命名（BUG-2 修复）|
+| 解构数组参数 | `function f([arguments])` | ✅ 重命名（BUG-2 修复）|
+| 嵌套解构 / 默认值 / RestElement | `function f({a: {arguments}})` | ✅ 重命名（BUG-2 修复）|
+
+**`wrappers.js` 中的对应处理**：`createCallAsFunEnterStatement`（生成 `J$.Fe` 调用）和
+`syncDefuns`（生成 `J$.N` arguments 初始化）均会检查当前作用域是否存在 `${_jalangiVar}_arguments`
+变量——若存在，则使用重命名后的标识符，而非硬编码的 `arguments`（BUG-11A 修复）。
+
+> **重要**：`J$.N(iid, "arguments", ...)` 和 `J$.Fe(iid, f, this, ...)` 中的
+> **名称字符串**始终使用原始 `"arguments"`，只有 **AST 标识符节点**（变量读取部分）使用重命名后的名称。
+> 这保证了运行时 Shadow Frame 通过标准名称 `"arguments"` 查找，不受重命名影响。
+
 ### Scope 对象结构
 
 ```js

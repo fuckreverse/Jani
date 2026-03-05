@@ -269,6 +269,9 @@ unary, write
 
 ### 错误处理
 
+当插件 hook 抛出异常时，`HookDispatcher` 会调用 `onError(hookName, error)` 进行处理，
+随后重新抛出原始异常，确保调用栈不被截断。
+
 ```js
 const host = new HookDispatcher({
     onError: (hookName, error) => {
@@ -277,6 +280,11 @@ const host = new HookDispatcher({
     },
 });
 ```
+
+> **实现细节**：`_makeDispatcher` 内部通过惰性读取 `() => this._onError` 支持构造后替换
+> `_onError`（动态更新错误处理器）。调用时先 `const handler = onError()` 取出处理器，
+> 再 `if (typeof handler === 'function') handler(name, e)` 安全调用，防止 `_onError`
+> 被意外设为非函数时产生掩盖原始异常的二次 `TypeError`。
 
 ## SMemory — 影子内存
 
@@ -292,6 +300,11 @@ J$.analysis.use(new SMemoryPlugin(smemory));
 
 // 现在可以通过 J$.smemory 访问影子内存
 ```
+
+> **向后兼容模式**：`SMemory.js` 模块底部保留了旧式自动安装代码（`--analysis SMemory.js` 直接加载时生效）。
+> 该代码通过 `globalThis.J$`（而非裸 `J$`）检测沙盒是否存在，在 ESM / CJS / 浏览器等
+> 所有环境下语义一致。若 `J$.analysis` 已是 `HookDispatcher`（支持 `.use()`），
+> 则以插件方式集成（不覆盖现有分析）；否则直接赋值（兼容旧式单一分析）。
 
 ### 主要 API
 

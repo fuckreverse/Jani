@@ -439,10 +439,15 @@ function runInstrumentPass(file) {
                 //  1. 对块体注入参数/var 同步语句（syncDefuns）
                 //  2. 恢复 _scope 到父作用域（popScope）
                 //  3. 将节点包装为字面量（J$.T），与 FunctionExpression 一致
-                // 注意：箭头函数表达式体（非 BlockStatement）不添加 try-catch 包裹。
-                // 箭头函数块体（BlockStatement）的 try-catch 已在 FunctionExpression 的
-                // wrapFunBodyWithTryCatch 中处理（ArrowFunctionExpression 编译为
-                // FunctionExpression 等价物）。
+                //
+                // BUG-5 注释修正（设计取舍，非 bug）：
+                // 箭头函数**不**添加 try-catch 包裹，也不注入 J$.Fr。
+                // 这是有意为之：箭头函数没有独立的 this/arguments 绑定，
+                // 向其插入 try-catch 会改变其中 return 表达式的语义（表达式体箭头函数
+                // `() => expr` 无法插入 try-catch），且注入 J$.Fr 需要配套的 J$.Fe，
+                // 而箭头函数没有 Fe，两者必须配对。
+                // 代价：箭头函数内抛出的异常不会被 J$.Ex 捕获，分析插件也不会收到
+                // functionEnter/functionExit 回调。这是已知的、明确接受的取舍。
                 instrumentArrowFunctionBody(node);
                 W.popScope();
                 const ret = W.wrapLiteral(node, node, N_LOG_FUNCTION_LIT);
@@ -477,6 +482,21 @@ function runInstrumentPass(file) {
                 if (!node.generator && !node.async) {
                     node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
                 }
+            },
+        },
+
+        // 架构-2 修复：补充 ClassDeclaration 的 scope 进出管理。
+        // scope.js/addScopes 中 ClassDeclaration 会在外层作用域注册类名，
+        // 但不为 ClassDeclaration 本身创建独立 scope（无 node.scope），
+        // 因此这里不需要 setScope/popScope。
+        // 添加此 visitor 是为了与 addScopes 的遍历逻辑保持结构对称，
+        // 并在 node.scope 存在时（未来可能扩展）正确处理。
+        ClassDeclaration: {
+            enter(path) {
+                if (path.node.scope) W.setScope(path.node);
+            },
+            exit(path) {
+                if (path.node.scope) W.popScope();
             },
         },
 
@@ -607,7 +627,10 @@ function runInstrumentPass(file) {
                 if (ignoreSubAst(path.node)) return;
                 const node = path.node;
                 // 跳过已插桩的 J$.* 调用（防止二次插桩）
-                if (node.callee?.type === 'MemberExpression'
+                // BUG-10 修复：同时覆盖 OptionalMemberExpression（J$?.F 形式，
+                // 理论上不会出现，但作为防御性检查一并处理）
+                const calleeType = node.callee?.type;
+                if ((calleeType === 'MemberExpression' || calleeType === 'OptionalMemberExpression')
                         && node.callee.object?.name === _jalangiVar) return;
                 const isEval = node.callee.type === 'Identifier' && node.callee.name === 'eval';
                 node.callee = W.instrumentCall(node, false);
@@ -928,10 +951,22 @@ function hoistFunctionDeclaration(ast, hoistedFunctions) {
     }
 
     // 递归处理子节点
+    // BUG-9 修复：原代码用 Object.keys(ast) 遍历所有 key，
+    // 当 child 是数组时，Object.keys 返回数字索引 ['0','1',...]，
+    // 功能上可工作但语义不清晰，且数组自身的 body 等字段可能触发意外逻辑。
+    // 现在显式区分数组和对象节点，分别处理。
     for (const key of Object.keys(ast)) {
         if (key === 'scope') continue;
         const child = ast[key];
-        if (child && typeof child === 'object') {
+        if (!child || typeof child !== 'object') continue;
+        if (Array.isArray(child)) {
+            // 数组子节点（如 body、params）：逐元素处理
+            for (const item of child) {
+                if (item && typeof item === 'object' && !Array.isArray(item)) {
+                    hoistFunctionDeclaration(item, hoistedFunctions);
+                }
+            }
+        } else {
             hoistFunctionDeclaration(child, hoistedFunctions);
         }
     }

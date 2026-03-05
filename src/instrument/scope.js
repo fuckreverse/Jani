@@ -126,7 +126,9 @@ class Scope {
 // ─── arguments 重命名常量 ─────────────────────────────────────────────────────
 
 const FROM_NAME = 'arguments';
-const TO_NAME   = `${JALANGI_VAR}_arguments`;
+// 注意：实际重命名目标名（toName）在 addScopes 函数内动态生成：
+//   const toName = `${jalangiVar}_arguments`;
+// 这样可以支持自定义 jalangiVar，不在模块顶层硬编码。
 
 /**
  * 从一个可能是任意模式（pattern）的参数节点中收集所有绑定的标识符名称。
@@ -152,6 +154,54 @@ function collectParamNames(param, collected) {
         case 'ArrayPattern':
             for (const el of param.elements) {
                 if (el) collectParamNames(el, collected);
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+/**
+ * BUG-2 修复：递归将解构参数 pattern 中所有名为 fromName 的 Identifier 节点
+ * 的 name 属性改为 toName（就地修改 AST 节点）。
+ *
+ * registerParam 的解构分支只调用 collectParamNames 收集名称，
+ * 但没有对名为 'arguments' 的绑定节点执行重命名，导致作用域表中注册的是
+ * 'arguments' 而非 '${jalangiVar}_arguments'，与后续 wrappers.js 的处理不一致。
+ *
+ * 使用时机：在 collectParamNames 之前调用，先完成 AST 就地重命名，
+ * 再让 collectParamNames 收集（已重命名后的）名称。
+ *
+ * @param {object} param    - 参数 pattern 节点
+ * @param {string} fromName - 需要被替换的名称（通常为 'arguments'）
+ * @param {string} toName   - 替换目标名称（通常为 '${jalangiVar}_arguments'）
+ */
+function renameArgumentsInPattern(param, fromName, toName) {
+    if (!param) return;
+    switch (param.type) {
+        case 'Identifier':
+            if (param.name === fromName) param.name = toName;
+            break;
+        case 'RestElement':
+            renameArgumentsInPattern(param.argument, fromName, toName);
+            break;
+        case 'AssignmentPattern':
+            // 只处理左侧绑定目标，右侧默认值不是绑定名
+            renameArgumentsInPattern(param.left, fromName, toName);
+            break;
+        case 'ObjectPattern':
+            for (const prop of param.properties) {
+                if (prop.type === 'RestElement') {
+                    renameArgumentsInPattern(prop, fromName, toName);
+                } else {
+                    // prop.value 是绑定目标（可能是嵌套 pattern 或 Identifier）
+                    renameArgumentsInPattern(prop.value, fromName, toName);
+                }
+            }
+            break;
+        case 'ArrayPattern':
+            for (const el of param.elements) {
+                if (el) renameArgumentsInPattern(el, fromName, toName);
             }
             break;
         default:
@@ -190,6 +240,10 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
             if (param.name === FROM_NAME) param.name = toName;
             currentScope.addVar(param.name, 'arg');
         } else {
+            // BUG-2 修复：解构参数中可能含名为 'arguments' 的绑定（如 function f({arguments}){}）。
+            // 必须先对 AST 节点就地重命名，再收集名称，保证注册到作用域表中的名称
+            // 与 wrappers.js 期望的 '${jalangiVar}_arguments' 一致。
+            renameArgumentsInPattern(param, FROM_NAME, toName);
             const names = [];
             collectParamNames(param, names);
             for (const n of names) currentScope.addVar(n, 'arg');
@@ -264,10 +318,13 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
         },
 
         // ─── ClassDeclaration：将类名注册到当前（外层）作用域 ────────────────
+        // 架构-3 修复：class 声明绑定的语义等同于 const（TDZ + 不可重赋值），
+        // 应使用 'const' kind，而非原来的 'let'。
+        // 这与 ClassExpression 中 addVar(..., 'const') 的处理保持一致。
         ClassDeclaration: {
             enter(path) {
                 if (path.node.id) {
-                    currentScope?.addVar(path.node.id.name, 'var', path.node.loc, path.node, 'let');
+                    currentScope?.addVar(path.node.id.name, 'var', path.node.loc, path.node, 'const');
                 }
             },
         },

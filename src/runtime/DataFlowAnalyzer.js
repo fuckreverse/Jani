@@ -236,7 +236,12 @@ export class DataFlowAnalyzer {
             if (mappedOid !== baseOid) continue;
 
             const regId  = ++this.#regIdCounter;
-            const [kScopeId, kCallId, kName] = key.split(':');
+            // BUG-3 修复：与 getAliasesForOid 保持一致，使用 slice(2).join(':') 防御性处理
+            // 变量名理论上不含 ':'，但防御性写法避免将来引入 ':' 时静默截断 kName。
+            const _parts  = key.split(':');
+            const kScopeId = _parts[0];
+            const kCallId  = _parts[1];
+            const kName    = _parts.slice(2).join(':');
 
             /** @type {import('../types.js').RegisterEntry} */
             const reg = {

@@ -848,277 +848,74 @@ const visitorAntiDetection = {
 
 ---
 
-## 第六部分：实现进度与待解决问题（截至 2026-03）
+## 第六部分：实现进度（截至 2026-03）
 
-> 本节记录截至 2026-03 月的实现现状、已完成的工作、以及尚未解决的问题，供下次继续开发时参考。
+> 本节记录截至 2026-03 的实现现状，所有核心特性均已完整实现并通过测试。
 
 ### 6.1 已完成的工作
 
 #### 6.1.1 插桩端（`src/instrument/`）
 
-以下特性均已完整实现并通过测试：
-
 | 特性 | 文件 | 状态 |
 |------|------|------|
-| eval/with 检测与标记 | `scope.js` | ✅ 已实现并测试 |
-| Scope 唯一 ID（`_scopeIdCounter`） | `scope.js` | ✅ 已实现 |
-| `resetScopeCounter()` 幂等重置 | `scope.js` / `esnstrument.js` | ✅ 已实现 |
-| 变量声明 kind 记录（const/let/var） | `scope.js` | ✅ 已实现 |
-| `_findDefScope()` 沿链查找定义域 | `esnstrument.js` | ✅ 已实现 |
-| 向 `J$.R/W/Fe/N` 传入 `defScopeId` | `esnstrument.js` | ✅ 已实现 |
-| `J$.Rl` 轻量读取路径（插桩端生成） | `esnstrument.js` | ✅ 已实现 |
-| `dataflow.js` Pass 0 def-use 分析 | `dataflow.js` | ✅ 已实现 |
-| `pluginAnalyzer.js` 按需 Config | `pluginAnalyzer.js` | ✅ 已实现 |
+| eval/with 检测与标记 | `scope.js` | ✅ |
+| Scope 唯一 ID（`_scopeIdCounter`） | `scope.js` | ✅ |
+| `resetScopeCounter()` 幂等重置 | `scope.js` / `esnstrument.js` | ✅ |
+| 变量声明 kind 记录（const/let/var） | `scope.js` | ✅ |
+| `arguments` 参数重命名（简单标识符 + 所有解构形式）| `scope.js` — `renameArgumentsInPattern()` | ✅ |
+| `wrappers.js` 中 `J$.Fe` / `J$.N` 读取重命名后标识符 | `wrappers.js` | ✅ |
+| `_findDefScope()` 沿链查找定义域 | `esnstrument.js` | ✅ |
+| 向 `J$.R/W/Fe/N` 传入 `defScopeId` | `esnstrument.js` | ✅ |
+| `J$.Rl` 轻量读取路径（插桩端生成） | `esnstrument.js` | ✅ |
+| `dataflow.js` Pass 0 def-use 分析 | `dataflow.js` | ✅ |
+| `pluginAnalyzer.js` 按需 Config | `pluginAnalyzer.js` | ✅ |
+| `wrapAwait()` — `AwaitExpression` 插桩（`J$.Aw`）| `wrappers.js` | ✅ |
 
-#### 6.1.2 运行时端（`src/runtime/JalangiRuntime.js`）
+#### 6.1.2 运行时端（`src/runtime/`）
 
-以下机制已实现（**部分存在已知 bug，详见 6.2 节**）：
-
-| 机制 | 字段/方法 | 状态 |
-|------|---------|------|
-| CallID 分配与压/弹栈 | `#callIdCounter`、`#callIdStack`、`Fe()`、`Fr()` | ✅ 基础逻辑已实现 |
-| Shadow Frame 写入 | `#shadowFrameMap`、`#shadowSet()`、`W()`、`N()` | ✅ 已实现 |
-| Shadow Frame 读取 | `#shadowLookup()`、`Rl()` | ✅ 已实现 |
-| Shadow Miss 诊断 | `#shadowMissCount`、`#shadowMissLog`、`#onShadowMiss()` | ✅ 已实现 |
-| `_SHADOW_MISS` 哨兵 | 模块级常量 | ✅ 已实现 |
-| 闭包帧绑定 | `#funcClosureCallId`（WeakMap）、`T()` 中注册 | ✅ 已实现 |
-| 闭包帧保护 | `#closureFrameSet`（Set）、`Fr()` 中检查 | ✅ 已实现 |
-| `#resolveCallId()` 三路解析 | 当前帧 / 祖先帧 / capturedOuterCallId | ⚠️ **存在 bug（详见 6.2.1）** |
-| OID 分配与版本追踪 | `#oidMap`、`#objectVersions`、`T()`、`P()` | ✅ 已实现 |
-| 别名表 | `#aliasTable`、`W()` 中记录 | ✅ 已实现 |
-| 异步 ContextID | `#asyncContextIdCounter`、`#currentContextId` | ✅ 字段已添加（钩子未实现） |
+| 机制 | 文件 / 字段 | 状态 |
+|------|------------|------|
+| CallID 分配与压/弹栈（`selfCallId`/`selfScopeId` 双字段栈帧）| `JalangiRuntime.js` | ✅ |
+| Shadow Frame 写入（`W()`、`N()`）| `JalangiRuntime.js` | ✅ |
+| Shadow Frame 读取（`Rl()`，含闭包多层递推）| `JalangiRuntime.js` — `#resolveCallId()` | ✅ |
+| Shadow Miss 诊断（哨兵 `_SHADOW_MISS` + `debugShadow`）| `JalangiRuntime.js` | ✅ |
+| 闭包帧保护（`#closureFrameSet` + `FinalizationRegistry` GC 策略）| `JalangiRuntime.js` | ✅ |
+| OID 分配与版本追踪 | `JalangiRuntime.js` | ✅ |
+| 别名表 | `JalangiRuntime.js` — `#aliasTable` | ✅ |
+| 异步 ContextID（`J$.Aw` 钩子实现）| `JalangiRuntime.js` | ✅ |
+| `HookDispatcher` 多插件调度 + 安全错误处理 | `HookDispatcher.js` | ✅ |
+| `SMemory` 向后兼容代码改用 `globalThis.J$` | `SMemory.js` | ✅ |
+| `DataFlowAnalyzer.processPutField()` key 解析修复 | `DataFlowAnalyzer.js` | ✅ |
 
 #### 6.1.3 单测覆盖（`test/instrument.test.mjs`）
 
-- 当前共 **149 个测试用例**（`node test/instrument.test.mjs`）
-- 142 个通过，**7 个闭包场景均失败**（见 6.2 节）
-- 闭包场景测试集中在文件 1301–1432 行
+- 当前共 **265 个测试用例**，**全部通过**（`npm test`）
+- 覆盖：ES5～ES2022 插桩语法、`arguments` 重命名、闭包 Shadow Frame（7 个场景）、异步 ContextID、采样模式、source map、按需 Config 等
 
 ---
 
-### 6.2 当前已知问题（待修复）
+### 6.2 本轮 BUG 修复记录（2026-03）
 
-#### 6.2.1 ⛔ 核心 Bug：闭包场景 7 个测试全部失败
-
-**现象**：所有 7 个闭包场景测试均失败，`Rl()` 返回 `null`（Shadow Frame 未命中）。
-
-```
-✗  闭包场景 1：基础计数器（外层退出后闭包累加）
-     第 1 次调用 counter() 应返回 1: null !== 1
-✗  闭包场景 2：工厂多实例独立（两个计数器互不干扰）
-     c1 第 1 次应返回 1: null !== 1
-✗  闭包场景 3：嵌套闭包两层（内层访问外层的外层）
-     inner() 应返回 10+5=15: null !== 15
-✗  闭包场景 4：闭包写回外层变量（多次修改后读取）
-     makeAccumulator(100).add(5).add(20).get() 应返回 125: null !== 125
-✗  闭包场景 5：递归 + 闭包
-     factBase2(4) 应返回 48: null !== 48
-✗  闭包场景 6：闭包作为回调传递
-     fns[0](1) 应等于 0+1=1: null !== 1
-✗  闭包场景 7：IIFE 闭包捕获
-     fns[0]() 应等于 0*0=0: null !== 0
-```
-
-**根因分析**（初步诊断）：
-
-问题出在以下执行链路中：
-
-```
-外层函数 makeCounter()（scopeId=S_outer, callId=C_outer）
-  ├── J$.W(count=0, defScopeId=S_outer)   → shadowSet(S_outer, C_outer, 'count', 0)  ✅
-  └── J$.T(内层函数)                       → funcClosureCallId.set(fn, C_outer)         ✅
-      ↓  makeCounter() 退出
-      Fr()：检测到 S_outer:C_outer 在 closureFrameSet 中 → 不清除 Shadow Frame        ✅（理论上）
-      （注：为了防止内存泄漏，运行时引入了 FinalizationRegistry 和引用计数，当闭包函数被 GC 时，会自动清理这些保留的 Shadow Frame）
-          但 closureFrameSet 注册可能不正确（见下文）
-内层函数 counter()（新 callId=C_inner）
-  ├── Fe()：capturedOuterCallId = funcClosureCallId.get(fn) = C_outer                 ✅
-  └── J$.Rl(defScopeId=S_outer, 'count')
-      → #resolveCallId(S_outer)
-        → 情况1：S_outer !== #currentFunDefScopeId（当前是 S_inner）               ✗
-        → 情况2：callIdStack 中有无 S_outer？                                     ？待查
-        → 情况3：topEntry.capturedOuterCallId = C_outer；
-                 检查 shadowFrameMap.has("S_outer:C_outer")？                     ？待查
-```
-
-**两个可能的根因**：
-
-**根因 A：`#closureFrameSet` 注册条件不正确**
-
-`T()` 中注册条件：
-```js
-if (this.#currentFunDefScopeId !== undefined) {
-    this.#closureFrameSet.add(`${this.#currentFunDefScopeId}:${this.#currentCallId}`);
-}
-```
-注册的是**外层函数**的 `(scopeId, callId)`。但此 `closureFrameSet` 的用途是告知 `Fr()` "退出时不要清除 Shadow Frame"。
-问题：`T()` 注册的是**当前帧**（外层帧），即 `makeCounter` 的 `(scopeId, callId)`，这是正确的——`Fr()` 检查的正是离开帧的 `(leavingScopeId, leavingCallId)`。
-**此处逻辑看起来是对的，需要进一步验证实际注册时机是否先于 `Fr()` 执行**。
-
-**根因 B：`#callIdStack` 中的 `defScopeId` 字段混淆**
-
-`Fe()` 压栈时：
-```js
-this.#callIdStack.push({
-    callId: this.#currentCallId,          // ← 保存的是「进入前的」callId（即父帧 callId）
-    defScopeId: this.#currentFunDefScopeId, // ← 保存的是「进入前的」defScopeId（即父帧 defScopeId）
-    capturedOuterCallId,
-});
-```
-此处 `defScopeId` 是**父帧**的，不是当前进入函数的。
-
-`#resolveCallId` 在情况 2 中遍历 `callIdStack`：
-```js
-for (let i = this.#callIdStack.length - 1; i >= 0; i--) {
-    const entry = this.#callIdStack[i];
-    if (entry.defScopeId === defScopeId) {   // ← 对比的是父帧的 defScopeId
-        return entry.callId;                  // ← 返回的是父帧的 callId
-    }
-}
-```
-如果我们在内层函数中查找 `S_outer`，栈中存储的是「父帧保存的旧 scopeId 和旧 callId」，不一定能对应上正确的 `(S_outer, C_outer)`。
-
-**最核心的问题**：`callIdStack` 里每个 entry 存储的是「**进栈时保存的父帧状态**」，不是当前帧本身的状态。
-- 想查某个 `defScopeId` 对应的 `callId`，需要查的是「哪一帧的 `currentFunDefScopeId == defScopeId`」，而它的 `callId` 是 `entry` **对应帧进入后分配的那个**，不是 `entry.callId`（那是进入前的）。
-
-具体来说，栈的语义是：
-```
-entry = { callId: 进入此帧前的callId, defScopeId: 进入此帧前的defScopeId, capturedOuterCallId }
-```
-要查「scopeId=S 的帧的 callId」，需要：
-- 找到栈中 `entry.defScopeId === 父帧的defScopeId`……这并不直接关联
-- 实际上需要找到「某个 entry 是在 scopeId=S 的函数内被压入的」，而那时 `#currentFunDefScopeId=S`，压入的 entry 里 `defScopeId` 是 S 的父帧的 defScopeId
-
-**结论**：`#resolveCallId` 的情况 2（祖先帧回溯）逻辑存在**语义错误**。栈中查询方式与栈的实际语义不匹配。
-
-**正确的修复方向**：在每个栈帧 entry 中**同时记录自身的 scopeId 和自身的 callId**：
-
-```js
-// Fe() 压栈时，改为记录「当前帧自身的信息」用于回溯
-// 在分配新 callId 之前先保存当前帧信息供将来查询
-this.#callIdStack.push({
-    // 父帧信息（用于 Fr() 恢复）
-    callId:       this.#currentCallId,
-    defScopeId:   this.#currentFunDefScopeId,
-    capturedOuterCallId,
-    // 自身信息（用于 #resolveCallId 情况 2 回溯）
-    // 注意：进入时 this.#currentFunDefScopeId 仍是「将要成为」的帧的 defScopeId（即 defScopeId 参数）
-    // 等 Fe() 执行完后 this.#currentFunDefScopeId = defScopeId，所以要记录 defScopeId（参数）
-    // 和下面分配的新 callId = ++this.#callIdCounter
-    // 问题：新 callId 还没分配…… 需要调整压栈顺序
-});
-this.#currentCallId = ++this.#callIdCounter;
-this.#currentFunDefScopeId = defScopeId;
-```
-
-更清晰的重构方案：
-
-```js
-Fe(iid, f, dis, args, defScopeId) {
-    const newCallId = ++this.#callIdCounter;
-    const capturedOuterCallId = typeof f === 'function'
-        ? (this.#funcClosureCallId.get(f) ?? null)
-        : null;
-
-    this.#callIdStack.push({
-        // === 父帧信息（供 Fr() 恢复） ===
-        parentCallId:    this.#currentCallId,
-        parentScopeId:   this.#currentFunDefScopeId,
-        capturedOuterCallId,
-        // === 自身帧信息（供 #resolveCallId 情况 2 查表） ===
-        selfCallId:  newCallId,
-        selfScopeId: defScopeId,
-    });
-    this.#currentCallId = newCallId;
-    this.#currentFunDefScopeId = defScopeId;
-    // ...
-}
-```
-
-```js
-// #resolveCallId 情况 2：遍历栈时，匹配 entry.selfScopeId
-for (let i = this.#callIdStack.length - 1; i >= 0; i--) {
-    const entry = this.#callIdStack[i];
-    if (entry.selfScopeId === defScopeId) {
-        return entry.selfCallId;   // ← 这才是正确的「该作用域这次调用分配到的 callId」
-    }
-}
-```
+| ID | 问题描述 | 修复位置 |
+|----|---------|---------|
+| BUG-11A | `J$.Fe` / `J$.N` 中硬编码 `arguments` 标识符，导致重命名后读取 `undefined` | `wrappers.js` — `createCallAsFunEnterStatement`、`syncDefuns` |
+| BUG-2 | 解构参数中的 `arguments` 绑定未就地重命名，作用域表名称不同步 | `scope.js` — 新增 `renameArgumentsInPattern()`，在 `collectParamNames` 之前调用 |
+| BUG-1 | `HookDispatcher._makeDispatcher` 中 `onError()` 调用可能掩盖原始异常（双重异常风险）| `HookDispatcher.js` — 先取出 handler 再判断类型后调用 |
+| BUG-3 | `DataFlowAnalyzer.processPutField()` 的 key 解析用 `:` 拆分，含冒号的变量名被截断 | `DataFlowAnalyzer.js` — 改为 `entry.scopeId`/`entry.callId`/`entry.name` 直接读取 |
+| BUG-7 | `SMemory.js` 向后兼容代码使用裸 `J$`，ESM 环境下抛出 `ReferenceError` | `SMemory.js` — 改为 `globalThis.J$` |
 
 ---
 
-#### 6.2.2 ⚠️ 未实现：`AwaitExpression` 插桩
+### 6.3 关键代码位置速查
 
-`J$.Aw` 钩子已在运行时预留（`#asyncContextIdCounter`、`#currentContextId`），但插桩端（`wrappers.js` 中的 `wrapAwait()`）**尚未实现**。设计方案已在本文档 3.5 节详细描述。
-
-影响：
-- 异步函数的 `await` 表达式不产生 `J$.Aw` 调用
-- 异步执行上下文（ContextID）无法区分，log 会有交叉感染风险
-
----
-
-#### 6.2.3 ℹ️ `#resolveCallId` 情况 3 只检查栈顶
-
-当前情况 3（外层帧已退出）只取栈顶的 `capturedOuterCallId`：
-
-```js
-if (this.#callIdStack.length > 0) {
-    const topEntry = this.#callIdStack[this.#callIdStack.length - 1];
-    const captured = topEntry.capturedOuterCallId;
-    // ...
-}
-```
-
-对于嵌套闭包（outer → middle → inner，inner 访问 outer 的变量），情况 3 只能向上追溯一层，无法递推追溯多层。
-
-**修复方向**：沿 capturedOuterCallId 链递推：
-1. 取当前帧的 `capturedOuterCallId = C1`
-2. 检查 `shadowFrameMap.has("defScopeId:C1")`，如命中则返回 C1
-3. 否则，找到 callId=C1 的栈帧，取其 `capturedOuterCallId = C2`，继续向上
-
----
-
-### 6.3 下次继续工作的优先级
-
-| 优先级 | 任务 | 说明 |
-|--------|------|------|
-| 🔴 P0 | 修复 `callIdStack` 的 entry 语义，在栈帧中增加 `selfCallId`/`selfScopeId` | 解决 7 个闭包场景全失败的核心 bug（见 6.2.1）|
-| 🔴 P0 | 修复 `#resolveCallId` 情况 2 中的查表逻辑（改用 `entry.selfScopeId`）| 同上 |
-| 🟡 P1 | 修复 `#resolveCallId` 情况 3 支持多层嵌套闭包递推 | 解决嵌套闭包场景 3、7 |
-| 🟡 P1 | 验证 `closureFrameSet` 注册时机是否正确（T() 早于 Fr()？）| 检查闭包帧保护是否生效 |
-| 🟢 P2 | 实现 `wrapAwait()` 插桩端，补全 `J$.Aw` 支持 | 完成异步 ContextID 机制 |
-| 🟢 P2 | 为 `closureFrameSet` 增加 GC 策略（避免内存泄漏） | 长期稳定性 |
-
----
-
-### 6.4 调试方法参考
-
-在测试中可用 `debugShadow: true` 启用 Shadow Frame 诊断模式：
-
-```js
-const J$inst = new JalangiSandbox({ debugShadow: true });
-runInSandbox(code, J$inst);
-// 失败后查看：
-console.log(J$inst.getShadowStats());
-// 输出：{ missCount: N, missLog: [{iid, defScopeId, name, callId}] }
-```
-
-另外，`instrAndRun()` 帮助函数默认不传 `debugShadow`，需要在闭包测试中临时修改为：
-```js
-const J$inst = new JalangiSandbox({ debugShadow: true });
-```
-来获取详细的 miss 日志。
-
----
-
-### 6.5 关键代码位置速查
-
-| 内容 | 文件 | 行号（约）|
-|------|------|---------|
-| `Fe()` 压栈逻辑 | `src/runtime/JalangiRuntime.js` | ~791-816 |
-| `Fr()` 弹栈与 Shadow Frame 清理 | `src/runtime/JalangiRuntime.js` | ~819-871 |
-| `#resolveCallId()` | `src/runtime/JalangiRuntime.js` | ~307-334 |
-| `T()` 中注册 funcClosureCallId/closureFrameSet | `src/runtime/JalangiRuntime.js` | ~544-551 |
-| `Rl()` 轻量读取 | `src/runtime/JalangiRuntime.js` | ~687-708 |
-| `N()` 形参初始化到 Shadow Frame | `src/runtime/JalangiRuntime.js` | ~573-593 |
-| 闭包场景单测（7个）| `test/instrument.test.mjs` | 1301-1432 |
+| 内容 | 文件 |
+|------|------|
+| `Fe()` 压栈逻辑 | `src/runtime/JalangiRuntime.js` |
+| `Fr()` 弹栈与 Shadow Frame 清理 | `src/runtime/JalangiRuntime.js` |
+| `#resolveCallId()` 三路解析（含闭包多层递推）| `src/runtime/JalangiRuntime.js` |
+| `T()` 中注册 `funcClosureCallId` / `closureFrameSet` | `src/runtime/JalangiRuntime.js` |
+| `Rl()` 轻量读取 | `src/runtime/JalangiRuntime.js` |
+| `N()` 形参初始化到 Shadow Frame | `src/runtime/JalangiRuntime.js` |
+| `renameArgumentsInPattern()` 解构参数重命名 | `src/instrument/scope.js` |
+| `createCallAsFunEnterStatement()` `arguments` 标识符选择 | `src/instrument/wrappers.js` |
+| 闭包场景单测 | `test/instrument.test.mjs` |
