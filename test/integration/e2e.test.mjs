@@ -575,3 +575,226 @@ describe('闭包 Shadow Frame 场景', () => {
         assert.equal(out.r2, 4, 'fns[2]() 应等于 2*2=4');
     });
 });
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Generator 函数运行时 yield 语义验证
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('Generator 函数运行时语义', () => {
+    test('基础 generator：next() 逐步 yield 正确值', () => {
+        // 验证 function* 的 yield 语义在插桩后仍正确：
+        //   - 每次 next() 暂停在 yield 处
+        //   - value 为 yield 表达式的值
+        //   - done 标志在最后一次 next() 后变为 true
+        const { out } = instrAndRun(`
+            function* gen() {
+                yield 1;
+                yield 2;
+                yield 3;
+            }
+            var it = gen();
+            var r1 = it.next();
+            var r2 = it.next();
+            var r3 = it.next();
+            var r4 = it.next();
+            $out.v1   = r1.value;
+            $out.v2   = r2.value;
+            $out.v3   = r3.value;
+            $out.done1 = r1.done;
+            $out.done4 = r4.done;
+        `);
+        assert.equal(out.v1,    1,     'yield 1 应产出 value=1');
+        assert.equal(out.v2,    2,     'yield 2 应产出 value=2');
+        assert.equal(out.v3,    3,     'yield 3 应产出 value=3');
+        assert.equal(out.done1, false, '未结束时 done 应为 false');
+        assert.equal(out.done4, true,  '耗尽后 done 应为 true');
+    });
+
+    test('generator 传参（next(value) 注入值）', () => {
+        // 验证 next(val) 将值注入到 yield 表达式的左侧赋值
+        const { out } = instrAndRun(`
+            function* adder() {
+                var a = yield 'first';
+                var b = yield 'second';
+                $out.sum = a + b;
+            }
+            var it = adder();
+            it.next();       // 启动，暂停在 yield 'first'
+            it.next(10);     // 将 10 传给 a，暂停在 yield 'second'
+            it.next(20);     // 将 20 传给 b，执行到结束
+        `);
+        assert.equal(out.sum, 30, 'next(10) + next(20) 累加应等于 30');
+    });
+
+    test('generator return 提前终止', () => {
+        // 验证 return() 调用后 generator 立即结束，done=true
+        const { out } = instrAndRun(`
+            function* counter() {
+                var i = 0;
+                while (true) { yield i; i = i + 1; }
+            }
+            var it = counter();
+            var r1 = it.next();
+            var r2 = it.next();
+            var r3 = it.return('stopped');
+            var r4 = it.next();
+            $out.v1 = r1.value;
+            $out.v2 = r2.value;
+            $out.r3val  = r3.value;
+            $out.r3done = r3.done;
+            $out.r4done = r4.done;
+        `);
+        assert.equal(out.v1,    0,         'counter 第 1 次 yield 应为 0');
+        assert.equal(out.v2,    1,         'counter 第 2 次 yield 应为 1');
+        assert.equal(out.r3val,  'stopped', 'return("stopped") 的 value 应为 "stopped"');
+        assert.equal(out.r3done, true,      'return() 后 done 应为 true');
+        assert.equal(out.r4done, true,      '终止后再调用 next() done 仍为 true');
+    });
+
+    test('generator for-of 迭代语义', () => {
+        // 验证 for-of 能正确消费 generator 产出的所有值
+        const { out } = instrAndRun(`
+            function* range(n) {
+                for (var i = 0; i < n; i++) { yield i; }
+            }
+            var sum = 0;
+            for (var v of range(5)) { sum = sum + v; }
+            $out.sum = sum;
+        `);
+        assert.equal(out.sum, 10, 'range(5) 产出 0+1+2+3+4=10');
+    });
+
+    test('generator 内嵌套闭包：yield 后闭包变量仍可访问', () => {
+        // 验证 generator 暂停/恢复后对外层变量的闭包引用不会丢失
+        const { out } = instrAndRun(`
+            function* makeGen(base) {
+                yield base + 1;
+                yield base + 2;
+                yield base + 3;
+            }
+            var it = makeGen(10);
+            $out.a = it.next().value;
+            $out.b = it.next().value;
+            $out.c = it.next().value;
+        `);
+        assert.equal(out.a, 11, 'base=10, yield base+1 应为 11');
+        assert.equal(out.b, 12, 'base=10, yield base+2 应为 12');
+        assert.equal(out.c, 13, 'base=10, yield base+3 应为 13');
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Promise.all / Promise.race contextId 独立性
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('Promise.all / Promise.race contextId 独立性', () => {
+    test('Promise.all 中多个并发 async 任务 contextId 互不相同', async () => {
+        // 验证在 Promise.all 并发执行的多个 async 函数中，
+        // 每个函数的 awaitResume contextId 是独立的（不会混用同一 contextId）
+        init({ ...ALL_CONFIG, INSTR_AWAIT: null });
+        const { code } = instrumentCode({
+            code: `
+                async function task(id) {
+                    var v = await Promise.resolve(id * 10);
+                    return v;
+                }
+                $out.p = Promise.all([task(1), task(2), task(3)]);
+            `,
+            origCodeFileName: 'promise-all-ctx.js',
+            instCodeFileName: 'promise-all-ctx_inst.js',
+            inlineSourceMap:  true,
+        });
+        const J$inst = new JalangiSandbox();
+        const ctxIds = [];
+        J$inst.analysis.use({
+            awaitResume(_iid, contextId) { ctxIds.push(contextId); }
+        });
+        const $out = {};
+        runInSandbox(code, J$inst, { $out, Promise });
+        const results = await $out.p;
+
+        assert.equal(results.length, 3, 'Promise.all 应返回 3 个结果');
+        assert.equal(results[0], 10, 'task(1) 应返回 10');
+        assert.equal(results[1], 20, 'task(2) 应返回 20');
+        assert.equal(results[2], 30, 'task(3) 应返回 30');
+        assert.equal(ctxIds.length, 3, '应有 3 个 awaitResume 事件（每个 task 各 1 个）');
+
+        // 三个并发任务的 contextId 应各不相同
+        const uniqueCtx = new Set(ctxIds);
+        assert.equal(uniqueCtx.size, 3, 'Promise.all 中 3 个并发 async 任务的 contextId 应互相独立');
+    });
+
+    test('Promise.all 语义正确：所有子 Promise resolve 后聚合结果', async () => {
+        // 验证 Promise.all 语义在插桩后完整保留（聚合结果顺序与传入顺序一致）
+        init({ ...ALL_CONFIG });
+        const { code } = instrumentCode({
+            code: `
+                var p1 = Promise.resolve(100);
+                var p2 = Promise.resolve(200);
+                var p3 = Promise.resolve(300);
+                $out.p = Promise.all([p1, p2, p3]);
+            `,
+            origCodeFileName: 'promise-all-sem.js',
+            instCodeFileName: 'promise-all-sem_inst.js',
+            inlineSourceMap:  true,
+        });
+        const J$inst = new JalangiSandbox();
+        const $out = {};
+        runInSandbox(code, J$inst, { $out, Promise });
+        const results = await $out.p;
+        assert.deepEqual(results, [100, 200, 300],
+            'Promise.all 聚合结果应与传入顺序一致');
+    });
+
+    test('Promise.race 语义正确：最快 resolve 的 Promise 胜出', async () => {
+        // 验证 Promise.race 在插桩后仍选择最先 resolve 的值（不改变竞争语义）
+        init({ ...ALL_CONFIG });
+        const { code } = instrumentCode({
+            code: `
+                // 用已 settled 的 Promise 模拟确定性竞争
+                var fast = Promise.resolve('fast');
+                var slow = new Promise(function(resolve) {
+                    // 延迟 resolve，但 fast 已经 settled
+                    resolve('slow');
+                });
+                $out.p = Promise.race([fast, slow]);
+            `,
+            origCodeFileName: 'promise-race.js',
+            instCodeFileName: 'promise-race_inst.js',
+            inlineSourceMap:  true,
+        });
+        const J$inst = new JalangiSandbox();
+        const $out = {};
+        runInSandbox(code, J$inst, { $out, Promise });
+        const result = await $out.p;
+        assert.equal(result, 'fast',
+            'Promise.race 中已 settled 的 fast 应优先 resolve');
+    });
+
+    test('Promise.all reject 语义：任一子 Promise reject 则整体 reject', async () => {
+        // 验证 Promise.all 的 fast-fail 语义（任一 reject → 整体 reject）
+        init({ ...ALL_CONFIG });
+        const { code } = instrumentCode({
+            code: `
+                var p1 = Promise.resolve(1);
+                var p2 = Promise.reject(new Error('boom'));
+                var p3 = Promise.resolve(3);
+                $out.p = Promise.all([p1, p2, p3]);
+            `,
+            origCodeFileName: 'promise-all-reject.js',
+            instCodeFileName: 'promise-all-reject_inst.js',
+            inlineSourceMap:  true,
+        });
+        const J$inst = new JalangiSandbox();
+        const $out = {};
+        runInSandbox(code, J$inst, { $out, Promise });
+        let caught = null;
+        try {
+            await $out.p;
+        } catch (e) {
+            caught = e.message;
+        }
+        assert.equal(caught, 'boom',
+            'Promise.all 中任一 reject 应导致整体 reject，错误消息应为 "boom"');
+    });
+});

@@ -537,6 +537,46 @@ describe('Config 选择性禁用', () => {
         assert.ok(!r.code.includes('jalangiLabel'), '不应有 jalangiLabel while 循环包裹');
         assert.ok(!r.code.includes('J$.Fe('), '不应有 J$.Fe 函数入口钩子（依赖 try-catch 包裹）');
     });
+
+    // ── sourceType: 'module' 下的 Config 独立禁用 ──────────────────────────────
+
+    test('module 模式下 INSTR_READ = () => false 禁用读取钩子（独立于 script 模式）', () => {
+        // 验证 module 模式下 Config 禁用与 script 模式行为完全一致：
+        // 同一个 Config 对象在两种 sourceType 下均应生效
+        init({ ...ALL_CONFIG, INSTR_READ: () => false });
+        const rModule = instr('export const x = a + b;', { sourceType: 'module' });
+        assert.ok(!rModule.code.includes('J$.R('),
+            'module 模式下 INSTR_READ 禁用时不应有 J$.R');
+        assert.ok(rModule.code.includes('J$.B('),
+            'module 模式下 INSTR_BINARY 仍应注入（未被禁用）');
+    });
+
+    test('module 模式下 INSTR_INVOKE = () => false 禁用函数调用钩子', () => {
+        init({ ...ALL_CONFIG, INSTR_INVOKE: () => false });
+        const r = instr('export function foo() {} foo();', { sourceType: 'module' });
+        assert.ok(!r.code.includes('J$.F('),
+            'module 模式下 INSTR_INVOKE 禁用时不应注入 J$.F');
+        assert.ok(!r.code.includes('J$.M('),
+            'module 模式下 INSTR_INVOKE 禁用时不应注入 J$.M');
+    });
+
+    test('module 模式下 INSTR_BINARY = () => false 禁用，但 INSTR_READ 仍生效', () => {
+        // 验证两个 Config 字段互相独立，module 模式不会因为 sourceType 差异而串扰
+        init({ ...ALL_CONFIG, INSTR_BINARY: () => false });
+        const r = instr('export const z = a + b;', { sourceType: 'module' });
+        assert.ok(!r.code.includes('J$.B('),
+            'module 模式下 INSTR_BINARY 禁用时不应注入 J$.B');
+        assert.ok(r.code.includes('J$.R(') || r.code.includes('J$.Rl('),
+            'module 模式下 INSTR_READ 未禁用，仍应注入读取钩子');
+    });
+
+    test('module 模式下 INSTR_FORIN = () => false 禁用 for-in 钩子', () => {
+        init({ ...ALL_CONFIG, INSTR_FORIN: () => false });
+        // module 模式使用 export 语法，for-in 内部使用普通变量
+        const r = instr('export var keys = []; for (var k in {}) { keys.push(k); }', { sourceType: 'module' });
+        assert.ok(!r.code.includes('J$.H('),
+            'module 模式下 INSTR_FORIN 禁用时不应注入 J$.H');
+    });
 });
 
 // ════════════════════════════════════════════════════════════════════════════════

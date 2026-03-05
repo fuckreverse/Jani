@@ -1,7 +1,7 @@
 # Jalangi2 项目状态追踪文档
 
 > 最后更新：2026-03-05  
-> 测试通过：252/252 ✅  
+> 测试通过：265/265 ✅  
 > **所有已知 Bug 与代码质量问题均已修复，测试覆盖盲区已全部补充**
 
 ---
@@ -211,13 +211,13 @@ if (pt === 'ArrayPattern' && key === 'elements') return CONTEXT.IGNORE;
 
 ## 二、剩余低优先级盲区（不影响正确性）
 
-以下少量场景仍未覆盖，优先级极低，可在未来迭代按需补充：
+~~以下少量场景仍未覆盖，优先级极低，可在未来迭代按需补充~~ **（2026-03-05 已全部覆盖）**
 
-| 遗漏场景 | 文件 | 优先级 |
-|---------|------|--------|
-| `sourceType: 'module'` 下的 Config 独立禁用行为 | `instrument.test.mjs` | 🟡 低 |
-| generator 函数的运行时 yield 语义执行验证 | `e2e.test.mjs` | 🟡 低 |
-| 多层 `Promise.all` / `Promise.race` 的 contextId 独立性 | `e2e.test.mjs` | 🟡 低 |
+| 遗漏场景 | 文件 | 状态 |
+|---------|------|------|
+| `sourceType: 'module'` 下的 Config 独立禁用行为 | `instrument.test.mjs` | ✅ 已覆盖（+4 用例）|
+| generator 函数的运行时 yield 语义执行验证 | `e2e.test.mjs` | ✅ 已覆盖（+5 用例）|
+| 多层 `Promise.all` / `Promise.race` 的 contextId 独立性 | `e2e.test.mjs` | ✅ 已覆盖（+4 用例）|
 
 ---
 
@@ -232,8 +232,8 @@ if (pt === 'ArrayPattern' && key === 'elements') return CONTEXT.IGNORE;
 | P2 代码质量 | 4 | 4 | ✅ 100% |
 | 测试覆盖补充 | 16 | 16 | ✅ 100% |
 
-**当前全量测试**：252/252 通过 ✅  
-**已知遗留待办**：仅剩 3 个极低优先级场景，不影响正确性
+**当前全量测试**：265/265 通过 ✅  
+**已知遗留待办**：无（原 3 个低优先级场景均已覆盖）
 
 ---
 
