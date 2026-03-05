@@ -17,9 +17,11 @@
 // JALANGI DO NOT INSTRUMENT
 
 import { HOP, JALANGI_VAR } from '../Constants.js';
-import { CONTEXT, transformAst } from './astUtil.js';
+import _babelTraverse from '@babel/traverse';
+// @babel/traverse 是 CJS 模块，ESM 导入需取 .default
+const babelTraverse = _babelTraverse.default ?? _babelTraverse;
 
-// ─── ScopeID 计数器（TODO-3）────────────────────────────────────────────────────
+// ─── ScopeID 计数器 ──────────────────────────────────────────────────────────
 // 每次 instrumentCode 调用前通过 resetScopeCounter() 重置，保证插桩幂等性
 
 let _scopeIdCounter = 0;
@@ -33,30 +35,27 @@ function resetScopeCounter() {
 
 /**
  * 词法作用域节点。
+ * 保持与 wrappers.js 兼容的接口（vars / funLocs / funNodes / id 等）。
  *
  * @param {Scope|null} parent  - 父作用域；顶层 Program 的父作用域为 null
  * @param {boolean}    isCatch - 是否是 catch 子句产生的特殊作用域
  */
 class Scope {
     constructor(parent, isCatch) {
-        this.id       = _scopeIdCounter++;  // TODO-3: 唯一词法作用域 ID
+        this.id       = _scopeIdCounter++;
         this.vars     = {};     // name -> 'var' | 'arg' | 'defun' | 'lambda' | 'catch'
-        this.funLocs  = {};     // name -> AST loc（仅 defun）
+        this.funLocs  = {};     // name -> AST loc（仅 defun / lambda）
         this.funNodes = {};     // name -> AST node（仅 defun）
         this.hasEval      = false;
         this.hasArguments = false;
         this.parent  = parent;
         this.isCatch = isCatch;
-        this.hasWith_ = false;  // TODO-2: with 语句标志
-        // TODO-4: 变量声明 kind 存储（按需创建）
-        // this.varKinds = {};  // 延迟创建
+        this.hasWith_ = false;
     }
 
     /**
      * 在作用域中注册一个变量。
      * catch 内部声明的非 catch 变量需要提升到父作用域。
-     *
-     * TODO-4: 新增 kind 参数（'const' | 'let' | 'var' | undefined）
      */
     addVar(name, type, loc, node, kind) {
         const target = (this.isCatch && type !== 'catch') ? this.parent : this;
@@ -64,7 +63,6 @@ class Scope {
         if (target.vars[name] !== 'arg') {
             target.vars[name] = type;
         }
-        // TODO-4: 记录声明 kind（'const' | 'let' | 'var'）
         if (kind) {
             target.varKinds = target.varKinds ?? {};
             target.varKinds[name] = kind;
@@ -73,9 +71,12 @@ class Scope {
             target.funLocs[name]  = loc;
             target.funNodes[name] = node;
         }
+        if (type === 'lambda') {
+            target.funLocs[name] = loc;
+        }
     }
 
-    /** TODO-4: 返回变量的声明 kind，沿作用域链向上查找，找不到返回 null */
+    /** 返回变量的声明 kind，沿作用域链向上查找，找不到返回 null */
     getVarKind(name) {
         for (let s = this; s !== null; s = s.parent) {
             if (s.varKinds?.[name]) return s.varKinds[name];
@@ -112,31 +113,23 @@ class Scope {
         for (let s = this; s !== null; s = s.parent) s.hasArguments = true;
     }
 
-    /** TODO-2: 标记整条作用域链使用了 with 语句 */
+    /** 标记整条作用域链使用了 with 语句 */
     addWith() {
         for (let s = this; s !== null; s = s.parent) s.hasWith_ = true;
     }
 
     usesEval()      { return this.hasEval; }
     usesArguments() { return this.hasArguments; }
-    /** TODO-2: 检查作用域链是否含 with 语句 */
     usesWith()      { return this.hasWith_; }
 }
 
-// ─── addScopes ────────────────────────────────────────────────────────────────
+// ─── arguments 重命名常量 ─────────────────────────────────────────────────────
 
 const FROM_NAME = 'arguments';
 const TO_NAME   = `${JALANGI_VAR}_arguments`;
 
 /**
  * 从一个可能是任意模式（pattern）的参数节点中收集所有绑定的标识符名称。
- *
- * 支持 ES6+ 参数格式：
- *  - Identifier          → `x`
- *  - RestElement         → `...rest`
- *  - AssignmentPattern   → `x = 10`（默认值）
- *  - ObjectPattern       → `{a, b}`（对象解构）
- *  - ArrayPattern        → `[x, y]`（数组解构）
  */
 function collectParamNames(param, collected) {
     if (!param) return;
@@ -166,26 +159,35 @@ function collectParamNames(param, collected) {
     }
 }
 
+// ─── addScopes (基于 @babel/traverse) ────────────────────────────────────────
+
 /**
- * 遍历 AST，为每个作用域节点附加 .scope 属性，并将 `arguments`
- * 标识符重命名为 `J$_arguments`，避免与插桩注入代码冲突。
+ * 遍历 AST，为每个作用域节点附加 .scope（Jalangi Scope 对象），
+ * 并完成 `arguments` → `J$_arguments` 重命名。
  *
- * @param {object} ast - 解析得到的 AST（Program 节点）
+ * 使用 @babel/traverse 替代旧版自定义 transformAst 实现，
+ * 确保对所有 ES2022+ 语法（可选链、解构、class 私有字段等）都能正确遍历。
+ *
+ * @param {object} fileOrProgram - 解析得到的 AST（File 节点或 Program 节点均可）
+ * @param {string} [jalangiVar]  - 沙盒变量名（默认 JALANGI_VAR）
  */
-function addScopes(ast) {
+function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
+    // @babel/traverse 需要 File 节点；若传入的是 Program，向上包一层
+    const fileNode = (fileOrProgram.type === 'File')
+        ? fileOrProgram
+        : { type: 'File', program: fileOrProgram, errors: [] };
+
+    // 遍历时访问的 Program 节点（用于附加 scope）
+    const programNode = fileNode.program;
+
+    const toName = `${jalangiVar}_arguments`;
     let currentScope = null;
 
-    // TODO-4: 当前 VariableDeclaration 的 kind（'const' | 'let' | 'var'）
-    let _currentDeclKind = null;
+    // ── 辅助：注册参数到当前作用域 ─────────────────────────────────────────
 
-    /**
-     * 处理一个函数参数节点：
-     *  1. 简单 Identifier 且名为 `arguments` → 重命名
-     *  2. 将其绑定的所有名称注册到当前作用域
-     */
     function registerParam(param) {
         if (param.type === 'Identifier') {
-            if (param.name === FROM_NAME) param.name = TO_NAME;
+            if (param.name === FROM_NAME) param.name = toName;
             currentScope.addVar(param.name, 'arg');
         } else {
             const names = [];
@@ -194,137 +196,177 @@ function addScopes(ast) {
         }
     }
 
-    function handleFun(node) {
-        const oldScope = currentScope;
+    // ── 辅助：进入函数作用域 ────────────────────────────────────────────────
+
+    function enterFun(path) {
+        const node = path.node;
+        const parentScope = currentScope;
         currentScope = new Scope(currentScope, false);
         node.scope = currentScope;
 
         switch (node.type) {
             case 'FunctionDeclaration':
-                oldScope.addVar(node.id.name, 'defun', node.loc, node);
+                if (node.id) parentScope?.addVar(node.id.name, 'defun', node.loc, node);
                 node.params.forEach(registerParam);
                 break;
             case 'FunctionExpression':
-                if (node.id !== null) currentScope.addVar(node.id.name, 'lambda');
+                if (node.id !== null) currentScope.addVar(node.id.name, 'lambda', node.loc);
                 node.params.forEach(registerParam);
                 break;
             case 'ArrowFunctionExpression':
-                // 标记为箭头函数作用域：运行时不注入 Fe/Fr，Rl 不可用
                 currentScope.isArrow = true;
                 node.params.forEach(registerParam);
                 break;
             case 'ClassMethod':
-                // ClassMethod 直接携带参数和函数体，注册形参即可。
+            case 'ObjectMethod':
                 node.params.forEach(registerParam);
                 break;
             // Program: currentScope 就是顶层全局作用域
         }
     }
 
-    function handleVar(node) {
-        if (!node.id) return;
-        if (node.id.type === 'Identifier') {
-            // TODO-4: 传递当前声明 kind
-            currentScope.addVar(node.id.name, 'var', undefined, undefined, _currentDeclKind);
-        } else {
-            // 解构声明：收集所有绑定名称
-            const names = [];
-            collectParamNames(node.id, names);
-            // TODO-4: 解构声明中的所有变量也记录 kind
-            for (const n of names) currentScope.addVar(n, 'var', undefined, undefined, _currentDeclKind);
-        }
-    }
+    // ── 辅助：离开作用域 ────────────────────────────────────────────────────
 
-    function handleCatch(node) {
-        currentScope = new Scope(currentScope, true);
-        node.scope = currentScope;
-        // ES2019+: optional catch binding 时 param 为 null
-        if (!node.param) return;
-        if (node.param.type === 'Identifier') {
-            currentScope.addVar(node.param.name, 'catch');
-        } else {
-            const names = [];
-            collectParamNames(node.param, names);
-            for (const n of names) currentScope.addVar(n, 'catch');
-        }
-    }
-
-    const popScope = (node) => {
+    function exitScope(path) {
         currentScope = currentScope.parent;
-        return node;
-    };
+    }
 
-    const visitorPre = {
-        Program:                 handleFun,
-        FunctionDeclaration:     handleFun,
-        FunctionExpression:      handleFun,
-        ArrowFunctionExpression: handleFun,
-        ClassMethod:             handleFun,
-        // TODO-4: VariableDeclaration pre-visitor 记录当前 kind
-        VariableDeclaration(node) {
-            _currentDeclKind = node.kind;  // 'const' | 'let' | 'var'
+    // ── @babel/traverse visitor ─────────────────────────────────────────────
+
+    babelTraverse(fileNode, {
+        // ─── 作用域节点：进入时建新 scope ────────────────────────────────────
+        Program: {
+            enter(path) {
+                currentScope = new Scope(null, false);
+                path.node.scope = currentScope;
+            },
+            exit: exitScope,
         },
-        VariableDeclarator:      handleVar,
-        CatchClause:             handleCatch,
-    };
-
-    const visitorPost = {
-        Program:                 popScope,
-        FunctionDeclaration:     popScope,
-        FunctionExpression:      popScope,
-        ArrowFunctionExpression: popScope,
-        ClassMethod:             popScope,
-        CatchClause:             popScope,
-
-        // TODO-4: VariableDeclaration post-visitor 重置 _currentDeclKind
-        VariableDeclaration(node) {
-            _currentDeclKind = null;
-            return node;
+        FunctionDeclaration: {
+            enter: enterFun,
+            exit:  exitScope,
+        },
+        FunctionExpression: {
+            enter: enterFun,
+            exit:  exitScope,
+        },
+        ArrowFunctionExpression: {
+            enter: enterFun,
+            exit:  exitScope,
+        },
+        ClassMethod: {
+            enter: enterFun,
+            exit:  exitScope,
+        },
+        ObjectMethod: {
+            enter: enterFun,
+            exit:  exitScope,
         },
 
-        // 重命名 arguments → J$_arguments（RHS 读取场景）
-        // TODO-1: 同时检测 eval 标识符，标记整条作用域链
-        Identifier(node, context) {
-            if (context === CONTEXT.RHS
-                    && node.name === FROM_NAME
-                    && currentScope?.hasOwnVar(TO_NAME)) {
-                node.name = TO_NAME;
-            }
-            // TODO-1: 检测 eval 出现（即使作为参数传递也标记，因为可能在外部被调用）
+        // ─── ClassDeclaration：将类名注册到当前（外层）作用域 ────────────────
+        ClassDeclaration: {
+            enter(path) {
+                if (path.node.id) {
+                    currentScope?.addVar(path.node.id.name, 'var', path.node.loc, path.node, 'let');
+                }
+            },
+        },
+
+        // ─── ClassExpression：有 id 时建独立作用域（类名只在类内可见）────────
+        ClassExpression: {
+            enter(path) {
+                if (path.node.id) {
+                    currentScope = new Scope(currentScope, false);
+                    path.node.scope = currentScope;
+                    currentScope.addVar(path.node.id.name, 'var', path.node.loc, path.node, 'const');
+                }
+            },
+            exit(path) {
+                if (path.node.id) {
+                    currentScope = currentScope.parent;
+                }
+            },
+        },
+
+        // ─── VariableDeclarator：注册 var / let / const 变量 ─────────────────
+        VariableDeclarator: {
+            enter(path) {
+                const declarationNode = path.parentPath?.node;
+                const kind = declarationNode?.kind ?? null;
+                const id = path.node.id;
+                if (!id) return;
+                if (id.type === 'Identifier') {
+                    currentScope?.addVar(id.name, 'var', undefined, undefined, kind);
+                } else {
+                    const names = [];
+                    collectParamNames(id, names);
+                    for (const n of names) currentScope?.addVar(n, 'var', undefined, undefined, kind);
+                }
+            },
+        },
+
+        // ─── CatchClause：建 catch 作用域 ─────────────────────────────────────
+        CatchClause: {
+            enter(path) {
+                const node = path.node;
+                currentScope = new Scope(currentScope, true);
+                node.scope = currentScope;
+                if (!node.param) return;
+                if (node.param.type === 'Identifier') {
+                    currentScope.addVar(node.param.name, 'catch');
+                } else {
+                    const names = [];
+                    collectParamNames(node.param, names);
+                    for (const n of names) currentScope.addVar(n, 'catch');
+                }
+            },
+            exit: exitScope,
+        },
+
+        // ─── Identifier：arguments 重命名 + eval 检测 ─────────────────────────
+        Identifier(path) {
+            const node = path.node;
+
+            // eval 出现在任何地方 → 标记整条作用域链
             if (node.name === 'eval') {
                 currentScope?.addEval();
             }
-            return node;
+
+            // arguments 重命名：只处理 RHS（读取）上下文
+            // 使用 path.isReferencedIdentifier() 而非手动判断上下文
+            if (node.name === FROM_NAME && path.isReferencedIdentifier()) {
+                // 只有当前作用域链中存在 J$_arguments（即函数已注册该参数）时才重命名
+                if (currentScope?.hasOwnVar(toName)) {
+                    node.name = toName;
+                }
+            }
         },
 
-        // TODO-2: 检测 WithStatement，标记当前作用域链使用了 with
-        WithStatement(node) {
-            currentScope?.addWith();
-            return node;
-        },
-
-        // UpdateExpression 操作数
-        UpdateExpression(node) {
+        // ─── arguments 重命名：UpdateExpression 操作数 ───────────────────────
+        UpdateExpression(path) {
+            const node = path.node;
             if (node.argument.type === 'Identifier'
                     && node.argument.name === FROM_NAME
-                    && currentScope?.hasOwnVar(TO_NAME)) {
-                node.argument.name = TO_NAME;
+                    && currentScope?.hasOwnVar(toName)) {
+                node.argument.name = toName;
             }
-            return node;
         },
 
-        // 赋值左侧
-        AssignmentExpression(node) {
+        // ─── arguments 重命名：AssignmentExpression 左侧 ────────────────────
+        AssignmentExpression(path) {
+            const node = path.node;
             if (node.left.type === 'Identifier'
                     && node.left.name === FROM_NAME
-                    && currentScope?.hasOwnVar(TO_NAME)) {
-                node.left.name = TO_NAME;
+                    && currentScope?.hasOwnVar(toName)) {
+                node.left.name = toName;
             }
-            return node;
         },
-    };
 
-    transformAst(ast, visitorPost, visitorPre);
+        // ─── WithStatement：标记当前作用域链使用了 with ───────────────────────
+        WithStatement(path) {
+            currentScope?.addWith();
+        },
+    });
 }
 
 export { Scope, addScopes, collectParamNames, resetScopeCounter };

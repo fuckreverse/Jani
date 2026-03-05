@@ -36,11 +36,14 @@ import * as babelParser from '@babel/parser';
 import _babelGenerate   from '@babel/generator';
 // @babel/generator 是 CJS 模块，ESM 导入需取 .default
 const babelGenerate = _babelGenerate.default ?? _babelGenerate;
+import _babelTraverse from '@babel/traverse';
+// @babel/traverse 是 CJS 模块，ESM 导入需取 .default
+const babelTraverse = _babelTraverse.default ?? _babelTraverse;
 
 import { JALANGI_VAR }     from '../Constants.js';
 import { CONTEXT, transformAst, setJalangiVar as setAstUtilJalangiVar } from './astUtil.js';
 import { addScopes, resetScopeCounter } from './scope.js';
-import { analyzeDefUse }  from './dataflow.js';  // TODO-9/10: 静态 def-use 分析
+import { analyzeDefUse }  from './dataflow.js';
 import * as IID            from './iid.js';
 import * as W              from './wrappers.js';
 import { analyzePluginHooks, buildConfigFromHooks, buildConfigFromPlugins, fullConfig } from './pluginAnalyzer.js';
@@ -97,6 +100,7 @@ const {
     N_LOG_NULL_LIT,
     N_LOG_REGEXP_LIT,
     N_LOG_UNDEFINED_LIT,
+    N_LOG_BIGINT_LIT,
 } = W;
 
 // ─── RegExp 序列化（用于 JSON 缓存 IID 时序列化 AST）────────────────────────
@@ -127,6 +131,119 @@ function JSONParseHandler(key, value) {
 
 const cloneAst = (src) =>
     JSON.parse(JSON.stringify(src, JSONStringifyHandler), JSONParseHandler);
+
+// ─── 通用 CONTEXT 推断（从 Babel path 推断 astUtil.js 的 CONTEXT 枚举值）────────
+
+/**
+ * 根据 Babel path（包含父节点关系）推断当前节点所处的语义上下文（CONTEXT 枚举值）。
+ * 这是 astUtil.js transformAst 中上下文推断逻辑的等价实现。
+ *
+ * @param {import('@babel/traverse').NodePath} path
+ * @returns {number} CONTEXT 枚举值
+ */
+function getContext(path) {
+    const parent = path.parent;
+    const key    = path.key;           // 当前节点在父节点中的属性名
+    if (!parent) return CONTEXT.RHS;
+    const pt = parent.type;
+
+    // ── IGNORE 上下文：不应该插桩的位置 ────────────────────────────────────────
+    if (
+        // ImportDeclaration.source（字符串字面量如 "./foo.js"）不应插桩
+        (pt === 'ImportDeclaration'       && key === 'source') ||
+        // ExportDeclaration.source 同理
+        (pt === 'ExportNamedDeclaration'  && key === 'source') ||
+        (pt === 'ExportAllDeclaration'    && key === 'source') ||
+        (pt === 'AssignmentExpression'   && key === 'left') ||
+        (pt === 'UpdateExpression'       && key === 'argument') ||
+        (pt === 'UnaryExpression'        && key === 'argument' && parent.operator === 'delete') ||
+        (pt === 'ForInStatement'         && key === 'left') ||
+        (pt === 'ForOfStatement'         && key === 'left') ||
+        ((pt === 'FunctionExpression' || pt === 'FunctionDeclaration') && key === 'id') ||
+        (pt === 'ArrowFunctionExpression' && key === 'id') ||
+        ((pt === 'ClassDeclaration' || pt === 'ClassExpression') && key === 'id') ||
+        (pt === 'ImportSpecifier'          && (key === 'local' || key === 'imported')) ||
+        (pt === 'ImportDefaultSpecifier'   && key === 'local') ||
+        (pt === 'ImportNamespaceSpecifier' && key === 'local') ||
+        (pt === 'ExportSpecifier'          && (key === 'local' || key === 'exported')) ||
+        (pt === 'LabeledStatement'         && key === 'label') ||
+        (pt === 'BreakStatement'           && key === 'label') ||
+        (pt === 'CatchClause'              && key === 'param') ||
+        (pt === 'ContinueStatement'        && key === 'label') ||
+        ((pt === 'CallExpression' || pt === 'NewExpression') &&
+            key === 'callee' &&
+            (parent.callee.type === 'MemberExpression' ||
+             (parent.callee.type === 'Identifier' && parent.callee.name === 'eval'))) ||
+        (pt === 'OptionalCallExpression' &&
+            key === 'callee' &&
+            (parent.callee.type === 'OptionalMemberExpression' ||
+             parent.callee.type === 'MemberExpression')) ||
+        (pt === 'VariableDeclarator'        && key === 'id') ||
+        (pt === 'MemberExpression'          && !parent.computed && key === 'property') ||
+        (pt === 'OptionalMemberExpression'  && !parent.computed && key === 'property') ||
+        (pt === 'Property'                  && key === 'key' && !parent.computed) ||
+        (pt === 'RestElement'               && key === 'argument') ||
+        (pt === 'AssignmentPattern'         && key === 'left') ||
+        (pt === 'PropertyDefinition'        && key === 'key' && !parent.computed) ||
+        (pt === 'MethodDefinition'          && key === 'key' && !parent.computed) ||
+        (pt === 'ClassMethod'               && key === 'key' && !parent.computed) ||
+        // Babel AST: ClassProperty（class static/instance 字段声明）的 key 不应插桩
+        (pt === 'ClassProperty'             && key === 'key' && !parent.computed) ||
+        (pt === 'ClassPrivateProperty'      && key === 'key') ||
+        (pt === 'PrivateName'               && key === 'id')
+    ) {
+        return CONTEXT.IGNORE;
+    }
+
+    // ── TYPEOF 上下文：typeof 操作数（Identifier）────────────────────────────
+    if (pt === 'UnaryExpression' && parent.operator === 'typeof' && key === 'argument'
+            && path.node.type === 'Identifier') {
+        return CONTEXT.TYPEOF;
+    }
+
+    // ── 函数参数列表（params）→ PARAMS，其子节点视为 IGNORE ──────────────────
+    // 函数参数中的标识符/模式不插桩
+    if (
+        ((pt === 'FunctionExpression' || pt === 'FunctionDeclaration' || pt === 'ArrowFunctionExpression')
+            && key === 'params') ||
+        (pt === 'ClassMethod' && key === 'params')
+    ) {
+        return CONTEXT.IGNORE; // params 数组中的每个参数节点 IGNORE
+    }
+
+    // ── ObjectExpression 属性中的 key 不插桩 ────────────────────────────────
+    if (pt === 'ObjectProperty' && key === 'key' && !parent.computed) {
+        return CONTEXT.IGNORE;
+    }
+
+    // ── GETTER / SETTER / METHOD 上下文 ─────────────────────────────────────
+    // Property（ES5 对象字面量）的 getter/setter
+    if (pt === 'ObjectProperty' && key === 'value' && parent.kind === 'get') {
+        return CONTEXT.GETTER;
+    }
+    if (pt === 'ObjectProperty' && key === 'value' && parent.kind === 'set') {
+        return CONTEXT.SETTER;
+    }
+    // ObjectMethod（Babel 用 ObjectMethod 表示方法简写、get、set）
+    if (pt === 'ObjectMethod' && key === 'body') {
+        if (parent.kind === 'get') return CONTEXT.GETTER;
+        if (parent.kind === 'set') return CONTEXT.SETTER;
+        return CONTEXT.METHOD;
+    }
+    // ClassMethod 的 body
+    if (pt === 'ClassMethod' && key === 'body') {
+        if (parent.kind === 'get') return CONTEXT.GETTER;
+        if (parent.kind === 'set') return CONTEXT.SETTER;
+        return CONTEXT.METHOD;
+    }
+    // MethodDefinition（ESTree，Babel 用 ClassMethod）
+    if (pt === 'MethodDefinition' && key === 'value') {
+        return CONTEXT.METHOD;
+    }
+
+    // ── 默认：RHS（右值，需要插桩读取）──────────────────────────────────────
+    return CONTEXT.RHS;
+}
 
 // ─── visitor：克隆函数体（用于 ENABLE_SAMPLING 模式）──────────────────────────
 
@@ -190,334 +307,542 @@ const visitorMergeBodyPre = {
     FunctionDeclaration: mergeBodies,
 };
 
-// ─── visitor：作用域绑定（Pre）────────────────────────────────────────────────
+// ─── ignoreSubAst：跳过已插桩的 J$.I() 子树 ────────────────────────────────
 
-const visitorRRPre = {
-    Program:                 W.setScope,
-    FunctionDeclaration:     W.setScope,
-    FunctionExpression:      W.setScope,
-    // ArrowFunctionExpression 在 addScopes 阶段已分配 .scope（含参数注册），
-    // 必须在这里同步更新 _scope，否则遍历箭头函数体内的标识符时
-    // _scope 仍指向父作用域，导致箭头参数和局部变量被错误识别为全局变量。
-    ArrowFunctionExpression: W.setScope,
-    // Babel AST：ClassMethod 节点同时含 params 和 body，在 addScopes 阶段
-    // 已创建独立作用域（handleFun），需要在此同步更新 _scope。
-    ClassMethod:             W.setScope,
-    CatchClause:             W.setScope,
-};
-
-// ─── visitor：主插桩变换（Post）──────────────────────────────────────────────
-
-const visitorRRPost = {
-    // Babel AST 将每种字面量表示为独立节点类型：
-    // NumericLiteral、StringLiteral、BooleanLiteral、NullLiteral、RegExpLiteral、BigIntLiteral
-
-    NumericLiteral(node, context) {
-        if (context !== CONTEXT.RHS) return node;
-        return W.wrapLiteral(node, node, N_LOG_NUMBER_LIT);
-    },
-
-    StringLiteral(node, context) {
-        if (context !== CONTEXT.RHS) return node;
-        return W.wrapLiteral(node, node, N_LOG_STRING_LIT);
-    },
-
-    BooleanLiteral(node, context) {
-        if (context !== CONTEXT.RHS) return node;
-        return W.wrapLiteral(node, node, N_LOG_BOOLEAN_LIT);
-    },
-
-    NullLiteral(node, context) {
-        if (context !== CONTEXT.RHS) return node;
-        return W.wrapLiteral(node, node, N_LOG_NULL_LIT);
-    },
-
-    RegExpLiteral(node, context) {
-        if (context !== CONTEXT.RHS) return node;
-        return W.wrapLiteral(node, node, N_LOG_REGEXP_LIT);
-    },
-
-    BigIntLiteral(node, context) {
-        // BigInt 字面量（如 42n）：暂不插桩，返回原节点
-        return node;
-    },
-
-    Program(node) {
-        const ret = W.instrumentScriptEntryExit(
-            node, node.body,
-            IID.getInstCodeFileName(),
-            IID.getOrigCodeFileName()
-        );
-        node.body = ret;
-        W.popScope();
-        return node;
-    },
-
-    VariableDeclaration(node) {
-        node.declarations = node.declarations.map((def) => {
-            // BUG-5 fix: 解构声明（ObjectPattern / ArrayPattern）的 def.id 不是 Identifier，
-            // 直接访问 def.id.name 会得到 undefined，导致错误地插入 J$.W(iid, undefined, ...)。
-            // 对非 Identifier 的解构模式暂不插桩写入（解构赋值已由 AssignmentExpression 处理）。
-            //
-            // Guard: 若 def.id 既不是 Identifier 也不是解构 Pattern，说明遇到了未预期的 AST 节点类型
-            const _knownNonIdentTypes = new Set(['ObjectPattern', 'ArrayPattern']);
-            if (def.id.type !== 'Identifier' && !_knownNonIdentTypes.has(def.id.type)) {
-                throw new Error(
-                    `[jalangi] VariableDeclaration: unexpected declarator id type "${def.id.type}". ` +
-                    `Expected Identifier, ObjectPattern, or ArrayPattern.`
-                );
-            }
-            if (def.init !== null && def.id.type === 'Identifier') {
-                const scope    = W.getScope();
-                const defScope = W._findDefScope(scope, def.id.name);
-                const scopeId  = defScope?.id;
-                let init = W.wrapWrite(def.init, W.createLiteralAst(def.id.name), def.init, def.id,
-                    false, scope.isGlobal(def.id.name), true, scopeId);
-                init = W.wrapWithX1(def.init, init);
-                def.init = init;
-            }
-            return def;
-        });
-        return node;
-    },
-
-    NewExpression(node) {
-        const ret = {
-            type:      'CallExpression',
-            callee:    W.instrumentCall(node, true),
-            arguments: node.arguments,
-        };
-        W.transferLoc(ret, node);
-        return ret;
-    },
-
-    CallExpression(node) {
-        const isEval = node.callee.type === 'Identifier' && node.callee.name === 'eval';
-        node.callee = W.instrumentCall(node, false);
-        if (isEval) node.arguments = node.arguments.map(W.wrapEvalArg);
-        return node;
-    },
-
-    AssignmentExpression(node) {
-        return node.operator === '='
-            ? W.instrumentStore(node, false)
-            : W.instrumentLoadModStore(node);
-    },
-
-    UpdateExpression(node) {
-        let ret = W.instrumentPreIncDec(node);
-        if (!node.prefix) ret = W.adjustIncDec(node.operator, ret);
-        return ret;
-    },
-
-    FunctionExpression(node, context) {
-        node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
-        // getter / setter / class 方法不作为独立字面量包装
-        const ret = (context === CONTEXT.GETTER || context === CONTEXT.SETTER || context === CONTEXT.METHOD)
-            ? node
-            : W.wrapLiteral(node, node, N_LOG_FUNCTION_LIT);
-        W.popScope();
-        return ret;
-    },
-
-    FunctionDeclaration(node) {
-        node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
-        W.popScope();
-        return node;
-    },
-
-    /**
-     * ClassMethod 节点直接携带 params 和 body（相当于 MethodDefinition 的函数体）。
-     * 在 body.body 中注入 J$.Fe 入口/出口钩子；方法定义本身不包装为字面量。
-     */
-    ClassMethod(node, context) {
-        node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
-        W.popScope();
-        return node;
-    },
-
-    ArrowFunctionExpression(node) {
-        // 箭头函数没有独立的 `arguments` / `this` / `callee`，
-        // 不注入 J$.Fe / J$.Fr 入口出口钩子，但需要：
-        //  1. 对块体注入参数/var 同步语句（syncDefuns）
-        //  2. 恢复 _scope 到父作用域（popScope）
-        //  3. 将节点包装为字面量（J$.T），与 FunctionExpression 一致
-        instrumentArrowFunctionBody(node);
-        const ret = W.wrapLiteral(node, node, N_LOG_FUNCTION_LIT);
-        W.popScope();
-        return ret;
-    },
-
-    ObjectExpression: (node) => W.wrapLiteral(node, node, N_LOG_OBJECT_LIT),
-    ArrayExpression:  (node) => W.wrapLiteral(node, node, N_LOG_ARRAY_LIT),
-
-    ThisExpression: (node) =>
-        W.wrapRead(node, W.createLiteralAst('this'), node, false, false, false),
-
-    Identifier(node, context) {
-        if (context === CONTEXT.RHS)    return W.instrumentLoad(node, false);
-        if (context === CONTEXT.TYPEOF) return W.instrumentLoad(node, true);
-        return node;
-    },
-
-    MemberExpression(node, context) {
-        if (context === CONTEXT.RHS) return W.instrumentLoad(node, false);
-        return node;
-    },
-
-    // OptionalMemberExpression（a?.b）：在 RHS 上下文中注入 J$.G 属性读取钩子。
-    OptionalMemberExpression(node, context) {
-        if (context === CONTEXT.RHS) return W.instrumentLoad(node, false);
-        return node;
-    },
-
-    // OptionalCallExpression（a?.()）：注入 J$.M / J$.F 调用钩子。
-    OptionalCallExpression(node) {
-        node.callee = W.instrumentCall(node, false);
-        return node;
-    },
-
-    SequenceExpression(node) {
-        const last = node.expressions.length - 1;
-        for (let i = 0; i < last; i++) {
-            node.expressions[i] = W.wrapWithX1(node.expressions[i], node.expressions[i]);
-        }
-        return node;
-    },
-
-    ForInStatement(node) {
-        node.right = W.wrapHash(node.right, node.right);
-        return W.wrapForIn(node, node.left, node.right, node.body);
-    },
-
-    CatchClause(node) {
-        // ES2019+: optional catch binding 时 node.param 为 null，跳过包装
-        if (node.param?.type === 'Identifier') {
-            W.wrapCatchClause(node, node.body.body, node.param.name);
-        }
-        W.popScope();
-        return node;
-    },
-
-    ReturnStatement(node) {
-        const ret = W.wrapReturn(node, node.argument);
-        node.argument = W.wrapWithX1(node, ret);
-        return node;
-    },
-
-    ThrowStatement(node) {
-        const ret = W.wrapThrow(node, node.argument);
-        node.argument = W.wrapWithX1(node, ret);
-        return node;
-    },
-
-    ExpressionStatement(node) {
-        node.expression = W.wrapWithX1(node, node.expression);
-        return node;
-    },
-
-    /**
-     * AwaitExpression 插桩：将 `await expr` 转换为 `J$.Aw(iid, await expr)`。
-     *
-     * 这里在 visitorRRPost（后序）中处理，因此 node.argument 已经被子节点
-     * visitor 完整插桩（子表达式的 J$.R、J$.G 等已注入）。
-     * wrapAwait() 将整个 AwaitExpression（含已插桩的 argument）内嵌为
-     * J$.Aw() 的第二个参数，JS 引擎仍在 argument 处挂起协程，
-     * 恢复后 resolved value 透传给 J$.Aw()，并由 J$.Aw() 返回，
-     * 保证语义与原始代码完全相同。
-     *
-     * 仅在 async 函数内部合法；顶层 await（module sourceType）同样适用。
-     */
-    AwaitExpression(node) {
-        // node.argument 已在后序遍历中被子 visitor 插桩。
-        // wrapAwait 内部检查 Config.INSTR_AWAIT，若禁用则原样返回节点。
-        return W.wrapAwait(node, node.argument);
-    },
-};
-
-// ─── visitor：运算符插桩（Post）──────────────────────────────────────────────
-
-function funCond(node) {
-    node.test   = W.wrapConditional(node.test, node.test);
-    node.test   = W.wrapWithX1(node, node.test);
-    node.init   = W.wrapWithX1(node, node.init);
-    node.update = W.wrapWithX1(node, node.update);
-    return node;
+function ignoreSubAst(node) {
+    return node.type === 'CallExpression'
+        && node.callee?.type === 'MemberExpression'
+        && node.callee.object?.type === 'Identifier'
+        && node.callee.object.name === _jalangiVar
+        && node.callee.property?.type === 'Identifier'
+        && node.callee.property.name === 'I';
 }
 
-const visitorOps = {
-    Program(node) {
-        node.body = W.wrapScriptBodyWithTryCatch(node, node.body);
-        return node;
-    },
+/**
+ * 替换当前 path 所指节点为 newNode，并在 newNode 上打上 __j_instrumented 标记，
+ * 防止 @babel/traverse 在 replaceWith 后重新遍历新节点时触发无限循环。
+ *
+ * @param {import('@babel/traverse').NodePath} path
+ * @param {object} newNode
+ */
+function replaceAndMark(path, newNode) {
+    newNode.__j_instrumented = true;
+    path.replaceWith(newNode);
+}
 
-    BinaryExpression: (node) =>
-        W.wrapBinaryOp(node, node.left, node.right, node.operator),
+// ─── 主插桩变换（单一 babelTraverse pass）────────────────────────────────────
 
-    LogicalExpression(node) {
-        if (node.operator === '&&') return W.wrapLogicalAnd(node, node.left, node.right);
-        if (node.operator === '||') return W.wrapLogicalOr(node, node.left, node.right);
-        if (node.operator === '??') return W.wrapLogicalNullish(node, node.left, node.right);
-        return node;
-    },
+/**
+ * 使用单一 babelTraverse 完成所有插桩变换（合并了旧版 Pass 1 + Pass 2）。
+ *
+ * 设计原则：
+ *  - 全局 enter 拦截：被 replaceAndMark 标记为 __j_instrumented 的节点，在 enter
+ *    时立即 skip 整个子树，防止 replaceWith 触发重新遍历导致无限循环。
+ *  - 函数节点（FunctionDeclaration/FunctionExpression/ArrowFunctionExpression）在
+ *    单一 exit 里按顺序完成：
+ *      1. instrumentFunctionEntryExit（注入 J$.Fe/J$.Fr）
+ *      2. wrapFunBodyWithTryCatch（添加 try-catch 包裹）
+ *      3. wrapLiteral（包装为 J$.T 字面量钩子）
+ *  - Program 节点在 exit 里：instrumentScriptEntryExit → wrapScriptBodyWithTryCatch
+ *
+ * @param {object} file - Babel File 节点
+ */
+function runInstrumentPass(file) {
+    babelTraverse(file, {
+        // ── 全局 enter：跳过已被 replaceAndMark 标记的节点子树 ─────────────────
+        // 防止 exit 中的 replaceWith 导致重新遍历已插桩节点（无限循环）。
+        enter(path) {
+            if (path.node.__j_instrumented) path.skip();
+        },
 
-    UnaryExpression(node) {
-        if (node.operator === 'void') return node;
-        if (node.operator === 'delete') {
-            if (node.argument.object) {
-                return W.wrapBinaryOp(node, node.argument.object,
-                    W.getPropertyAsAst(node.argument), node.operator, node.argument.computed);
-            }
-            return node;
-        }
-        return W.wrapUnaryOp(node, node.argument, node.operator);
-    },
+        // ── 作用域进入（前序 enter）────────────────────────────────────────────
+        Program: {
+            enter(path) { W.setScope(path.node); },
+            exit(path) {
+                const node = path.node;
+                // Step 1（原 Pass 1）：注入脚本入口/出口钩子 J$.Se / J$.Le
+                const ret = W.instrumentScriptEntryExit(
+                    node, node.body,
+                    IID.getInstCodeFileName(),
+                    IID.getOrigCodeFileName()
+                );
+                node.body = ret;
+                W.popScope();
+                // Step 2（原 Pass 2）：添加脚本级 try-catch 包裹（J$.Ex / J$.Sr / J$.L）
+                node.body = W.wrapScriptBodyWithTryCatch(node, node.body);
+            },
+        },
 
-    SwitchStatement(node) {
-        let dis = W.wrapSwitchDiscriminant(node.discriminant, node.discriminant);
-        dis = W.wrapWithX1(node.discriminant, dis);
-        node.cases = node.cases.map((acase) => {
-            if (acase.test) {
-                const test = W.wrapSwitchTest(acase.test, acase.test);
-                acase.test = W.wrapWithX1(acase.test, test);
-            }
-            return acase;
-        });
-        node.discriminant = dis;
-        return node;
-    },
+        FunctionDeclaration: {
+            enter(path) { W.setScope(path.node); },
+            exit(path) {
+                const node = path.node;
+                // Step 1（原 Pass 1）：注入函数入口/出口钩子 J$.Fe / J$.Fr
+                node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
+                W.popScope();
+                // Step 2（原 Pass 2）：添加函数体 try-catch 包裹
+                if (!node.generator && !node.async) {
+                    node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
+                }
+                // FunctionDeclaration 不需要 wrapLiteral（不是表达式）
+            },
+        },
 
-    FunctionExpression(node) {
-        // Guard: generator/async FunctionExpression 不应进入 wrapFunBodyWithTryCatch
-        // wrapFunBodyWithTryCatch 内部也有相同 guard，此处提前拦截提供更清晰的调用栈
-        if (node.generator || node.async) return node;
-        // Guard: probe fn（由 createCallAsFunEnterStatement 生成）已被标记 __j_probe=true，
-        // 跳过 wrapFunBodyWithTryCatch，防止 probe fn 只有 Fr 没有 Fe（callIdStack 不平衡）。
-        if (node.__j_probe) return node;
-        node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
-        return node;
-    },
+        FunctionExpression: {
+            enter(path) { W.setScope(path.node); },
+            exit(path) {
+                const node = path.node;
+                // Step 1（原 Pass 1）：注入函数入口/出口钩子 J$.Fe / J$.Fr
+                node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
+                // getter / setter / class 方法不作为独立字面量包装
+                const ctx = getContext(path);
+                const shouldWrapAsLiteral = !(ctx === CONTEXT.GETTER || ctx === CONTEXT.SETTER || ctx === CONTEXT.METHOD);
+                W.popScope();
+                // Step 2（原 Pass 2）：添加函数体 try-catch 包裹
+                // Guard: generator/async 不包裹；probe fn（__j_probe）不包裹
+                if (!node.generator && !node.async && !node.__j_probe) {
+                    node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
+                }
+                // Step 3（原 Pass 1）：将函数表达式包装为 J$.T 字面量钩子
+                const ret = shouldWrapAsLiteral ? W.wrapLiteral(node, node, N_LOG_FUNCTION_LIT) : node;
+                if (ret !== node) replaceAndMark(path, ret);
+            },
+        },
 
-    FunctionDeclaration(node) {
-        // Guard: generator/async FunctionDeclaration 不应进入 wrapFunBodyWithTryCatch
-        if (node.generator || node.async) return node;
-        node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
-        return node;
-    },
+        ArrowFunctionExpression: {
+            enter(path) { W.setScope(path.node); },
+            exit(path) {
+                const node = path.node;
+                // 箭头函数没有独立的 arguments / this / callee，
+                // 不注入 J$.Fe / J$.Fr 入口出口钩子，但需要：
+                //  1. 对块体注入参数/var 同步语句（syncDefuns）
+                //  2. 恢复 _scope 到父作用域（popScope）
+                //  3. 将节点包装为字面量（J$.T），与 FunctionExpression 一致
+                // 注意：箭头函数表达式体（非 BlockStatement）不添加 try-catch 包裹。
+                // 箭头函数块体（BlockStatement）的 try-catch 已在 FunctionExpression 的
+                // wrapFunBodyWithTryCatch 中处理（ArrowFunctionExpression 编译为
+                // FunctionExpression 等价物）。
+                instrumentArrowFunctionBody(node);
+                W.popScope();
+                const ret = W.wrapLiteral(node, node, N_LOG_FUNCTION_LIT);
+                replaceAndMark(path, ret);
+            },
+        },
 
-    WithStatement(node) {
-        // TODO-2: 标记当前作用域使用了 with
-        W.getScope()?.addWith();
-        node.object = W.wrapWith(node.object);
-        return node;
-    },
+        ClassMethod: {
+            enter(path) { W.setScope(path.node); },
+            exit(path) {
+                const node = path.node;
+                node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
+                W.popScope();
+                // ClassMethod 的 try-catch 包裹：同 FunctionExpression
+                if (!node.generator && !node.async) {
+                    node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
+                }
+            },
+        },
 
-    ConditionalExpression: funCond,
-    IfStatement:           funCond,
-    WhileStatement:        funCond,
-    DoWhileStatement:      funCond,
-    ForStatement:          funCond,
-};
+        ClassExpression: {
+            enter(path) {
+                if (path.node.scope) W.setScope(path.node);
+            },
+            exit(path) {
+                if (path.node.scope) W.popScope();
+            },
+        },
+
+        CatchClause: {
+            enter(path) { W.setScope(path.node); },
+            exit(path) {
+                const node = path.node;
+                // ES2019+: optional catch binding 时 node.param 为 null，跳过包装
+                if (node.param?.type === 'Identifier') {
+                    W.wrapCatchClause(node, node.body.body, node.param.name);
+                }
+                W.popScope();
+            },
+        },
+
+        // ── 后序 exit：字面量插桩（原 Pass 1 visitorRRPost）──────────────────
+
+        NumericLiteral: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                if (getContext(path) !== CONTEXT.RHS) return;
+                const ret = W.wrapLiteral(path.node, path.node, N_LOG_NUMBER_LIT);
+                replaceAndMark(path, ret);
+            },
+        },
+
+        StringLiteral: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                if (getContext(path) !== CONTEXT.RHS) return;
+                const ret = W.wrapLiteral(path.node, path.node, N_LOG_STRING_LIT);
+                replaceAndMark(path, ret);
+            },
+        },
+
+        BooleanLiteral: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                if (getContext(path) !== CONTEXT.RHS) return;
+                const ret = W.wrapLiteral(path.node, path.node, N_LOG_BOOLEAN_LIT);
+                replaceAndMark(path, ret);
+            },
+        },
+
+        NullLiteral: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                if (getContext(path) !== CONTEXT.RHS) return;
+                const ret = W.wrapLiteral(path.node, path.node, N_LOG_NULL_LIT);
+                replaceAndMark(path, ret);
+            },
+        },
+
+        RegExpLiteral: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                if (getContext(path) !== CONTEXT.RHS) return;
+                const ret = W.wrapLiteral(path.node, path.node, N_LOG_REGEXP_LIT);
+                replaceAndMark(path, ret);
+            },
+        },
+
+        BigIntLiteral: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                if (getContext(path) !== CONTEXT.RHS) return;
+                const ret = W.wrapLiteral(path.node, path.node, N_LOG_BIGINT_LIT);
+                replaceAndMark(path, ret);
+            },
+        },
+
+        VariableDeclaration: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                node.declarations = node.declarations.map((def) => {
+                    // BUG-5 fix: 解构声明（ObjectPattern / ArrayPattern）的 def.id 不是 Identifier，
+                    // 直接访问 def.id.name 会得到 undefined，导致错误地插入 J$.W(iid, undefined, ...)。
+                    // 对非 Identifier 的解构模式暂不插桩写入（解构赋值已由 AssignmentExpression 处理）。
+                    //
+                    // Guard: 若 def.id 既不是 Identifier 也不是解构 Pattern，说明遇到了未预期的 AST 节点类型
+                    const _knownNonIdentTypes = new Set(['ObjectPattern', 'ArrayPattern']);
+                    if (def.id.type !== 'Identifier' && !_knownNonIdentTypes.has(def.id.type)) {
+                        throw new Error(
+                            `[jalangi] VariableDeclaration: unexpected declarator id type "${def.id.type}". ` +
+                            `Expected Identifier, ObjectPattern, or ArrayPattern.`
+                        );
+                    }
+                    if (def.init !== null && def.id.type === 'Identifier') {
+                        const scope    = W.getScope();
+                        const defScope = W._findDefScope(scope, def.id.name);
+                        const scopeId  = defScope?.id;
+                        let init = W.wrapWrite(def.init, W.createLiteralAst(def.id.name), def.init, def.id,
+                            false, scope.isGlobal(def.id.name), true, scopeId);
+                        init = W.wrapWithX1(def.init, init);
+                        def.init = init;
+                    }
+                    return def;
+                });
+            },
+        },
+
+        NewExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                const ret = {
+                    type:      'CallExpression',
+                    callee:    W.instrumentCall(node, true),
+                    arguments: node.arguments,
+                };
+                W.transferLoc(ret, node);
+                replaceAndMark(path, ret);
+            },
+        },
+
+        CallExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                // 跳过已插桩的 J$.* 调用（防止二次插桩）
+                if (node.callee?.type === 'MemberExpression'
+                        && node.callee.object?.name === _jalangiVar) return;
+                const isEval = node.callee.type === 'Identifier' && node.callee.name === 'eval';
+                node.callee = W.instrumentCall(node, false);
+                if (isEval) node.arguments = node.arguments.map(W.wrapEvalArg);
+            },
+        },
+
+        AssignmentExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                const ret = node.operator === '='
+                    ? W.instrumentStore(node, false)
+                    : W.instrumentLoadModStore(node);
+                if (ret !== node) replaceAndMark(path, ret);
+            },
+        },
+
+        UpdateExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                let ret = W.instrumentPreIncDec(node);
+                if (!node.prefix) ret = W.adjustIncDec(node.operator, ret);
+                if (ret !== node) replaceAndMark(path, ret);
+            },
+        },
+
+        ObjectExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const ret = W.wrapLiteral(path.node, path.node, N_LOG_OBJECT_LIT);
+                replaceAndMark(path, ret);
+            },
+        },
+
+        ArrayExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const ret = W.wrapLiteral(path.node, path.node, N_LOG_ARRAY_LIT);
+                replaceAndMark(path, ret);
+            },
+        },
+
+        ThisExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const ret = W.wrapRead(path.node, W.createLiteralAst('this'), path.node, false, false, false);
+                replaceAndMark(path, ret);
+            },
+        },
+
+        Identifier: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const ctx = getContext(path);
+                let ret;
+                if (ctx === CONTEXT.RHS)    ret = W.instrumentLoad(path.node, false);
+                else if (ctx === CONTEXT.TYPEOF) ret = W.instrumentLoad(path.node, true);
+                else return;
+                if (ret !== path.node) replaceAndMark(path, ret);
+            },
+        },
+
+        MemberExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                if (getContext(path) !== CONTEXT.RHS) return;
+                const ret = W.instrumentLoad(path.node, false);
+                if (ret !== path.node) replaceAndMark(path, ret);
+            },
+        },
+
+        // OptionalMemberExpression（a?.b）：在 RHS 上下文中注入 J$.G 属性读取钩子。
+        OptionalMemberExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                if (getContext(path) !== CONTEXT.RHS) return;
+                const ret = W.instrumentLoad(path.node, false);
+                if (ret !== path.node) replaceAndMark(path, ret);
+            },
+        },
+
+        // OptionalCallExpression（a?.()）：注入 J$.M / J$.F 调用钩子。
+        OptionalCallExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                node.callee = W.instrumentCall(node, false);
+            },
+        },
+
+        SequenceExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                const last = node.expressions.length - 1;
+                for (let i = 0; i < last; i++) {
+                    node.expressions[i] = W.wrapWithX1(node.expressions[i], node.expressions[i]);
+                }
+            },
+        },
+
+        ForInStatement: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                node.right = W.wrapHash(node.right, node.right);
+                const ret = W.wrapForIn(node, node.left, node.right, node.body);
+                if (ret !== node) replaceAndMark(path, ret);
+            },
+        },
+
+        ReturnStatement: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                const ret = W.wrapReturn(node, node.argument);
+                node.argument = W.wrapWithX1(node, ret);
+            },
+        },
+
+        ThrowStatement: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                const ret = W.wrapThrow(node, node.argument);
+                node.argument = W.wrapWithX1(node, ret);
+            },
+        },
+
+        ExpressionStatement: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                node.expression = W.wrapWithX1(node, node.expression);
+            },
+        },
+
+        /**
+         * AwaitExpression 插桩：将 `await expr` 转换为 `J$.Aw(iid, await expr)`。
+         */
+        AwaitExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const ret = W.wrapAwait(path.node, path.node.argument);
+                if (ret !== path.node) replaceAndMark(path, ret);
+            },
+        },
+
+        // ── 运算符插桩（原 Pass 2 visitorOps）────────────────────────────────
+
+        BinaryExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                const ret = W.wrapBinaryOp(node, node.left, node.right, node.operator);
+                if (ret !== node) replaceAndMark(path, ret);
+            },
+        },
+
+        LogicalExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                let ret = node;
+                if (node.operator === '&&') ret = W.wrapLogicalAnd(node, node.left, node.right);
+                else if (node.operator === '||') ret = W.wrapLogicalOr(node, node.left, node.right);
+                else if (node.operator === '??') ret = W.wrapLogicalNullish(node, node.left, node.right);
+                if (ret !== node) replaceAndMark(path, ret);
+            },
+        },
+
+        UnaryExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                if (node.operator === 'void') return;
+                let ret = node;
+                if (node.operator === 'delete') {
+                    if (node.argument.object) {
+                        ret = W.wrapBinaryOp(node, node.argument.object,
+                            W.getPropertyAsAst(node.argument), node.operator, node.argument.computed);
+                    }
+                } else {
+                    ret = W.wrapUnaryOp(node, node.argument, node.operator);
+                }
+                if (ret !== node) replaceAndMark(path, ret);
+            },
+        },
+
+        SwitchStatement: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                let dis = W.wrapSwitchDiscriminant(node.discriminant, node.discriminant);
+                dis = W.wrapWithX1(node.discriminant, dis);
+                node.cases = node.cases.map((acase) => {
+                    if (acase.test) {
+                        const test = W.wrapSwitchTest(acase.test, acase.test);
+                        acase.test = W.wrapWithX1(acase.test, test);
+                    }
+                    return acase;
+                });
+                node.discriminant = dis;
+            },
+        },
+
+        WithStatement: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                W.getScope()?.addWith();
+                node.object = W.wrapWith(node.object);
+            },
+        },
+
+        ConditionalExpression: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                node.test   = W.wrapConditional(node.test, node.test);
+                node.test   = W.wrapWithX1(node, node.test);
+                node.init   = W.wrapWithX1(node, node.init);
+                node.update = W.wrapWithX1(node, node.update);
+            },
+        },
+
+        IfStatement: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                node.test   = W.wrapConditional(node.test, node.test);
+                node.test   = W.wrapWithX1(node, node.test);
+                node.init   = W.wrapWithX1(node, node.init);
+                node.update = W.wrapWithX1(node, node.update);
+            },
+        },
+
+        WhileStatement: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                node.test   = W.wrapConditional(node.test, node.test);
+                node.test   = W.wrapWithX1(node, node.test);
+                node.init   = W.wrapWithX1(node, node.init);
+                node.update = W.wrapWithX1(node, node.update);
+            },
+        },
+
+        DoWhileStatement: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                node.test   = W.wrapConditional(node.test, node.test);
+                node.test   = W.wrapWithX1(node, node.test);
+                node.init   = W.wrapWithX1(node, node.init);
+                node.update = W.wrapWithX1(node, node.update);
+            },
+        },
+
+        ForStatement: {
+            exit(path) {
+                if (ignoreSubAst(path.node)) return;
+                const node = path.node;
+                node.test   = W.wrapConditional(node.test, node.test);
+                node.test   = W.wrapWithX1(node, node.test);
+                node.init   = W.wrapWithX1(node, node.init);
+                node.update = W.wrapWithX1(node, node.update);
+            },
+        },
+    });
+}
 
 // ─── 函数声明提升（Firefox 兼容）─────────────────────────────────────────────
 
@@ -572,11 +897,11 @@ function hoistFunctionDeclaration(ast, hoistedFunctions) {
 // ─── AST 转换主流程 ────────────────────────────────────────────────────────────
 
 /**
- * 解析代码字符串，返回 Program 节点。
- * @babel/parser 返回 { type:'File', program: Program }，各 visitor 遍历 Program 节点。
+ * 解析代码字符串，返回 Babel File 节点（包含 .program: Program）。
+ * @babel/traverse 需要 File 节点作为根节点；addScopes 同样接受 File 节点。
  */
 function babelParse(code, sourceType) {
-    const file = babelParser.parse(code, {
+    return babelParser.parse(code, {
         sourceType,
         // 启用 Babel 支持的所有稳定 + 提案语法
         plugins: [
@@ -599,20 +924,32 @@ function babelParse(code, sourceType) {
         // （Babel 默认开启，此处显式标注）
         ranges: false,
     });
-    return file.program;
 }
 
-function transformString(code, visitorsPost, visitorsPre, sourceType) {
-    const newAst = babelParse(code, sourceType);
-    addScopes(newAst);
+function transformString(code, sourceType, enableSampling) {
+    // babelParse 现在返回 File 节点（{ type:'File', program: Program }）
+    const file    = babelParse(code, sourceType);
+    const newAst  = file.program;   // Program 节点（各 visitor 操作对象）
 
-    // TODO-9/10: Pass 0 — 静态 def-use 分析，生成插桩决策表
-    // 分析结果注入 wrappers 模块，后续 instrumentLoad 查表决定插桩级别
+    // addScopes 接受 File 节点（供内部 @babel/traverse 使用）
+    addScopes(file, _jalangiVar);
+
+    // Pass 0 — 静态 def-use 分析，生成插桩决策表
+    // analyzeDefUse 依赖 addScopes 附加的 .scope 字段，输入 Program 节点
     const instrDecisions = analyzeDefUse(newAst);
     W.setInstrDecisions(instrDecisions);
 
-    for (let i = 0; i < visitorsPost.length; i++) {
-        transformAst(newAst, visitorsPost[i], visitorsPre[i], CONTEXT.RHS);
+    if (enableSampling) {
+        // ENABLE_SAMPLING 模式：Pass -1 克隆函数体（使用旧版 transformAst，仅访问两个节点类型）
+        transformAst(newAst, visitorCloneBodyPre, undefined, CONTEXT.RHS);
+    }
+
+    // 主插桩变换（单一 pass，合并了旧版 Pass 1 + Pass 2）
+    runInstrumentPass(file);
+
+    if (enableSampling) {
+        // ENABLE_SAMPLING 模式：最后合并采样函数体
+        transformAst(newAst, visitorMergeBodyPre, undefined, CONTEXT.RHS);
     }
 
     // Pass 结束后清理决策表（避免内存泄漏和跨文件污染）
@@ -706,17 +1043,7 @@ function instrumentCode(options) {
 
     if (!skip && typeof code === 'string' && !code.includes(NO_INSTR)) {
         try {
-            if (_config?.ENABLE_SAMPLING) {
-                newAst = transformString(code,
-                    [visitorCloneBodyPre, visitorRRPost, visitorOps, visitorMergeBodyPre],
-                    [undefined,           visitorRRPre,  undefined,  undefined],
-                    sourceType);
-            } else {
-                newAst = transformString(code,
-                    [visitorRRPost, visitorOps],
-                    [visitorRRPre,  undefined],
-                    sourceType);
-            }
+            newAst = transformString(code, sourceType, !!_config?.ENABLE_SAMPLING);
 
             newAst = hoistFunctionDeclaration(newAst, []);
 

@@ -201,7 +201,7 @@ mindmap
 
 #### `literal(iid, val, hasGetterSetter)`
 
-字面量（数字/字符串/布尔/null/对象/数组/函数/正则）创建后触发。
+字面量（数字/字符串/布尔/null/对象/数组/函数/正则/BigInt）创建后触发。
 
 **返回值**：`{ result }` 或 `undefined`。
 

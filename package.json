@@ -6,6 +6,8 @@
   "dependencies": {
     "@babel/generator": "^7.29.1",
     "@babel/parser": "^7.29.0",
+    "@babel/traverse": "^7.29.0",
+    "@babel/types": "^7.29.0",
     "codemirror": "5.1.0",
     "datatables": "1.10.6",
     "jquery": "3.5.0",
@@ -39,5 +41,9 @@
     "mocha": "^10.0.0",
     "rollup": "^4.59.0"
   },
-  "main": "src/instrument/esnstrument.js"
+  "main": "src/instrument/esnstrument.js",
+  "bundleDependencies": [
+    "@babel/parser",
+    "@babel/generator"
+  ]
 }

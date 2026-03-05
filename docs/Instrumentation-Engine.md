@@ -5,32 +5,30 @@
 ## 概述
 
 插桩引擎是 Jalangi2 的核心组件，负责将普通 JavaScript 源代码转换为带有分析钩子的插桩代码。
-整个过程分为多个 Pass：**解析 → 作用域分析 → 静态 def-use 分析（Pass 0）→ AST 变换 → 代码生成 → 输出**。
+整个过程为：**解析 → 作用域分析 → 静态 def-use 分析（Pass 0）→ 单次统一插桩 Pass → 代码生成 → 输出**。
 
 ```mermaid
 flowchart TD
     SRC["JavaScript 源代码"]
     PARSE["@babel/parser 解析\n支持 ES2022+ 及实验性语法"]
-    AST1["AST（含 loc 信息）"]
-    SCOPE["addScopes()\n作用域分析\n附 .scope（ScopeID / hasWith / hasEval / varKind）"]
+    AST1["File AST（含 loc 信息）"]
+    SCOPE["addScopes(file)\n作用域分析（@babel/traverse）\n附 .scope（ScopeID / hasWith / hasEval / varKind）"]
     AST2["AST（含 loc / scope 信息）"]
     DU["analyzeDefUse() — Pass 0\n静态 def-use 分析"]
     DMAP["插桩决策表 Map&lt;nodeKey,'full'|'lightweight'&gt;"]
-    P1["Pass 1（可选）\nvisitorCloneBodyPre — 克隆函数体"]
-    P2["Pass 2\nvisitorRRPre + visitorRRPost — 主插桩\n查决策表：局部变量走 J$.Rl，其余走 J$.R"]
-    P3["Pass 3\nvisitorOps — 运算符 / 控制流插桩"]
-    P4["Pass 4（可选）\nvisitorMergeBodyPre — 合并"]
+    CLONE["Pass −1（ENABLE_SAMPLING 时）\nvisitorCloneBodyPre — 克隆函数体"]
+    MAIN["runInstrumentPass()\n单次 @babel/traverse\n字面量/读写/运算符/函数进出 统一处理\nreplaceAndMark 防止节点重复插桩"]
+    MERGE["Pass +1（ENABLE_SAMPLING 时）\nvisitorMergeBodyPre — 合并采样函数体"]
     IAST["插桩后 AST"]
-    HOIST["hoistFunctionDeclaration()\n函数声明提升（Firefox 兼容）"]
     GEN["@babel/generator 代码生成"]
     OUTPUT["插桩后 JavaScript 代码"]
 
     SRC --> PARSE --> AST1 --> SCOPE --> AST2
     AST2 --> DU --> DMAP
-    AST2 --> P1
-    DMAP --> P2
-    P1 --> P2 --> P3 --> P4 --> IAST
-    IAST --> HOIST --> GEN --> OUTPUT
+    AST2 --> CLONE
+    DMAP --> MAIN
+    CLONE --> MAIN --> MERGE --> IAST
+    IAST --> GEN --> OUTPUT
 ```
 
 ## 对外 API
@@ -127,7 +125,7 @@ const instrCode = instrumentEvalCode('var x = 1;', 42, true);
 
 ## 插桩变换详解
 
-### 变量读写
+### 变量读写（统一 Pass 处理）
 
 变量读取有**两条路径**，插桩器在静态分析阶段决定走哪条：
 
@@ -230,6 +228,7 @@ J$.M(iid, obj, 'method', flags)(args)
 ```js
 // 原始代码 → 插桩后
 42            → J$.T(iid, 42, J$.N_LOG_NUMBER_LIT, false)
+42n           → J$.T(iid, 42n, J$.N_LOG_BIGINT_LIT, false)
 'hello'       → J$.T(iid, 'hello', J$.N_LOG_STRING_LIT, false)
 {}            → J$.T(iid, {}, J$.N_LOG_OBJECT_LIT, false)
 []            → J$.T(iid, [], J$.N_LOG_ARRAY_LIT, false)
@@ -293,8 +292,11 @@ function foo(a, b) {
 
 ## 作用域分析
 
-插桩前，`scope.js` 的 `addScopes()` 会对 AST 进行一遍预扫描，
+插桩前，`scope.js` 的 `addScopes(file, jalangiVar)` 会对 AST 进行一遍预扫描，
 为每个作用域节点（Program / Function / CatchClause）附加 `.scope` 属性。
+
+> **注意**：`addScopes` 接受 `@babel/parser` 返回的 **`File` 节点**（`{ type: 'File', program: Program }`），
+> 内部使用 `@babel/traverse` 遍历，不再接受裸 `Program` 节点。
 
 ### Scope 对象结构
 
@@ -544,15 +546,29 @@ const J$ = globalThis.J$;
 | `CONTEXT.OEXP` | ObjectExpression 属性列表 | 特殊处理 |
 | `CONTEXT.PARAMS` | 函数形参 | 不插桩 |
 
-## 模板缓存优化
+## AST 直接构建（Phase 4 重构）
 
-`wrappers.js` 中的 `replaceInStatement(templateStr, ...args)` 函数：
+`wrappers.js` 中所有包装函数均已迁移为使用 **`@babel/types` 工厂函数直接构建 AST 节点**，
+彻底消除了旧版字符串模板解析方案（`replaceInStatement` / `replaceInExpr`）的运行时 parse 开销。
 
-1. 第一次调用时，用 `@babel/parser` 解析模板字符串并缓存 AST
-2. 后续调用通过 `deepCloneAndReplace` 深拷贝缓存的 AST，替换占位符
-3. 占位符格式：`J$_1`、`J$_2`（RP 前缀 = `"J$_"`，可随沙盒变量名变化）
+### 核心辅助函数
 
-这种方式避免了每次注入钩子都重新 parse，大幅提升大文件插桩性能。
+| 函数 | 作用 |
+|------|------|
+| `memberExpr(obj, prop)` | 构建 `J$.xxx` 形式的 `MemberExpression` |
+| `callExpr(callee, args)` | 构建 `CallExpression` |
+| `jalangiCall(name, args)` | 构建 `J$.name(args)` 调用表达式 |
+| `transferLoc(dst, src)` | 将源节点的位置信息复制到目标节点 |
+| `replaceAndMark(path, newNode)` | 替换节点并打 `__j_instrumented` 标记，防止二次插桩 |
+
+### 各 wrap 函数使用的构建方式
+
+所有高频插桩函数（`wrapRead`、`wrapWrite`、`wrapLiteral`、`wrapGetField`、`wrapPutField`、
+`wrapMethodCall`、`wrapAwait`、`createCallAsFunEnterStatement`、`wrapForIn`、
+`wrapScriptBodyWithTryCatch`、`wrapFunBodyWithTryCatch`）均已改为 `@babel/types` 直接构建。
+
+> `replaceInStatement` / `replaceInExpr` 保留在文件末尾作为**参考实现**，
+> 已无任何内部调用方，可在将来清理。
 
 ## 采样模式（ENABLE_SAMPLING）
 

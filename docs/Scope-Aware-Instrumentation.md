@@ -25,7 +25,7 @@ flowchart TD
         R["J$.R(iid, name, val, flags, defScopeId)\n全量路径，同步 Shadow Frame"]
         Rl["J$.Rl(iid, defScopeId, name)\n轻量路径，从 Shadow Frame 查值"]
         W_hook["J$.W(iid, name, val, lhs, flags, defScopeId)\n写入并更新 Shadow Frame"]
-        SF["Shadow Frame\nMap&lt;'scopeId:callId', Map&lt;name,value&gt;&gt;"]
+        SF["Shadow Frame\nMap&lt;defScopeId, Map&lt;callId, Map&lt;name,value&gt;&gt;&gt;"]
         DFA["DataFlowAnalyzer\nSSA 化 + 别名追踪\nBackward Slicing"]
     end
 
@@ -459,7 +459,7 @@ Fr(iid) {
 
 ### 3.2 Shadow Frame 机制
 
-Shadow Frame 是一个按 `(defScopeId, callId)` 复合键索引的 Map，在 `J$.W` 写入局部变量时同步更新，供 `J$.Rl` 查询，省去 `J$.R` 需要将值作为参数传入的开销。
+Shadow Frame 是一个嵌套的 Map（`defScopeId -> callId -> Map<name, value>`），在 `J$.W` 写入局部变量时同步更新，供 `J$.Rl` 查询，省去 `J$.R` 需要将值作为参数传入的开销。
 
 ```js
 #shadowFrameMap = new Map(); // `${defScopeId}:${callId}` → Map<name, value>
@@ -826,7 +826,7 @@ const visitorAntiDetection = {
 当前项目直接在 Babel AST 上插桩并原样输出，这是正确决策：
 - 降级 `async/await → Promise.then` 会改变 `arguments.callee` 和 `Function.length`，可能触发恶意代码的反调试逻辑
 - 降级 `class → function` 会让 `instanceof` 行为不一致
-- 降级 `let/const → var` 会消除 TDZ（Temporal Dead Zone）
+- 降级 `let/const → var` 会消除 TDZ（Temporal Dead Zone）。为了避免在未降级的情况下触发 TDZ `ReferenceError`，插桩器在作用域顶部同步变量（`J$.N`）时，会跳过 `let`、`const` 和 `class` 声明。
 
 `wrapFunBodyWithTryCatch` 已明确排除 async 和 generator 函数。
 
@@ -929,6 +929,7 @@ const visitorAntiDetection = {
   └── J$.T(内层函数)                       → funcClosureCallId.set(fn, C_outer)         ✅
       ↓  makeCounter() 退出
       Fr()：检测到 S_outer:C_outer 在 closureFrameSet 中 → 不清除 Shadow Frame        ✅（理论上）
+      （注：为了防止内存泄漏，运行时引入了 FinalizationRegistry 和引用计数，当闭包函数被 GC 时，会自动清理这些保留的 Shadow Frame）
           但 closureFrameSet 注册可能不正确（见下文）
 内层函数 counter()（新 callId=C_inner）
   ├── Fe()：capturedOuterCallId = funcClosureCallId.get(fn) = C_outer                 ✅

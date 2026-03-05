@@ -280,7 +280,7 @@ describe('ESM import/export', () => {
     test('import + export（module 模式）', () => {
         const r = instr('import { foo } from "./foo.js"; export const bar = foo();', { sourceType: 'module' });
         assert.ok(r.code.includes('J$.F('), 'foo() 调用应注入 J$.F');
-        assert.ok(r.code.includes('J$.N('), 'const bar 初始化应注入 J$.N');
+        assert.ok(r.code.includes('J$.W('), 'const bar 初始化应注入 J$.W');
     });
 
     test('export default function', () => {

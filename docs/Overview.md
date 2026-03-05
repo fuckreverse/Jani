@@ -37,7 +37,7 @@ flowchart TD
 | `astUtil.js` | AST 遍历器与 CONTEXT 上下文枚举 |
 | `scope.js` | 词法作用域分析，含 ScopeID / eval / with 检测 / varKind |
 | `iid.js` | IID（Instruction ID）计数器与源码位置映射 |
-| `wrappers.js` | AST 节点包装函数库，模板缓存优化 |
+| `wrappers.js` | AST 节点包装函数库，全部使用 `@babel/types` 直接构建 AST |
 | `dataflow.js` | 静态 SSA def-use 分析，生成插桩决策表（Pass 0）|
 | `pluginAnalyzer.js` | 插件静态分析器，自动推导按需 Config（`buildConfigFromPlugins`）|
 
@@ -204,16 +204,17 @@ npm run trace-server
 
 1. **无全局污染**：插桩代码用 IIFE 包裹，沙盒变量名（默认 `J$`，可自定义）通过闭包传入
 2. **可选 module 模式**：`sourceType: 'module'` 支持 ESM 插桩（顶层 await）
-3. **模板缓存**：`wrappers.js` 中 `replaceInStatement` 对模板 Babel AST 结果缓存，大幅提升性能
+3. **`@babel/types` 直接构建 AST**：`wrappers.js` 中所有 wrap 函数均改为用 `@babel/types` 工厂函数直接构建 AST 节点，彻底消除旧版字符串模板解析（`replaceInStatement`）的运行时 parse 开销
 4. **IID 步长 8**：同一 AST 节点的多个子操作共享一段 IID，如方法调用 `iid+2` 为内部 getField
 5. **采样模式**：`ENABLE_SAMPLING: true` 时，每个函数在"插桩版本"和"原始版本"之间动态切换
 6. **作用域感知插桩**：`scope.js` 为每个词法作用域分配唯一 `ScopeID`，`J$.W` / `J$.Fe` 传递 `defScopeId`，精确区分同名变量
-7. **Shadow Frame + 轻量读取**：运行时按 `(defScopeId, callId)` 缓存变量值；对静态可信局部变量改用 `J$.Rl` 不传值路径，大幅降低代码膨胀
+7. **Shadow Frame + 轻量读取**：运行时按 `(defScopeId, callId)` 缓存变量值；对静态可信局部变量改用 `J$.Rl` 不传值路径，大幅降低代码膨胀。结合 `FinalizationRegistry` 自动回收闭包引用的 Shadow Frame，防止内存泄漏。
 8. **CallID 递归隔离**：`J$.Fe` 每次函数进入生成新 `callId`，递归调用与并发任务的 Shadow Frame 互不干扰
 9. **对象 OID 机制**：`J$.T` 字面量创建时为引用类型分配全局唯一 OID，通过 `J$.P` 写属性时自动递增版本号，支持别名追踪
 10. **异步 ContextID**：`J$.Aw` 恢复点钩子 + `newAsyncContext()` / `activateContext()` API，彻底解决异步 log 交叉感染问题
-11. **静态 SSA def-use 分析**：`dataflow.js` 在插桩前对 AST 进行两阶段分析，生成插桩决策表（FULL / LIGHTWEIGHT / DEAD），指导第三 AST Pass 选择最优钩子
-12. **按需 Config 推导**：`pluginAnalyzer.js` 静态扫描插件代码，自动推导最小化插桩 Config，减少不必要的插桩开销
-13. **统一日志工厂**：`src/logger/logger.js` 提供 `createLogger(domain)` + `DOMAIN` 常量，插桩器与运行时的诊断日志统一走两级（域 + 级别）分类，`debug` 级别受 `JALANGI_DEBUG` / `localStorage.jalangiDebug` 开关控制
-14. **高性能日志后端**：`TypedArrayBackend` 使用 `Float64Array` 环形缓冲区，单条写入无 GC，峰值吞吐量显著优于普通对象数组
-15. **反插桩对抗**：`AntiDetection` 提供 `Function.prototype.toString` Hook、全局泄露检测、异步上下文包装等隐蔽性增强机制
+11. **单次统一插桩 Pass**：`esnstrument.js` 通过单次 `@babel/traverse`（`runInstrumentPass`）完成全部插桩变换（字面量、读写、运算符、函数进出），`replaceAndMark` 防止已插桩节点被二次遍历，彻底解决现代语法（箭头函数、逻辑赋值、Async/Await 等）漏插桩问题
+12. **静态 SSA def-use 分析**：`dataflow.js` 在插桩前对 AST 进行两阶段分析，生成插桩决策表（FULL / LIGHTWEIGHT / DEAD），指导统一插桩 Pass 选择最优钩子
+13. **按需 Config 推导**：`pluginAnalyzer.js` 静态扫描插件代码，自动推导最小化插桩 Config，减少不必要的插桩开销
+14. **统一日志工厂**：`src/logger/logger.js` 提供 `createLogger(domain)` + `DOMAIN` 常量，插桩器与运行时的诊断日志统一走两级（域 + 级别）分类，`debug` 级别受 `JALANGI_DEBUG` / `localStorage.jalangiDebug` 开关控制
+15. **高性能日志后端**：`TypedArrayBackend` 使用 `Float64Array` 环形缓冲区，单条写入无 GC，峰值吞吐量显著优于普通对象数组
+16. **反插桩对抗**：`AntiDetection` 提供 `Function.prototype.toString` Hook、全局泄露检测、异步上下文包装等隐蔽性增强机制

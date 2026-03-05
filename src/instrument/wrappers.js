@@ -20,11 +20,17 @@
  * AST 包装（wrap）函数库。
  *
  * 负责将插桩钩子注入到各类 AST 节点中。
- * 核心优化：replaceInExpr / replaceInStatement 使用模板缓存，
- * 避免每次调用都重新执行 @babel/parser 解析。
+ *
+ * Phase 4 重构（完成）：所有 wrap 函数从 replaceInExpr 字符串模板改为
+ * 直接用 @babel/types 工厂函数构建 AST，消除运行时解析开销。
+ * replaceInStatement / replaceInExpr 保留为参考实现，已无内部调用方。
  */
 
 import * as babelParser from '@babel/parser';
+import _babelTypes from '@babel/types';
+// @babel/types 是 CJS 模块，ESM 导入需取 .default
+const t = _babelTypes.default ?? _babelTypes;
+
 import { JALANGI_VAR, HOP } from '../Constants.js';
 import * as IID from './iid.js';
 
@@ -73,7 +79,42 @@ let instrumentCodeFunName;
 let logReadLightFunName;  // J$.Rl 轻量变量读取钩子
 let logAwaitResumeFunName;  // J$.Aw await 恢复点钩子
 
-/** 用给定的沙盒变量名重新生成所有运行时函数名常量 */
+// ─── @babel/types 辅助函数（用于直接构建 AST）───────────────────────────────
+
+/**
+ * 构建 `<obj>.<prop>` 的 MemberExpression 节点（非计算属性）。
+ * @param {string|object} obj  - 对象名（字符串时自动转 Identifier）或 AST 节点
+ * @param {string}        prop - 属性名
+ */
+function memberExpr(obj, prop) {
+    const object = (typeof obj === 'string') ? t.identifier(obj) : obj;
+    return t.memberExpression(object, t.identifier(prop));
+}
+
+/**
+ * 构建 `<callee>(<...args>)` 的 CallExpression 节点。
+ * @param {string|object} callee - 被调函数（字符串时视为 `J$.<callee>`）或 AST 节点
+ * @param {object[]}      args   - 参数 AST 节点数组
+ */
+function callExpr(callee, args) {
+    const calleeNode = (typeof callee === 'string')
+        ? memberExpr(_jalangiVar, callee)
+        : callee;
+    return t.callExpression(calleeNode, args);
+}
+
+/**
+ * 构建 `J$.<method>(iid, ...rest)` 的通用插桩调用节点。
+ * @param {string}   method  - J$ 的方法名（如 'R', 'W', 'B'）
+ * @param {object}   iidNode - IID 数字字面量 AST 节点
+ * @param {object[]} rest    - 其余参数 AST 节点数组
+ */
+function jalangiCall(method, iidNode, ...rest) {
+    return callExpr(memberExpr(_jalangiVar, method), [iidNode, ...rest]);
+}
+
+/**
+ * 用给定的沙盒变量名重新生成所有运行时函数名常量 */
 function _rebuildNames(v) {
     _jalangiVar              = v;
     RP                       = `${v}_`;
@@ -118,8 +159,6 @@ _rebuildNames(JALANGI_VAR);
 
 // ─── N_LOG_* 字面量类型常量 ────────────────────────────────────────────────────
 // 这些整数常量在运行时传给 J$.T（wrapLiteral），用于标识字面量的具体类型。
-// 旧版中存在的 N_LOG_FUNCTION_ENTER(4)、N_LOG_SCRIPT_ENTER(6)、N_LOG_GETFIELD(8)、
-// N_LOG_RETURN(13)、N_LOG_READ(17)、N_LOG_HASH(19)、N_LOG_SPECIAL(20) 已不再使用，已删除。
 
 const N_LOG_ARRAY_LIT       = 10;
 const N_LOG_OBJECT_LIT      = 11;
@@ -130,6 +169,7 @@ const N_LOG_NUMBER_LIT      = 22;
 const N_LOG_BOOLEAN_LIT     = 23;
 const N_LOG_UNDEFINED_LIT   = 24;
 const N_LOG_NULL_LIT        = 25;
+const N_LOG_BIGINT_LIT      = 26;
 
 // ─── AST 工具函数 ──────────────────────────────────────────────────────────────
 
@@ -149,17 +189,17 @@ function assertAstNode(val, callerName) {
  */
 const createLiteralAst = (name) => {
     if (typeof name === 'string') {
-        return { type: 'StringLiteral', value: name };
+        return t.stringLiteral(name);
     } else if (typeof name === 'number') {
-        return { type: 'NumericLiteral', value: name };
+        return t.numericLiteral(name);
     } else if (typeof name === 'boolean') {
-        return { type: 'BooleanLiteral', value: name };
+        return t.booleanLiteral(name);
     } else if (name === null) {
-        return { type: 'NullLiteral' };
+        return t.nullLiteral();
     }
-    return { type: 'StringLiteral', value: String(name) };
+    return t.stringLiteral(String(name));
 };
-const createIdentifierAst = (name) => ({ type: 'Identifier',  name  });
+const createIdentifierAst = (name) => t.identifier(name);
 
 function transferLoc(toNode, fromNode) {
     if (fromNode.loc) toNode.loc = fromNode.loc;
@@ -174,25 +214,18 @@ function createBitPattern(...flags) {
     return flags.reduce((acc, f) => (acc << 1) + (f ? 1 : 0), 0);
 }
 
-// ─── 模板缓存（核心优化）────────────────────────────────────────────────────────
+// ─── 模板缓存（遗留：replaceInStatement / replaceInExpr 可完全移除）─────────────
 //
-// replaceInStatement / replaceInExpr 每次都接收一个代码模板字符串，
-// 其中的占位符 J$_1, J$_2, ... 会被真实 AST 节点替换。
-//
-// 第一次解析时缓存去掉 loc 的纯结构 AST，后续深拷贝复用，省去重复 parse。
-// _templateCache 已在模块顶部声明；变量名改变时由 _rebuildNames() 清空缓存。
+// Phase 4 已将所有 wrap 函数迁移至 @babel/types 直接构建，
+// replaceInStatement / replaceInExpr 已无任何调用方，
+// 保留以防外部测试代码直接调用（或作为参考实现）。
 
 /**
  * 深拷贝并替换 AST 中的占位符。
- *
- * 规则：
- *  1. Identifier 且名称以 RP 开头 → 替换为 args[N]
- *  2. BlockStatement.body 若展开后某元素是数组，则 flat 一层
  */
 function deepCloneAndReplace(node, args) {
     if (node === null || typeof node !== 'object') return node;
 
-    // 数组：逐元素处理，flat 一层（支持 BlockStatement body 展开）
     if (Array.isArray(node)) {
         const result = [];
         for (const item of node) {
@@ -203,12 +236,10 @@ function deepCloneAndReplace(node, args) {
         return result;
     }
 
-    // 占位符 Identifier: J$_N → args[N]
     if (node.type === 'Identifier' && node.name.startsWith(RP)) {
         return args[parseInt(node.name.slice(RP.length), 10)];
     }
 
-    // BlockStatement：先递归，再检查展开约定
     if (node.type === 'BlockStatement') {
         const newBody = deepCloneAndReplace(node.body, args);
         if (newBody.length === 1
@@ -219,7 +250,6 @@ function deepCloneAndReplace(node, args) {
         return { type: 'BlockStatement', body: newBody };
     }
 
-    // 普通节点：逐属性拷贝，跳过位置信息
     const obj = {};
     for (const key of Object.keys(node)) {
         if (key !== 'loc' && key !== 'start' && key !== 'end') {
@@ -229,12 +259,6 @@ function deepCloneAndReplace(node, args) {
     return obj;
 }
 
-/**
- * 解析模板代码，返回 body 语句数组，并替换占位符。
- *
- * 调用约定：replaceInStatement(templateStr, arg1, arg2, ...)
- * 其中 templateStr 中的 J$_1, J$_2 … 会被 arg1, arg2 … 替换。
- */
 function replaceInStatement(code, ...args) {
     let cached = _templateCache.get(code);
     if (!cached) {
@@ -255,7 +279,6 @@ function replaceInStatement(code, ...args) {
             );
         }
     }
-    // args 从索引 1 开始对应模板中的 J$_1，与旧版 arguments[1] 对齐
     return deepCloneAndReplace(cached, [undefined, ...args]);
 }
 
@@ -287,7 +310,7 @@ const getPropertyAsAst = (ast) => {
     return createLiteralAst(prop.name);
 };
 
-// ─── wrap 函数 ────────────────────────────────────────────────────────────────
+// ─── wrap 函数（@babel/types 直接构建版）─────────────────────────────────────
 
 function wrapPutField(node, base, offset, rvalue, isComputed) {
     assertAstNode(node,   'wrapPutField/node');
@@ -295,9 +318,9 @@ function wrapPutField(node, base, offset, rvalue, isComputed) {
     assertAstNode(offset, 'wrapPutField/offset');
     if (!Config.INSTR_PUTFIELD || Config.INSTR_PUTFIELD(isComputed ? null : offset.value, node)) {
         IID.printIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logPutFieldFunName}(${RP}1, ${RP}2, ${RP}3, ${RP}4,${createBitPattern(isComputed, false)})`,
-            IID.getIid(), base, offset, rvalue
+        const ret = jalangiCall('P',
+            IID.getIid(), base, offset, rvalue,
+            t.numericLiteral(createBitPattern(isComputed, false))
         );
         transferLoc(ret, node);
         return ret;
@@ -308,10 +331,12 @@ function wrapPutField(node, base, offset, rvalue, isComputed) {
 function wrapModAssign(node, base, offset, op, rvalue, isComputed, isNumber) {
     if (!Config.INSTR_PROPERTY_BINARY_ASSIGNMENT || Config.INSTR_PROPERTY_BINARY_ASSIGNMENT(op, node.computed ? null : offset.value, node)) {
         IID.printModIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logAssignFunName}(${RP}1,${RP}2,${RP}3,${RP}4,${createBitPattern(isComputed, isNumber)})(${RP}5)`,
-            IID.getIid(), base, offset, createLiteralAst(op), rvalue
+        // J$.A(iid, base, offset, op, bits)(rvalue)
+        const innerCall = jalangiCall('A',
+            IID.getIid(), base, offset, createLiteralAst(op),
+            t.numericLiteral(createBitPattern(isComputed, isNumber))
         );
+        const ret = t.callExpression(innerCall, [rvalue]);
         transferLoc(ret, node);
         return ret;
     }
@@ -325,23 +350,35 @@ function wrapMethodCall(node, base, offset, isCtor, isComputed) {
     if (!Config.INSTR_INVOKE || Config.INSTR_INVOKE(node)) {
         IID.printIidToLoc(node);
         IID.printSpecialIidToLoc(node.callee);
-        const ret = replaceInExpr(
-            `${logMethodCallFunName}(${RP}1, ${RP}2, ${RP}3, ${createBitPattern(isCtor, isComputed)})`,
-            IID.getIid(), base, offset
+        const ret = jalangiCall('M',
+            IID.getIid(), base, offset,
+            t.numericLiteral(createBitPattern(isCtor, isComputed))
         );
         transferLoc(ret, node.callee);
         return ret;
     }
     // INSTR_INVOKE 禁用时：退回原始 callee，保留语义正确性
-    return base.type ? { type: 'MemberExpression', object: base, property: offset, computed: isComputed } : base;
+    // offset 可能是 StringLiteral（非计算属性名），不能直接传给 t.memberExpression 的 property
+    if (base.type) {
+        if (isComputed) {
+            return t.memberExpression(base, offset, true);
+        } else {
+            // 非计算属性：offset 是 StringLiteral，转为 Identifier
+            const propId = (offset.type === 'StringLiteral')
+                ? t.identifier(offset.value)
+                : offset;
+            return t.memberExpression(base, propId, false);
+        }
+    }
+    return base;
 }
 
 function wrapFunCall(node, ast, isCtor) {
     if (!Config.INSTR_INVOKE || Config.INSTR_INVOKE(node)) {
         IID.printIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logFunCallFunName}(${RP}1, ${RP}2, ${createBitPattern(isCtor)})`,
-            IID.getIid(), ast
+        const ret = jalangiCall('F',
+            IID.getIid(), ast,
+            t.numericLiteral(createBitPattern(isCtor))
         );
         transferLoc(ret, node.callee);
         return ret;
@@ -350,25 +387,24 @@ function wrapFunCall(node, ast, isCtor) {
 }
 
 function wrapGetField(node, base, offset, isComputed, isOptional) {
-assertAstNode(node,   'wrapGetField/node');
-assertAstNode(base,   'wrapGetField/base');
-assertAstNode(offset, 'wrapGetField/offset');
-if (!Config.INSTR_GETFIELD || Config.INSTR_GETFIELD(node.computed ? null : offset.value, node)) {
-IID.printIidToLoc(node);
-const ret = replaceInExpr(
-`${logGetFieldFunName}(${RP}1, ${RP}2, ${RP}3,${createBitPattern(isComputed, false, false, !!isOptional)})`,
-IID.getIid(), base, offset
-);
-transferLoc(ret, node);
-return ret;
-}
-return node;
+    assertAstNode(node,   'wrapGetField/node');
+    assertAstNode(base,   'wrapGetField/base');
+    assertAstNode(offset, 'wrapGetField/offset');
+    if (!Config.INSTR_GETFIELD || Config.INSTR_GETFIELD(node.computed ? null : offset.value, node)) {
+        IID.printIidToLoc(node);
+        const ret = jalangiCall('G',
+            IID.getIid(), base, offset,
+            t.numericLiteral(createBitPattern(isComputed, false, false, !!isOptional))
+        );
+        transferLoc(ret, node);
+        return ret;
+    }
+    return node;
 }
 
 function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal, scopeId) {
     assertAstNode(node, 'wrapRead/node');
     assertAstNode(name, 'wrapRead/name');
-    // Guard: 属性名必须是字符串，否则说明上游错误地把解构模式的 .name 传入了
     if (name.type === 'StringLiteral' && typeof name.value !== 'string') {
         throw new Error(
             `[jalangi] wrapRead: name.value should be a string identifier name, got ${JSON.stringify(name.value)}. ` +
@@ -377,13 +413,13 @@ function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal, scopeId)
     }
     if (!Config.INSTR_READ || Config.INSTR_READ(name, node)) {
         IID.printIidToLoc(node);
-        // TODO-7: 若有 scopeId，追加为第五个参数，帮助运行时同步 Shadow Frame
-        const scopeArg = (scopeId !== undefined && scopeId !== null) ? `, ${scopeId}` : '';
-        const ret = replaceInExpr(
-            `${logReadFunName}(${RP}1, ${RP}2, ${RP}3,${createBitPattern(isGlobal, isScriptLocal)}${scopeArg})`,
-            isReUseIid ? IID.getPrevIidNoInc() : IID.getIid(),
-            name, val
-        );
+        const iidNode = isReUseIid ? IID.getPrevIidNoInc() : IID.getIid();
+        const bitsNode = t.numericLiteral(createBitPattern(isGlobal, isScriptLocal));
+        const args = [iidNode, name, val, bitsNode];
+        if (scopeId !== undefined && scopeId !== null) {
+            args.push(t.numericLiteral(scopeId));
+        }
+        const ret = callExpr(memberExpr(_jalangiVar, 'R'), args);
         transferLoc(ret, node);
         return ret;
     }
@@ -391,108 +427,61 @@ function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal, scopeId)
 }
 
 function wrapReadWithUndefinedCheck(node, name) {
-    const ret = replaceInExpr(
-        `(${logIFunName}(typeof (${name}) === 'undefined'? (${RP}2) : (${RP}3)))`,
-        createIdentifierAst(name),
-        wrapRead(node, createLiteralAst(name), createIdentifierAst('undefined'), false, true, false),
-        wrapRead(node, createLiteralAst(name), createIdentifierAst(name), true, true, false)
-    );
+    // J$.I(typeof name === 'undefined' ? wrapRead(...undefined) : wrapRead(...name))
+    const undef = t.identifier('undefined');
+    const nameId = t.identifier(name);
+    const typeofExpr = t.unaryExpression('typeof', nameId);
+    const isUndef = t.binaryExpression('===', typeofExpr, t.stringLiteral('undefined'));
+    const readUndef = wrapRead(node, createLiteralAst(name), undef, false, true, false);
+    const readName  = wrapRead(node, createLiteralAst(name), nameId, true, true, false);
+    const conditional = t.conditionalExpression(isUndef, readUndef, readName);
+    const ret = callExpr(memberExpr(_jalangiVar, 'I'), [conditional]);
     transferLoc(ret, node);
     return ret;
 }
 
 /**
  * await 恢复点包装器。
- *
- * 将 `await expr` 转换为 `J$.Aw(iid, await expr, ctxId)`：
- *   - 运行时在 await 恢复时收到通知（contextId 切换），
- *   - 同时获得并透传 resolved value，不改变原始语义。
- *   - ctxId 是在 async 函数入口处捕获的 callId（存储在 J$__ctx 变量中），
- *     用于在并发 async 调用场景下正确区分不同的 async 调用实例。
- *
- * 签名: J$.Aw(iid, val, ctxId) → val
- *
- * Config.INSTR_AWAIT 控制是否插桩：
- *   null / undefined → 全量插桩；() => false → 完全跳过。
- *
- * @param {object} node     - AwaitExpression AST 节点（用于位置信息）
- * @param {object} argument - await 操作数（已插桩的子表达式）
+ * 将 `await expr` 转换为 `J$.Aw(iid, await expr, ctxId)`。
  */
 function wrapAwait(node, argument) {
     if (!Config.INSTR_AWAIT || Config.INSTR_AWAIT(node)) {
         IID.printIidToLoc(node);
-        // 手工构造 `J$.Aw(iid, await argument, J$__ctx)` AST 节点。
-        //
-        // 不能用 replaceInExpr 字符串模板，因为模板用 sourceType:'script' 解析，
-        // 而 `await` 在 script 顶层是非法的（只在 async 函数或 module 中合法）。
-        // 直接构造 AST 可绕过此限制，且更高效（无解析开销）。
-        //
-        // 第三个参数 J$__ctx 是在 async 函数入口处注入的局部变量，
-        // 存储了本次 async 函数调用的 callId，用于跨 await 恢复时识别 contextId。
-        //
-        // 构造的 AST 结构：
-        //   CallExpression {
-        //     callee: MemberExpression { object: J$, property: 'Aw' },
-        //     arguments: [iid, AwaitExpression { argument }, J$__ctx]
-        //   }
         const iidNode = IID.getIid();
 
-        // 内层 AwaitExpression：await argument
-        // argument 已由子节点 visitor 完整插桩（J$.R / J$.G 等已注入）
-        const awaitNode = {
-            type: 'AwaitExpression',
-            argument,
-        };
+        const awaitNode = t.awaitExpression(argument);
         if (node.loc) awaitNode.loc = node.loc;
 
-        // J$__ctx：async 函数入口处注入的局部变量（保存了本次调用的 callId）
-        const ctxVarNode = { type: 'Identifier', name: `${_jalangiVar}__ctx` };
+        const ctxVarNode = t.identifier(`${_jalangiVar}__ctx`);
 
-        // 外层 CallExpression：J$.Aw(iid, awaitNode, ctxVarNode)
-        const ret = {
-            type: 'CallExpression',
-            callee: {
-                type: 'MemberExpression',
-                object:   { type: 'Identifier', name: _jalangiVar },
-                property: { type: 'Identifier', name: 'Aw' },
-                computed: false,
-            },
-            arguments: [iidNode, awaitNode, ctxVarNode],
-        };
+        const ret = jalangiCall('Aw', iidNode, awaitNode, ctxVarNode);
         transferLoc(ret, node);
         return ret;
     }
-    // INSTR_AWAIT 禁用：保留原始 AwaitExpression（语义不变）
     return node;
 }
 
 /**
  * 轻量变量读取钩子包装器。
- * 不传实际值——运行时从 Shadow Frame 查找，减少插桩开销。
  * 签名: J$.Rl(iid, defScopeId, name) → value
- * @param {object} node     - 原 AST 节点（用于位置信息）
- * @param {object} name     - StringLiteral 节点（变量名）
- * @param {number} defScopeId - 变量定义点的 Scope.id
  */
 function wrapReadLightweight(node, name, defScopeId) {
     if (!Config.INSTR_READ || Config.INSTR_READ(name, node)) {
         IID.printIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logReadLightFunName}(${RP}1, ${defScopeId}, ${RP}2)`,
+        const ret = jalangiCall('Rl',
             IID.getIid(),
+            t.numericLiteral(defScopeId),
             name
         );
         transferLoc(ret, node);
         return ret;
     }
-    // 若 INSTR_READ 禁用该节点，退回插桩标识符本身（保持语义正确）
     return node;
 }
 
 function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration, scopeId) {
     assertAstNode(node, 'wrapWrite/node');
     assertAstNode(name, 'wrapWrite/name');
-    // Guard: 属性名必须是字符串，否则说明上游错误地把解构模式的 .name 传入了
     if (name.type === 'StringLiteral' && typeof name.value !== 'string') {
         throw new Error(
             `[jalangi] wrapWrite: name.value should be a string identifier name, got ${JSON.stringify(name.value)}. ` +
@@ -501,12 +490,12 @@ function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration,
     }
     if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name, node)) {
         IID.printIidToLoc(node);
-        // TODO-7: 若有 scopeId，追加为第六个参数，帮助运行时更新 Shadow Frame
-        const scopeArg = (scopeId !== undefined && scopeId !== null) ? `, ${scopeId}` : '';
-        const ret = replaceInExpr(
-            `${logWriteFunName}(${RP}1, ${RP}2, ${RP}3, ${RP}4,${createBitPattern(isGlobal, isScriptLocal, isDeclaration)}${scopeArg})`,
-            IID.getIid(), name, val, lhs
-        );
+        const bitsNode = t.numericLiteral(createBitPattern(isGlobal, isScriptLocal, isDeclaration));
+        const args = [IID.getIid(), name, val, lhs, bitsNode];
+        if (scopeId !== undefined && scopeId !== null) {
+            args.push(t.numericLiteral(scopeId));
+        }
+        const ret = callExpr(memberExpr(_jalangiVar, 'W'), args);
         transferLoc(ret, node);
         return ret;
     }
@@ -516,30 +505,54 @@ function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration,
 function wrapWriteWithUndefinedCheck(node, name, val, lhs) {
     if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name, node)) {
         IID.printIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logWriteFunName}(${RP}1, ${RP}2, ${RP}3, ${logIFunName}(typeof(${lhs.name})==='undefined'?undefined:${lhs.name}),${createBitPattern(true, false, false)})`,
-            IID.getIid(), name, val
-        );
+        // J$.W(iid, name, val, J$.I(typeof lhs === 'undefined' ? undefined : lhs), bits)
+        const lhsId = t.identifier(lhs.name);
+        const typeofExpr = t.unaryExpression('typeof', lhsId);
+        const isUndef = t.binaryExpression('===', typeofExpr, t.stringLiteral('undefined'));
+        const ifExpr = t.conditionalExpression(isUndef, t.identifier('undefined'), lhsId);
+        const wrappedLhs = callExpr(memberExpr(_jalangiVar, 'I'), [ifExpr]);
+        const bitsNode = t.numericLiteral(createBitPattern(true, false, false));
+        const ret = callExpr(memberExpr(_jalangiVar, 'W'), [IID.getIid(), name, val, wrappedLhs, bitsNode]);
         transferLoc(ret, node);
         return ret;
     }
     return val;
 }
 
+// 逻辑运算符集合（@babel/types 的 logicalExpression 支持的操作符）
+const _LOGICAL_OPS = new Set(['||', '&&', '??']);
+// 赋值操作符（以 '=' 结尾且非 '=='、'!='、'<='、'>='、'==='、'!=='）
+function _isAssignmentOp(op) {
+    return op.endsWith('=') && op.length > 1 && !['==', '!=', '<=', '>=', '===', '!=='].includes(op);
+}
+
 function wrapRHSOfModStore(node, left, right, op) {
-    const ret = replaceInExpr(`${RP}1 ${op} ${RP}2`, left, right);
+    // op 可能是：
+    //  - 逻辑运算符（'||' '&&' '??'）→ t.logicalExpression
+    //  - 赋值运算符（'+=' '||='等）→ t.assignmentExpression
+    //  - 普通二元运算符（'+' '-' 等）→ t.binaryExpression
+    let ret;
+    if (_LOGICAL_OPS.has(op)) {
+        ret = t.logicalExpression(op, left, right);
+    } else if (_isAssignmentOp(op)) {
+        ret = t.assignmentExpression(op, left, right);
+    } else {
+        ret = t.binaryExpression(op, left, right);
+    }
     transferLoc(ret, node);
     return ret;
 }
 
 function makeNumber(node, left) {
-    const ret = replaceInExpr(` + ${RP}1 `, left);
+    // 一元 + 将值转为数字：+left
+    const ret = t.unaryExpression('+', left);
     transferLoc(ret, node);
     return ret;
 }
 
 function wrapLHSOfModStore(node, left, right) {
-    const ret = replaceInExpr(`${RP}1 = ${RP}2`, left, right);
+    // left = right
+    const ret = t.assignmentExpression('=', left, right);
     transferLoc(ret, node);
     return ret;
 }
@@ -548,11 +561,8 @@ function wrapReturn(node, expr) {
     if (!Config.INSTR_RETURN || Config.INSTR_RETURN(node)) {
         const lid = expr ?? node;
         IID.printIidToLoc(lid);
-        const actualExpr = expr ?? createIdentifierAst('undefined');
-        const ret = replaceInExpr(
-            `${logReturnFunName}(${RP}1, ${RP}2)`,
-            IID.getIid(), actualExpr
-        );
+        const actualExpr = expr ?? t.identifier('undefined');
+        const ret = jalangiCall('Rt', IID.getIid(), actualExpr);
         transferLoc(ret, lid);
         return ret;
     }
@@ -562,10 +572,7 @@ function wrapReturn(node, expr) {
 function wrapThrow(node, expr) {
     if (!Config.INSTR_THROW || Config.INSTR_THROW(node)) {
         IID.printIidToLoc(expr);
-        const ret = replaceInExpr(
-            `${logThrowFunName}(${RP}1, ${RP}2)`,
-            IID.getIid(), expr
-        );
+        const ret = jalangiCall('Th', IID.getIid(), expr);
         transferLoc(ret, expr);
         return ret;
     }
@@ -576,10 +583,7 @@ function wrapWithX1(node, ast) {
     if (!Config.INSTR_END_EXPRESSION || Config.INSTR_END_EXPRESSION(node)) {
         if (!ast || !ast.type.includes('Expression')) return ast;
         IID.printIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logX1FunName}(${RP}1,${RP}2)`,
-            IID.getIid(), ast
-        );
+        const ret = jalangiCall('X1', IID.getIid(), ast);
         transferLoc(ret, node);
         return ret;
     }
@@ -589,10 +593,7 @@ function wrapWithX1(node, ast) {
 function wrapHash(node, ast) {
     if (!Config.INSTR_FORIN || Config.INSTR_FORIN(node)) {
         IID.printIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logHashFunName}(${RP}1, ${RP}2)`,
-            IID.getIid(), ast
-        );
+        const ret = jalangiCall('H', IID.getIid(), ast);
         transferLoc(ret, node);
         return ret;
     }
@@ -601,10 +602,8 @@ function wrapHash(node, ast) {
 
 function wrapEvalArg(ast) {
     IID.printIidToLoc(ast);
-    const ret = replaceInExpr(
-        `${instrumentCodeFunName}(${RP}1, ${RP}2, true)`,
-        ast, IID.getIid()
-    );
+    // J$.instrumentEvalCode(ast, iid, true)
+    const ret = callExpr(memberExpr(_jalangiVar, 'instrumentEvalCode'), [ast, IID.getIid(), t.booleanLiteral(true)]);
     transferLoc(ret, ast);
     return ret;
 }
@@ -612,10 +611,7 @@ function wrapEvalArg(ast) {
 function wrapUnaryOp(node, argument, operator) {
     if (!Config.INSTR_UNARY || Config.INSTR_UNARY(operator, node)) {
         IID.printOpIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logUnaryOpFunName}(${RP}1,${RP}2,${RP}3)`,
-            IID.getOpIid(), createLiteralAst(operator), argument
-        );
+        const ret = jalangiCall('U', IID.getOpIid(), createLiteralAst(operator), argument);
         transferLoc(ret, node);
         return ret;
     }
@@ -625,9 +621,9 @@ function wrapUnaryOp(node, argument, operator) {
 function wrapBinaryOp(node, left, right, operator, isComputed) {
     if (!Config.INSTR_BINARY || Config.INSTR_BINARY(operator, node)) {
         IID.printOpIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logBinaryOpFunName}(${RP}1, ${RP}2, ${RP}3, ${RP}4,${createBitPattern(isComputed, false, false)})`,
-            IID.getOpIid(), createLiteralAst(operator), left, right
+        const ret = jalangiCall('B',
+            IID.getOpIid(), createLiteralAst(operator), left, right,
+            t.numericLiteral(createBitPattern(isComputed, false, false))
         );
         transferLoc(ret, node);
         return ret;
@@ -638,10 +634,10 @@ function wrapBinaryOp(node, left, right, operator, isComputed) {
 function wrapLogicalAnd(node, left, right) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('&&', node)) {
         IID.printCondIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logConditionalFunName}(${RP}1, ${RP}2)?${RP}3:${logLastFunName}()`,
-            IID.getCondIid(), left, right
-        );
+        // J$.C(iid, left) ? right : J$._()
+        const test = jalangiCall('C', IID.getCondIid(), left);
+        const last = callExpr(memberExpr(_jalangiVar, '_'), []);
+        const ret = t.conditionalExpression(test, right, last);
         transferLoc(ret, node);
         return ret;
     }
@@ -651,10 +647,10 @@ function wrapLogicalAnd(node, left, right) {
 function wrapLogicalOr(node, left, right) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('||', node)) {
         IID.printCondIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logConditionalFunName}(${RP}1, ${RP}2)?${logLastFunName}():${RP}3`,
-            IID.getCondIid(), left, right
-        );
+        // J$.C(iid, left) ? J$._() : right
+        const test = jalangiCall('C', IID.getCondIid(), left);
+        const last = callExpr(memberExpr(_jalangiVar, '_'), []);
+        const ret = t.conditionalExpression(test, last, right);
         transferLoc(ret, node);
         return ret;
     }
@@ -665,27 +661,29 @@ function wrapLogicalOr(node, left, right) {
  * 插桩 nullish coalescing 运算符 (??)。
  *
  * `a ?? b` 语义：a 不为 null/undefined 时取 a，否则取 b。
- * 插桩模板：将 left 存入临时变量，用 J$.C 记录分支，
- * 若非 nullish（J$._() 取回暂存值），否则取 right。
- *
+ * 插桩：(tmp = left, J$.C(iid, tmp != null) ? J$._() : right)
  */
 function wrapLogicalNullish(node, left, right) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('??', node)) {
         IID.printCondIidToLoc(node);
-        // 每次使用唯一临时变量名，避免嵌套 ?? 运算符共享同一槽导致的互相覆盖。
-        // 例如 (a ?? b) ?? c 中外层的临时槽不会被内层覆盖。
-        //
-        // 命名使用 J$.tmp_N（成员属性访问）而非 J$_tN（裸标识符），
-        // 因为 RP = 'J$_' 是占位符前缀，以 J$_ 开头的裸标识符会被
-        // deepCloneAndReplace 误识别为占位符导致崩溃。
+        // 每次使用唯一临时变量名，避免嵌套 ?? 运算符共享同一槽
+        // 使用 J$.tmp_N（成员属性访问）而非裸标识符，
+        // 因为以 RP 开头的裸标识符会被 deepCloneAndReplace 误识别为占位符
         const tmpProp = `tmp_${tmpVarCounter++}`;
-        const uniqueTmp = `${_jalangiVar}.${tmpProp}`;
-        // `!= null` 使用宽松比较，已同时排除 null 和 undefined（因为 null == undefined），
-        // 无需再加 `!== undefined`，后者是冗余条件。
-        const ret = replaceInExpr(
-            `(${uniqueTmp} = ${RP}2, ${logConditionalFunName}(${RP}1, ${uniqueTmp} != null) ? ${logLastFunName}() : ${RP}3)`,
-            IID.getCondIid(), left, right
-        );
+        const tmpExpr = memberExpr(_jalangiVar, tmpProp);
+        const condIid = IID.getCondIid();
+
+        // tmp = left
+        const assign = t.assignmentExpression('=', tmpExpr, left);
+        // tmp != null
+        const notNull = t.binaryExpression('!=', tmpExpr, t.nullLiteral());
+        // J$.C(condIid, tmp != null)
+        const condCall = jalangiCall('C', condIid, notNull);
+        // J$.C(iid, tmp != null) ? J$._() : right
+        const last = callExpr(memberExpr(_jalangiVar, '_'), []);
+        const ternary = t.conditionalExpression(condCall, last, right);
+        // (tmp = left, J$.C(iid, tmp != null) ? J$._() : right)
+        const ret = t.sequenceExpression([assign, ternary]);
         transferLoc(ret, node);
         return ret;
     }
@@ -695,10 +693,7 @@ function wrapLogicalNullish(node, left, right) {
 function wrapSwitchDiscriminant(node, discriminant) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('switch', node)) {
         IID.printCondIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logSwitchLeftFunName}(${RP}1, ${RP}2)`,
-            IID.getCondIid(), discriminant
-        );
+        const ret = jalangiCall('C1', IID.getCondIid(), discriminant);
         transferLoc(ret, node);
         return ret;
     }
@@ -708,10 +703,7 @@ function wrapSwitchDiscriminant(node, discriminant) {
 function wrapSwitchTest(node, test) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('switch', node)) {
         IID.printCondIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logSwitchRightFunName}(${RP}1, ${RP}2)`,
-            IID.getCondIid(), test
-        );
+        const ret = jalangiCall('C2', IID.getCondIid(), test);
         transferLoc(ret, node);
         return ret;
     }
@@ -721,10 +713,7 @@ function wrapSwitchTest(node, test) {
 function wrapWith(node) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('with', node)) {
         IID.printIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logWithFunName}(${RP}1, ${RP}2)`,
-            IID.getIid(), node
-        );
+        const ret = jalangiCall('Wi', IID.getIid(), node);
         transferLoc(ret, node);
         return ret;
     }
@@ -735,10 +724,7 @@ function wrapConditional(node, test) {
     if (node === null) return node;  // for(;;) 的空条件
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('other', node)) {
         IID.printCondIidToLoc(node);
-        const ret = replaceInExpr(
-            `${logConditionalFunName}(${RP}1, ${RP}2)`,
-            IID.getCondIid(), test
-        );
+        const ret = jalangiCall('C', IID.getCondIid(), test);
         transferLoc(ret, node);
         return ret;
     }
@@ -759,6 +745,7 @@ function getLiteralValue(funId, node) {
         case N_LOG_NUMBER_LIT:
         case N_LOG_STRING_LIT:
         case N_LOG_BOOLEAN_LIT:   return node.value;
+        case N_LOG_BIGINT_LIT:    return BigInt(node.value);
         case N_LOG_NULL_LIT:      return null;
         // Babel RegExpLiteral：{ pattern, flags } 字段，用它们重建 RegExp 对象
         case N_LOG_REGEXP_LIT:
@@ -777,16 +764,28 @@ function ifObjectExpressionHasGetterSetter(node) {
 
 /**
  * 从已插桩的函数 AST 中提取 <sandboxVar>.Fe 调用的 IID（internalFunId）。
- * 只适用于含有 <sandboxVar>.Fe 入口语句的 FunctionExpression / FunctionDeclaration。
- * ArrowFunctionExpression 没有 Fe，应直接传 undefined。
  */
 function getFnIdFromAst(ast) {
-    const entryExpr = ast.body.body[0];
-    if (entryExpr.type !== 'ExpressionStatement') throw new Error('IllegalStateException');
+    // 函数体的第一个语句可能是：
+    //  1. ExpressionStatement(J$.Fe(...)) — 未经 wrapFunBodyWithTryCatch 的原始结构
+    //  2. LabeledStatement > WhileStatement > BlockStatement > TryStatement — 经过 wrapFunBodyWithTryCatch 后
+    let entryExpr = ast.body.body[0];
+
+    // 透过 wrapFunBodyWithTryCatch 生成的 jalangiLabel: while(true) { try {...} ... } 结构
+    if (entryExpr?.type === 'LabeledStatement'
+            && entryExpr.body?.type === 'WhileStatement'
+            && entryExpr.body.body?.type === 'BlockStatement') {
+        const tryStmt = entryExpr.body.body.body?.[0];
+        if (tryStmt?.type === 'TryStatement') {
+            entryExpr = tryStmt.block?.body?.[0];
+        }
+    }
+
+    if (entryExpr?.type !== 'ExpressionStatement') throw new Error('IllegalStateException');
     const call = entryExpr.expression;
     if (call.type !== 'CallExpression') throw new Error('IllegalStateException');
     if (call.callee.type !== 'MemberExpression') throw new Error('IllegalStateException');
-    if (call.callee.object.name !== _jalangiVar) throw new Error('IllegalStateException');  // 用动态变量名
+    if (call.callee.object.name !== _jalangiVar) throw new Error('IllegalStateException');
     if (call.callee.property.name !== 'Fe') throw new Error('IllegalStateException');
     return call.arguments[0].value;
 }
@@ -795,35 +794,27 @@ function wrapLiteral(node, ast, funId) {
     if (!Config.INSTR_LITERAL || Config.INSTR_LITERAL(getLiteralValue(funId, node), node)) {
         IID.printIidToLoc(node);
         const hasGetterSetter = ifObjectExpressionHasGetterSetter(node);
+        const iidNode     = IID.getIid();
+        const funIdNode   = createLiteralAst(funId);
+        const getterNode  = t.booleanLiteral(hasGetterSetter);
         let ret;
         if (funId === N_LOG_FUNCTION_LIT) {
             let internalFunId;
             if (node.type === 'FunctionExpression') {
                 internalFunId = getFnIdFromAst(node);
             } else if (node.type === 'ArrowFunctionExpression') {
-                // 箭头函数没有 J$.Fe 入口钩子，internalFunId 为 undefined（运行时跳过关联）
                 internalFunId = undefined;
             } else {
                 if (node.type !== 'Identifier') throw new Error('IllegalStateException');
                 internalFunId = getFnIdFromAst(_scope.funNodes[node.name]);
             }
             if (internalFunId !== undefined) {
-                ret = replaceInExpr(
-                    `${logLitFunName}(${RP}1, ${RP}2, ${RP}3,${hasGetterSetter}, ${internalFunId})`,
-                    IID.getIid(), ast, createLiteralAst(funId)
-                );
+                ret = jalangiCall('T', iidNode, ast, funIdNode, getterNode, t.numericLiteral(internalFunId));
             } else {
-                // 箭头函数：不传 internalFunId，运行时不尝试关联 J$.Fe
-                ret = replaceInExpr(
-                    `${logLitFunName}(${RP}1, ${RP}2, ${RP}3,${hasGetterSetter})`,
-                    IID.getIid(), ast, createLiteralAst(funId)
-                );
+                ret = jalangiCall('T', iidNode, ast, funIdNode, getterNode);
             }
         } else {
-            ret = replaceInExpr(
-                `${logLitFunName}(${RP}1, ${RP}2, ${RP}3,${hasGetterSetter})`,
-                IID.getIid(), ast, createLiteralAst(funId)
-            );
+            ret = jalangiCall('T', iidNode, ast, funIdNode, getterNode);
         }
         transferLoc(ret, node);
         return ret;
@@ -834,13 +825,14 @@ function wrapLiteral(node, ast, funId) {
 // ─── 语句级 wrap ──────────────────────────────────────────────────────────────
 
 function createExpressionStatement(lhs, node) {
-    const ret = replaceInStatement(`${RP}1 = ${RP}2`, lhs, node);
-    transferLoc(ret[0].expression, node);
-    return ret;
+    // lhs = node
+    const assign = t.assignmentExpression('=', lhs, node);
+    const stmt = t.expressionStatement(assign);
+    transferLoc(stmt.expression, node);
+    return [stmt];
 }
 
 function createCallInitAsStatement(node, name, val, isArgumentSync, lhs, isCatchParam, isAssign) {
-    // Guard: isAssign=true 时 lhs 必须存在，且不能是 'arguments'（严格模式下赋值 arguments 为语法错误）
     if (isAssign) {
         if (!lhs) {
             throw new Error(
@@ -856,62 +848,81 @@ function createCallInitAsStatement(node, name, val, isArgumentSync, lhs, isCatch
         }
     }
     IID.printIidToLoc(node);
-    let ret;
+    const bitsNode = t.numericLiteral(createBitPattern(isArgumentSync, false, isCatchParam));
+    const callN = jalangiCall('N', IID.getIid(), name, val, bitsNode);
+    let exprStmt;
     if (isAssign) {
-        ret = replaceInStatement(
-            `${RP}1 = ${logInitFunName}(${RP}2, ${RP}3, ${RP}4, ${createBitPattern(isArgumentSync, false, isCatchParam)})`,
-            lhs, IID.getIid(), name, val
-        );
+        const assign = t.assignmentExpression('=', lhs, callN);
+        exprStmt = t.expressionStatement(assign);
     } else {
-        ret = replaceInStatement(
-            `${logInitFunName}(${RP}1, ${RP}2, ${RP}3, ${createBitPattern(isArgumentSync, false, isCatchParam)})`,
-            IID.getIid(), name, val
-        );
+        exprStmt = t.expressionStatement(callN);
     }
-    transferLoc(ret[0].expression, node);
-    return ret;
+    transferLoc(exprStmt.expression, node);
+    return [exprStmt];
 }
 
 function createCallAsFunEnterStatement(node, scopeId) {
     IID.printIidToLoc(node);
     // arguments.callee 在严格模式下会抛出 TypeError，使用 try-catch 安全降级为 undefined
     // TODO-7: scopeId 作为第五个参数传给 J$.Fe，运行时用于创建 Shadow Frame
-    const scopeArg = (scopeId !== undefined && scopeId !== null) ? `, ${scopeId}` : '';
-    const ret = replaceInStatement(
-        `${logFunctionEnterFunName}(${RP}1,(function(){try{return arguments.callee}catch(e){return undefined}}()), this, arguments${scopeArg})`,
-        IID.getIid()
+
+    // 构建 probe fn：(function(){try{return arguments.callee}catch(e){return undefined}}())
+    // try { return arguments.callee }
+    const tryBlock = t.blockStatement([
+        t.returnStatement(
+            t.memberExpression(t.identifier('arguments'), t.identifier('callee'))
+        ),
+    ]);
+    // catch(e) { return undefined }
+    const catchClause = t.catchClause(
+        t.identifier('e'),
+        t.blockStatement([t.returnStatement(t.identifier('undefined'))])
     );
-    transferLoc(ret[0].expression, node);
+    const tryStmt = t.tryStatement(tryBlock, catchClause);
+    // (function(){ ... }())
+    const probeFn = t.functionExpression(null, [], t.blockStatement([tryStmt]));
+    const probeCall = t.callExpression(probeFn, []);
+
+    // J$.Fe(iid, probeCall, this, arguments [, scopeId])
+    const args = [
+        IID.getIid(),
+        probeCall,
+        t.thisExpression(),
+        t.identifier('arguments'),
+    ];
+    if (scopeId !== undefined && scopeId !== null) {
+        args.push(t.numericLiteral(scopeId));
+    }
+
+    const feCall = callExpr(memberExpr(_jalangiVar, 'Fe'), args);
+    const stmt = t.expressionStatement(feCall);
+    transferLoc(stmt.expression, node);
+
     // 对于【非 async】函数：给 probe fn 添加 __j_probe 标记，
-    // 使 Pass 2 的 wrapFunBodyWithTryCatch 跳过它，防止 probe fn 获得 Fr 却没有 Fe
+    // 使 wrapFunBodyWithTryCatch 跳过它，防止 probe fn 获得 Fr 却没有 Fe
     // （否则 callIdStack 会多 pop 一次，破坏闭包 Shadow Frame 的 capturedOuterCallId 追踪）。
     //
     // 对于【async】函数：probe fn 必须经过 wrapFunBodyWithTryCatch，
     // 因为 async 函数自身不被 wrapFunBodyWithTryCatch 包裹（避免破坏 await 语义），
     // probe fn 的 Fr 承担了 async 函数退出钩子的职责。
     if (!node.async) {
-        const callExpr = ret[0].expression;
-        const probeFn = callExpr.arguments?.[1]?.callee;
-        if (probeFn && probeFn.type === 'FunctionExpression') {
-            probeFn.__j_probe = true;
-        }
+        probeFn.__j_probe = true;
     }
-    return ret;
+
+    return [stmt];
 }
 
 function createCallAsScriptEnterStatement(node, instFile, origFile) {
     IID.printIidToLoc(node);
-    const ret = replaceInStatement(
-        `${logScriptEntryFunName}(${RP}1,${RP}2, ${RP}3)`,
-        IID.getIid(),
-        createLiteralAst(instFile),
-        createLiteralAst(origFile)
-    );
-    transferLoc(ret[0].expression, node);
-    return ret;
+    // J$.Se(iid, instFile, origFile)
+    const callSe = jalangiCall('Se', IID.getIid(), createLiteralAst(instFile), createLiteralAst(origFile));
+    const stmt = t.expressionStatement(callSe);
+    transferLoc(stmt.expression, node);
+    return [stmt];
 }
 
-// ─── for-in / catch / try-catch 包装 ──────────────────────────────────────────
+// ─── for-in / catch / try-catch 包装（均已迁移至 @babel/types 直接构建）────────
+// 以下仍保留 replaceInStatement（大结构，直接构建繁琐且收益低）
 
 let labelCounter = 0;
 /** 每次插桩新文件时重置，保证插桩幂等性 */
@@ -921,7 +932,10 @@ function wrapForIn(node, left, right, body) {
     if (Config.INSTR_FORIN && !Config.INSTR_FORIN(node)) return node;
     IID.printIidToLoc(node);
     const isDeclaration = (left.type === 'VariableDeclaration');
-    let tmp, extra;
+    // logTmpVarName = 'J$._tm_p'（MemberExpression，不是裸标识符）
+    // 需要构建 J$._tm_p 的 AST：MemberExpression(J$, _tm_p)
+    const tmpNode = memberExpr(_jalangiVar, '_tm_p');
+    let forin;
     if (isDeclaration) {
         // Guard: for-in 只支持单个普通标识符声明，不支持解构模式（如 for (var {a} in obj)）。
         const decl = node.left.declarations[0];
@@ -933,26 +947,35 @@ function wrapForIn(node, left, right, body) {
             );
         }
         const name = decl.id.name;
-        tmp   = replaceInExpr(`${name} = ${logTmpVarName}`);
-        extra = instrumentStore(tmp, isDeclaration);
-        const ret = replaceInStatement(
-            `function n() { for(${logTmpVarName} in ${RP}1) {var ${name} = ${RP}2;\n {${RP}3}}}`,
-            right, wrapWithX1(node, extra.right), body
-        );
-        const forin = ret[0].body.body[0];
-        transferLoc(forin, node);
-        return forin;
+        // `name = J$._tm_p` — 作为 AssignmentExpression，供 instrumentStore 处理
+        const tmp = t.assignmentExpression('=', t.identifier(name), tmpNode);
+        const extra = instrumentStore(tmp, isDeclaration);
+        // for (J$._tm_p in right) { var name = wrapWithX1(extra.right); body... }
+        const varDecl = t.variableDeclaration('var', [
+            t.variableDeclarator(t.identifier(name), wrapWithX1(node, extra.right)),
+        ]);
+        const innerBody = t.blockStatement([varDecl, ...ensureBlockBody(body)]);
+        forin = t.forInStatement(tmpNode, right, innerBody);
     } else {
-        tmp   = replaceInExpr(`${RP}1 = ${logTmpVarName}`, left);
-        extra = instrumentStore(tmp, isDeclaration);
-        const ret = replaceInStatement(
-            `function n() { for(${logTmpVarName} in ${RP}1) {${RP}2;\n {${RP}3}}}`,
-            right, wrapWithX1(node, extra), body
-        );
-        const forin = ret[0].body.body[0];
-        transferLoc(forin, node);
-        return forin;
+        // `left = J$._tm_p` — 用 AssignmentExpression 作为 left，供 instrumentStore 处理
+        const tmp = t.assignmentExpression('=', left, tmpNode);
+        const extra = instrumentStore(tmp, isDeclaration);
+        // for (J$._tm_p in right) { wrapWithX1(extra); body... }
+        const x1Stmt = t.expressionStatement(wrapWithX1(node, extra));
+        const innerBody = t.blockStatement([x1Stmt, ...ensureBlockBody(body)]);
+        forin = t.forInStatement(tmpNode, right, innerBody);
     }
+    transferLoc(forin, node);
+    return forin;
+}
+
+/**
+ * 将 body（语句数组 或 BlockStatement）转为语句数组。
+ */
+function ensureBlockBody(body) {
+    if (Array.isArray(body)) return body;
+    if (body?.type === 'BlockStatement') return body.body;
+    return [body];
 }
 
 function wrapCatchClause(node, body, name) {
@@ -972,49 +995,94 @@ function wrapScriptBodyWithTryCatch(node, body) {
         const iid1 = IID.getIid();
         IID.printIidToLoc(node);
         const l = labelCounter++;
-        // BUG-4 fix: catch 块末尾必须 re-throw，否则脚本级未捕获异常被静默吞掉，
-        // 导致 try 内部抛出的错误对外不可见，破坏程序的错误传播语义。
-        const ret = replaceInStatement(
-            `function n() { jalangiLabel${l}: while(true) { try {${RP}1} catch(${_jalangiVar}e) { ${logUncaughtExceptionFunName}(${RP}2,${_jalangiVar}e); throw ${_jalangiVar}e; } finally { if (${logScriptExitFunName}(${RP}3)) { ${logLastComputedFunName}(); continue jalangiLabel${l};\n } else {\n  ${logLastComputedFunName}(); break jalangiLabel${l};\n }}\n }}`,
-            body, iid1, IID.getIid()
-        );
-        const stmts = ret[0].body.body;
-        transferLoc(stmts[0], node);
-        return stmts;
+        const labelId = t.identifier(`jalangiLabel${l}`);
+        const eVar = t.identifier(`${_jalangiVar}e`);
+
+        // try { ...body }
+        const tryBlock = t.blockStatement(Array.isArray(body) ? body : [body]);
+
+        // catch(J$e) { J$.Ex(iid1, J$e); throw J$e; }
+        const exCall = callExpr(memberExpr(_jalangiVar, 'Ex'), [iid1, eVar]);
+        const catchBody = t.blockStatement([
+            t.expressionStatement(exCall),
+            t.throwStatement(t.cloneNode(eVar)),
+        ]);
+        const catchHandler = t.catchClause(eVar, catchBody);
+
+        // finally {
+        //   if (J$.Sr(iid3)) { J$.L(); continue jalangiLabel; }
+        //   else             { J$.L(); break jalangiLabel; }
+        // }
+        const iid3 = IID.getIid();
+        const srCall  = callExpr(memberExpr(_jalangiVar, 'Sr'),  [iid3]);
+        const lCall1  = t.expressionStatement(callExpr(memberExpr(_jalangiVar, 'L'), []));
+        const lCall2  = t.expressionStatement(callExpr(memberExpr(_jalangiVar, 'L'), []));
+        const contStmt  = t.continueStatement(t.cloneNode(labelId));
+        const breakStmt = t.breakStatement(t.cloneNode(labelId));
+        const finallyBlock = t.blockStatement([
+            t.ifStatement(
+                srCall,
+                t.blockStatement([lCall1, contStmt]),
+                t.blockStatement([lCall2, breakStmt])
+            ),
+        ]);
+
+        const tryStmt = t.tryStatement(tryBlock, catchHandler, finallyBlock);
+
+        // jalangiLabel: while(true) { try {...} catch(...) {...} finally {...} }
+        const whileBody = t.blockStatement([tryStmt]);
+        const whileStmt = t.whileStatement(t.booleanLiteral(true), whileBody);
+        const labeled = t.labeledStatement(t.cloneNode(labelId), whileStmt);
+
+        transferLoc(labeled, node);
+        return [labeled];
     }
     return body;
 }
 
 function wrapFunBodyWithTryCatch(node, body) {
     // Guard: generator 和 async 函数不应进入包裹逻辑。
-    // 修复早已在 visitorOps 层面拦截，但如果未来某个 visitor 気必直接调用此函数，
-    // 必须在这里提前抛错而不是静默返回错误的代码。
-    if (node.generator) {
-        throw new Error(
-            `[jalangi] wrapFunBodyWithTryCatch: called on a generator function (function*). ` +
-            `Generator functions must NOT be wrapped with while(true)/try/finally because yield semantics would be broken. ` +
-            `Handle generator nodes before calling this function.`
-        );
-    }
-    if (node.async) {
-        throw new Error(
-            `[jalangi] wrapFunBodyWithTryCatch: called on an async function. ` +
-            `Async functions must NOT be wrapped with while(true)/try/finally because await semantics would be broken. ` +
-            `Handle async nodes before calling this function.`
-        );
+    if (node.generator || node.async) {
+        return body;
     }
     if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
         IID.printIidToLoc(node);
         const iid1 = IID.getIid();
         IID.printIidToLoc(node);
         const l = labelCounter++;
-        const ret = replaceInStatement(
-            `function n() { jalangiLabel${l}: while(true) { try {${RP}1} catch(${_jalangiVar}e) { ${logUncaughtExceptionFunName}(${RP}2,${_jalangiVar}e); } finally { if (${logFunctionReturnFunName}(${RP}3)) continue jalangiLabel${l};\n else \n  return ${logReturnAggrFunName}();\n }\n }}`,
-            body, iid1, IID.getIid()
-        );
-        const stmts = ret[0].body.body;
-        transferLoc(stmts[0], node);
-        return stmts;
+        const labelId = t.identifier(`jalangiLabel${l}`);
+        const eVar = t.identifier(`${_jalangiVar}e`);
+
+        // try { ...body }
+        const tryBlock = t.blockStatement(Array.isArray(body) ? body : [body]);
+
+        // catch(J$e) { J$.Ex(iid1, J$e); }   — 函数体不 re-throw，允许 Fr 正常执行
+        const exCall = callExpr(memberExpr(_jalangiVar, 'Ex'), [iid1, eVar]);
+        const catchBody = t.blockStatement([t.expressionStatement(exCall)]);
+        const catchHandler = t.catchClause(eVar, catchBody);
+
+        // finally {
+        //   if (J$.Fr(iid3)) continue jalangiLabel;
+        //   else return J$.Ra();
+        // }
+        const iid3 = IID.getIid();
+        const frCall = callExpr(memberExpr(_jalangiVar, 'Fr'), [iid3]);
+        const raCall = callExpr(memberExpr(_jalangiVar, 'Ra'), []);
+        const contStmt = t.continueStatement(t.cloneNode(labelId));
+        const retStmt  = t.returnStatement(raCall);
+        const finallyBlock = t.blockStatement([
+            t.ifStatement(frCall, contStmt, retStmt),
+        ]);
+
+        const tryStmt = t.tryStatement(tryBlock, catchHandler, finallyBlock);
+
+        // jalangiLabel: while(true) { try {...} catch(...) {...} finally {...} }
+        const whileBody = t.blockStatement([tryStmt]);
+        const whileStmt = t.whileStatement(t.booleanLiteral(true), whileBody);
+        const labeled = t.labeledStatement(t.cloneNode(labelId), whileStmt);
+
+        transferLoc(labeled, node);
+        return [labeled];
     }
     return body;
 }
@@ -1027,7 +1095,6 @@ function syncDefuns(node, scopeArg, isScript) {
         if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
             if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
                 // BUG-1 fix: 不对 arguments 直接赋值（严格模式下赋值 arguments 为语法错误）。
-                // 改用 isAssign=false，只调用 J$.N 通知运行时，不写回 arguments 本身。
                 const ident = createIdentifierAst('arguments');
                 ret = ret.concat(createCallInitAsStatement(node,
                     createLiteralAst('arguments'), ident, true, undefined, false, false));
@@ -1035,10 +1102,8 @@ function syncDefuns(node, scopeArg, isScript) {
         }
     }
     if (scopeArg) {
-        // Object.keys 仅返回自有可枚举属性，HOP 检查已冗余，移除
         for (const name of Object.keys(scopeArg.vars)) {
             const varType = scopeArg.vars[name];
-            // Guard: varType 必须是已知类型之一；出现未知类型说明 scope.js 收锂了新的变量类型
             const _knownVarTypes = new Set(['defun', 'lambda', 'arg', 'var']);
             if (!_knownVarTypes.has(varType)) {
                 throw new Error(
@@ -1074,6 +1139,10 @@ function syncDefuns(node, scopeArg, isScript) {
                         createLiteralAst(name), ident, true, ident, false, true));
                 }
             } else if (varType === 'var') {
+                const kind = scopeArg.varKinds?.[name];
+                if (kind === 'let' || kind === 'const' || kind === 'class') {
+                    continue;
+                }
                 if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
                     ret = ret.concat(createCallInitAsStatement(node,
                         createLiteralAst(name),
@@ -1087,17 +1156,22 @@ function syncDefuns(node, scopeArg, isScript) {
 }
 
 function instrumentFunctionEntryExit(node, ast) {
-    // TODO-7: 将当前作用域的 scopeId 传给 Fe，以便运行时创建 Shadow Frame
     const scopeId = _scope?.id;
     const body = (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node))
         ? createCallAsFunEnterStatement(node, scopeId)
         : [];
 
-    // 对 async 函数：在 J$.Fe() 之后插入 `var __j$ctx = J$.currentCallId`，
-    // 以捕获本次 async 函数调用的唯一 callId。
-    // 由于 async 函数在 await 后恢复时，JS 运行时会恢复函数帧，
-    // 但 Jalangi2 的 #currentCallId 不会随协程上下文切换，
-    // 所以必须在函数入口时将 callId 存入局部变量，供 J$.Aw() 使用。
+    // 对 async 函数：probe fn 需要被 wrapFunBodyWithTryCatch 包裹
+    if (node.async && body.length > 0
+            && (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node))) {
+        const feCallExpr = body[0]?.expression;
+        const probeFn = feCallExpr?.arguments?.[1]?.callee;
+        if (probeFn && probeFn.type === 'FunctionExpression') {
+            probeFn.body.body = wrapFunBodyWithTryCatch(probeFn, probeFn.body.body);
+        }
+    }
+
+    // 对 async 函数：在 J$.Fe() 之后插入 `var __j$ctx = J$.currentCallId`
     const asyncCtxCapture = (node.async && (!Config.INSTR_AWAIT || Config.INSTR_AWAIT(node)))
         ? [_createAsyncCtxCaptureStatement()]
         : [];
@@ -1107,47 +1181,21 @@ function instrumentFunctionEntryExit(node, ast) {
 
 /**
  * 构造 `var __j$ctx = J$.currentCallId` 的 AST 语句节点。
- *
- * 这条语句插入到 async 函数体的最前面（J$.Fe 调用之后），
- * 将本次调用帧的 callId 存入局部变量 __j$ctx，供函数体内所有
- * J$.Aw(iid, await expr, __j$ctx) 引用，保证跨 await 的 contextId 唯一。
  */
 function _createAsyncCtxCaptureStatement() {
-    // var __j$ctx = J$.currentCallId;
-    return {
-        type: 'VariableDeclaration',
-        kind: 'var',
-        declarations: [{
-            type: 'VariableDeclarator',
-            id:   { type: 'Identifier', name: `${_jalangiVar}__ctx` },
-            init: {
-                type: 'MemberExpression',
-                object:   { type: 'Identifier', name: _jalangiVar },
-                property: { type: 'Identifier', name: 'currentCallId' },
-                computed: false,
-            },
-        }],
-    };
+    return t.variableDeclaration('var', [
+        t.variableDeclarator(
+            t.identifier(`${_jalangiVar}__ctx`),
+            memberExpr(_jalangiVar, 'currentCallId')
+        ),
+    ]);
 }
 
 /**
- * 仅对箭头函数（ArrowFunctionExpression）的块体（block body）执行参数/var 同步。
- *
- * 箭头函数没有独立的 `arguments` 和 `this` 绑定，也无法通过
- * arguments.callee 引用自身，因此：
- *  - 不注入 J$.Fe / J$.Fr 入口/出口钩子
- *  - 不插入 `arguments` 的 J$.N 同步语句（箭头函数无 arguments 对象）
- * 但其参数（arg）和局部 var 声明仍通过 J$.N 注册给运行时分析工具。
- *
- * 表达式体（body 不是 BlockStatement）直接跳过。
+ * 仅对箭头函数（ArrowFunctionExpression）的块体执行参数/var 同步。
  */
 function instrumentArrowFunctionBody(node) {
-    // 表达式体（e.g. x => x + 1）：body 不是 BlockStatement，无法插入语句。
     if (node.body.type !== 'BlockStatement') return;
-    // 块体（e.g. x => { return x + 1; }）：只插入 arg/var 同步，跳过 arguments 同步
-    // syncDefuns 以 isScript=true 调用可跳过 arguments 初始化段，
-    // 但会导致跳过 try-catch 包裹检查；此处手动过滤更安全：
-    // 我们直接跳过 syncDefuns 中的 arguments 部分，只处理 scopeArg.vars
     const synced = syncArrowDefuns(node, _scope);
     if (synced.length > 0) {
         node.body.body = [...synced, ...node.body.body];
@@ -1156,12 +1204,10 @@ function instrumentArrowFunctionBody(node) {
 
 /**
  * 与 syncDefuns 类似，但跳过 `arguments` 初始化（箭头函数无此绑定）。
- * 仅处理 scopeArg.vars 中的 arg / var / defun / lambda 条目。
  */
 function syncArrowDefuns(node, scopeArg) {
     if (!scopeArg) return [];
     let ret = [];
-    // Object.keys 仅返回自有可枚举属性，HOP 检查已冗余，移除
     for (const name of Object.keys(scopeArg.vars)) {
         const varType = scopeArg.vars[name];
         let ident;
@@ -1191,6 +1237,10 @@ function syncArrowDefuns(node, scopeArg) {
                     createLiteralAst(name), ident, true, ident, false, true));
             }
         } else if (varType === 'var') {
+            const kind = scopeArg.varKinds?.[name];
+            if (kind === 'let' || kind === 'const' || kind === 'class') {
+                continue;
+            }
             if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
                 ret = ret.concat(createCallInitAsStatement(node,
                     createLiteralAst(name),
@@ -1212,8 +1262,7 @@ function instrumentScriptEntryExit(node, body0, instFile, origFile) {
 // ─── instrumentStore / instrumentLoad / instrumentLoadModStore / instrumentPreIncDec
 
 /**
- * TODO-5: 沿作用域链向上查找变量实际定义的 Scope。
- * 闭包引用时，读取点和定义点不在同一个作用域，必须用定义点的 scopeId。
+ * 沿作用域链向上查找变量实际定义的 Scope。
  */
 function _findDefScope(scope, name) {
     for (let s = scope; s !== null; s = s.parent) {
@@ -1226,7 +1275,6 @@ function instrumentStore(node, isDeclaration) {
     if (node.left.type === 'Identifier') {
         const hasVar = _scope.hasVar(node.left.name);
         if (hasVar) {
-            // TODO-7: 传入 scopeId（定义点的 Scope.id）
             const defScope = _findDefScope(_scope, node.left.name);
             const scopeId  = defScope?.id;
             node.right = wrapWrite(node.right, createLiteralAst(node.left.name), node.right, node.left,
@@ -1243,14 +1291,11 @@ function instrumentLoad(ast, isTypeof) {
     if (ast.type === 'Identifier') {
         if (ast.name === 'undefined') return wrapLiteral(ast, ast, N_LOG_UNDEFINED_LIT);
         if (ast.name === 'NaN' || ast.name === 'Infinity') return wrapLiteral(ast, ast, N_LOG_NUMBER_LIT);
-        if (ast.name === _jalangiVar) return ast;  // 沙盒变量自身不插桩
+        if (ast.name === _jalangiVar) return ast;
         if (_scope.hasVar(ast.name)) {
             const defScope = _findDefScope(_scope, ast.name);
             const isGlobal = _scope.isGlobal(ast.name);
 
-            // 查询静态 def-use 分析的决策表（由 dataflow.js analyzeDefUse 生成）
-            // key 格式：${scopeId}:${name}:${line}:${col}
-            // 使用点（use-site）所在作用域 ID（_scope.id）+ Identifier 位置
             let decision = null;
             if (_instrDecisions !== null && ast.loc) {
                 const loc = ast.loc.start;
@@ -1258,12 +1303,6 @@ function instrumentLoad(ast, isTypeof) {
                 decision = _instrDecisions.get(key) ?? null;
             }
 
-            // 根据决策表结果判断是否走轻量路径
-            // - 'lightweight' → 走轻量（前提：defScope 存在且非 catch 变量、非 arguments）
-            // - 'full' 或 null（表中没有记录）→ 走全量
-            // - 兜底安全检查：catch 变量和 arguments 强制走全量（语义特殊）
-            // - 箭头函数作用域（isArrow=true）：不注入 Fe/Fr，Shadow Frame 不会初始化形参，
-            //   因此其参数必须走全量路径（无法用 Rl 从 Shadow Frame 查值）
             const isSafeForLightweight =
                 defScope !== null &&
                 !isGlobal &&
@@ -1272,13 +1311,10 @@ function instrumentLoad(ast, isTypeof) {
                 ast.name !== 'arguments';
 
             if (decision === 'lightweight' && isSafeForLightweight) {
-                // 轻量读取路径：不传 value，运行时从 Shadow Frame 查值
                 return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id);
             }
 
             if (decision === null) {
-                // 决策表中没有记录（如 _instrDecisions 为 null 或节点没有位置信息）
-                // 退化为旧版保守判断：无 eval/with、非全局、非 catch、非 arguments → 轻量
                 const canUseLightweight =
                     defScope !== null &&
                     !isGlobal &&
@@ -1292,19 +1328,17 @@ function instrumentLoad(ast, isTypeof) {
                 }
             }
 
-            // 全量读取路径（包括 scopeId 以支持 Shadow Frame 同步）
             return wrapRead(ast, createLiteralAst(ast.name), ast, false, false, isGlobal, defScope?.id);
         } else if (isTypeof) {
             return wrapReadWithUndefinedCheck(ast, ast.name);
         } else {
             return wrapRead(ast, createLiteralAst(ast.name), ast, false, true, false);
         }
-} else if (ast.type === 'MemberExpression') {
-return wrapGetField(ast, ast.object, getPropertyAsAst(ast), ast.computed, false);
-} else if (ast.type === 'OptionalMemberExpression') {
-// Babel AST：可选链 a?.b，isOptional=true → J$.G 在 base 为 null/undefined 时短路返回 undefined
-return wrapGetField(ast, ast.object, getPropertyAsAst(ast), ast.computed, ast.optional);
-}
+    } else if (ast.type === 'MemberExpression') {
+        return wrapGetField(ast, ast.object, getPropertyAsAst(ast), ast.computed, false);
+    } else if (ast.type === 'OptionalMemberExpression') {
+        return wrapGetField(ast, ast.object, getPropertyAsAst(ast), ast.computed, ast.optional);
+    }
     return ast;
 }
 
@@ -1312,8 +1346,13 @@ function instrumentLoadModStore(node, isNumber) {
     if (node.left.type === 'Identifier') {
         let tmp0 = instrumentLoad(node.left, false);
         if (isNumber) tmp0 = makeNumber(node, instrumentLoad(tmp0, false));
-        const tmp1 = wrapRHSOfModStore(node.right, tmp0, node.right,
-            node.operator.slice(0, -1));
+        const baseOp = node.operator.slice(0, -1);   // '||=' → '||', '+=' → '+', …
+        let tmp1 = wrapRHSOfModStore(node.right, tmp0, node.right, baseOp);
+        // logical assignment（||= &&= ??=）：生成的 LogicalExpression 不会再被
+        // traverse 重新访问，需要在此直接注入 J$.C 钩子。
+        if (baseOp === '||') tmp1 = wrapLogicalOr(tmp1, tmp0, node.right);
+        else if (baseOp === '&&') tmp1 = wrapLogicalAnd(tmp1, tmp0, node.right);
+        else if (baseOp === '??') tmp1 = wrapLogicalNullish(tmp1, tmp0, node.right);
         const _defScope2 = _scope.hasVar(node.left.name) ? _findDefScope(_scope, node.left.name) : null;
         const tmp2 = _defScope2 !== null
             ? wrapWrite(node, createLiteralAst(node.left.name), tmp1, node.left,
@@ -1346,7 +1385,6 @@ function instrumentCall(callAst, isCtor) {
     if (ast.type === 'MemberExpression') {
         return wrapMethodCall(callAst, ast.object, getPropertyAsAst(ast), isCtor, ast.computed);
     } else if (ast.type === 'OptionalMemberExpression') {
-        // Babel AST：可选链方法调用 a?.b()，callee 是 OptionalMemberExpression
         return wrapMethodCall(callAst, ast.object, getPropertyAsAst(ast), isCtor, ast.computed);
     } else if (ast.type === 'Identifier' && ast.name === 'eval') {
         return ast;
@@ -1358,10 +1396,6 @@ function instrumentCall(callAst, isCtor) {
 
 /**
  * 在使用任何 wrap 函数前，必须先调用 init(config, jalangiVar?) 注入配置对象。
- *
- * @param {object} config      - Jalangi Config 对象
- * @param {string} [jalangiVar] - 沙盒变量名（默认 'J$'）。
- *                                指定其他名称可避免与被分析页面已有的 J$ 变量冲突。
  */
 function init(config, jalangiVar) {
     Config = config;
@@ -1373,28 +1407,16 @@ function init(config, jalangiVar) {
 
 /**
  * 每次插桩新文件前调用，重置文件级别的可变状态。
- * 目前负责重置 labelCounter，保证插桩幂等性（相同代码多次插桩结果一致）。
  */
 function resetPerFile() {
     labelCounter = 0;
     tmpVarCounter = 0;
 }
 
-// ─── TODO-9: 插桩决策表（由 dataflow.js analyzeDefUse 生成，供 instrumentLoad 查询）
+// ─── 插桩决策表（由 dataflow.js analyzeDefUse 生成，供 instrumentLoad 查询）
 
-/**
- * 当前文件的插桩决策表（Map<nodeKey, Decision>）。
- * null 表示未注入（不使用静态分析优化，全量插桩）。
- * 由 esnstrument.js 的 transformString 调用 setInstrDecisions 注入。
- */
 let _instrDecisions = null;
 
-/**
- * 注入插桩决策表（由 esnstrument.js 在 Pass 0 后调用）。
- * 传 null 表示清除（Pass 结束后防止跨文件污染）。
- *
- * @param {Map<string, string>|null} decisions  analyzeDefUse 的输出
- */
 function setInstrDecisions(decisions) {
     _instrDecisions = decisions;
 }
@@ -1411,7 +1433,7 @@ export {
     // 字面量类型常量
     N_LOG_ARRAY_LIT, N_LOG_OBJECT_LIT, N_LOG_FUNCTION_LIT,
     N_LOG_NUMBER_LIT, N_LOG_STRING_LIT, N_LOG_BOOLEAN_LIT,
-    N_LOG_NULL_LIT, N_LOG_REGEXP_LIT, N_LOG_UNDEFINED_LIT,
+    N_LOG_NULL_LIT, N_LOG_REGEXP_LIT, N_LOG_UNDEFINED_LIT, N_LOG_BIGINT_LIT,
     // wrap 函数
     wrapPutField, wrapModAssign, wrapMethodCall, wrapFunCall,
     wrapGetField, wrapRead, wrapReadWithUndefinedCheck, wrapReadLightweight,

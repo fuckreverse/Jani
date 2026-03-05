@@ -159,6 +159,29 @@ export class JalangiRuntime {
     #closureFrameSet = new Set();
 
     /**
+     * 闭包引用计数：记录每个 (defScopeId, callId) 被多少个闭包函数捕获。
+     */
+    #closureFrameRefCount = new Map();
+
+    /**
+     * 垃圾回收注册表：当闭包函数被 GC 时，递减引用计数。
+     * 若计数归零，则清理对应的 Shadow Frame，防止内存泄漏。
+     */
+    #closureRegistry = typeof FinalizationRegistry !== 'undefined' 
+        ? new FinalizationRegistry((key) => {
+            const count = this.#closureFrameRefCount.get(key) || 0;
+            if (count <= 1) {
+                this.#closureFrameRefCount.delete(key);
+                this.#closureFrameSet.delete(key);
+                const parts = key.split(':');
+                this.#shadowClear(parts[0], parts[1]);
+            } else {
+                this.#closureFrameRefCount.set(key, count - 1);
+            }
+        }) 
+        : null;
+
+    /**
      * callId → 其外层帧的 capturedOuterCallId（闭包链追踪）。
      *
      * 在 Fe() 时记录：`newCallId → capturedOuterCallId`。
@@ -183,7 +206,7 @@ export class JalangiRuntime {
     #pendingCapturedOuterCallId = null;
 
     /**
-     * Shadow Frame 映射：`${defScopeId}:${callId}` → Map<name, value>
+     * Shadow Frame 映射：defScopeId (number) → Map<callId (number), Map<string, any>>
      * 由 W() 在写入时填充，由 Rl() 在轻量读取时消费。
      */
     #shadowFrameMap = new Map();
@@ -277,7 +300,9 @@ export class JalangiRuntime {
      * @returns {*} 存储的值；若 key 不存在则返回 `_SHADOW_MISS`（哨兵，表示从未写入）
      */
     #shadowLookup(defScopeId, callId, name) {
-        const frame = this.#shadowFrameMap.get(`${defScopeId}:${callId}`);
+        const scopeMap = this.#shadowFrameMap.get(Number(defScopeId));
+        if (!scopeMap) return _SHADOW_MISS;
+        const frame = scopeMap.get(Number(callId));
         if (!frame || !frame.has(name)) return _SHADOW_MISS;
         return frame.get(name);
     }
@@ -290,11 +315,17 @@ export class JalangiRuntime {
      * @param {*}      val         新值
      */
     #shadowSet(defScopeId, callId, name, val) {
-        const key = `${defScopeId}:${callId}`;
-        let frame = this.#shadowFrameMap.get(key);
+        const dId = Number(defScopeId);
+        const cId = Number(callId);
+        let scopeMap = this.#shadowFrameMap.get(dId);
+        if (!scopeMap) {
+            scopeMap = new Map();
+            this.#shadowFrameMap.set(dId, scopeMap);
+        }
+        let frame = scopeMap.get(cId);
         if (!frame) {
             frame = new Map();
-            this.#shadowFrameMap.set(key, frame);
+            scopeMap.set(cId, frame);
         }
         frame.set(name, val);
     }
@@ -305,7 +336,15 @@ export class JalangiRuntime {
      * @param {number} callId      该次调用的 callId
      */
     #shadowClear(defScopeId, callId) {
-        this.#shadowFrameMap.delete(`${defScopeId}:${callId}`);
+        const dId = Number(defScopeId);
+        const cId = Number(callId);
+        const scopeMap = this.#shadowFrameMap.get(dId);
+        if (scopeMap) {
+            scopeMap.delete(cId);
+            if (scopeMap.size === 0) {
+                this.#shadowFrameMap.delete(dId);
+            }
+        }
     }
 
     /**
@@ -351,9 +390,10 @@ export class JalangiRuntime {
             let walkCallId = topEntry.capturedOuterCallId;
             const MAX_DEPTH = 64;   // 防止循环引用导致死循环
             for (let depth = 0; depth < MAX_DEPTH && walkCallId != null; depth++) {
-                if (this.#shadowFrameMap.has(`${defScopeId}:${walkCallId}`)) {
-                    return walkCallId;
-                }
+            const scopeMap = this.#shadowFrameMap.get(Number(defScopeId));
+            if (scopeMap && scopeMap.has(Number(walkCallId))) {
+                return walkCallId;
+            }
                 // 沿链向上追溯
                 walkCallId = this.#callIdToOuterCallId.get(walkCallId) ?? null;
             }
@@ -584,7 +624,13 @@ export class JalangiRuntime {
             // 当前正在某函数帧内（而非顶层脚本）才需要注册
             if (this.#currentFunDefScopeId !== undefined) {
                 // 使用 "scopeId:callId" 复合 key，每次工厂函数调用独立注册，互不覆盖
-                this.#closureFrameSet.add(`${this.#currentFunDefScopeId}:${this.#currentCallId}`);
+                const key = `${this.#currentFunDefScopeId}:${this.#currentCallId}`;
+                this.#closureFrameSet.add(key);
+                
+                if (this.#closureRegistry) {
+                    this.#closureFrameRefCount.set(key, (this.#closureFrameRefCount.get(key) || 0) + 1);
+                    this.#closureRegistry.register(val, key);
+                }
             }
         }
 
@@ -1245,7 +1291,7 @@ export class JalangiRuntime {
         return {
             missCount:   this.#shadowMissCount,
             missLog:     this.#shadowMissLog.slice(),   // 返回副本，防止外部修改
-            frameCount:  this.#shadowFrameMap.size,
+            frameCount:  Array.from(this.#shadowFrameMap.values()).reduce((acc, map) => acc + map.size, 0),
             debugShadow: this.#debugShadow,
         };
     }

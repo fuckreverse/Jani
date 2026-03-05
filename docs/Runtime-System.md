@@ -331,7 +331,7 @@ const orig = smemory.getOriginalObject(id);
 
 ### Shadow Frame
 
-`JalangiRuntime` 内部维护一张 **Shadow Frame 映射表**，索引格式为 `"defScopeId:callId"`，
+`JalangiRuntime` 内部维护一张 **Shadow Frame 映射表**，结构为嵌套的 `Map<number, Map<number, Map>>`（即 `defScopeId -> callId -> Map<name, value>`）。
 每个条目是 `Map<name, value>`。其作用是让 `J$.Rl` 轻量读取钩子能够在不接收 `value` 参数的情况下，
 仍能正确获取变量当前值，避免将变量值通过表达式传递（减少插桩开销）。
 
@@ -342,19 +342,27 @@ flowchart LR
     W["J$.W(iid, name, val, lhs, flags, defScopeId)\n变量写入"]
     R["J$.R(iid, name, val, flags, defScopeId)\n变量读取（全量路径）"]
     Rl["J$.Rl(iid, defScopeId, name)\n变量读取（轻量路径）"]
-    SF["Shadow Frame\nMap&lt;'defScopeId:callId', Map&lt;name,value&gt;&gt;"]
+    SF["Shadow Frame\nMap&lt;defScopeId, Map&lt;callId, Map&lt;name,value&gt;&gt;&gt;"]
     HOOK_W["analysis.write(iid, name, val, ...)"]
     HOOK_R["analysis.read(iid, name, val, ...)"]
 
-    W -->|"写入时同步\nShadowFrame[key][name] = val"| SF
-    R -->|"读取时同步\nShadowFrame[key][name] = val"| SF
-    Rl -->|"查 Shadow Frame 获取值\nval = ShadowFrame[key][name]"| SF
+    W -->|"写入时同步\nShadowFrame[defScopeId][callId][name] = val"| SF
+    R -->|"读取时同步\nShadowFrame[defScopeId][callId][name] = val"| SF
+    Rl -->|"查 Shadow Frame 获取值\nval = ShadowFrame[defScopeId][callId][name]"| SF
     W --> HOOK_W
     R --> HOOK_R
     Rl --> HOOK_R
 ```
 
 **适用条件**（插桩器静态判断）：局部变量、无 `eval`/`with`、非 `catch` 参数、非 `arguments`、**非箭头函数参数**（箭头函数无 `Fe`/`Fr` 钩子，Shadow Frame 不会初始化其形参，因此强制走全量 `R` 路径）。
+
+### Shadow Frame 内存管理与闭包
+
+当函数退出（`Fr`）时，通常会清除其对应的 Shadow Frame。但如果该函数内创建了闭包，闭包可能会在未来访问这些局部变量。
+为了解决这个问题，`JalangiRuntime` 引入了 **闭包引用计数** 和 **垃圾回收注册表（FinalizationRegistry）**：
+1. 在 `T`（字面量创建）钩子中，如果创建的是函数（闭包），则将其外层帧的 `(defScopeId, callId)` 记录到 `#closureFrameSet`，并递增引用计数。
+2. `Fr` 退出时，如果当前帧在 `#closureFrameSet` 中，则**不清除** Shadow Frame。
+3. 将闭包函数注册到 `FinalizationRegistry`。当闭包函数被 JS 引擎垃圾回收时，自动递减引用计数；当计数归零时，安全地清理对应的 Shadow Frame，防止内存泄漏。
 
 ### Shadow Frame 诊断 API
 
