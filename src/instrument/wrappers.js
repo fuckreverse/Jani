@@ -185,6 +185,45 @@ function assertAstNode(val, callerName) {
 }
 
 /**
+ * 可被 wrapWithX1（J$.X1）包装的 AST 表达式类型白名单。
+ *
+ * 只有真正的表达式节点才能被包装；Statement、Literal 等其他节点类型不适用。
+ * 使用精确的白名单而非 type.includes('Expression') 字符串检查，
+ * 避免将来 Babel 新增以 'Expression' 结尾但不适合包装的节点类型（如 'TSTypeAssertion' 等）。
+ *
+ * 注意：Babel 原生 AST 的字面量类型（NumericLiteral、StringLiteral 等）已由各自的
+ * visitor 在插桩后被替换为 CallExpression（J$.T 调用），此处不需要单独列出。
+ */
+const _EXPRESSION_TYPES = new Set([
+    'AssignmentExpression',
+    'BinaryExpression',
+    'CallExpression',
+    'ConditionalExpression',
+    'LogicalExpression',
+    'MemberExpression',
+    'NewExpression',
+    'ObjectExpression',
+    'ArrayExpression',
+    'SequenceExpression',
+    'UnaryExpression',
+    'UpdateExpression',
+    'YieldExpression',
+    'AwaitExpression',
+    'TaggedTemplateExpression',
+    'TemplateLiteral',
+    'OptionalCallExpression',
+    'OptionalMemberExpression',
+    'ArrowFunctionExpression',
+    'FunctionExpression',
+    'ClassExpression',
+    'Identifier',
+    'ThisExpression',
+    'Super',
+    'Import',
+    'MetaProperty',
+]);
+
+/**
  * 创建 Babel 字面量节点：string → StringLiteral，number → NumericLiteral，以此类推。
  */
 const createLiteralAst = (name) => {
@@ -581,7 +620,7 @@ function wrapThrow(node, expr) {
 
 function wrapWithX1(node, ast) {
     if (!Config.INSTR_END_EXPRESSION || Config.INSTR_END_EXPRESSION(node)) {
-        if (!ast || !ast.type.includes('Expression')) return ast;
+        if (!ast || !_EXPRESSION_TYPES.has(ast.type)) return ast;
         IID.printIidToLoc(node);
         const ret = jalangiCall('X1', IID.getIid(), ast);
         transferLoc(ret, node);
@@ -764,11 +803,15 @@ function ifObjectExpressionHasGetterSetter(node) {
 
 /**
  * 从已插桩的函数 AST 中提取 <sandboxVar>.Fe 调用的 IID（internalFunId）。
+ *
+ * 当 INSTR_TRY_CATCH_ARGUMENTS = () => false 时，函数体没有 J$.Fe 注入，
+ * 此时安全地返回 undefined（让调用方生成不含 internalFunId 的 J$.T 调用）。
  */
 function getFnIdFromAst(ast) {
     // 函数体的第一个语句可能是：
     //  1. ExpressionStatement(J$.Fe(...)) — 未经 wrapFunBodyWithTryCatch 的原始结构
     //  2. LabeledStatement > WhileStatement > BlockStatement > TryStatement — 经过 wrapFunBodyWithTryCatch 后
+    //  3. 其他（当 INSTR_TRY_CATCH_ARGUMENTS 禁用时没有 Fe 注入）→ 返回 undefined
     let entryExpr = ast.body.body[0];
 
     // 透过 wrapFunBodyWithTryCatch 生成的 jalangiLabel: while(true) { try {...} ... } 结构
@@ -781,12 +824,13 @@ function getFnIdFromAst(ast) {
         }
     }
 
-    if (entryExpr?.type !== 'ExpressionStatement') throw new Error('IllegalStateException');
+    // 若第一个语句不是 ExpressionStatement，说明 Fe 未被注入（Config 禁用），安全降级
+    if (entryExpr?.type !== 'ExpressionStatement') return undefined;
     const call = entryExpr.expression;
-    if (call.type !== 'CallExpression') throw new Error('IllegalStateException');
-    if (call.callee.type !== 'MemberExpression') throw new Error('IllegalStateException');
-    if (call.callee.object.name !== _jalangiVar) throw new Error('IllegalStateException');
-    if (call.callee.property.name !== 'Fe') throw new Error('IllegalStateException');
+    if (call.type !== 'CallExpression') return undefined;
+    if (call.callee.type !== 'MemberExpression') return undefined;
+    if (call.callee.object.name !== _jalangiVar) return undefined;
+    if (call.callee.property.name !== 'Fe') return undefined;
     return call.arguments[0].value;
 }
 
@@ -989,53 +1033,85 @@ function wrapCatchClause(node, body, name) {
     }
 }
 
-function wrapScriptBodyWithTryCatch(node, body) {
-    if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
-        IID.printIidToLoc(node);
-        const iid1 = IID.getIid();
-        IID.printIidToLoc(node);
-        const l = labelCounter++;
-        const labelId = t.identifier(`jalangiLabel${l}`);
-        const eVar = t.identifier(`${_jalangiVar}e`);
+/**
+ * 内部工厂：生成 `jalangiLabel: while(true){ try{...} catch(J$e){...} finally{...} }` 骨架。
+ *
+ * 脚本（isScript=true）与函数（isScript=false）的区别在于 catch 和 finally 的内容：
+ *
+ *   isScript=true（脚本体）：
+ *     catch:   J$.Ex(iid1, J$e); throw J$e;               — re-throw 保持未捕获语义
+ *     finally: J$.Sr(iid3) ? { J$.L(); continue } : { J$.L(); break }
+ *
+ *   isScript=false（函数体）：
+ *     catch:   J$.Ex(iid1, J$e);                           — 不 re-throw，让 Fr 正常执行
+ *     finally: J$.Fr(iid3) ? continue : return J$.Ra()
+ *
+ * @param {object}  node      - 当前 AST 节点（用于 IID/loc 记录）
+ * @param {Array}   bodyStmts - 原始语句数组
+ * @param {boolean} isScript  - true = 脚本体，false = 函数体
+ * @returns {Array} 包含一个 LabeledStatement 的数组
+ */
+function _buildTryCatchWrapper(node, bodyStmts, isScript) {
+    IID.printIidToLoc(node);
+    const iid1 = IID.getIid();
+    IID.printIidToLoc(node);
+    const l = labelCounter++;
+    const labelId = t.identifier(`jalangiLabel${l}`);
+    const eVar = t.identifier(`${_jalangiVar}e`);
 
-        // try { ...body }
-        const tryBlock = t.blockStatement(Array.isArray(body) ? body : [body]);
+    // try { ...body }
+    const tryBlock = t.blockStatement(bodyStmts);
 
-        // catch(J$e) { J$.Ex(iid1, J$e); throw J$e; }
-        const exCall = callExpr(memberExpr(_jalangiVar, 'Ex'), [iid1, eVar]);
-        const catchBody = t.blockStatement([
-            t.expressionStatement(exCall),
-            t.throwStatement(t.cloneNode(eVar)),
-        ]);
-        const catchHandler = t.catchClause(eVar, catchBody);
+    // catch(J$e) { J$.Ex(iid1, J$e); [throw J$e;] }
+    const exCall = callExpr(memberExpr(_jalangiVar, 'Ex'), [iid1, eVar]);
+    const catchStmts = [t.expressionStatement(exCall)];
+    if (isScript) {
+        // 脚本体必须 re-throw，保持未捕获异常语义
+        catchStmts.push(t.throwStatement(t.cloneNode(eVar)));
+    }
+    const catchHandler = t.catchClause(eVar, t.blockStatement(catchStmts));
 
-        // finally {
-        //   if (J$.Sr(iid3)) { J$.L(); continue jalangiLabel; }
-        //   else             { J$.L(); break jalangiLabel; }
-        // }
-        const iid3 = IID.getIid();
-        const srCall  = callExpr(memberExpr(_jalangiVar, 'Sr'),  [iid3]);
-        const lCall1  = t.expressionStatement(callExpr(memberExpr(_jalangiVar, 'L'), []));
-        const lCall2  = t.expressionStatement(callExpr(memberExpr(_jalangiVar, 'L'), []));
-        const contStmt  = t.continueStatement(t.cloneNode(labelId));
+    // finally { ... }
+    const iid3 = IID.getIid();
+    const contStmt = t.continueStatement(t.cloneNode(labelId));
+    let finallyBlock;
+    if (isScript) {
+        // J$.Sr(iid3) ? { J$.L(); continue } : { J$.L(); break }
+        const srCall   = callExpr(memberExpr(_jalangiVar, 'Sr'), [iid3]);
+        const lCall1   = t.expressionStatement(callExpr(memberExpr(_jalangiVar, 'L'), []));
+        const lCall2   = t.expressionStatement(callExpr(memberExpr(_jalangiVar, 'L'), []));
         const breakStmt = t.breakStatement(t.cloneNode(labelId));
-        const finallyBlock = t.blockStatement([
+        finallyBlock = t.blockStatement([
             t.ifStatement(
                 srCall,
                 t.blockStatement([lCall1, contStmt]),
                 t.blockStatement([lCall2, breakStmt])
             ),
         ]);
+    } else {
+        // J$.Fr(iid3) ? continue : return J$.Ra()
+        const frCall = callExpr(memberExpr(_jalangiVar, 'Fr'), [iid3]);
+        const raCall = callExpr(memberExpr(_jalangiVar, 'Ra'), []);
+        finallyBlock = t.blockStatement([
+            t.ifStatement(frCall, contStmt, t.returnStatement(raCall)),
+        ]);
+    }
 
-        const tryStmt = t.tryStatement(tryBlock, catchHandler, finallyBlock);
+    const tryStmt = t.tryStatement(tryBlock, catchHandler, finallyBlock);
 
-        // jalangiLabel: while(true) { try {...} catch(...) {...} finally {...} }
-        const whileBody = t.blockStatement([tryStmt]);
-        const whileStmt = t.whileStatement(t.booleanLiteral(true), whileBody);
-        const labeled = t.labeledStatement(t.cloneNode(labelId), whileStmt);
+    // jalangiLabel: while(true) { try {...} catch(...) {...} finally {...} }
+    const labeled = t.labeledStatement(
+        t.cloneNode(labelId),
+        t.whileStatement(t.booleanLiteral(true), t.blockStatement([tryStmt]))
+    );
+    transferLoc(labeled, node);
+    return [labeled];
+}
 
-        transferLoc(labeled, node);
-        return [labeled];
+function wrapScriptBodyWithTryCatch(node, body) {
+    if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
+        const bodyStmts = Array.isArray(body) ? body : [body];
+        return _buildTryCatchWrapper(node, bodyStmts, true);
     }
     return body;
 }
@@ -1046,112 +1122,97 @@ function wrapFunBodyWithTryCatch(node, body) {
         return body;
     }
     if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
-        IID.printIidToLoc(node);
-        const iid1 = IID.getIid();
-        IID.printIidToLoc(node);
-        const l = labelCounter++;
-        const labelId = t.identifier(`jalangiLabel${l}`);
-        const eVar = t.identifier(`${_jalangiVar}e`);
-
-        // try { ...body }
-        const tryBlock = t.blockStatement(Array.isArray(body) ? body : [body]);
-
-        // catch(J$e) { J$.Ex(iid1, J$e); }   — 函数体不 re-throw，允许 Fr 正常执行
-        const exCall = callExpr(memberExpr(_jalangiVar, 'Ex'), [iid1, eVar]);
-        const catchBody = t.blockStatement([t.expressionStatement(exCall)]);
-        const catchHandler = t.catchClause(eVar, catchBody);
-
-        // finally {
-        //   if (J$.Fr(iid3)) continue jalangiLabel;
-        //   else return J$.Ra();
-        // }
-        const iid3 = IID.getIid();
-        const frCall = callExpr(memberExpr(_jalangiVar, 'Fr'), [iid3]);
-        const raCall = callExpr(memberExpr(_jalangiVar, 'Ra'), []);
-        const contStmt = t.continueStatement(t.cloneNode(labelId));
-        const retStmt  = t.returnStatement(raCall);
-        const finallyBlock = t.blockStatement([
-            t.ifStatement(frCall, contStmt, retStmt),
-        ]);
-
-        const tryStmt = t.tryStatement(tryBlock, catchHandler, finallyBlock);
-
-        // jalangiLabel: while(true) { try {...} catch(...) {...} finally {...} }
-        const whileBody = t.blockStatement([tryStmt]);
-        const whileStmt = t.whileStatement(t.booleanLiteral(true), whileBody);
-        const labeled = t.labeledStatement(t.cloneNode(labelId), whileStmt);
-
-        transferLoc(labeled, node);
-        return [labeled];
+        const bodyStmts = Array.isArray(body) ? body : [body];
+        return _buildTryCatchWrapper(node, bodyStmts, false);
     }
     return body;
 }
 
 // ─── syncDefuns / instrumentFunctionEntryExit / instrumentScriptEntryExit ────
 
+/** 合法的变量类型集合（模块级常量，避免在循环内反复创建） */
+const _KNOWN_VAR_TYPES = new Set(['defun', 'lambda', 'arg', 'var']);
+
+/**
+ * 内部核心：遍历 scopeArg.vars，为每个变量生成对应的初始化语句数组。
+ *
+ * @param {object}  node      - 当前函数/脚本 AST 节点（用于 IID/loc 记录）
+ * @param {object}  scopeArg  - Scope 对象（含 .vars / .funLocs / .varKinds）
+ * @returns {Array} 生成的语句数组
+ */
+function _syncVarsCore(node, scopeArg) {
+    if (!scopeArg) return [];
+    const ret = [];
+    for (const name of Object.keys(scopeArg.vars)) {
+        const varType = scopeArg.vars[name];
+        if (!_KNOWN_VAR_TYPES.has(varType)) {
+            throw new Error(
+                `[jalangi] syncDefuns: unknown varType "${varType}" for variable "${name}". ` +
+                `Expected one of: defun, lambda, arg, var. ` +
+                `If scope.js added a new varType, update syncDefuns to handle it.`
+            );
+        }
+        let ident;
+        if (varType === 'defun') {
+            ident = createIdentifierAst(name);
+            ident.loc = scopeArg.funLocs[name];
+            if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+                ret.push(...createCallInitAsStatement(node,
+                    createLiteralAst(name),
+                    wrapLiteral(ident, ident, N_LOG_FUNCTION_LIT),
+                    false, ident, false, true));
+            } else {
+                ret.push(...createExpressionStatement(ident,
+                    wrapLiteral(ident, ident, N_LOG_FUNCTION_LIT)));
+            }
+        } else if (varType === 'lambda') {
+            if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+                ident = createIdentifierAst(name);
+                ident.loc = scopeArg.funLocs[name];
+                ret.push(...createCallInitAsStatement(node,
+                    createLiteralAst(name), ident, false, ident, false, true));
+            }
+        } else if (varType === 'arg') {
+            if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+                ident = createIdentifierAst(name);
+                ret.push(...createCallInitAsStatement(node,
+                    createLiteralAst(name), ident, true, ident, false, true));
+            }
+        } else if (varType === 'var') {
+            const kind = scopeArg.varKinds?.[name];
+            if (kind === 'let' || kind === 'const' || kind === 'class') {
+                continue;
+            }
+            if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
+                ret.push(...createCallInitAsStatement(node,
+                    createLiteralAst(name),
+                    createIdentifierAst(name),
+                    false, undefined, false, false));
+            }
+        }
+    }
+    return ret;
+}
+
+/**
+ * 普通函数 / 脚本的变量同步。
+ *
+ * 对非脚本函数（isScript=false），会在变量列表前先注入 arguments 初始化钩子。
+ * 箭头函数应使用 syncArrowDefuns（它不注入 arguments）。
+ */
 function syncDefuns(node, scopeArg, isScript) {
-    let ret = [];
+    const ret = [];
     if (!isScript) {
         if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
             if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
                 // BUG-1 fix: 不对 arguments 直接赋值（严格模式下赋值 arguments 为语法错误）。
                 const ident = createIdentifierAst('arguments');
-                ret = ret.concat(createCallInitAsStatement(node,
+                ret.push(...createCallInitAsStatement(node,
                     createLiteralAst('arguments'), ident, true, undefined, false, false));
             }
         }
     }
-    if (scopeArg) {
-        for (const name of Object.keys(scopeArg.vars)) {
-            const varType = scopeArg.vars[name];
-            const _knownVarTypes = new Set(['defun', 'lambda', 'arg', 'var']);
-            if (!_knownVarTypes.has(varType)) {
-                throw new Error(
-                    `[jalangi] syncDefuns: unknown varType "${varType}" for variable "${name}". ` +
-                    `Expected one of: defun, lambda, arg, var. ` +
-                    `If scope.js added a new varType, update syncDefuns to handle it.`
-                );
-            }
-            let ident;
-            if (varType === 'defun') {
-                ident = createIdentifierAst(name);
-                ident.loc = scopeArg.funLocs[name];
-                if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                    ret = ret.concat(createCallInitAsStatement(node,
-                        createLiteralAst(name),
-                        wrapLiteral(ident, ident, N_LOG_FUNCTION_LIT),
-                        false, ident, false, true));
-                } else {
-                    ret = ret.concat(createExpressionStatement(ident,
-                        wrapLiteral(ident, ident, N_LOG_FUNCTION_LIT)));
-                }
-            } else if (varType === 'lambda') {
-                if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                    ident = createIdentifierAst(name);
-                    ident.loc = scopeArg.funLocs[name];
-                    ret = ret.concat(createCallInitAsStatement(node,
-                        createLiteralAst(name), ident, false, ident, false, true));
-                }
-            } else if (varType === 'arg') {
-                if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                    ident = createIdentifierAst(name);
-                    ret = ret.concat(createCallInitAsStatement(node,
-                        createLiteralAst(name), ident, true, ident, false, true));
-                }
-            } else if (varType === 'var') {
-                const kind = scopeArg.varKinds?.[name];
-                if (kind === 'let' || kind === 'const' || kind === 'class') {
-                    continue;
-                }
-                if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                    ret = ret.concat(createCallInitAsStatement(node,
-                        createLiteralAst(name),
-                        createIdentifierAst(name),
-                        false, undefined, false, false));
-                }
-            }
-        }
-    }
+    ret.push(..._syncVarsCore(node, scopeArg));
     return ret;
 }
 
@@ -1193,6 +1254,7 @@ function _createAsyncCtxCaptureStatement() {
 
 /**
  * 仅对箭头函数（ArrowFunctionExpression）的块体执行参数/var 同步。
+ * 箭头函数没有独立的 arguments 绑定，不注入 arguments 初始化钩子。
  */
 function instrumentArrowFunctionBody(node) {
     if (node.body.type !== 'BlockStatement') return;
@@ -1203,53 +1265,10 @@ function instrumentArrowFunctionBody(node) {
 }
 
 /**
- * 与 syncDefuns 类似，但跳过 `arguments` 初始化（箭头函数无此绑定）。
+ * 箭头函数的变量同步（跳过 arguments 初始化，复用 _syncVarsCore）。
  */
 function syncArrowDefuns(node, scopeArg) {
-    if (!scopeArg) return [];
-    let ret = [];
-    for (const name of Object.keys(scopeArg.vars)) {
-        const varType = scopeArg.vars[name];
-        let ident;
-        if (varType === 'defun') {
-            ident = createIdentifierAst(name);
-            ident.loc = scopeArg.funLocs[name];
-            if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                ret = ret.concat(createCallInitAsStatement(node,
-                    createLiteralAst(name),
-                    wrapLiteral(ident, ident, N_LOG_FUNCTION_LIT),
-                    false, ident, false, true));
-            } else {
-                ret = ret.concat(createExpressionStatement(ident,
-                    wrapLiteral(ident, ident, N_LOG_FUNCTION_LIT)));
-            }
-        } else if (varType === 'lambda') {
-            if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                ident = createIdentifierAst(name);
-                ident.loc = scopeArg.funLocs[name];
-                ret = ret.concat(createCallInitAsStatement(node,
-                    createLiteralAst(name), ident, false, ident, false, true));
-            }
-        } else if (varType === 'arg') {
-            if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                ident = createIdentifierAst(name);
-                ret = ret.concat(createCallInitAsStatement(node,
-                    createLiteralAst(name), ident, true, ident, false, true));
-            }
-        } else if (varType === 'var') {
-            const kind = scopeArg.varKinds?.[name];
-            if (kind === 'let' || kind === 'const' || kind === 'class') {
-                continue;
-            }
-            if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                ret = ret.concat(createCallInitAsStatement(node,
-                    createLiteralAst(name),
-                    createIdentifierAst(name),
-                    false, undefined, false, false));
-            }
-        }
-    }
-    return ret;
+    return _syncVarsCore(node, scopeArg);
 }
 
 function instrumentScriptEntryExit(node, body0, instFile, origFile) {

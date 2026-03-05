@@ -342,6 +342,33 @@ describe('IID Source Map', () => {
         const [, loc] = entries[0];
         assert.ok(Array.isArray(loc) && loc.length === 4, 'IID 位置应为 4 元素数组');
     });
+
+    test('inlineSource: true 时 sourceMapObject.code 包含原始源代码', () => {
+        const originalCode = 'var x = 1 + 2;';
+        const r = instrumentCode({
+            code: originalCode,
+            origCodeFileName: 'inline-src.js',
+            instCodeFileName: 'inline-src_i.js',
+            inlineSourceMap: true,
+            inlineSource:    true,
+        });
+        assert.ok(r.sourceMapObject.code === originalCode,
+            'inlineSource=true 时 sourceMapObject.code 应等于原始代码');
+        // 内联到头部的 JSON 串中也应包含 code 字段
+        assert.ok(r.code.includes('"code"'), '头部注入的 JSON 应包含 "code" 字段（inlineSource=true）');
+    });
+
+    test('inlineSource: false（默认）时 sourceMapObject 不含 code 字段', () => {
+        const r = instrumentCode({
+            code: 'var y = 3;',
+            origCodeFileName: 'no-inline.js',
+            instCodeFileName: 'no-inline_i.js',
+            inlineSourceMap: true,
+            inlineSource:    false,
+        });
+        assert.ok(r.sourceMapObject.code === undefined,
+            'inlineSource=false 时 sourceMapObject 不应包含 code 字段');
+    });
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -456,6 +483,41 @@ describe('Config 选择性禁用', () => {
         init({ ...ALL_CONFIG, INSTR_INIT: () => false });
         assert.ok(!instr('var x = 1;').code.includes('J$.N('), '不应有 J$.N 初始化钩子');
     });
+
+    test('INSTR_INVOKE = () => false 时不注入函数调用钩子', () => {
+        init({ ...ALL_CONFIG, INSTR_INVOKE: () => false });
+        const r = instr('function foo(){} foo(); var o = {}; o.bar = function(){}; o.bar();');
+        assert.ok(!r.code.includes('J$.F('), '不应有 J$.F 函数调用钩子');
+        assert.ok(!r.code.includes('J$.M('), '不应有 J$.M 方法调用钩子');
+    });
+
+    test('INSTR_RETURN = () => false 时不注入 return 钩子', () => {
+        init({ ...ALL_CONFIG, INSTR_RETURN: () => false });
+        assert.ok(!instr('function f() { return 1; }').code.includes('J$.Rt('), '不应有 J$.Rt return 钩子');
+    });
+
+    test('INSTR_THROW = () => false 时不注入 throw 钩子', () => {
+        init({ ...ALL_CONFIG, INSTR_THROW: () => false });
+        assert.ok(!instr('function f() { throw new Error("e"); }').code.includes('J$.Th('), '不应有 J$.Th throw 钩子');
+    });
+
+    test('INSTR_FORIN = () => false 时不注入 for-in 钩子', () => {
+        init({ ...ALL_CONFIG, INSTR_FORIN: () => false });
+        const r = instr('for (var k in obj) { k; }');
+        assert.ok(!r.code.includes('J$.H('), '不应有 J$.H for-in 钩子');
+    });
+
+    test('INSTR_END_EXPRESSION = () => false 时不注入 X1 表达式末尾钩子', () => {
+        init({ ...ALL_CONFIG, INSTR_END_EXPRESSION: () => false });
+        assert.ok(!instr('1 + 2;').code.includes('J$.X1('), '不应有 J$.X1 表达式末尾钩子');
+    });
+
+    test('INSTR_TRY_CATCH_ARGUMENTS = () => false 时不注入 try-catch 包裹', () => {
+        init({ ...ALL_CONFIG, INSTR_TRY_CATCH_ARGUMENTS: () => false });
+        const r = instr('function f(a) { return a; }');
+        assert.ok(!r.code.includes('jalangiLabel'), '不应有 jalangiLabel while 循环包裹');
+        assert.ok(!r.code.includes('J$.Fe('), '不应有 J$.Fe 函数入口钩子（依赖 try-catch 包裹）');
+    });
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -510,6 +572,35 @@ describe('边界条件', () => {
         const r2 = instr(code);
         assert.equal(r1.sourceMapObject.nBranches, r2.sourceMapObject.nBranches, 'nBranches 应一致');
         assert.equal(r1.code, r2.code, '两次插桩同一代码结果应完全相同');
+    });
+
+    test('isEval: true 时代码被 eval 包裹，并包含 JALANGI DO NOT INSTRUMENT', () => {
+        // isEval=true 用于插桩 eval 内部代码：不使用 jalangiLabel while(true) 脚本外壳，
+        // 使用更轻量的 Se/Sr 入口，且输出末尾仍有防二次插桩标记。
+        const r = instrumentCode({
+            code:             'var x = 1 + 2; x;',
+            origCodeFileName: 'eval-test.js',
+            instCodeFileName: 'eval-test_inst.js',
+            inlineSourceMap:  false,
+            isEval:           true,
+        });
+        assert.ok(typeof r.code === 'string' && r.code.length > 0, 'isEval=true 应正常返回插桩代码');
+        assert.ok(r.code.includes('JALANGI DO NOT INSTRUMENT'), 'isEval 插桩输出末尾应含防二次插桩标记');
+        // 应含基本钩子（表明插桩有效）
+        assert.ok(r.code.includes('J$.B(') || r.code.includes('J$.W('), 'isEval 模式下基本钩子仍应被注入');
+        assert.ok(typeof r.sourceMapObject === 'object', 'isEval 模式应返回 sourceMapObject');
+    });
+
+    test('isEval: true 与 inlineSourceMap: true 可同时使用', () => {
+        const r = instrumentCode({
+            code:             'var y = 10;',
+            origCodeFileName: 'eval-smap.js',
+            instCodeFileName: 'eval-smap_inst.js',
+            inlineSourceMap:  true,
+            isEval:           true,
+        });
+        assert.ok(r.code.includes('J$.smap'), 'isEval+inlineSourceMap=true 应在代码中内联 smap 对象');
+        assert.ok(r.sourceMapObject && typeof r.sourceMapObject === 'object', '应有 sourceMapObject');
     });
 });
 

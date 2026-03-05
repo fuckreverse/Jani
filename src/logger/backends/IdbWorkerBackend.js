@@ -11,6 +11,8 @@
  *  - 批量写入（单个 IDB 事务写整批），大幅减少事务开销
  *  - 背压控制：待确认批次超过 maxPendingBatches 时，暂停接收新批次
  *  - 支持查询（通过 query() 方法）
+ *  - flush/query/clear 采用统一的 request-response 机制，
+ *    避免并发调用时覆盖 onmessage 导致响应丢失
  *
  * 诊断日志（直接到 console，不走 IDB）：
  *  - localStorage.jalangiDebug='backend:idb' 开启 debug 级别
@@ -60,8 +62,16 @@ export class IdbWorkerBackend {
         this._closed            = false;
         this._batchIdCounter    = 0;
 
-        // 挂起的 Promise：batchId → { resolve, reject, timer }
+        // 挂起的 write Promise：batchId → { resolve, reject, timer }
         this._pending           = new Map();
+
+        // 一次性 request-response：reqId → { resolve, reject, timer }
+        // 用于 flush / query / clear / close 等需要等待 Worker 应答的操作
+        this._requests          = new Map();
+        this._reqIdCounter      = 0;
+
+        // 背压等待队列：pending 满时在此挂起，ack 到来后依次唤醒
+        this._slotWaiters       = [];
 
         // 统计
         this.stats = { batchCount: 0, totalEvents: 0, errors: 0, dropped: 0 };
@@ -92,7 +102,7 @@ export class IdbWorkerBackend {
         };
         this._worker.onmessage = (evt) => this._handleMessage(evt.data);
 
-        // 等待 Worker ready
+        // 等待 Worker ready（在 _handleMessage 中处理；init 阶段用临时 Promise 桥接）
         await new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
                 const msg = `Worker init timeout after 15s (workerUrl=${workerUrlStr})`;
@@ -100,22 +110,9 @@ export class IdbWorkerBackend {
                 reject(new Error('IdbWorkerBackend: Worker init timeout'));
             }, 15000);
 
-            // 临时拦截第一条消息
-            const origOnMessage = this._worker.onmessage.bind(this);
-            this._worker.onmessage = (evt) => {
-                if (evt.data.type === 'ready') {
-                    clearTimeout(timeout);
-                    this._worker.onmessage = origOnMessage;
-                    resolve();
-                } else if (evt.data.type === 'error') {
-                    clearTimeout(timeout);
-                    const msg = evt.data.message ?? 'unknown worker error';
-                    log.error('Worker reported error during init:', msg);
-                    reject(new Error(msg));
-                } else {
-                    log.warn('unexpected message during init:', evt.data.type);
-                }
-            };
+            // 在 _handleMessage 里增加一个单次 'ready' 路由
+            this._readyResolve = () => { clearTimeout(timeout); resolve(); };
+            this._readyReject  = (e) => { clearTimeout(timeout); reject(e); };
 
             this._worker.postMessage({
                 cmd:       'init',
@@ -127,6 +124,8 @@ export class IdbWorkerBackend {
             });
         });
 
+        this._readyResolve = null;
+        this._readyReject  = null;
         this._ready = true;
         const elapsed = Date.now() - t0;
         log.debug(`init() complete — Worker + IDB ready in ${elapsed}ms`, { dbName: this._dbName, storeName: this._storeName });
@@ -150,7 +149,7 @@ export class IdbWorkerBackend {
             await this.init();
         }
 
-        // 背压：待确认批次过多时等待
+        // 背压：待确认批次过多时等待（事件驱动，非忙等待）
         if (this._pending.size >= this._maxPending) {
             log.warn(`backpressure: pending=${this._pending.size} >= maxPending=${this._maxPending}, waiting for slot (batch=${batch.length})`);
             const t0 = Date.now();
@@ -188,27 +187,7 @@ export class IdbWorkerBackend {
             return;
         }
         log.debug(`flush() — pending=${this._pending.size}`);
-        return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                const msg = `flush timeout after 30s (pending=${this._pending.size})`;
-                log.error(msg);
-                reject(new Error('IdbWorkerBackend: flush timeout'));
-            }, 30000);
-            const orig = this._worker.onmessage.bind(this);
-            // 临时拦截 flushed 消息
-            const onMsg = (evt) => {
-                if (evt.data.type === 'flushed') {
-                    clearTimeout(timeout);
-                    this._worker.onmessage = orig;
-                    log.debug('flush() complete');
-                    resolve();
-                } else {
-                    orig({ data: evt.data });
-                }
-            };
-            this._worker.onmessage = onMsg;
-            this._worker.postMessage({ cmd: 'flush' });
-        });
+        return this._sendRequest('flush', 30000);
     }
 
     /**
@@ -233,19 +212,9 @@ export class IdbWorkerBackend {
             log.error('flush() during close failed:', err.message);
         });
 
-        await new Promise((resolve) => {
-            const timeout = setTimeout(() => {
-                log.warn('close(): Worker did not respond within 3s — forcing terminate');
-                resolve();
-            }, 3000);
-            this._worker.onmessage = (evt) => {
-                if (evt.data.type === 'closed') {
-                    clearTimeout(timeout);
-                    log.debug('Worker sent "closed" ack');
-                    resolve();
-                }
-            };
-            this._worker.postMessage({ cmd: 'close' });
+        // 等待 Worker 确认关闭，超时 3s 后强制 terminate
+        await this._sendRequest('close', 3000).catch((err) => {
+            log.warn('close(): Worker did not respond:', err.message, '— forcing terminate');
         });
 
         this._worker.terminate();
@@ -271,25 +240,7 @@ export class IdbWorkerBackend {
             return [];
         }
         log.debug('query()', { filter, limit });
-        return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                const msg = 'query timeout after 10s';
-                log.error(msg);
-                reject(new Error('IdbWorkerBackend: query timeout'));
-            }, 10000);
-            const orig = this._worker.onmessage.bind(this);
-            this._worker.onmessage = (evt) => {
-                if (evt.data.type === 'queryResult') {
-                    clearTimeout(timeout);
-                    this._worker.onmessage = orig;
-                    log.debug(`query() returned ${evt.data.events.length} events`);
-                    resolve(evt.data.events);
-                } else {
-                    orig({ data: evt.data });
-                }
-            };
-            this._worker.postMessage({ cmd: 'query', filter, limit });
-        });
+        return this._sendRequest('query', 10000, { filter, limit });
     }
 
     /**
@@ -302,31 +253,48 @@ export class IdbWorkerBackend {
             return;
         }
         log.debug('clear()');
-        return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                const msg = 'clear timeout after 10s';
-                log.error(msg);
-                reject(new Error('IdbWorkerBackend: clear timeout'));
-            }, 10000);
-            const orig = this._worker.onmessage.bind(this);
-            this._worker.onmessage = (evt) => {
-                if (evt.data.type === 'cleared') {
-                    clearTimeout(timeout);
-                    this._worker.onmessage = orig;
-                    log.debug('clear() done');
-                    resolve();
-                } else {
-                    orig({ data: evt.data });
-                }
-            };
-            this._worker.postMessage({ cmd: 'clear' });
-        });
+        return this._sendRequest('clear', 10000);
     }
 
     // ── 内部方法 ──────────────────────────────────────────────────────────────
 
+    /**
+     * 统一的 request-response 机制。
+     * 为每条请求分配唯一 reqId，在 _handleMessage 中按 reqId 路由响应。
+     * 支持并发调用，不会互相覆盖。
+     *
+     * @param {string} cmd         - Worker 命令名
+     * @param {number} timeoutMs   - 超时时间（ms）
+     * @param {object} [extra={}]  - 附加消息字段
+     * @returns {Promise<any>}     - 对于 queryResult 返回 events 数组，其余返回 undefined
+     */
+    _sendRequest(cmd, timeoutMs, extra = {}) {
+        return new Promise((resolve, reject) => {
+            const reqId = ++this._reqIdCounter;
+            const timer = setTimeout(() => {
+                this._requests.delete(reqId);
+                const msg = `${cmd} timeout after ${timeoutMs}ms (reqId=${reqId})`;
+                log.error(msg);
+                reject(new Error(`IdbWorkerBackend: ${cmd} timeout`));
+            }, timeoutMs);
+
+            this._requests.set(reqId, { resolve, reject, timer });
+            this._worker.postMessage({ cmd, reqId, ...extra });
+        });
+    }
+
     _handleMessage(msg) {
         switch (msg.type) {
+            case 'ready': {
+                // init() 阶段的单次就绪通知
+                if (this._readyResolve) {
+                    log.debug('Worker sent "ready"');
+                    this._readyResolve();
+                } else {
+                    log.debug('unexpected "ready" message after init — ignoring');
+                }
+                break;
+            }
             case 'ack': {
                 const entry = this._pending.get(msg.batchId);
                 if (entry) {
@@ -334,55 +302,101 @@ export class IdbWorkerBackend {
                     this._pending.delete(msg.batchId);
                     log.debug(`ack batchId=${msg.batchId} count=${msg.count} pending=${this._pending.size}`);
                     entry.resolve();
+                    // 背压释放：唤醒等待槽位的调用方
+                    this._notifySlotWaiters();
                 } else {
                     log.warn(`ack for unknown batchId=${msg.batchId} — already timed out?`);
                 }
                 break;
             }
             case 'error': {
-                const entry = this._pending.get(msg.batchId);
+                // 可能是 write 错误（有 batchId）或通用错误
                 const errMsg = msg.message ?? 'unknown error';
-                if (entry) {
-                    clearTimeout(entry.timer);
-                    this._pending.delete(msg.batchId);
-                    log.error(`Worker error for batchId=${msg.batchId}:`, errMsg);
-                    if (msg.stack) log.error('Worker stack trace:', msg.stack);
-                    entry.reject(new Error(errMsg));
+                if (msg.batchId != null) {
+                    const entry = this._pending.get(msg.batchId);
+                    if (entry) {
+                        clearTimeout(entry.timer);
+                        this._pending.delete(msg.batchId);
+                        log.error(`Worker error for batchId=${msg.batchId}:`, errMsg);
+                        if (msg.stack) log.error('Worker stack trace:', msg.stack);
+                        entry.reject(new Error(errMsg));
+                        // 背压释放：出错后也应唤醒等待者
+                        this._notifySlotWaiters();
+                    } else {
+                        log.error('Worker error (no pending entry):', errMsg);
+                        if (msg.stack) log.error('Worker stack trace:', msg.stack);
+                    }
+                } else if (msg.reqId != null) {
+                    this._resolveRequest(msg.reqId, null, new Error(errMsg));
                 } else {
-                    log.error('Worker error (no pending entry):', errMsg);
+                    log.error('Worker error (unknown origin):', errMsg);
                     if (msg.stack) log.error('Worker stack trace:', msg.stack);
                 }
                 this.stats.errors++;
                 break;
             }
-            case 'ready':
-            case 'flushed':
-            case 'queryResult':
-            case 'cleared':
-            case 'closed':
-                // 这些由临时拦截的 onmessage 处理，到这里说明没人处理，忽略
-                log.debug(`unhandled message type in _handleMessage: ${msg.type} (expected to be intercepted)`);
+            case 'flushed': {
+                log.debug(`flush complete (reqId=${msg.reqId})`);
+                this._resolveRequest(msg.reqId, undefined);
                 break;
+            }
+            case 'queryResult': {
+                log.debug(`query returned ${msg.events?.length ?? 0} events (reqId=${msg.reqId})`);
+                this._resolveRequest(msg.reqId, msg.events);
+                break;
+            }
+            case 'cleared': {
+                log.debug(`clear complete (reqId=${msg.reqId})`);
+                this._resolveRequest(msg.reqId, undefined);
+                break;
+            }
+            case 'closed': {
+                log.debug(`Worker sent "closed" (reqId=${msg.reqId})`);
+                this._resolveRequest(msg.reqId, undefined);
+                break;
+            }
             default:
                 log.warn('unhandled message type:', msg.type, msg);
         }
     }
 
     /**
-     * 等待 pending 批次中有一个完成（背压释放槽位）。
+     * 按 reqId 路由 request-response 的应答。
+     * @param {number} reqId
+     * @param {any}    result  - 成功时的返回值
+     * @param {Error}  [err]   - 失败时的错误（传入则 reject）
+     */
+    _resolveRequest(reqId, result, err) {
+        if (reqId == null) return;
+        const req = this._requests.get(reqId);
+        if (!req) {
+            log.warn(`_resolveRequest: no pending request for reqId=${reqId} — already timed out?`);
+            return;
+        }
+        clearTimeout(req.timer);
+        this._requests.delete(reqId);
+        if (err) {
+            req.reject(err);
+        } else {
+            req.resolve(result);
+        }
+    }
+
+    /**
+     * 等待背压槽位释放（事件驱动，非忙等待）。
+     * ack 到来后，_notifySlotWaiters() 会依次唤醒队列中的等待者。
      */
     _waitForSlot() {
-        // 等待第一个 pending 的 resolve（任意一个完成即可）
-        return new Promise(resolve => {
-            const check = () => {
-                if (this._pending.size < this._maxPending) {
-                    resolve();
-                } else {
-                    // 在下一个微任务再检查
-                    Promise.resolve().then(check);
-                }
-            };
-            check();
-        });
+        if (this._pending.size < this._maxPending) return Promise.resolve();
+        return new Promise(resolve => this._slotWaiters.push(resolve));
+    }
+
+    /**
+     * 唤醒背压等待队列中的下一个调用方（每次 ack 后调用）。
+     */
+    _notifySlotWaiters() {
+        while (this._pending.size < this._maxPending && this._slotWaiters.length > 0) {
+            this._slotWaiters.shift()();
+        }
     }
 }

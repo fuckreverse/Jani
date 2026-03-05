@@ -34,7 +34,19 @@ export class FunCalledWithMoreArguments {
 
     invokeFunPre(iid, f, base, args, isConstructor, isMethod) {
         // 只检查有 length 属性的普通函数（排除内置/native 函数，其 length 可能不反映真实参数数）
+        // BUG-PLG-01 修复：跳过含 rest 参数的函数。
+        // f.length 只计算第一个 rest 参数之前的形参数量，因此 function f(a, ...rest) 的 length=1，
+        // 传入 f(1, 2, 3) 时 args.length=3 > f.length=1 会被误报。
+        // 通过 toString() 检测函数签名中是否含有 rest 参数（...identifier），跳过此类函数。
+        let hasRestParam = false;
+        try {
+            hasRestParam = /\(\.\.\.\w|,\s*\.\.\.\w/.test(Function.prototype.toString.call(f));
+        } catch (_) {
+            // native 函数 toString 可能抛出，保守处理：不报告
+            hasRestParam = true;
+        }
         if (
+            !hasRestParam &&
             typeof f === 'function' &&
             typeof f.length === 'number' &&
             !isConstructor &&

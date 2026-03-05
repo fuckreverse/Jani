@@ -21,17 +21,17 @@
  *     → 批量写入，完成后回复 { type: 'ack', batchId, count }
  *       失败时回复 { type: 'error', batchId, message, stack }
  *
- *   { cmd: 'flush' }
- *     → 确认所有进行中事务完成，回复 { type: 'flushed' }
+ *   { cmd: 'flush', reqId: number }
+ *     → 确认所有进行中事务完成，回复 { type: 'flushed', reqId }
  *
- *   { cmd: 'query', filter?: object, limit?: number }
- *     → 查询所有事件，回复 { type: 'queryResult', events: Array }
+ *   { cmd: 'query', reqId: number, filter?: object, limit?: number }
+ *     → 查询所有事件，回复 { type: 'queryResult', reqId, events: Array }
  *
- *   { cmd: 'clear' }
- *     → 清空 store，回复 { type: 'cleared' }
+ *   { cmd: 'clear', reqId: number }
+ *     → 清空 store，回复 { type: 'cleared', reqId }
  *
- *   { cmd: 'close' }
- *     → 关闭数据库连接，回复 { type: 'closed' }
+ *   { cmd: 'close', reqId: number }
+ *     → 关闭数据库连接，回复 { type: 'closed', reqId }
  *
  * 存储格式：
  *   每条事件作为一个 IDB record，key = autoIncrement。
@@ -260,12 +260,12 @@ self.onmessage = async (evt) => {
             case 'flush': {
                 dbg.debug(`flush: pendingTxCount=${pendingTxCount}`);
                 if (pendingTxCount === 0) {
-                    self.postMessage({ type: 'flushed' });
+                    self.postMessage({ type: 'flushed', reqId: msg.reqId });
                     dbg.debug('flush: no pending tx, sent "flushed" immediately');
                 } else {
                     // 等待所有进行中事务完成
                     await new Promise(resolve => flushResolvers.push(resolve));
-                    self.postMessage({ type: 'flushed' });
+                    self.postMessage({ type: 'flushed', reqId: msg.reqId });
                     dbg.debug('flush: all tx drained, sent "flushed"');
                 }
                 break;
@@ -274,22 +274,22 @@ self.onmessage = async (evt) => {
             case 'query': {
                 if (!db) {
                     dbg.warn('query: DB not initialized — returning empty');
-                    self.postMessage({ type: 'queryResult', events: [] });
+                    self.postMessage({ type: 'queryResult', reqId: msg.reqId, events: [] });
                     return;
                 }
                 const events = await queryEvents(msg.filter ?? {}, msg.limit ?? 10000);
-                self.postMessage({ type: 'queryResult', events });
+                self.postMessage({ type: 'queryResult', reqId: msg.reqId, events });
                 break;
             }
 
             case 'clear': {
                 if (!db) {
                     dbg.warn('clear: DB not initialized — nothing to clear');
-                    self.postMessage({ type: 'cleared' });
+                    self.postMessage({ type: 'cleared', reqId: msg.reqId });
                     return;
                 }
                 await clearStore();
-                self.postMessage({ type: 'cleared' });
+                self.postMessage({ type: 'cleared', reqId: msg.reqId });
                 break;
             }
 
@@ -299,7 +299,7 @@ self.onmessage = async (evt) => {
                     db.close();
                     db = null;
                 }
-                self.postMessage({ type: 'closed' });
+                self.postMessage({ type: 'closed', reqId: msg.reqId });
                 dbg.debug('close: sent "closed"');
                 break;
             }

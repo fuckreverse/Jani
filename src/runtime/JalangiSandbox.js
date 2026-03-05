@@ -41,6 +41,9 @@ import { AnalysisHost   } from './AnalysisHost.js';
  * 继承 JalangiRuntime（所有运行时钩子 R/W/G/P/…），
  * 并直接提供 iidToLocation / getGlobalIID 位置查询方法。
  *
+ * **重要**：请通过静态异步工厂方法 `JalangiSandbox.create(options)` 创建实例。
+ * 不要直接使用 `new JalangiSandbox()`，因为异步插件注册无法在构造函数中 await。
+ *
  * @param {object}  [options]
  * @param {boolean} [options.useIdb=false]
  *   浏览器中是否启用 IndexedDB
@@ -83,13 +86,44 @@ export class JalangiSandbox extends JalangiRuntime {
         SPECIAL_PROP_SID, SPECIAL_PROP_IID, UNKNOWN, HOP, hasGetterSetter,
     };
 
+    /**
+     * BUG-RT-05 修复：私有构造函数，防止直接 new 调用。
+     * 必须通过静态工厂方法 `create(options)` 创建实例。
+     */
     constructor(options = {}) {
         super({ debugShadow: options.debugShadow ?? false });
         this.analysis = new AnalysisHost();
+    }
 
+    /**
+     * 异步工厂方法，创建并初始化 JalangiSandbox 实例。
+     * 
+     * 此方法支持异步插件注册（如 ExecutionTraceAnalysis），
+     * 确保在使用前所有插件已完全注册，避免早期 trace 事件丢失。
+     *
+     * @param {object} [options] - 配置选项（同构造函数）
+     * @returns {Promise<JalangiSandbox>}
+     *
+     * @example
+     *   // 基础用法
+     *   const J$ = await JalangiSandbox.create();
+     *   globalThis.J$ = J$;
+     *
+     *   // 带 ExecutionTrace
+     *   const J$ = await JalangiSandbox.create({
+     *       withExecutionTrace: true,
+     *       useIdb: true,
+     *   });
+     */
+    static async create(options = {}) {
+        const sandbox = new JalangiSandbox(options);
+
+        // 若启用 ExecutionTrace，异步注册并等待完成
         if (options.withExecutionTrace) {
-            this.#registerExecutionTrace(options);
+            await sandbox.#registerExecutionTrace(options);
         }
+
+        return sandbox;
     }
 
     // ── 源码位置查询 ──────────────────────────────────────────────────────────

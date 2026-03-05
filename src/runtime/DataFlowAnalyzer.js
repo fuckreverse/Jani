@@ -352,8 +352,10 @@ export class DataFlowAnalyzer {
             }
         }
 
-        // 按 iid 升序排列（还原时间顺序）
-        return result.sort((a, b) => a.iid - b.iid);
+        // BUG-RT-04 修复：按 regId 升序排列（而非 iid）以正确反映运行时执行顺序。
+        // iid 是编译时静态分配的，同一指令在循环中多次执行时 iid 相同，无法区分执行顺序。
+        // regId 是单调递增的运行时序号，才能正确还原执行时间顺序。
+        return result.sort((a, b) => a.regId - b.regId);
     }
 
     /**

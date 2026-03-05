@@ -277,8 +277,8 @@ export function deserializeBatchFromBinary(buf) {
     for (let i = 0; i < count; i++) {
         const size    = view.getUint32(offset, true);
         offset       += 4;
-        const subView = new DataView(buf, offset, size);
-        // 重建一个完整的 DataView（共享 buffer）
+        // Q-2 修复：移除未使用的 subView 变量（死代码）。
+        // deserializeEventFromBinary 接受共享整个 buffer 的 DataView + offset，无需 subView。
         const { event } = deserializeEventFromBinary(new DataView(buf), offset);
         events[i] = event;
         offset   += size;

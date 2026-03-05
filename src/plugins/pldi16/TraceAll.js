@@ -204,7 +204,7 @@ export class TraceAllAnalysis {
     }
 
     endExecution() {
-        this._log('endExpression()');
+        this._log('endExecution()');
     }
 
     runInstrumentedFunctionBody(iid, f, functionIid, functionSid) {

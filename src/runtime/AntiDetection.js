@@ -74,8 +74,8 @@ export function installToStringHook() {
             if (orig !== undefined) return orig;
             return _origToString.call(this);
         },
-        writable:     false,
-        configurable: false,
+        writable:     true,   // 必须为 true，否则 uninstallToStringHook 无法恢复
+        configurable: true,   // 必须为 true，否则 Object.defineProperty 恢复时抛 TypeError
         enumerable:   false,
     });
 

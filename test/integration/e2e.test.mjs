@@ -5,7 +5,7 @@
  *
  * 覆盖范围：
  *  - 基础语义：算术、字符串、函数调用、递归、对象/数组
- *  - ES6+：箭头函数、class 实例化/继承、try-catch、for-in、解构
+ *  - ES6+：箭头函数、class 实例化/继承、try-catch、for-in、for-of、解构（含真实语法）
  *  - ES2020：可选链、空值合并、逻辑赋值
  *  - ES2017/async：Promise、await 透传、awaitResume 钩子、contextId 独立性
  *  - 闭包 Shadow Frame 场景（7 种，覆盖 #resolveCallId 修复）
@@ -188,6 +188,110 @@ describe('ES6+ 语义', () => {
             $out.r = r;
         `);
         assert.equal(out.r, 6);
+    });
+
+    test('for-of 循环（数组迭代）', () => {
+        const { out } = instrAndRun(`
+            var arr = [10, 20, 30];
+            var sum = 0;
+            for (var v of arr) { sum = sum + v; }
+            $out.sum = sum;
+        `);
+        assert.equal(out.sum, 60, 'for-of 应正确累加数组元素');
+    });
+
+    test('for-of 循环（字符串迭代）', () => {
+        const { out } = instrAndRun(`
+            var str = 'abc';
+            var chars = [];
+            for (var ch of str) { chars.push(ch); }
+            $out.r = chars.join('-');
+        `);
+        assert.equal(out.r, 'a-b-c', 'for-of 应逐字符迭代字符串');
+    });
+
+    test('for-of 循环（Map 迭代）', () => {
+        const { out } = instrAndRun(`
+            var m = new Map([['a', 1], ['b', 2]]);
+            var keys = [];
+            var vals = [];
+            for (var entry of m) { keys.push(entry[0]); vals.push(entry[1]); }
+            $out.keys = keys.join(',');
+            $out.sum  = vals[0] + vals[1];
+        `);
+        assert.equal(out.keys, 'a,b', 'for-of Map 应按插入顺序迭代键');
+        assert.equal(out.sum, 3,      'for-of Map 值应正确');
+    });
+
+    test('对象解构声明（const {x, y} = obj）', () => {
+        const { out } = instrAndRun(`
+            var obj = { x: 7, y: 13, z: 99 };
+            var { x, y } = obj;
+            $out.x = x;
+            $out.y = y;
+        `);
+        assert.equal(out.x, 7,  '对象解构 x 应等于 7');
+        assert.equal(out.y, 13, '对象解构 y 应等于 13');
+    });
+
+    test('对象解构（带默认值）', () => {
+        const { out } = instrAndRun(`
+            var obj = { a: 10 };
+            var { a, b = 42 } = obj;
+            $out.a = a;
+            $out.b = b;
+        `);
+        assert.equal(out.a, 10, '解构中已有的属性应取原值');
+        assert.equal(out.b, 42, '解构中缺失的属性应取默认值 42');
+    });
+
+    test('数组解构声明（const [first, second] = arr）', () => {
+        const { out } = instrAndRun(`
+            var arr = [100, 200, 300];
+            var [first, second] = arr;
+            $out.first  = first;
+            $out.second = second;
+        `);
+        assert.equal(out.first,  100, '数组解构第一元素应为 100');
+        assert.equal(out.second, 200, '数组解构第二元素应为 200');
+    });
+
+    test('数组解构（跳过元素 + rest）', () => {
+        const { out } = instrAndRun(`
+            var arr = [1, 2, 3, 4, 5];
+            var [a, , c, ...rest] = arr;
+            $out.a    = a;
+            $out.c    = c;
+            $out.rest = rest.join(',');
+        `);
+        assert.equal(out.a,    1,     '解构第 1 元素应为 1');
+        assert.equal(out.c,    3,     '跳过第 2、取第 3 元素应为 3');
+        assert.equal(out.rest, '4,5', 'rest 应为 [4,5]');
+    });
+
+    test('嵌套解构（对象中嵌套数组）', () => {
+        const { out } = instrAndRun(`
+            var data = { name: 'Alice', scores: [90, 85] };
+            var { name, scores: [s1, s2] } = data;
+            $out.name = name;
+            $out.s1   = s1;
+            $out.s2   = s2;
+        `);
+        assert.equal(out.name, 'Alice', '嵌套解构 name 应为 Alice');
+        assert.equal(out.s1,   90,      '嵌套解构 scores[0] 应为 90');
+        assert.equal(out.s2,   85,      '嵌套解构 scores[1] 应为 85');
+    });
+
+    test('函数参数解构（对象解构形参）', () => {
+        const { out } = instrAndRun(`
+            function greet({ name, age = 0 }) {
+                return name + ':' + age;
+            }
+            $out.r1 = greet({ name: 'Bob', age: 30 });
+            $out.r2 = greet({ name: 'Ann' });
+        `);
+        assert.equal(out.r1, 'Bob:30', '解构形参应正确读取 name 和 age');
+        assert.equal(out.r2, 'Ann:0',  '解构形参默认值应生效');
     });
 });
 

@@ -130,14 +130,27 @@ export class NodeStreamBackend {
 
     /**
      * 等待底层 stream 将所有缓冲数据写入 OS（非 fsync，只是清空用户空间缓冲）。
+     *
+     * `drain` 事件只在 stream.write() 返回 false（背压）后才会触发，
+     * 因此不能单纯靠监听 drain 来判断"写完了"。
+     * 正确做法：通过 writableNeedDrain 判断是否真的在背压状态；
+     * 否则缓冲区虽非空但流未背压，此时数据已在 OS 写入队列，直接 resolve 即可。
+     *
      * @returns {Promise<void>}
      */
     flush() {
         return new Promise((resolve, reject) => {
-            if (!this._stream.writableNeedDrain) {
+            // 没有背压，缓冲区数据已提交给 OS，直接完成
+            const needDrain = this._stream.writableNeedDrain !== undefined
+                ? this._stream.writableNeedDrain
+                : !this._drainable;
+
+            if (!needDrain) {
                 resolve();
                 return;
             }
+
+            // 处于背压状态，等待 drain 事件
             const onDrain = () => { cleanup(); resolve(); };
             const onError = (err) => { cleanup(); reject(err); };
             const cleanup = () => {

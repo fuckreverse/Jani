@@ -102,12 +102,15 @@ function initialize(forEval, instFile, origFile) {
 /**
  * 返回当前 iidSourceInfo 的快照，用于插入到插桩代码头部。
  * nBranches 会在此时根据最终 condIid 计算。
+ *
+ * Q-1 修复：返回防御性副本（shallow spread），防止调用者修改返回值时污染内部
+ * iidSourceInfo 对象（该对象在整个 instrumentCode 调用生命周期内持续使用）。
  */
 function getSourceInfo() {
     iidSourceInfo.nBranches                  = (condIid / IID_INC_STEP - 1) * 2;
     iidSourceInfo.originalCodeFileName       = origCodeFileName;
     iidSourceInfo.instrumentedCodeFileName   = instCodeFileName;
-    return iidSourceInfo;
+    return { ...iidSourceInfo };
 }
 
 const getInstCodeFileName = () => instCodeFileName;

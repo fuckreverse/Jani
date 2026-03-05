@@ -509,7 +509,8 @@ export class JalangiRuntime {
 
     #invokeFunctionDecl(base, f, args, iid) {
         const newArgs = Array.from(args).map(v => String(new String(v)));
-        f.apply(base, newArgs);
+        // 注意：不调用原始 f（Function 构造函数），而是先插桩再用 eval 执行，
+        // 以便对 new Function(...) 动态创建的代码也进行分析。
         const rawCode = `(function(${newArgs.slice(0, newArgs.length - 1).join(', ')}) { ${newArgs[newArgs.length - 1]} })`;
         const code    = this.instrumentEvalCode(rawCode, iid, false);
         return EVAL_ORG(code);
@@ -939,8 +940,9 @@ export class JalangiRuntime {
             //
             // 使用 Set 而非 Map，每次工厂函数调用的 callId 各自独立注册，
             // 避免多实例调用时互相覆盖导致旧帧被误清除。
+            let isReferencedByClosure = false;
             if (leavingScopeId !== undefined) {
-                const isReferencedByClosure = this.#closureFrameSet.has(`${leavingScopeId}:${leavingCallId}`);
+                isReferencedByClosure = this.#closureFrameSet.has(`${leavingScopeId}:${leavingCallId}`);
                 if (!isReferencedByClosure) {
                     this.#shadowClear(leavingScopeId, leavingCallId);
                 }
@@ -949,6 +951,16 @@ export class JalangiRuntime {
             this.#currentCallId = parentCallId;
             // 恢复父帧的 defScopeId
             this.#currentFunDefScopeId = parentDefScopeId;
+
+            // BUG-RT-03 修复：清除 #callIdToOuterCallId 映射，防止内存泄漏。
+            // 当函数退出时，若没有闭包在引用此帧，可安全删除，允许 GC 回收。
+            // 若有闭包引用（isReferencedByClosure=true），则保留链条，
+            // 使得内层闭包的 #resolveCallId() 能继续沿链找到祖父层及以上的变量。
+            // （FinalizationRegistry 回调会在闭包函数被 GC 后负责清理 closureFrameSet，
+            //   届时再通过 FinalizationRegistry 删除）
+            if (!isReferencedByClosure) {
+                this.#callIdToOuterCallId.delete(leavingCallId);
+            }
         }
 
         if (!isBacktrack) this.#returnStack.push(returnVal);

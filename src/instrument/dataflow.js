@@ -139,15 +139,9 @@ export function analyzeDefUse(ast) {
                 return;
             }
 
-            // binding.constant：该变量在其生命周期中是否从未被重赋值
-            // binding.constantViolations.length === 0 等价于 constant === true
-            if (binding.constant) {
-                // 常量绑定且无属性 mutation：可以走轻量路径
-                decisions.set(key, Decision.LIGHTWEIGHT);
-                return;
-            }
-
-            // 有重赋值但无属性 mutation → 轻量路径（Shadow Frame 可感知重赋值）
+            // Q-3 修复：无论 binding.constant 是 true 还是 false，
+            // 只要没有属性 mutation（已在上方排除），都走轻量路径（Rl/Shadow Frame）。
+            // Shadow Frame 对重赋值也能正确追踪，因此两个分支可合并为无条件赋值。
             decisions.set(key, Decision.LIGHTWEIGHT);
         },
     });

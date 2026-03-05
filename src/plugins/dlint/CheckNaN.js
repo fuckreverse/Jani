@@ -38,7 +38,7 @@ export class CheckNaN {
             op === '==' || op === '===' || op === '!=' || op === '!==' ||
             op === '<'  || op === '>'   || op === '<=' || op === '>='
         ) {
-            if (left !== left || right !== right) {   // NaN check (NaN !== NaN)
+            if (Number.isNaN(left) || Number.isNaN(right)) {   // Q-4 修复：改用 Number.isNaN()（替代 x !== x 惯用法）
                 const giid = this._sandbox.getGlobalIID(iid);
                 this._info[giid] = (this._info[giid] | 0) + 1;
             }

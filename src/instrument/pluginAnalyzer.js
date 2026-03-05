@@ -92,8 +92,9 @@ const HOOK_TO_CONFIG_FIELDS = {
     // 属性访问
     getFieldPre:    ['INSTR_GETFIELD'],
     getField:       ['INSTR_GETFIELD'],
-    putFieldPre:    ['INSTR_PUTFIELD'],
-    putField:       ['INSTR_PUTFIELD'],
+    // 属性写入同时启用复合赋值插桩（obj.x += 1 等）
+    putFieldPre:    ['INSTR_PUTFIELD', 'INSTR_PROPERTY_BINARY_ASSIGNMENT'],
+    putField:       ['INSTR_PUTFIELD', 'INSTR_PROPERTY_BINARY_ASSIGNMENT'],
 
     // 变量读写
     read:           ['INSTR_READ'],
@@ -155,6 +156,7 @@ export const ALL_CONFIG_FIELDS = new Set([
     'INSTR_THROW',
     'INSTR_FORIN',
     'INSTR_AWAIT',
+    'INSTR_PROPERTY_BINARY_ASSIGNMENT',
 ]);
 
 // ─── analyzePluginHooks：静态 AST 扫描 ───────────────────────────────────────
@@ -386,7 +388,7 @@ export function buildConfigFromHooks(usedHooks) {
 export function buildConfigFromPlugins(plugins) {
     if (!plugins || plugins.length === 0) {
         // 没有插件 → 返回全量插桩 Config（与旧行为一致）
-        return _fullConfig();
+        return fullConfig();
     }
     const usedHooks = analyzePluginHooks(plugins);
     return buildConfigFromHooks(usedHooks);
@@ -397,10 +399,6 @@ export function buildConfigFromPlugins(plugins) {
  * @returns {import('../types.js').JalangiConfig}
  */
 export function fullConfig() {
-    return _fullConfig();
-}
-
-function _fullConfig() {
     const config = { ENABLE_SAMPLING: false };
     for (const field of ALL_CONFIG_FIELDS) {
         config[field] = null;

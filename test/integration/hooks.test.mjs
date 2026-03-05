@@ -227,6 +227,91 @@ describe('Spy 钩子参数验证', () => {
             val !== null && typeof val === 'object' && 'a' in val);
         assert.ok(objCall !== undefined, 'forinObject 传入的 val 应是被枚举的对象');
     });
+
+    test('unary 钩子被调用，op 和操作数正确', () => {
+        const { code: instrCode } = (() => {
+            init({ ...ALL_CONFIG });
+            return instrumentCode({
+                code: 'var x = 5; var neg = -x; var notX = !true;',
+                origCodeFileName: 'spy-unary.js',
+                instCodeFileName: 'spy-unary_inst.js',
+                inlineSourceMap: true,
+            });
+        })();
+        const J$inst = new JalangiSandbox();
+        const { plugin, calls } = createSpy('unary');
+        J$inst.analysis.use(plugin);
+        runInSandbox(instrCode, J$inst);
+
+        const unaryCalls = calls.get('unary');
+        assert.ok(unaryCalls.length > 0, 'unary 钩子应至少触发一次');
+        // unary(iid, op, left, result)
+        const negCall = unaryCalls.find(([_iid, op, arg]) => op === '-' && arg === 5);
+        assert.ok(negCall !== undefined, 'unary 钩子应记录 -x（x=5）');
+        assert.equal(negCall[3], -5, 'unary 钩子的 result 应等于 -5');
+
+        const notCall = unaryCalls.find(([_iid, op, arg]) => op === '!' && arg === true);
+        assert.ok(notCall !== undefined, 'unary 钩子应记录 !true');
+        assert.equal(notCall[3], false, 'unary 钩子的 result 应等于 false');
+    });
+
+    test('declare 钩子被调用，函数参数可正确识别', () => {
+        const { code: instrCode } = (() => {
+            init({ ...ALL_CONFIG });
+            return instrumentCode({
+                code: 'function add(a, b) { var c = a + b; return c; } add(3, 7);',
+                origCodeFileName: 'spy-declare.js',
+                instCodeFileName: 'spy-declare_inst.js',
+                inlineSourceMap: true,
+            });
+        })();
+        const J$inst = new JalangiSandbox();
+        const { plugin, calls } = createSpy('declare');
+        J$inst.analysis.use(plugin);
+        runInSandbox(instrCode, J$inst);
+
+        const declareCalls = calls.get('declare');
+        assert.ok(declareCalls.length > 0, 'declare 钩子应至少触发一次');
+        // declare(iid, name, val, isArgument, argumentIndex, isCatchParam)
+        // 验证：参数 a=3，isArgument=true，argumentIndex 应为 0
+        const aDecl = declareCalls.find(([_iid, name, val, isArg]) =>
+            name === 'a' && val === 3 && isArg === true);
+        assert.ok(aDecl !== undefined, 'declare 钩子应记录形参 a=3（isArgument=true）');
+        assert.equal(aDecl[4], 0, '形参 a 的 argumentIndex 应为 0');
+
+        // 参数 b=7，isArgument=true，argumentIndex 应为 1
+        const bDecl = declareCalls.find(([_iid, name, val, isArg]) =>
+            name === 'b' && val === 7 && isArg === true);
+        assert.ok(bDecl !== undefined, 'declare 钩子应记录形参 b=7（isArgument=true）');
+        assert.equal(bDecl[4], 1, '形参 b 的 argumentIndex 应为 1');
+
+        // 局部变量 c，isArgument=false
+        const cDecl = declareCalls.find(([_iid, name, _val, isArg]) =>
+            name === 'c' && isArg === false);
+        assert.ok(cDecl !== undefined, 'declare 钩子应记录局部变量 c（isArgument=false）');
+    });
+
+    test('_return 钩子在函数返回时触发，val 正确', () => {
+        const { code: instrCode } = (() => {
+            init({ ...ALL_CONFIG });
+            return instrumentCode({
+                code: 'function double(n) { return n * 2; } var r = double(6);',
+                origCodeFileName: 'spy-return.js',
+                instCodeFileName: 'spy-return_inst.js',
+                inlineSourceMap: true,
+            });
+        })();
+        const J$inst = new JalangiSandbox();
+        const { plugin, calls } = createSpy('_return');
+        J$inst.analysis.use(plugin);
+        runInSandbox(instrCode, J$inst);
+
+        const retCalls = calls.get('_return');
+        assert.ok(retCalls.length > 0, '_return 钩子应至少触发一次');
+        // _return(iid, val) — val 应是实际返回值
+        const ret12 = retCalls.find(([_iid, val]) => val === 12);
+        assert.ok(ret12 !== undefined, '_return 钩子应记录 double(6) 的返回值 12');
+    });
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -289,6 +374,61 @@ describe('端到端分析插件场景', () => {
         const $out = {};
         runInSandbox(instrCode, J$inst, { $out });
         assert.equal($out.r, 30, '分析插件应将 obj.val=10 改写为 30');
+    });
+
+    test('putFieldPre 可拦截并修改属性写入值（在实际写入前）', () => {
+        // putField  是后置钩子：实际写入已发生，修改其 result 不影响对象属性。
+        // putFieldPre 是前置钩子：可通过修改 val 来改变写入到对象的值。
+        // 注意：$out.xxx 赋值也会触发 putFieldPre，需通过标记区分目标对象。
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code: `
+                var obj = {};
+                obj.__target = true;      // 打标记，用于区分 obj 和 $out
+                obj.score = 50;
+                $out.score = obj.score;   // 读 obj.score 再写到 $out（$out 不被拦截）
+            `,
+            origCodeFileName: 'e2e-putfieldpre.js',
+            instCodeFileName: 'e2e-putfieldpre_inst.js',
+            inlineSourceMap: true,
+        });
+        const J$inst = new JalangiSandbox();
+        // 只拦截有 __target 标记的对象的 score 属性
+        J$inst.analysis.use({
+            putFieldPre(_iid, base, offset, val) {
+                if (base && base.__target && offset === 'score') {
+                    return { base, offset, val: val * 2, skip: false };
+                }
+            }
+        });
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal($out.score, 100, 'putFieldPre 应将 obj.score=50 改写为 100');
+    });
+
+    test('putField（后置）钩子被触发，Spy 正确记录写入参数', () => {
+        // putField 是后置观察钩子，不能修改对象属性值，但可以观察写入行为。
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code: 'var obj = {}; obj.a = 1; obj.b = 2; obj.c = 3;',
+            origCodeFileName: 'e2e-putfield-spy.js',
+            instCodeFileName: 'e2e-putfield-spy_inst.js',
+            inlineSourceMap: true,
+        });
+        const J$inst = new JalangiSandbox();
+        const { plugin, calls } = createSpy('putField');
+        J$inst.analysis.use(plugin);
+        runInSandbox(instrCode, J$inst);
+
+        const pfCalls = calls.get('putField');
+        assert.ok(pfCalls.length >= 3, 'putField 应至少被调用 3 次（a/b/c 各一次）');
+        // putField(iid, base, offset, val, isComputed, isOpAssign)
+        const aWrite = pfCalls.find(([_iid, _base, offset, val]) => offset === 'a' && val === 1);
+        const bWrite = pfCalls.find(([_iid, _base, offset, val]) => offset === 'b' && val === 2);
+        const cWrite = pfCalls.find(([_iid, _base, offset, val]) => offset === 'c' && val === 3);
+        assert.ok(aWrite !== undefined, 'putField 应记录 obj.a = 1');
+        assert.ok(bWrite !== undefined, 'putField 应记录 obj.b = 2');
+        assert.ok(cWrite !== undefined, 'putField 应记录 obj.c = 3');
     });
 
     test('多个分析插件链式注册，按序执行', () => {

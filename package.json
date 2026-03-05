@@ -38,12 +38,7 @@
   },
   "devDependencies": {
     "@rollup/plugin-terser": "^0.4.4",
-    "mocha": "^10.0.0",
     "rollup": "^4.59.0"
   },
-  "main": "src/instrument/esnstrument.js",
-  "bundleDependencies": [
-    "@babel/parser",
-    "@babel/generator"
-  ]
+  "main": "src/instrument/esnstrument.js"
 }

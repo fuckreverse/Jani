@@ -283,8 +283,18 @@ export class SMemoryPlugin {
 //   J$.smemory = smemory;
 //   host.use(new SMemoryPlugin(smemory));
 
+// BUG-RT-06 修复：集成到现有 AnalysisHost 而非覆盖。
+// 若 J$.analysis 已是 AnalysisHost 实例（支持 .use() 方法），则将 SMemoryPlugin
+// 注册为插件，保留其他已注册的分析。否则才直接赋值（向后兼容旧式单一分析）。
 if (typeof J$ !== 'undefined') {
-    const smemory    = new SMemory(J$);
-    J$.smemory       = smemory;
-    J$.analysis      = new SMemoryPlugin(smemory);
+    const smemory = new SMemory(J$);
+    J$.smemory    = smemory;
+    
+    if (J$.analysis?.use && typeof J$.analysis.use === 'function') {
+        // 已有 AnalysisHost：集成新插件
+        J$.analysis.use(new SMemoryPlugin(smemory));
+    } else {
+        // 兼容旧式单一分析赋值
+        J$.analysis = new SMemoryPlugin(smemory);
+    }
 }

@@ -86,6 +86,11 @@ function transformAst(object, visitorPost, visitorPre, context, noIgnore) {
         let newContext;
 
         if (
+            // ImportDeclaration.source（如 import "./foo.js" 中的 "./foo.js"）不应插桩
+            (type === 'ImportDeclaration'       && key === 'source') ||
+            // ExportDeclaration.source 同理（如 export { x } from "./foo.js" 中的 "./foo.js"）
+            (type === 'ExportNamedDeclaration'  && key === 'source') ||
+            (type === 'ExportAllDeclaration'    && key === 'source') ||
             (type === 'AssignmentExpression'  && key === 'left') ||
             (type === 'UpdateExpression'      && key === 'argument') ||
             (type === 'UnaryExpression'       && key === 'argument' && object.operator === 'delete') ||
@@ -135,10 +140,26 @@ function transformAst(object, visitorPost, visitorPre, context, noIgnore) {
             newContext = CONTEXT.PARAMS;
         } else if (context === CONTEXT.OEXP) {
             newContext = CONTEXT.OEXP2;
-        } else if (context === CONTEXT.OEXP2 && key === 'key') {
-            newContext = CONTEXT.IGNORE;
+        // NOTE: OEXP2 && key==='key' 已由上方 `Property.key && !object.computed` 规则覆盖，
+        //       此处不需要再单独判断。
         } else if (context === CONTEXT.PARAMS) {
             newContext = CONTEXT.IGNORE;
+        // 解构绑定模式（ObjectPattern / ArrayPattern）内部的所有子节点均为绑定目标，
+        // 不应被插桩为读取操作。
+        // - ObjectPattern.properties 中的 ObjectProperty（Babel AST 特有类型）的 key（非计算属性）
+        //   和 value（绑定目标 Identifier/嵌套 Pattern）均应 IGNORE。
+        // - ObjectProperty 的 shorthand 形式：key 和 value 指向同一 Identifier，均不应插桩。
+        } else if (
+            (type === 'ObjectProperty' && key === 'key' && !object.computed) ||
+            (type === 'ObjectProperty' && key === 'value' && context === CONTEXT.IGNORE)
+        ) {
+            newContext = CONTEXT.IGNORE;
+        // 当 object 本身是数组（type === undefined，即数组容器节点）时，
+        // 数组索引对应的子元素直接继承父上下文。
+        // 场景：ObjectPattern.properties / ArrayPattern.elements 等数组字段在
+        // 遍历其元素时，context 应从父节点传播，而非重置为 RHS。
+        } else if (type === undefined) {
+            newContext = context;
         } else if (object.key && key === 'value' && object.kind === 'get') {
             newContext = CONTEXT.GETTER;
         } else if (object.key && key === 'value' && object.kind === 'set') {
@@ -256,6 +277,9 @@ function computeTopLevelExpressions(ast) {
 
     const TOP_LEVEL_OPS = new Set(['A','P','G','R','W','H','T','Rt','B','U','C','C1','C2']);
 
+    const _pushDepth  = () => { exprDepthStack.push(exprDepth); exprDepth = 0; };
+    const _popDepth   = (node) => { exprDepth = exprDepthStack.pop(); return node; };
+
     const visitorPre = {
         CallExpression(node) {
             if (node.callee.type === 'MemberExpression' &&
@@ -276,8 +300,11 @@ function computeTopLevelExpressions(ast) {
                 exprDepth++;
             }
         },
-        FunctionExpression() { exprDepthStack.push(exprDepth); exprDepth = 0; },
-        FunctionDeclaration() { exprDepthStack.push(exprDepth); exprDepth = 0; },
+        FunctionExpression:       _pushDepth,
+        FunctionDeclaration:      _pushDepth,
+        // 箭头函数与 class 方法同样划定独立的表达式深度边界
+        ArrowFunctionExpression:  _pushDepth,
+        ClassMethod:              _pushDepth,
     };
 
     const visitorPost = {
@@ -295,8 +322,10 @@ function computeTopLevelExpressions(ast) {
             }
             return node;
         },
-        FunctionExpression(node) { exprDepth = exprDepthStack.pop(); return node; },
-        FunctionDeclaration(node) { exprDepth = exprDepthStack.pop(); return node; },
+        FunctionExpression:      _popDepth,
+        FunctionDeclaration:     _popDepth,
+        ArrowFunctionExpression: _popDepth,
+        ClassMethod:             _popDepth,
     };
 
     transformAst(ast, visitorPost, visitorPre, CONTEXT.RHS);

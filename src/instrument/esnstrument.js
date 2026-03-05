@@ -143,9 +143,14 @@ const cloneAst = (src) =>
  */
 function getContext(path) {
     const parent = path.parent;
-    const key    = path.key;           // 当前节点在父节点中的属性名
     if (!parent) return CONTEXT.RHS;
     const pt = parent.type;
+    // path.key：当节点直接位于父节点的具名属性时为属性名（如 'left'、'test'）；
+    //           当节点位于数组中时为数字索引（如 0、1）。
+    // path.listKey：当节点位于数组中时为该数组的属性名（如 'params'、'body'、'arguments'）；
+    //               当节点直接位于具名属性时为 undefined。
+    // 因此「在父节点哪个位置」应统一用 key = listKey ?? path.key 来表示。
+    const key    = path.listKey ?? path.key;
 
     // ── IGNORE 上下文：不应该插桩的位置 ────────────────────────────────────────
     if (
@@ -211,8 +216,24 @@ function getContext(path) {
         return CONTEXT.IGNORE; // params 数组中的每个参数节点 IGNORE
     }
 
-    // ── ObjectExpression 属性中的 key 不插桩 ────────────────────────────────
+    // ── ObjectExpression / ObjectPattern 属性中的 key 不插桩 ──────────────
     if (pt === 'ObjectProperty' && key === 'key' && !parent.computed) {
+        return CONTEXT.IGNORE;
+    }
+    // ── 解构绑定模式（ObjectPattern）中的 ObjectProperty.value 是绑定目标，不应插桩 ──
+    // ObjectProperty 既出现在 ObjectExpression（字面量 {a: 1}，value 是 RHS）中，
+    // 也出现在 ObjectPattern（解构 {a: x}，value 是绑定目标，IGNORE）中。
+    // 通过检查祖先节点（path.parentPath.parentPath）来区分两种场景。
+    if (pt === 'ObjectProperty' && key === 'value') {
+        const grandParent = path.parentPath?.parent;
+        if (grandParent?.type === 'ObjectPattern') {
+            return CONTEXT.IGNORE;
+        }
+    }
+    // ── ArrayPattern.elements 中的元素是绑定目标，不应插桩 ──────────────────
+    // ArrayPattern 的每个元素（Identifier / AssignmentPattern / RestElement 等）
+    // 都是绑定目标，不应被 wrapRead 插桩。
+    if (pt === 'ArrayPattern' && key === 'elements') {
         return CONTEXT.IGNORE;
     }
 
@@ -436,6 +457,23 @@ function runInstrumentPass(file) {
                 node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
                 W.popScope();
                 // ClassMethod 的 try-catch 包裹：同 FunctionExpression
+                if (!node.generator && !node.async) {
+                    node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
+                }
+            },
+        },
+
+        // BUG-INS-05 修复：补充 ObjectMethod 的 scope 管理
+        // ObjectMethod 是 Babel 中表示对象字面量方法简写（如 { method() {...} }）的节点类型。
+        // 虽然在 scope.js 的 addScopes 中已正确处理，但 runInstrumentPass 的 visitor 遗漏了
+        // scope 进出管理，导致该方法内的插桩代码中 _scope 指向错误。
+        ObjectMethod: {
+            enter(path) { W.setScope(path.node); },
+            exit(path) {
+                const node = path.node;
+                node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
+                W.popScope();
+                // ObjectMethod 的 try-catch 包裹：同 FunctionExpression
                 if (!node.generator && !node.async) {
                     node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
                 }
@@ -793,8 +831,6 @@ function runInstrumentPass(file) {
                 const node = path.node;
                 node.test   = W.wrapConditional(node.test, node.test);
                 node.test   = W.wrapWithX1(node, node.test);
-                node.init   = W.wrapWithX1(node, node.init);
-                node.update = W.wrapWithX1(node, node.update);
             },
         },
 
@@ -804,8 +840,6 @@ function runInstrumentPass(file) {
                 const node = path.node;
                 node.test   = W.wrapConditional(node.test, node.test);
                 node.test   = W.wrapWithX1(node, node.test);
-                node.init   = W.wrapWithX1(node, node.init);
-                node.update = W.wrapWithX1(node, node.update);
             },
         },
 
@@ -815,8 +849,6 @@ function runInstrumentPass(file) {
                 const node = path.node;
                 node.test   = W.wrapConditional(node.test, node.test);
                 node.test   = W.wrapWithX1(node, node.test);
-                node.init   = W.wrapWithX1(node, node.init);
-                node.update = W.wrapWithX1(node, node.update);
             },
         },
 
@@ -826,8 +858,6 @@ function runInstrumentPass(file) {
                 const node = path.node;
                 node.test   = W.wrapConditional(node.test, node.test);
                 node.test   = W.wrapWithX1(node, node.test);
-                node.init   = W.wrapWithX1(node, node.init);
-                node.update = W.wrapWithX1(node, node.update);
             },
         },
 
