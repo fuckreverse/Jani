@@ -56,6 +56,15 @@ import { AnalysisHost   } from './AnalysisHost.js';
  *   若为 false（默认），沙盒不预装任何分析，调用方自行 J$.analysis.use(...)。
  * @param {string}  [options.sourceCode]
  *   原始源码（ExecutionTrace 用，可选）
+ * @param {boolean} [options.observeOnly=false]
+ *   纯观测模式。true 时所有插件钩子仍正常调用，但返回值被完全忽略——
+ *   插件无法通过 result/skip/isBacktrack 等字段修改原始程序的执行。
+ *   适用于 Trace / Coverage / Profiling 等纯观测场景。
+ *   等同于 `new AnalysisHost({ observeOnly: true })`。
+ * @param {boolean} [options.instrumentEval=false]
+ *   是否对 eval / new Function 动态创建的代码进行插桩。
+ *   默认 false：eval/Function 直接透传原始调用，语义完全保持原样，适合 trace / observe 等场景。
+ *   设为 true 则恢复旧式行为（动态代码也被插桩分析），需确保 `this.instrumentEvalCode` 已注入。
  */
 export class JalangiSandbox extends JalangiRuntime {
 
@@ -91,8 +100,13 @@ export class JalangiSandbox extends JalangiRuntime {
      * 必须通过静态工厂方法 `create(options)` 创建实例。
      */
     constructor(options = {}) {
-        super({ debugShadow: options.debugShadow ?? false });
-        this.analysis = new AnalysisHost();
+        super({
+            debugShadow:    options.debugShadow    ?? false,
+            instrumentEval: options.instrumentEval ?? false,
+        });
+        this.analysis = new AnalysisHost({
+            observeOnly: options.observeOnly ?? false,
+        });
     }
 
     /**

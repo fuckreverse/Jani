@@ -557,3 +557,269 @@ describe('端到端分析插件场景', () => {
         assert.ok(parseInt(match[2]) >= 1, 'startLine 应 >= 1');
     });
 });
+
+// ════════════════════════════════════════════════════════════════════════════════
+// observeOnly 模式验证
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('observeOnly 模式', () => {
+    // 公共插桩代码生成：var x = 1 + 2; $out.x = x;
+    function makeInstrCode(fileName = 'observe-only') {
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code: 'var x = 1 + 2; $out.x = x;',
+            origCodeFileName: `${fileName}.js`,
+            instCodeFileName: `${fileName}_inst.js`,
+            inlineSourceMap: true,
+        });
+        return instrCode;
+    }
+
+    test('observeOnly=false（默认）：插件返回 result 可修改执行结果', () => {
+        // 标准模式：binary 钩子返回 { result: 999 } 应覆盖 1+2 的结果
+        const instrCode = makeInstrCode('observe-false');
+        const J$inst = new JalangiSandbox(); // 默认 observeOnly=false
+        assert.equal(J$inst.analysis.observeOnly, false, 'observeOnly 默认应为 false');
+        J$inst.analysis.use({
+            binary(_iid, _op, _l, _r, _result) { return { result: 999 }; }
+        });
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal($out.x, 999, '标准模式下 binary 钩子返回的 result 应生效');
+    });
+
+    test('observeOnly=true：插件返回 result 被忽略，原始计算结果不变', () => {
+        // observeOnly 模式：binary 钩子返回 { result: 999 } 应被框架忽略
+        const instrCode = makeInstrCode('observe-true');
+        const J$inst = new JalangiSandbox({ observeOnly: true });
+        assert.equal(J$inst.analysis.observeOnly, true, 'observeOnly 应为 true');
+        J$inst.analysis.use({
+            binary(_iid, _op, _l, _r, _result) { return { result: 999 }; }
+        });
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal($out.x, 3, 'observeOnly 模式下 binary 钩子的 result 被忽略，1+2 仍应为 3');
+    });
+
+    test('observeOnly=true：插件仍能观察到所有事件（钩子被正常调用）', () => {
+        // 验证钩子仍被调用，只是返回值无效
+        const instrCode = makeInstrCode('observe-spy');
+        const J$inst = new JalangiSandbox({ observeOnly: true });
+        const binaryCalls = [];
+        J$inst.analysis.use({
+            binary(iid, op, left, right, result) {
+                binaryCalls.push({ iid, op, left, right, result });
+                return { result: 999 }; // 这个返回值应被忽略
+            }
+        });
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.ok(binaryCalls.length > 0, 'binary 钩子应被正常调用');
+        assert.equal(binaryCalls[0].op, '+',  '钩子参数 op 应为 "+"');
+        assert.equal(binaryCalls[0].left, 1,  '钩子参数 left 应为 1');
+        assert.equal(binaryCalls[0].right, 2, '钩子参数 right 应为 2');
+        assert.equal(binaryCalls[0].result, 3, '钩子参数 result 应为原始计算结果 3');
+        assert.equal($out.x, 3, '原始程序结果 x 应仍为 3，未被插件修改');
+    });
+
+    test('observeOnly=true：write 钩子返回 result 被忽略，变量赋值不受影响', () => {
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code: 'var y = 42; $out.y = y;',
+            origCodeFileName: 'observe-write.js',
+            instCodeFileName: 'observe-write_inst.js',
+            inlineSourceMap: true,
+        });
+        const J$inst = new JalangiSandbox({ observeOnly: true });
+        J$inst.analysis.use({
+            // 试图将所有变量写入值改为 0
+            write(_iid, _name, _val) { return { result: 0 }; }
+        });
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal($out.y, 42, 'observeOnly 模式下 write 钩子的 result 被忽略，y 仍应为 42');
+    });
+
+    test('observeOnly=true：invokeFunPre skip=true 被忽略，函数正常调用', () => {
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code: 'function double(n) { return n * 2; } $out.r = double(5);',
+            origCodeFileName: 'observe-skip.js',
+            instCodeFileName: 'observe-skip_inst.js',
+            inlineSourceMap: true,
+        });
+        const J$inst = new JalangiSandbox({ observeOnly: true });
+        J$inst.analysis.use({
+            // 试图跳过 double 函数的调用
+            invokeFunPre(_iid, f, base, args) {
+                if (f && f.name === 'double') return { f, base, args, skip: true };
+            },
+            invokeFun(_iid, f) {
+                if (f && f.name === 'double') return { result: -1 };
+            }
+        });
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal($out.r, 10, 'observeOnly 模式下 invokeFunPre skip 被忽略，double(5) 应正常执行返回 10');
+    });
+
+    test('observeOnly=true：getField 钩子返回 result 被忽略，属性读取不受影响', () => {
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code: 'var obj = { a: 7 }; $out.v = obj.a;',
+            origCodeFileName: 'observe-getfield.js',
+            instCodeFileName: 'observe-getfield_inst.js',
+            inlineSourceMap: true,
+        });
+        const J$inst = new JalangiSandbox({ observeOnly: true });
+        J$inst.analysis.use({
+            getField(_iid, _base, offset) {
+                if (offset === 'a') return { result: 999 };
+            }
+        });
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal($out.v, 7, 'observeOnly 模式下 getField 的 result 被忽略，obj.a 仍应为 7');
+    });
+
+    test('observeOnly=true：多插件链中各插件返回值均被忽略', () => {
+        // 验证链式分发中 observeOnly 对所有插件统一生效
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code: 'var z = 10 - 3; $out.z = z;',
+            origCodeFileName: 'observe-chain.js',
+            instCodeFileName: 'observe-chain_inst.js',
+            inlineSourceMap: true,
+        });
+        const J$inst = new JalangiSandbox({ observeOnly: true });
+        const calls1 = [], calls2 = [];
+        J$inst.analysis
+            .use({ binary(_iid, _op, l, r) { calls1.push([l, r]); return { result: 100 }; } })
+            .use({ binary(_iid, _op, l, r, result) { calls2.push([l, r, result]); return { result: 200 }; } });
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        // 两个插件均被调用
+        assert.ok(calls1.length > 0, '插件 1 的 binary 钩子应被调用');
+        assert.ok(calls2.length > 0, '插件 2 的 binary 钩子应被调用');
+        // observeOnly 下链式传值也被忽略：插件 2 看到的 result 应为原始值 7，而非插件 1 的 100
+        assert.equal(calls2[0][2], 7, 'observeOnly 下链式 result 传递被阻断，插件 2 应看到原始 result=7');
+        // 最终程序结果不受两个插件影响
+        assert.equal($out.z, 7, 'observeOnly 模式下 10-3 仍应为 7');
+    });
+
+    test('observeOnly 可在 AnalysisHost 直接实例化时使用', async () => {
+        // 直接 new AnalysisHost({ observeOnly: true }) 而非通过 JalangiSandbox 透传
+        const { AnalysisHost } = await import('../../src/runtime/AnalysisHost.js');
+        const host = new AnalysisHost({ observeOnly: true });
+        assert.equal(host.observeOnly, true, 'AnalysisHost 构造后 observeOnly 应为 true');
+        // 注册一个试图修改值的插件
+        let called = false;
+        host.use({ read(_iid, _name, val) { called = true; return { result: 999 }; } });
+        // 直接调用 read 分发器：原始 val=5，插件试图改为 999
+        const ret = host.read(1, 'x', 5, false, false);
+        assert.ok(called, 'read 钩子应被调用');
+        // observeOnly 下返回值被忽略，调度器本身返回值也为 undefined（不再是插件的返回对象）
+        assert.equal(ret, undefined, 'observeOnly 模式下调度器返回 undefined（插件返回值被丢弃）');
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// instrumentEval 选项验证
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('instrumentEval 选项', () => {
+
+    // 公共插桩代码生成：运行 eval（注意：不在代码中声明 var $out，由外部沙盒注入）
+    function makeEvalInstrCode(fileName = 'eval-test') {
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code:             '$out.result = eval("1 + 2");',
+            origCodeFileName: `${fileName}.js`,
+            instCodeFileName: `${fileName}_inst.js`,
+            inlineSourceMap:  true,
+        });
+        return instrCode;
+    }
+
+    test('instrumentEval=false（默认）：eval 直接透传，不插桩动态代码', () => {
+        // 默认模式：eval("1 + 2") 不经过 instrumentEvalCode，直接执行原始代码
+        const instrCode = makeEvalInstrCode('eval-false');
+        const J$inst = new JalangiSandbox(); // 默认 instrumentEval=false
+        assert.equal(J$inst.instrumentEvalEnabled, false, 'instrumentEvalEnabled 默认应为 false');
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal($out.result, 3, 'eval("1 + 2") 应返回 3');
+    });
+
+    test('instrumentEval=false（默认）：eval 不触发 instrumentCodePre 钩子', () => {
+        // 默认模式下，eval 内容不经过插桩器，instrumentCodePre 不应被调用
+        const instrCode = makeEvalInstrCode('eval-no-hook');
+        const J$inst = new JalangiSandbox();
+        let hookCalled = false;
+        J$inst.analysis.use({
+            instrumentCodePre(_iid, _code, _isDirect) {
+                hookCalled = true;
+            }
+        });
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal(hookCalled, false, 'instrumentEval=false 时 instrumentCodePre 不应被调用');
+    });
+
+    test('instrumentEval=true：instrumentEvalEnabled 标志被正确设置，instrumentEvalCode 可注入真正的插桩函数', async () => {
+        // 验证：
+        //   1. instrumentEval=true 时，instrumentEvalEnabled 标志为 true
+        //   2. 可以将 instrumentEvalCode 替换为真正的插桩函数
+        //   3. eval 的参数会被该函数处理（而非直通），返回插桩后的代码字符串
+        const J$inst = new JalangiSandbox({ instrumentEval: true });
+        assert.equal(J$inst.instrumentEvalEnabled, true, 'instrumentEvalEnabled 应为 true');
+
+        // 注入真正的插桩函数，并拦截其调用以验证行为
+        const { init: instrInit, instrumentEvalCode } = await import('../../src/instrument/esnstrument.js');
+        instrInit({ ...ALL_CONFIG });
+        J$inst.instrumentEvalCode = instrumentEvalCode;
+
+        let processedCode = null;
+        const realFn = instrumentEvalCode;
+        J$inst.instrumentEvalCode = (code, iid, isDirect) => {
+            const result = realFn(code, iid, isDirect);
+            processedCode = result;
+            return result;
+        };
+
+        // 用一段简单的 eval 触发 instrumentEvalCode
+        const instrCode = makeEvalInstrCode('eval-true');
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+
+        // 验证真正的插桩函数被调用，且返回插桩后的代码（包含 J$.Se 等特征标识）
+        assert.ok(processedCode !== null, '注入的 instrumentEvalCode 应被调用');
+        assert.ok(processedCode.includes('J$.Se'), '插桩后代码应包含 J$.Se 脚本进入钩子');
+        assert.ok(processedCode.includes('J$.Sr'), '插桩后代码应包含 J$.Sr 脚本退出钩子');
+    });
+
+    test('instrumentEvalEnabled 可在运行时直接切换', () => {
+        // 验证 instrumentEvalEnabled 是公开字段，可在构造后动态赋值
+        const J$inst = new JalangiSandbox();
+        assert.equal(J$inst.instrumentEvalEnabled, false, '默认为 false');
+        J$inst.instrumentEvalEnabled = true;
+        assert.equal(J$inst.instrumentEvalEnabled, true, '动态切换后应为 true');
+        J$inst.instrumentEvalEnabled = false;
+        assert.equal(J$inst.instrumentEvalEnabled, false, '切换回 false 应成功');
+    });
+
+    test('new Function 默认不被插桩（instrumentEval=false）', () => {
+        // 默认不对 new Function 创建的代码进行插桩
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code:             'var fn = new Function("return 10 + 5;"); $out.result = fn();',
+            origCodeFileName: 'new-func-false.js',
+            instCodeFileName: 'new-func-false_inst.js',
+            inlineSourceMap:  true,
+        });
+        const J$inst = new JalangiSandbox({ instrumentEval: false });
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal($out.result, 15, 'instrumentEval=false 时 new Function 创建的函数应正常执行返回 15');
+    });
+});

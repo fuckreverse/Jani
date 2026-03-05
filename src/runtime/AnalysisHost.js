@@ -20,6 +20,15 @@
  *   J$.analysis = new AnalysisHost()
  *       .use(new SMemoryPlugin(smemory))
  *       .use(new LogAllAnalysis(smemory));
+ *
+ * observeOnly 模式（Trace 场景推荐）：
+ *
+ *   J$.analysis = new AnalysisHost({ observeOnly: true })
+ *       .use(new MyTraceAnalysis());
+ *
+ *   // 或通过 JalangiSandbox 透传：
+ *   const J$ = await JalangiSandbox.create({ observeOnly: true });
+ *   J$.analysis.use(new MyTraceAnalysis());
  */
 
 import { createLogger, DOMAIN } from '../logger/logger.js';
@@ -75,6 +84,12 @@ const RESULT_ARG_INDEX = Object.freeze({
  * 则该数组会替换分发器的参数列表，后续插件将看到更新后的参数。
  * 若返回值含 `result` 字段，且该钩子在 RESULT_ARG_INDEX 中有定义，
  * 则对应位置的 args 会被更新，后续插件可见修改后的值。
+ *
+ * **observeOnly 模式**：当 `options.observeOnly = true` 时，调度器仍会依次
+ * 调用所有插件的钩子（保证插件能观察到所有事件），但会忽略所有钩子的返回值——
+ * 不消费 `result`、`skip`、`args`、`isBacktrack` 等修改字段，从而在框架层面
+ * 保证插件无法改变原始程序的执行结果。适用于 Trace / Coverage / Profiling 等
+ * 纯观测场景，消除"插件误返回值导致静默破坏原始程序语义"的风险。
  */
 class AnalysisHost {
     /**
@@ -84,9 +99,16 @@ class AnalysisHost {
      *   默认行为：打印错误并在 Node.js 环境下调用 process.exit(1)；
      *   浏览器环境下继续向上抛出。
      *   传入自定义函数可覆盖（例如测试时阻止 process.exit）。
+     * @param {boolean}  [options.observeOnly=false] - 纯观测模式。
+     *   true：所有插件钩子仍正常调用（插件可观察事件），但返回值被完全忽略，
+     *         插件无法通过 result/skip/isBacktrack 等字段修改原始程序的执行。
+     *   false（默认）：标准模式，插件可通过返回值修改执行行为。
      */
-    constructor({ onError } = {}) {
+    constructor({ onError, observeOnly = false } = {}) {
         this._onError = onError ?? _defaultOnError;
+
+        /** @type {boolean} 是否处于纯观测模式（插件返回值被完全忽略）。 */
+        this.observeOnly = observeOnly;
 
         /** @private  hookName -> { fns: Function[], thisArgs: object[] } */
         this._chains = {};
@@ -125,12 +147,17 @@ class AnalysisHost {
         const chain        = this._chains[name];
         const onError      = () => this._onError;  // 惰性读取，允许构造后替换
         const resultArgIdx = RESULT_ARG_INDEX[name] ?? -1;
+        // 惰性读取 observeOnly，允许构造后通过 this.observeOnly 动态切换
+        const host         = this;
         return function dispatchHook(...args) {
             let ret;
+            const observeOnly = host.observeOnly;
             for (let i = 0; i < chain.fns.length; i++) {
                 try {
                     const r = chain.fns[i].apply(chain.thisArgs[i], args);
-                    if (r !== undefined && r !== null && typeof r === 'object') {
+                    // observeOnly 模式：钩子仍正常调用，但返回值被完全忽略。
+                    // 插件只能观察事件，无法通过任何返回字段修改原始执行结果。
+                    if (!observeOnly && r !== undefined && r !== null && typeof r === 'object') {
                         if (Array.isArray(r.args)) {
                             args = r.args;
                         } else if ('result' in r && resultArgIdx >= 0) {

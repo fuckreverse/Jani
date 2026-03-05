@@ -270,6 +270,41 @@ export class JalangiRuntime {
     EVAL_ORG = EVAL_ORG;
 
     /**
+     * 是否对 eval / new Function 的动态代码进行插桩。
+     *
+     * - `false`（默认）：不插桩动态代码，eval/Function 直接透传原始调用，
+     *   语义完全保持原样，适合 trace / observe 等场景。
+     * - `true`：对 eval/Function 创建的代码进行插桩（旧式行为），
+     *   动态代码也受到分析覆盖，但存在 instrumentEvalCode 未注入时抛出异常的风险。
+     *
+     * 通过构造函数选项 `instrumentEval: true` 开启，
+     * 或在运行时直接赋值 `J$.instrumentEvalEnabled = true`。
+     */
+    instrumentEvalEnabled = false;
+
+    /**
+     * eval / new Function 代码插桩入口。
+     *
+     * 插桩器在静态阶段会将所有 eval 调用改写为：
+     *   `eval(J$.instrumentEvalCode(originalArg, iid, isDirect))`
+     * 因此本方法必须始终存在（即使不做实际插桩）。
+     *
+     * 默认行为（`instrumentEvalEnabled = false`）：直接原样返回代码字符串，不做任何插桩。
+     * 若需要对动态代码插桩，可将 `instrumentEvalEnabled` 设为 `true` 后，
+     * 将本方法替换为实际插桩函数（如 `instrumentEvalCode` from esnstrument.js）。
+     *
+     * @param {string}  code      要（可能）插桩的代码字符串
+     * @param {number}  _iid      调用点 IID（passthrough）
+     * @param {boolean} _isDirect 是否直接调用 eval（passthrough）
+     * @returns {string} 原始代码（不插桩时）或插桩后代码
+     */
+    instrumentEvalCode(code, _iid, _isDirect) {
+        // instrumentEvalEnabled=false（默认）：直接返回原始代码，语义不受影响
+        // instrumentEvalEnabled=true 时，子类/使用方应将本方法替换为真正的插桩函数
+        return code;
+    }
+
+    /**
      * @param {object}  [options]
      * @param {boolean} [options.debugShadow=false]
      *   是否开启 Shadow Frame 调试模式。
@@ -278,10 +313,15 @@ export class JalangiRuntime {
      *     2. 将 { iid, defScopeId, name, callId } 追加到 miss 日志
      *     3. 向 console.warn 输出诊断信息
      *   可通过 getShadowStats() 查询统计结果。
+     * @param {boolean} [options.instrumentEval=false]
+     *   是否对 eval / new Function 动态创建的代码进行插桩。
+     *   默认 false（不插桩），eval/Function 直接透传原始调用。
+     *   设为 true 则恢复旧式行为（动态代码也被插桩分析）。
      */
     constructor(options = {}) {
         // 注意：字段初始化器在 super() 之后执行，此处 super() 隐式完成（无父类）
-        this.#debugShadow = options.debugShadow === true;
+        this.#debugShadow          = options.debugShadow    === true;
+        this.instrumentEvalEnabled = options.instrumentEval === true;
     }
 
     // ── 私有工具方法 ─────────────────────────────────────────────────────────
@@ -519,9 +559,11 @@ export class JalangiRuntime {
     #callFun(f, base, args, isConstructor, iid) {
         this.#pushSwitchKey();
         try {
-            if (f === EVAL_ORG) {
+            if (this.instrumentEvalEnabled && f === EVAL_ORG) {
+                // instrumentEval=true 时对 eval 动态代码进行插桩（旧式行为）
                 return this.#invokeEval(base, f, args, iid);
-            } else if (f === Function) {
+            } else if (this.instrumentEvalEnabled && f === Function) {
+                // instrumentEval=true 时对 new Function 动态代码进行插桩（旧式行为）
                 return this.#invokeFunctionDecl(base, f, args, iid);
             } else if (isConstructor) {
                 return this.#callAsConstructor(f, args);
