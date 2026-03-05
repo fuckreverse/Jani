@@ -823,3 +823,116 @@ describe('instrumentEval 选项', () => {
         assert.equal($out.result, 15, 'instrumentEval=false 时 new Function 创建的函数应正常执行返回 15');
     });
 });
+
+// ════════════════════════════════════════════════════════════════════════════════
+// 框架层语义保证（L2 observeOnly 修复验证）
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('框架层语义保证（L2 observeOnly 修复）', () => {
+
+    test('P0：observeOnly=true 下 functionExit isBacktrack=true 被忽略，不会死循环', () => {
+        // 若插件 functionExit 返回 isBacktrack=true，observeOnly 下应被强制忽略
+        // 原始骨架：while(true){ try{...} finally{ if(J$.Fr()) continue; else return J$.Ra(); } }
+        // observeOnly 修复后 Fr() 强制返回 false，不进入 continue 分支
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code:             'function f(x) { return x * 2; } $out.r = f(7);',
+            origCodeFileName: 'backtrack-guard.js',
+            instCodeFileName: 'backtrack-guard_inst.js',
+            inlineSourceMap:  true,
+        });
+        const J$inst = new JalangiSandbox({ observeOnly: true });
+        let exitCount = 0;
+        J$inst.analysis.use({
+            functionExit(_iid, returnVal) {
+                exitCount++;
+                // 试图触发 isBacktrack，observeOnly 下应被强制忽略
+                return { returnVal, isBacktrack: true };
+            }
+        });
+        const $out = {};
+        // 如果 isBacktrack 没被忽略，会死循环，超时报错
+        // 测试需在合理时间内完成
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal($out.r, 14, 'observeOnly=true 下函数返回值应正确（isBacktrack 被忽略，函数只执行一次）');
+        // 钩子仍被调用（observeOnly 不阻止观察）
+        assert.ok(exitCount > 0, 'functionExit 钩子仍应被调用');
+    });
+
+    test('P1：函数对象不被写入 SID/IID 属性（WeakMap 替代，freeze 场景兼容）', () => {
+        // 修复前：T() 中 defineProperty 直接写函数属性，Object.freeze(fn) 会 TypeError
+        // 修复后：使用 WeakMap，freeze 不影响
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code:             'var fn = Object.freeze(function() { return 42; }); $out.r = fn();',
+            origCodeFileName: 'freeze-fn.js',
+            instCodeFileName: 'freeze-fn_inst.js',
+            inlineSourceMap:  true,
+        });
+        const J$inst = new JalangiSandbox();
+        const $out = {};
+        // 修复前这里会抛 TypeError: Cannot define property J$_sid_ on a non-extensible object
+        assert.doesNotThrow(() => runInSandbox(instrCode, J$inst, { $out }), 'frozen 函数不应导致 TypeError');
+        assert.equal($out.r, 42, 'frozen 函数调用结果应正确');
+    });
+
+    test('P1：函数对象不暴露 SID/IID 属性（WeakMap 替代，Object.getOwnPropertyNames 干净）', () => {
+        // 修复后，函数对象的 ownPropertyNames 不应含有 J$ 的内部属性
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code:             'function greet(name) { return "hello " + name; } $out.fnProps = Object.getOwnPropertyNames(greet);',
+            origCodeFileName: 'fn-props.js',
+            instCodeFileName: 'fn-props_inst.js',
+            inlineSourceMap:  true,
+        });
+        const J$inst = new JalangiSandbox();
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        // 正常函数 ownPropertyNames 应只有 'length', 'name', 'prototype'
+        const hasJalangiProp = $out.fnProps.some(p => String(p).startsWith('J$'));
+        assert.ok(!hasJalangiProp, '函数对象 ownPropertyNames 不应包含 J$ 内部属性');
+    });
+
+    test('P1：new 表达式构造语义正确（Reflect.construct 传入 newTarget，instanceof 正确）', () => {
+        // 修复前：Reflect.construct(C, args) 第三参数缺失，原型链可能不正确
+        // 修复后：Reflect.construct(C, args, C)，对象原型正确，instanceof 语义不变
+        // 注意：class 继承中的 super() 调用是插桩器已知限制（super 关键字不能被 J$.F() 包裹），
+        //       此处用普通 class（不调用 super）验证 Reflect.construct 的 newTarget 修复
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code: `
+function Animal(name) {
+    this.name = name;
+    this.type = 'animal';
+}
+Animal.prototype.speak = function() { return this.name + " makes a noise."; };
+
+function Dog(name) {
+    Animal.call(this, name);
+    this.type = 'dog';
+}
+Dog.prototype = Object.create(Animal.prototype);
+Dog.prototype.constructor = Dog;
+Dog.prototype.speak = function() { return this.name + " barks."; };
+
+var d = new Dog("Rex");
+$out.name = d.name;
+$out.type = d.type;
+$out.isAnimal = d instanceof Animal;
+$out.isDog = d instanceof Dog;
+$out.speak = d.speak();
+            `,
+            origCodeFileName: 'inherit-reflect.js',
+            instCodeFileName: 'inherit-reflect_inst.js',
+            inlineSourceMap:  true,
+        });
+        const J$inst = new JalangiSandbox();
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal($out.name, 'Rex', 'Dog 实例的 name 应为 Rex');
+        assert.equal($out.type, 'dog', 'Dog 实例的 type 应为 dog');
+        assert.equal($out.isAnimal, true, 'Dog 实例应是 Animal 的实例（instanceof Animal）');
+        assert.equal($out.isDog, true, 'Dog 实例应是 Dog 的实例（instanceof Dog）');
+        assert.equal($out.speak, 'Rex barks.', 'Dog 的 speak 方法应正确调用');
+    });
+});

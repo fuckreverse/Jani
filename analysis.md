@@ -1,7 +1,7 @@
 # Jalangi2 项目状态追踪文档
 
 > 最后更新：2026-03-05  
-> 测试通过：246/246 ✅  
+> 测试通过：252/252 ✅  
 > **所有已知 Bug 与代码质量问题均已修复，测试覆盖盲区已全部补充**
 
 ---
@@ -232,7 +232,7 @@ if (pt === 'ArrayPattern' && key === 'elements') return CONTEXT.IGNORE;
 | P2 代码质量 | 4 | 4 | ✅ 100% |
 | 测试覆盖补充 | 16 | 16 | ✅ 100% |
 
-**当前全量测试**：246/246 通过 ✅  
+**当前全量测试**：252/252 通过 ✅  
 **已知遗留待办**：仅剩 3 个极低优先级场景，不影响正确性
 
 ---
@@ -450,17 +450,17 @@ J$.F(iid, eval, bits)(J$.instrumentEvalCode("x + 1", iid, true))
 |--------|------|---------|------|------|
 | **P0** | L1：`AnalysisHost.observeOnly` 标志 | `AnalysisHost.js`（5 行）+ `JalangiSandbox.js`（透传） | 立即解决插件修改问题，breaking 风险零 | ✅ 已完成 |
 | **P0** | `instrumentEval` 选项：默认不插桩 eval/Function 动态代码 | `JalangiRuntime.js`（默认直通方法 + `#callFun` 守卫）+ `JalangiSandbox.js`（透传） | eval/Function 语义完全保持原样，消除动态代码插桩副作用 | ✅ 已完成 |
-| **P0** | `J$.Fr()`/`J$.Sr()` 在 observeOnly 模式下强制返回 `false` | `JalangiRuntime.js`（2 处 if 判断） | 消除死循环隐患 | 🔲 待实现 |
-| **P1** | 函数 SID/IID 改用 `WeakMap` 存储 | `JalangiRuntime.js`（`#associateSidWithFunction` + `#updateSid`）| 消除属性写入副作用，修复 `freeze` 场景 | 🔲 待实现 |
-| **P1** | `Reflect.construct` 补充 `newTarget` | `JalangiRuntime.js`（`#callAsConstructor`，1 行） | 修复继承类 `new.target` 语义 | 🔲 待实现 |
-| **P2** | `for-in` 改用局部变量 | `wrappers.js`（`wrapForIn`）+ 插桩器 | 消除沙盒属性污染 | 🔲 待实现 |
-| **P3** | `#lastComputedValue` 保存/恢复 | `JalangiRuntime.js`（钩子调用包裹） | 防御递归钩子场景 | 🔲 待实现 |
+| **P0** | `J$.Fr()`/`J$.Sr()` 在 observeOnly 模式下强制返回 `false` | `JalangiRuntime.js`（2 处 if 判断） | 消除死循环隐患 | ✅ 已完成 |
+| **P1** | 函数 SID/IID 改用 `WeakMap` 存储 | `JalangiRuntime.js`（`#associateSidWithFunction` + `#updateSid` + `#funcSidIidMap`）| 消除属性写入副作用，修复 `freeze` 场景 | ✅ 已完成 |
+| **P1** | `Reflect.construct` 补充 `newTarget` | `JalangiRuntime.js`（`#callAsConstructor`，1 行） | 修复继承类 `new.target` 语义 | ✅ 已完成 |
+| **P2** | `for-in` 改用局部变量 | `wrappers.js`（`wrapForIn`）+ `esnstrument.js`（`ForInStatement` visitor）| 消除沙盒属性污染 | ✅ 已完成 |
+| **P3** | `#lastComputedValue` 保存/恢复 | `JalangiRuntime.js`（`#callHook` + 关键 pre/post 钩子调用包裹） | 防御递归钩子场景 | ✅ 已完成 |
 
 ---
 
 ### 4.5 `observeOnly` 模式的完整语义承诺
 
-实现上述 P0+P1 修复后，`observeOnly: true` 可以做出以下承诺：
+实现上述 P0+P1+P2+P3 修复后，`observeOnly: true` 可以做出以下承诺：
 
 ✅ **保证（插件层）**：
 - 任何插件的 `read/write/getField/...` 等钩子返回值均被忽略，不会替换原始计算结果
@@ -468,22 +468,23 @@ J$.F(iid, eval, bits)(J$.instrumentEvalCode("x + 1", iid, true))
 - `isBacktrack` 永远不被采纳，函数/脚本不会被重执行
 - `J$.Fr()`/`J$.Sr()` 强制返回 `false`，`while(true)` 骨架不会死循环
 
-✅ **保证（框架层，P1 修复后）**：
-- 不向函数对象写入任何可见属性（SID/IID 改用 WeakMap）
+✅ **保证（框架层，P0~P3 修复后）**：
+- 不向函数对象写入任何可见属性（SID/IID 改用 WeakMap，freeze 场景兼容）
 - `new` 表达式的 `new.target` 语义正确（Reflect.construct 传入 newTarget）
+- `for-in` 使用唯一局部变量 `J$_fkN`，不再污染沙盒的 `_tm_p` 属性
+- 分析插件内部触发 J$ 调用（递归钩子）不会污染外层的 `L()` 值（`#callHook` 保护）
 
 ⚠️ **已知局限（不可消除）**：
 - `eval` 和 `new Function()` 内执行的代码默认为原始代码（`instrumentEval=false`，已修复）；若显式开启 `instrumentEval: true`，则动态代码为插桩后版本
 - 调用栈深度增加，`Error.stack` 格式与原始代码不同
 - 函数调用通过 `Function.prototype.apply.call` 中转，`arguments.callee.caller` 语义改变
-- `for-in` 使用 `J$._tm_p` 沙盒属性（P2 修复前）
 
 ---
 
 ## 五、`instrumentEval` 选项：eval / new Function 插桩控制
 
 > 实现日期：2026-03-05  
-> 状态：✅ 已完成，测试 246/246
+> 状态：✅ 已完成，测试 252/252
 
 ### 5.1 背景
 

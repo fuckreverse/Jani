@@ -68,6 +68,25 @@ describe('ES5 基础语法', () => {
         assert.ok(r.code.includes('J$.W('), '应注入写入钩子（for-in 变量赋值）');
     });
 
+    test('for-in 使用局部变量而非 J$._tm_p 沙盒属性（P2 修复验证）', () => {
+        // 修复前：for-in 使用 J$._tm_p 传递迭代变量（污染沙盒属性）
+        // 修复后：生成唯一局部变量 J$_fk{N}，不写沙盒属性
+        const r = instr('var o = {a:1}; for (var k in o) { console.log(k); }');
+        assert.ok(!r.code.includes('J$._tm_p'), 'for-in 不应使用 J$._tm_p 沙盒属性');
+        // 应生成 J$_fk{N} 形式的局部变量
+        assert.ok(/J\$_fk\d/.test(r.code), 'for-in 应生成 J$_fk{N} 局部变量作为迭代器临时变量');
+        // 局部变量应通过 var 声明（保证提升）
+        assert.ok(/var J\$_fk\d/.test(r.code), '局部变量应通过 var 声明');
+    });
+
+    test('多层 for-in 嵌套使用不同局部变量（P2 修复验证）', () => {
+        // 每层 for-in 应使用不同的 J$_fk{N} 变量，不会互相覆盖
+        const r = instr('var o={a:1}; var p={x:1}; for (var k in o) { for (var j in p) {} }');
+        const matches = r.code.match(/J\$_fk\d+/g) || [];
+        const unique = new Set(matches.map(m => m));
+        assert.ok(unique.size >= 2, '嵌套 for-in 应使用不同的局部变量');
+    });
+
     test('try-catch-finally', () => {
         const r = instr('try { x(); } catch(e) { console.log(e); } finally { done(); }');
         assert.ok(r.code.includes('J$.Se('), '应注入脚本入口钩子 J$.Se');

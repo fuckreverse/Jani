@@ -717,7 +717,21 @@ function runInstrumentPass(file) {
                 const node = path.node;
                 node.right = W.wrapHash(node.right, node.right);
                 const ret = W.wrapForIn(node, node.left, node.right, node.body);
-                if (ret !== node) replaceAndMark(path, ret);
+                if (ret !== node) {
+                    // wrapForIn 可能附带了一个需要前置插入的局部变量声明（_jalangiTmpVarDecl）。
+                    // 例如 `var J$_fk0;` 用于替代旧的 J$._tm_p 沙盒属性传递迭代变量。
+                    // 使用 Babel path.replaceWithMultiple 将 [varDecl, forInStmt] 一并替换。
+                    const tmpVarDecl = ret._jalangiTmpVarDecl;
+                    delete ret._jalangiTmpVarDecl;
+                    if (tmpVarDecl) {
+                        // 将两个节点都标记为已插桩，防止 enter 时再次遍历
+                        tmpVarDecl.__j_instrumented = true;
+                        ret.__j_instrumented = true;
+                        path.replaceWithMultiple([tmpVarDecl, ret]);
+                    } else {
+                        replaceAndMark(path, ret);
+                    }
+                }
             },
         },
 

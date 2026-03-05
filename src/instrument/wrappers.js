@@ -976,9 +976,18 @@ function wrapForIn(node, left, right, body) {
     if (Config.INSTR_FORIN && !Config.INSTR_FORIN(node)) return node;
     IID.printIidToLoc(node);
     const isDeclaration = (left.type === 'VariableDeclaration');
-    // logTmpVarName = 'J$._tm_p'（MemberExpression，不是裸标识符）
-    // 需要构建 J$._tm_p 的 AST：MemberExpression(J$, _tm_p)
-    const tmpNode = memberExpr(_jalangiVar, '_tm_p');
+
+    // 使用插桩时生成的唯一局部变量替代旧的 J$._tm_p 沙盒属性，消除以下副作用：
+    //   - J$._tm_p 是沙盒的可写属性，for-in J$ 或 Object.keys(J$) 会意外暴露它
+    //   - 多层 for-in 嵌套时理论上存在覆盖风险（虽顺序执行，但为消除语义干扰）
+    // 通过 tmpVarCounter 生成文件范围内唯一的变量名（var 声明，自动提升，不污染外部）
+    const tmpVarName = `${_jalangiVar}_fk${tmpVarCounter++}`;
+    // 生成 `var J$_fk{n}` 声明（插在循环前，保证变量在循环体内可见）
+    const tmpVarDecl = t.variableDeclaration('var', [
+        t.variableDeclarator(t.identifier(tmpVarName)),
+    ]);
+    const tmpNode = t.identifier(tmpVarName);
+
     let forin;
     if (isDeclaration) {
         // Guard: for-in 只支持单个普通标识符声明，不支持解构模式（如 for (var {a} in obj)）。
@@ -991,25 +1000,28 @@ function wrapForIn(node, left, right, body) {
             );
         }
         const name = decl.id.name;
-        // `name = J$._tm_p` — 作为 AssignmentExpression，供 instrumentStore 处理
+        // `name = tmpVar` — 作为 AssignmentExpression，供 instrumentStore 处理
         const tmp = t.assignmentExpression('=', t.identifier(name), tmpNode);
         const extra = instrumentStore(tmp, isDeclaration);
-        // for (J$._tm_p in right) { var name = wrapWithX1(extra.right); body... }
+        // for (tmpVar in right) { var name = wrapWithX1(extra.right); body... }
         const varDecl = t.variableDeclaration('var', [
             t.variableDeclarator(t.identifier(name), wrapWithX1(node, extra.right)),
         ]);
         const innerBody = t.blockStatement([varDecl, ...ensureBlockBody(body)]);
         forin = t.forInStatement(tmpNode, right, innerBody);
     } else {
-        // `left = J$._tm_p` — 用 AssignmentExpression 作为 left，供 instrumentStore 处理
+        // `left = tmpVar` — 用 AssignmentExpression 作为 left，供 instrumentStore 处理
         const tmp = t.assignmentExpression('=', left, tmpNode);
         const extra = instrumentStore(tmp, isDeclaration);
-        // for (J$._tm_p in right) { wrapWithX1(extra); body... }
+        // for (tmpVar in right) { wrapWithX1(extra); body... }
         const x1Stmt = t.expressionStatement(wrapWithX1(node, extra));
         const innerBody = t.blockStatement([x1Stmt, ...ensureBlockBody(body)]);
         forin = t.forInStatement(tmpNode, right, innerBody);
     }
     transferLoc(forin, node);
+    // 返回 [var J$_fk{n}; for (J$_fk{n} in ...) {...}] 的语句列表
+    // 调用方（esnstrument.js ForInStatement exit）负责将其替换到 AST
+    forin._jalangiTmpVarDecl = tmpVarDecl;
     return forin;
 }
 

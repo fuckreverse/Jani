@@ -231,6 +231,20 @@ export class JalangiRuntime {
      */
     #debugShadow = false;
 
+    // ── 函数 SID/IID 关联表（WeakMap，不阻止 GC，不污染函数对象属性）──────────
+
+    /**
+     * 函数对象 → { sid, iid } 的 WeakMap 映射表。
+     *
+     * 替代旧方案（直接在函数对象上 defineProperty），消除以下副作用：
+     *  - V8 hidden class 污染（deoptimization）
+     *  - Object.getOwnPropertyNames(fn) 结果变化
+     *  - Object.freeze(fn) 场景下 defineProperty 抛 TypeError
+     *
+     * WeakMap 的 key 是函数对象（弱引用），GC 可正常回收。
+     */
+    #funcSidIidMap = new WeakMap();
+
     // ── TODO-14: 对象 OID 机制 —— 为对象/数组/函数分配唯一 ID，支持别名追踪 ──
 
     /** OID 单调递增计数器（0 保留，表示"非对象"） */
@@ -524,23 +538,37 @@ export class JalangiRuntime {
 
     #associateSidWithFunction(f, iid) {
         if (typeof f !== 'function') return;
-        const propSid = this.Constants.SPECIAL_PROP_SID;
-        const propIid = this.Constants.SPECIAL_PROP_IID;
-        Object.defineProperty(f, propSid, { enumerable: false, writable: true, configurable: true });
-        Object.defineProperty(f, propIid, { enumerable: false, writable: true, configurable: true });
-        f[propSid] = this.sid;
-        f[propIid] = iid;
+        // 使用 WeakMap 存储，避免直接向函数对象写属性（消除 V8 deopt / freeze 副作用）
+        this.#funcSidIidMap.set(f, { sid: this.sid, iid });
     }
 
     #updateSid(f) {
         this.#sidStack.push(this.sid);
-        this.sid = getPropSafe(f, this.Constants.SPECIAL_PROP_SID);
+        // 从 WeakMap 读取，兼容旧式 SPECIAL_PROP_SID 属性（外部代码可能直接写）
+        const entry = (typeof f === 'function') ? this.#funcSidIidMap.get(f) : undefined;
+        this.sid = entry ? entry.sid : getPropSafe(f, this.Constants.SPECIAL_PROP_SID);
     }
 
     // ── 私有调用辅助 ─────────────────────────────────────────────────────────
 
+    /**
+     * 以构造器模式调用函数（等价于 new Constructor(...args)）。
+     *
+     * 显式将 Constructor 作为 newTarget 传入 Reflect.construct，
+     * 确保 new.target 在继承场景（class B extends A）下语义正确：
+     *   - new B()  → B 构造函数内 new.target === B
+     *   - super()  → A 构造函数内 new.target 仍为 B（JS 引擎自动传递）
+     *
+     * 若未来需要支持动态 newTarget（如 Proxy 或 Reflect.construct 的第三参数不同），
+     * 可在 #invokeFun 中预传递 newTarget 并在此处消费。
+     *
+     * @param {Function} Constructor  构造函数
+     * @param {Array}    args         参数列表
+     * @returns {object}  构造的新实例
+     */
     #callAsConstructor(Constructor, args) {
-        return Reflect.construct(Constructor, args);
+        // 第三个参数显式传入 Constructor，等价于原始 `new Constructor(...args)` 的语义
+        return Reflect.construct(Constructor, args, Constructor);
     }
 
     #invokeEval(base, f, args, iid) {
@@ -575,15 +603,62 @@ export class JalangiRuntime {
         }
     }
 
+    /**
+     * 调用分析钩子，并在调用前后保存/恢复 `#lastComputedValue`（P3 修复）。
+     *
+     * **为什么需要这个包装**：
+     * 若分析插件在钩子内部读取某个属性（如 `base.name`），这会触发 `G()` 钩子，
+     * 从而覆写 `#lastComputedValue`。导致外层操作（如 `B()`）的 `L()` 读取到错误值。
+     *
+     * **保护机制**：每次分析钩子调用前保存 `#lastComputedValue`，调用后恢复。
+     * 若分析钩子内部自己也有返回值需要更新 `#lastComputedValue`，
+     * 框架调用方（`B()`/`G()`/`R()` 等）负责在最后统一写入正确值，覆盖恢复的旧值。
+     *
+     * **性能影响**：每次分析钩子调用多一次私有字段读写，开销可忽略不计。
+     *
+     * @template T
+     * @param {() => T} hookFn  - 调用分析钩子的无参闭包
+     * @returns {T}  钩子的返回值
+     */
+    #callHook(hookFn) {
+        const saved = this.#lastComputedValue;
+        try {
+            return hookFn();
+        } finally {
+            this.#lastComputedValue = saved;
+        }
+    }
+
+    /**
+     * 获取函数关联的 IID（优先从 WeakMap，回退到旧式属性）。
+     * @param {Function} f
+     * @returns {number|undefined}
+     */
+    #getFuncIid(f) {
+        if (typeof f !== 'function') return undefined;
+        const entry = this.#funcSidIidMap.get(f);
+        return entry ? entry.iid : getPropSafe(f, this.Constants.SPECIAL_PROP_IID);
+    }
+
+    /**
+     * 获取函数关联的 SID（优先从 WeakMap，回退到旧式属性）。
+     * @param {Function} f
+     * @returns {number|undefined}
+     */
+    #getFuncSid(f) {
+        if (typeof f !== 'function') return undefined;
+        const entry = this.#funcSidIidMap.get(f);
+        return entry ? entry.sid : getPropSafe(f, this.Constants.SPECIAL_PROP_SID);
+    }
+
     #invokeFun(iid, base, f, args, isConstructor, isMethod) {
         let aret, skip = false, result;
         const analysis = this.analysis;
-        const propIid  = this.Constants.SPECIAL_PROP_IID;
-        const propSid  = this.Constants.SPECIAL_PROP_SID;
 
         if (analysis?.invokeFunPre) {
-            aret = analysis.invokeFunPre(iid, f, base, args, isConstructor, isMethod,
-                getPropSafe(f, propIid), getPropSafe(f, propSid));
+            // P3: 调用 pre 钩子时保护 #lastComputedValue
+            const _fIid = this.#getFuncIid(f), _fSid = this.#getFuncSid(f);
+            aret = this.#callHook(() => analysis.invokeFunPre(iid, f, base, args, isConstructor, isMethod, _fIid, _fSid));
             if (aret) {
                 f    = aret.f;
                 base = aret.base;
@@ -607,7 +682,7 @@ export class JalangiRuntime {
 
         if (analysis?.invokeFun) {
             aret = analysis.invokeFun(iid, f, base, args, result, isConstructor, isMethod,
-                getPropSafe(f, propIid), getPropSafe(f, propSid));
+                this.#getFuncIid(f), this.#getFuncSid(f));
             if (aret) result = aret.result;
         }
 
@@ -731,7 +806,8 @@ export class JalangiRuntime {
         }
 
         if (analysis?.getFieldPre) {
-            aret = analysis.getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall);
+            // P3: 调用 pre 钩子时保护 #lastComputedValue 不被 hook 内的递归 J$ 调用污染
+            aret = this.#callHook(() => analysis.getFieldPre(iid, base, offset, isComputed, isOpAssign, isMethodCall));
             if (aret) {
                 base   = aret.base;
                 offset = aret.offset;
@@ -742,7 +818,7 @@ export class JalangiRuntime {
         if (!skip) val = base[offset];
 
         if (analysis?.getField) {
-            aret = analysis.getField(iid, base, offset, val, isComputed, isOpAssign, isMethodCall);
+            aret = this.#callHook(() => analysis.getField(iid, base, offset, val, isComputed, isOpAssign, isMethodCall));
             if (aret) val = aret.result;
         }
 
@@ -756,7 +832,8 @@ export class JalangiRuntime {
         let aret, skip = false;
 
         if (analysis?.putFieldPre) {
-            aret = analysis.putFieldPre(iid, base, offset, val, isComputed, !!isOpAssign);
+            // P3: 调用 pre 钩子时保护 #lastComputedValue
+            aret = this.#callHook(() => analysis.putFieldPre(iid, base, offset, val, isComputed, !!isOpAssign));
             if (aret) {
                 base   = aret.base;
                 offset = aret.offset;
@@ -774,7 +851,7 @@ export class JalangiRuntime {
         }
 
         if (analysis?.putField) {
-            aret = analysis.putField(iid, base, offset, val, isComputed, !!isOpAssign);
+            aret = this.#callHook(() => analysis.putField(iid, base, offset, val, isComputed, !!isOpAssign));
             if (aret) val = aret.result;
         }
 
@@ -959,7 +1036,9 @@ export class JalangiRuntime {
 
         if (analysis?.functionExit) {
             const aret = analysis.functionExit(iid, returnVal, this.#wrappedExceptionVal);
-            if (aret) {
+            // observeOnly 模式：强制忽略 isBacktrack（防止 while(true) 死循环）
+            // 其他返回字段由 AnalysisHost._makeDispatcher 在上游已过滤，此处仅守卫 isBacktrack
+            if (aret && !analysis.observeOnly) {
                 returnVal                 = aret.returnVal;
                 this.#wrappedExceptionVal = aret.wrappedExceptionVal;
                 isBacktrack               = aret.isBacktrack;
@@ -1034,7 +1113,8 @@ export class JalangiRuntime {
 
         if (analysis?.scriptExit) {
             const aret = analysis.scriptExit(iid, this.#wrappedExceptionVal);
-            if (aret) {
+            // observeOnly 模式：强制忽略 isBacktrack，防止脚本被重执行
+            if (aret && !analysis.observeOnly) {
                 this.#wrappedExceptionVal = aret.wrappedExceptionVal;
                 isBacktrack               = aret.isBacktrack;
             }
@@ -1069,7 +1149,8 @@ export class JalangiRuntime {
         let result, aret, skip = false;
 
         if (analysis?.binaryPre) {
-            aret = analysis.binaryPre(iid, op, left, right, isOpAssign, isSwitchCaseComparison, isComputed);
+            // P3: 调用 pre 钩子时保护 #lastComputedValue
+            aret = this.#callHook(() => analysis.binaryPre(iid, op, left, right, isOpAssign, isSwitchCaseComparison, isComputed));
             if (aret) {
                 op    = aret.op;
                 left  = aret.left;
@@ -1122,7 +1203,8 @@ export class JalangiRuntime {
         let result, aret, skip = false;
 
         if (analysis?.unaryPre) {
-            aret = analysis.unaryPre(iid, op, left);
+            // P3: 调用 pre 钩子时保护 #lastComputedValue
+            aret = this.#callHook(() => analysis.unaryPre(iid, op, left));
             if (aret) {
                 op   = aret.op;
                 left = aret.left;
@@ -1196,8 +1278,8 @@ export class JalangiRuntime {
         if (analysis?.runInstrumentedFunctionBody) {
             return analysis.runInstrumentedFunctionBody(
                 iid, f,
-                getPropSafe(f, this.Constants.SPECIAL_PROP_IID),
-                getPropSafe(f, this.Constants.SPECIAL_PROP_SID)
+                this.#getFuncIid(f),
+                this.#getFuncSid(f)
             );
         }
         return true;
