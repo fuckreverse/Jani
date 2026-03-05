@@ -11,7 +11,7 @@
 |------|------|------|
 | `JalangiRuntime` | `JalangiRuntime.js` | 所有 J$ 钩子函数的核心实现（基类） |
 | `JalangiSandbox` | `JalangiSandbox.js` | 完整沙盒对象，继承 JalangiRuntime（**推荐使用**） |
-| `AnalysisHost` | `AnalysisHost.js` | 多插件链式调度器 |
+| `HookDispatcher` | `HookDispatcher.js` | 多插件链式调度器 |
 | `SMemory` | `SMemory.js` | Shadow Memory 影子内存服务 |
 | `AnalysisTemplate` | `analysisCallbackTemplate.js` | 分析插件接口基类模板 |
 | `DataFlowAnalyzer` | `DataFlowAnalyzer.js` | 运行时 SSA 数据流分析器，支持 backward slicing |
@@ -53,7 +53,7 @@ classDiagram
         +smap
         +sid
         +iids
-        +analysis: AnalysisHost
+        +analysis: HookDispatcher
         +tracer: TraceLogger
         +Constants
         +smemory: SMemory
@@ -66,8 +66,8 @@ classDiagram
         +resetShadowStats()
     }
 
-    class AnalysisHost {
-        +use(plugin): AnalysisHost
+    class HookDispatcher {
+        +use(plugin): HookDispatcher
         +read(iid, name, val, ...)
         +write(iid, name, val, ...)
         +getField(iid, base, offset, ...)
@@ -83,9 +83,9 @@ classDiagram
     }
 
     JalangiSandbox --|> JalangiRuntime : 继承
-    JalangiSandbox "1" --> "1" AnalysisHost : analysis
+    JalangiSandbox "1" --> "1" HookDispatcher : analysis
     JalangiSandbox "1" --> "0..1" SMemory : smemory
-    AnalysisHost "1" --> "*" Plugin : use()
+    HookDispatcher "1" --> "*" Plugin : use()
 ```
 
 ## JalangiSandbox — 完整沙盒
@@ -127,7 +127,7 @@ J$.analysis.use(new AnotherAnalysis(J$));
 | `sid` | `number` | 当前脚本 ID（`Sr()` 执行后会回滚，脚本结束后为 0） |
 | `lastSid` | `number` | 最后执行的脚本 ID（不随 `Sr()` 回滚，脚本执行完成后仍可用于查询位置映射）|
 | `iids` | `object\|null` | 当前脚本的 iid 映射（由插桩代码在 Se() 前写入） |
-| `analysis` | `AnalysisHost` | 当前分析插件调度器，支持 `.use()` 链式注册 |
+| `analysis` | `HookDispatcher` | 当前分析插件调度器，支持 `.use()` 链式注册 |
 | `tracer` | `TraceLogger\|null` | TraceLogger 实例（由 ExecutionTraceAnalysis 写入） |
 | `Constants` | `object` | 所有全局常量（APPLY、CALL、HOP、JALANGI_VAR 等） |
 | `smemory` | `SMemory\|null` | Shadow Memory 实例（启用后由 SMemoryPlugin 写入） |
@@ -185,7 +185,7 @@ const globalIid = J$.getGlobalIID(iid);
 sequenceDiagram
     participant Code as 插桩代码
     participant RT as JalangiRuntime
-    participant Host as AnalysisHost
+    participant Host as HookDispatcher
     participant Plugin as 分析插件
 
     Code->>RT: J$.G(iid, base, offset, flags)
@@ -212,14 +212,14 @@ sequenceDiagram
 - `P` 的 flags：`[isComputed, isOpAssign]`
 - `F` / `M` 的 flags：`[isConstructor, isMethod]`
 
-## AnalysisHost — 多插件调度器
+## HookDispatcher — 多插件调度器
 
-`AnalysisHost` 管理多个分析插件，并将每个钩子依次分发给所有注册了该钩子的插件。
+`HookDispatcher` 管理多个分析插件，并将每个钩子依次分发给所有注册了该钩子的插件。
 
 ```js
-import { AnalysisHost } from './src/runtime/AnalysisHost.js';
+import { HookDispatcher } from './src/runtime/HookDispatcher.js';
 
-const host = new AnalysisHost();
+const host = new HookDispatcher();
 
 // 注册多个插件（链式调用）
 host.use(new SMemoryPlugin(smemory))
@@ -245,7 +245,7 @@ unary, write
 
 ### 参数传递机制
 
-`AnalysisHost` 支持两种插件间数据传递方式：
+`HookDispatcher` 支持两种插件间数据传递方式：
 
 1. **全量 args 替换**：若插件返回含 `args` 字段（Array 类型）的对象，后续插件将使用该新参数数组。
 
@@ -270,7 +270,7 @@ unary, write
 ### 错误处理
 
 ```js
-const host = new AnalysisHost({
+const host = new HookDispatcher({
     onError: (hookName, error) => {
         console.error(`[${hookName}] Plugin error:`, error);
         // 自定义错误处理，如测试时阻止 process.exit
@@ -552,7 +552,7 @@ log.debug('flush 完成, size=', n); // 仅 debug 开关开启时输出
 ```js
 import { DOMAIN } from './src/logger/logger.js';
 
-// DOMAIN.FRAMEWORK    → 'framework'   （JalangiRuntime / JalangiSandbox / AnalysisHost）
+// DOMAIN.FRAMEWORK    → 'framework'   （JalangiRuntime / JalangiSandbox / HookDispatcher）
 // DOMAIN.INSTRUMENT   → 'instrument'  （astUtil / pluginAnalyzer / esnstrument）
 // DOMAIN.LOGGING      → 'logging'     （LogManager / TraceLogger）
 // DOMAIN.BACKEND_IDB  → 'backend:idb' （IdbWorkerBackend / idb-worker）

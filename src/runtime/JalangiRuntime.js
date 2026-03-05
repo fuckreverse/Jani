@@ -71,7 +71,7 @@ function createBitPattern(...bits) {
  *
  * 本类依赖子类（通常是 JalangiSandbox）在 `this` 上提供以下公开字段：
  *   - this.Constants   包含 { SPECIAL_PROP_SID, SPECIAL_PROP_IID } 的对象
- *   - this.analysis    当前分析插件（AnalysisHost 实例，可为 null）
+ *   - this.analysis    当前分析插件（HookDispatcher 实例，可为 null）
  *   - this.tracer      TraceLogger 实例（可选）
  *   - this.Results     浏览器结果面板（可选）
  *   - this.smap        iid → 位置映射表（{ [sid]: { [iid]: [sl,sc,el,ec] } }）
@@ -1037,7 +1037,7 @@ export class JalangiRuntime {
         if (analysis?.functionExit) {
             const aret = analysis.functionExit(iid, returnVal, this.#wrappedExceptionVal);
             // observeOnly 模式：强制忽略 isBacktrack（防止 while(true) 死循环）
-            // 其他返回字段由 AnalysisHost._makeDispatcher 在上游已过滤，此处仅守卫 isBacktrack
+            // 其他返回字段由 HookDispatcher._makeDispatcher 在上游已过滤，此处仅守卫 isBacktrack
             if (aret && !analysis.observeOnly) {
                 returnVal                 = aret.returnVal;
                 this.#wrappedExceptionVal = aret.wrappedExceptionVal;

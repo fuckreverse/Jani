@@ -4,7 +4,7 @@
  * 覆盖以下模块的公开 API：
  *   - JalangiRuntime.js     (JalangiRuntime class)
  *   - JalangiSandbox.js     (JalangiSandbox class)
- *   - AnalysisHost.js       (AnalysisHost class + HOOKS)
+ *   - HookDispatcher.js     (HookDispatcher class + HOOKS)
  *   - SMemory.js            (SMemory + SMemoryPlugin)
  *   - DataFlowAnalyzer.js   (DataFlowAnalyzer class + REG_TYPE)
  *   - analysisCallbackTemplate.js (AnalysisTemplate class)
@@ -35,7 +35,7 @@ export interface JalangiRuntimeHost {
         SPECIAL_PROP_IID: string;
         [key: string]: unknown;
     };
-    /** 当前分析插件（AnalysisHost 实例，可为 null） */
+    /** 当前分析插件（HookDispatcher 实例，可为 null） */
     analysis: IAnalysisPlugin | null;
     /** TraceLogger 实例（可选） */
     tracer?: { key?: (level: string, msg: string) => void } | null;
@@ -225,7 +225,7 @@ export interface JalangiSandboxOptions {
  *
  * 继承 JalangiRuntime（所有运行时钩子），同时提供：
  *   - iidToLocation / getGlobalIID 位置查询
- *   - analysis（AnalysisHost 实例）插件注册
+ *   - analysis（HookDispatcher 实例）插件注册
  *
  * 典型用法：
  * ```js
@@ -245,8 +245,8 @@ export declare class JalangiSandbox extends JalangiRuntime {
     /** 当前脚本的 iid 映射（由插桩器在 Se() 前写入 J$.iids） */
     iids: IidSourceMap | null;
 
-    /** 当前分析插件（AnalysisHost 实例，支持 .use() 链式注册） */
-    analysis: AnalysisHost;
+    /** 当前分析插件（HookDispatcher 实例，支持 .use() 链式注册） */
+    analysis: HookDispatcher;
 
     /** TraceLogger 实例（由 ExecutionTraceAnalysis 写入，供 log() 使用） */
     tracer: unknown | null;
@@ -291,7 +291,7 @@ export declare class JalangiSandbox extends JalangiRuntime {
     getGlobalIID(iid: number): string;
 }
 
-// ── AnalysisHost.js ───────────────────────────────────────────────────────────
+// ── HookDispatcher.js ──────────────────────────────────────────────────────────
 
 /**
  * 所有可能的钩子名称（与 analysisCallbackTemplate.js 中的方法保持一致）。
@@ -299,9 +299,9 @@ export declare class JalangiSandbox extends JalangiRuntime {
 export declare const HOOKS: ReadonlyArray<string>;
 
 /**
- * AnalysisHost 的构造选项。
+ * HookDispatcher 的构造选项。
  */
-export interface AnalysisHostOptions {
+export interface HookDispatcherOptions {
     /**
      * 插件 hook 抛出异常时的处理函数，接收 (hookName, error)。
      * 默认：打印错误并在 Node.js 下调用 process.exit(1)。
@@ -317,13 +317,13 @@ export interface AnalysisHostOptions {
  * 则该数组会替换后续插件看到的参数列表。
  *
  * @example
- * const host = new AnalysisHost();
- * host.use(new SMemoryPlugin(smemory)).use(new LogAllAnalysis());
- * J$.analysis = host;
+* const host = new HookDispatcher();
+* host.use(new SMemoryPlugin(smemory)).use(new LogAllAnalysis());
+* J$.analysis = host;
  */
-export declare class AnalysisHost implements IAnalysisPlugin {
+export declare class HookDispatcher implements IAnalysisPlugin {
 
-    constructor(options?: AnalysisHostOptions);
+    constructor(options?: HookDispatcherOptions);
 
     /**
      * 注册一个分析插件。
@@ -334,6 +334,8 @@ export declare class AnalysisHost implements IAnalysisPlugin {
      * @returns this
      */
     use(plugin: IAnalysisPlugin): this;
+
+    observeOnly: boolean;
 
     // IAnalysisPlugin 中所有方法在此处均已实现（dispatch 到插件链）
     invokeFunPre?: IAnalysisPlugin['invokeFunPre'];
@@ -434,7 +436,7 @@ export declare class SMemory {
  * @example
  * const smemory = new SMemory(J$);
  * J$.smemory = smemory;
- * J$.analysis = new AnalysisHost().use(new SMemoryPlugin(smemory));
+ * J$.analysis = new HookDispatcher().use(new SMemoryPlugin(smemory));
  */
 export declare class SMemoryPlugin implements IAnalysisPlugin {
     constructor(smemory: SMemory);

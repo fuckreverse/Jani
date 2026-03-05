@@ -33,7 +33,7 @@ import {
     SPECIAL_PROP_SID, SPECIAL_PROP_IID, UNKNOWN, HOP, hasGetterSetter,
 } from '../Constants.js';
 import { JalangiRuntime } from './JalangiRuntime.js';
-import { AnalysisHost   } from './AnalysisHost.js';
+import { HookDispatcher } from './HookDispatcher.js';
 
 /**
  * Jalangi2 完整沙盒。
@@ -60,7 +60,7 @@ import { AnalysisHost   } from './AnalysisHost.js';
  *   纯观测模式。true 时所有插件钩子仍正常调用，但返回值被完全忽略——
  *   插件无法通过 result/skip/isBacktrack 等字段修改原始程序的执行。
  *   适用于 Trace / Coverage / Profiling 等纯观测场景。
- *   等同于 `new AnalysisHost({ observeOnly: true })`。
+* 等同于 `new HookDispatcher({ observeOnly: true })`。
  * @param {boolean} [options.instrumentEval=false]
  *   是否对 eval / new Function 动态创建的代码进行插桩。
  *   默认 false：eval/Function 直接透传原始调用，语义完全保持原样，适合 trace / observe 等场景。
@@ -104,7 +104,7 @@ export class JalangiSandbox extends JalangiRuntime {
             debugShadow:    options.debugShadow    ?? false,
             instrumentEval: options.instrumentEval ?? false,
         });
-        this.analysis = new AnalysisHost({
+        this.analysis = new HookDispatcher({
             observeOnly: options.observeOnly ?? false,
         });
     }

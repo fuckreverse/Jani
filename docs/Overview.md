@@ -18,7 +18,7 @@ flowchart TD
     SRC["JavaScript 源代码"]
     INSTR["插桩器\n(src/instrument/)\n\n@babel/parser 解析 → AST 变换\n→ @babel/generator 生成\n\n注入 J$.R / J$.W / J$.G / J$.P / ..."]
     OUT["插桩后的 JavaScript 代码"]
-    RT["运行时沙盒\n(src/runtime/)\n\nJ$ = new JalangiSandbox()\nJ$.analysis = AnalysisHost\n\n每次执行触发 → 分发给分析插件"]
+    RT["运行时沙盒\n(src/runtime/)\n\nJ$ = new JalangiSandbox()\nJ$.analysis = HookDispatcher\n\n每次执行触发 → 分发给分析插件"]
     PLUGIN["分析插件\n(src/plugins/)\n\n实现 read / write / getField / ... 等钩子\n收集数据、检测 bug、生成报告"]
 
     SRC -->|"init(config) + instrumentCode()"| INSTR
@@ -71,7 +71,7 @@ flowchart TD
 |------|------|
 | `JalangiRuntime.js` | 所有 J$ 钩子函数的核心实现（基类），含 OID、ContextID、Shadow Frame |
 | `JalangiSandbox.js` | 完整沙盒对象，继承 `JalangiRuntime`（推荐使用） |
-| `AnalysisHost.js` | 多插件链式调度器，`.use()` 注册分析 |
+| `HookDispatcher.js` | 多插件链式调度器，`.use()` 注册分析 |
 | `SMemory.js` | Shadow Memory 影子内存服务，为对象关联唯一 ID |
 | `analysisCallbackTemplate.js` | 分析插件接口模板（`AnalysisTemplate` 基类） |
 | `DataFlowAnalyzer.js` | 运行时 SSA 数据流分析器，消费 log 条目，支持 backward slicing |
@@ -85,7 +85,7 @@ flowchart TD
 flowchart TD
     Sandbox["JalangiSandbox\n(推荐入口，继承 JalangiRuntime)"]
     Runtime["JalangiRuntime\n(所有 J$.xxx 钩子实现)"]
-    Host["AnalysisHost\n(多插件链式调度器)"]
+    Host["HookDispatcher\n(多插件链式调度器)"]
     Plugin["分析插件\n(实现 read/write/getField/... 等钩子)"]
     SMemory["SMemory\n(影子内存，对象 ID 追踪)"]
     DFA["DataFlowAnalyzer\n(SSA 化 + Backward Slicing)"]

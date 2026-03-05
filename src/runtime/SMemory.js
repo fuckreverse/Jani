@@ -7,8 +7,8 @@
  * 这是一个框架级服务，不是普通的分析插件。
  *
  * 使用方式（推荐）：
- *   import { createAnalysisHost } from './AnalysisHost.js';
- *   const host = createAnalysisHost(J$);
+ *   import { HookDispatcher } from './HookDispatcher.js';
+ *   const host = new HookDispatcher();
  *   host.enableShadowMemory();        // 创建 SMemory 并挂到 J$.smemory
  *   // 现在业务插件可以通过 J$.smemory 访问影子内存
  *   host.use(new MyAnalysis(J$.smemory));
@@ -277,21 +277,21 @@ export class SMemoryPlugin {
 // 当本文件被旧式 --analysis SMemory.js 命令行参数直接加载时，
 // 自动创建 SMemory 实例并安装为分析插件。
 //
-// 新式推荐用法（通过 AnalysisHost）：
+// 新式推荐用法（通过 HookDispatcher）：
 //   import { SMemory, SMemoryPlugin } from './SMemory.js';
 //   const smemory = new SMemory(J$);
 //   J$.smemory = smemory;
 //   host.use(new SMemoryPlugin(smemory));
 
-// BUG-RT-06 修复：集成到现有 AnalysisHost 而非覆盖。
-// 若 J$.analysis 已是 AnalysisHost 实例（支持 .use() 方法），则将 SMemoryPlugin
+// BUG-RT-06 修复：集成到现有 HookDispatcher 而非覆盖。
+// 若 J$.analysis 已是 HookDispatcher 实例（支持 .use() 方法），则将 SMemoryPlugin
 // 注册为插件，保留其他已注册的分析。否则才直接赋值（向后兼容旧式单一分析）。
 if (typeof J$ !== 'undefined') {
     const smemory = new SMemory(J$);
     J$.smemory    = smemory;
     
     if (J$.analysis?.use && typeof J$.analysis.use === 'function') {
-        // 已有 AnalysisHost：集成新插件
+        // 已有 HookDispatcher：集成新插件
         J$.analysis.use(new SMemoryPlugin(smemory));
     } else {
         // 兼容旧式单一分析赋值

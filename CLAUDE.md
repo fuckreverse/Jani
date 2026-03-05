@@ -48,7 +48,7 @@ esnstrument.js        ← 所有上述模块 + @babel/parser + @babel/generator
 |------|------|
 | `JalangiRuntime.js` | 所有 J$ 钩子函数核心实现（基类），含 OID / CallID / Shadow Frame / ContextID |
 | `JalangiSandbox.js` | 完整沙盒对象，继承 `JalangiRuntime`（推荐使用） |
-| `AnalysisHost.js` | 多插件链式调度器，`.use()` 注册分析 |
+| `HookDispatcher.js` | 多插件链式调度器，`.use()` 注册分析 |
 | `SMemory.js` | Shadow Memory 影子内存服务 |
 | `analysisCallbackTemplate.js` | 分析插件接口基类模板 `AnalysisTemplate` |
 | `DataFlowAnalyzer.js` | 运行时 SSA 数据流分析器，支持 backward slicing |
@@ -220,7 +220,7 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 2. **`init()` / `instrumentCode()` 参数变化** → 更新 `Instrumentation-Engine.md`
 3. **新增 / 修改 Config 字段** → 更新 `Configuration.md` + `Instrumentation-Engine.md`
 4. **新增 / 修改分析钩子（hook）** → 更新 `Analysis-Development.md` + `Runtime-System.md`
-5. **`JalangiSandbox` / `AnalysisHost` / `SMemory` API 变化** → 更新 `Runtime-System.md`
+5. **`JalangiSandbox` / `HookDispatcher` / `SMemory` API 变化** → 更新 `Runtime-System.md`
 6. **新增 / 删除 `src/plugins/` 示例插件** → 更新 `Sample-Analyses.md`
 7. **架构层面的重大变化**（模块拆分/合并、依赖变更等）→ 更新 `Overview.md`
 

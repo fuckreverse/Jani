@@ -707,11 +707,11 @@ describe('observeOnly 模式', () => {
         assert.equal($out.z, 7, 'observeOnly 模式下 10-3 仍应为 7');
     });
 
-    test('observeOnly 可在 AnalysisHost 直接实例化时使用', async () => {
-        // 直接 new AnalysisHost({ observeOnly: true }) 而非通过 JalangiSandbox 透传
-        const { AnalysisHost } = await import('../../src/runtime/AnalysisHost.js');
-        const host = new AnalysisHost({ observeOnly: true });
-        assert.equal(host.observeOnly, true, 'AnalysisHost 构造后 observeOnly 应为 true');
+    test('observeOnly 可在 HookDispatcher 直接实例化时使用', async () => {
+        // 直接 new HookDispatcher({ observeOnly: true }) 而非通过 JalangiSandbox 透传
+        const { HookDispatcher } = await import('../../src/runtime/HookDispatcher.js');
+        const host = new HookDispatcher({ observeOnly: true });
+        assert.equal(host.observeOnly, true, 'HookDispatcher 构造后 observeOnly 应为 true');
         // 注册一个试图修改值的插件
         let called = false;
         host.use({ read(_iid, _name, val) { called = true; return { result: 999 }; } });

@@ -88,7 +88,7 @@ src/
   runtime/             ← 运行时系统（含 Node.js 专有代码）
     JalangiRuntime.js  ← 运行时钩子实现（基类）
     JalangiSandbox.js  ← 完整沙盒对象（推荐使用）
-    AnalysisHost.js    ← 多插件链式调度器
+    HookDispatcher.js    ← 多插件链式调度器
     SMemory.js         ← Shadow Memory 影子内存服务
     analysisCallbackTemplate.js ← 分析插件接口模板
     DataFlowAnalyzer.js         ← 运行时 SSA 数据流分析器

@@ -3,16 +3,16 @@
  *
  * 覆盖范围：
  *  - HOOKS 常量完整性
- *  - AnalysisHost：构造、use()、链式调度、值传递、异常处理、实例独立性
+ *  - HookDispatcher：构造、use()、链式调度、值传递、异常处理、实例独立性
  *  - SMemory / SMemoryPlugin：ESM 导入、状态管理
  *  - LogAllAnalysis：ESM 导入、钩子返回值格式
- *  - 端到端：三层组合（AnalysisHost + SMemoryPlugin + LogAllAnalysis）
+ *  - 端到端：三层组合（HookDispatcher + SMemoryPlugin + LogAllAnalysis）
  */
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { AnalysisHost, HOOKS }   from '../../src/runtime/AnalysisHost.js';
+import { HookDispatcher, HOOKS }   from '../../src/runtime/HookDispatcher.js';
 import { SMemory, SMemoryPlugin } from '../../src/runtime/SMemory.js';
 import { LogAllAnalysis }         from '../../src/plugins/tutorial/LogAll.js';
 
@@ -44,19 +44,19 @@ describe('HOOKS 常量', () => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
-// AnalysisHost 构造与基本行为
+// HookDispatcher 构造与基本行为
 // ════════════════════════════════════════════════════════════════════════════════
 
-describe('AnalysisHost 构造与基本行为', () => {
-    test('new AnalysisHost() 构造后每个 hook 方法都存在', () => {
-        const host = new AnalysisHost();
+describe('HookDispatcher 构造与基本行为', () => {
+    test('new HookDispatcher() 构造后每个 hook 方法都存在', () => {
+        const host = new HookDispatcher();
         for (const name of HOOKS) {
             assert.equal(typeof host[name], 'function', `host.${name} 应为函数`);
         }
     });
 
     test('未注册任何插件时，钩子调用返回 undefined', () => {
-        const host = new AnalysisHost();
+        const host = new HookDispatcher();
         assert.equal(host.read(1, 'x', 42, false, false), undefined);
     });
 });
@@ -67,13 +67,13 @@ describe('AnalysisHost 构造与基本行为', () => {
 
 describe('use() 注册插件', () => {
     test('use() 返回 this，支持链式语法', () => {
-        const host = new AnalysisHost();
+        const host = new HookDispatcher();
         assert.equal(host.use({ read: () => {} }), host);
     });
 
     test('use().use() 链式注册，顺序即执行顺序', () => {
         const order = [];
-        new AnalysisHost()
+        new HookDispatcher()
             .use({ read: () => { order.push(1); } })
             .use({ read: () => { order.push(2); } })
             .read(1, 'x', undefined, false, false);
@@ -82,7 +82,7 @@ describe('use() 注册插件', () => {
 
     test('只注册插件中实现的 hook，未实现的不触发', () => {
         const calls = [];
-        const host = new AnalysisHost()
+        const host = new HookDispatcher()
             .use({ read: () => { calls.push('read'); } });
         host.read(1, 'x', undefined, false, false);
         host.write(1, 'x', 42, undefined, false, false);
@@ -92,7 +92,7 @@ describe('use() 注册插件', () => {
     test('同一插件多次 use() 会导致重复调用', () => {
         const calls = [];
         const plugin = { read: () => { calls.push(1); } };
-        new AnalysisHost().use(plugin).use(plugin).read(1, 'x', undefined, false, false);
+        new HookDispatcher().use(plugin).use(plugin).read(1, 'x', undefined, false, false);
         assert.deepEqual(calls, [1, 1], '重复注册应重复调用');
     });
 });
@@ -103,27 +103,27 @@ describe('use() 注册插件', () => {
 
 describe('链式值传递', () => {
     test('最后一个有返回值的插件决定最终返回值', () => {
-        const host = new AnalysisHost()
+        const host = new HookDispatcher()
             .use({ read: () => ({ result: 'first' }) })
             .use({ read: () => ({ result: 'last'  }) });
         assert.equal(host.read(1, 'x', undefined, false, false).result, 'last');
     });
 
     test('插件 A 返回 {result} 时，插件 B 看到修改后的值（链式传递语义）', () => {
-        // AnalysisHost 的核心设计：前一个插件返回 { result: newVal }
+        // HookDispatcher 的核心设计：前一个插件返回 { result: newVal }
         // 后续插件看到的对应参数会被替换为 newVal（链式 taint/shadow 传递）
         const seenByB = [];
-        new AnalysisHost()
+        new HookDispatcher()
             .use({ read: (_iid, _name, _val) => ({ result: 'MODIFIED' }) })
             .use({ read: (_iid, _name, val)  => { seenByB.push(val); } })
             .read(1, 'x', 'original', false, false);
         assert.deepEqual(seenByB, ['MODIFIED'],
-            '插件 B 应看到插件 A 修改后的值（链式传递是 AnalysisHost 的核心特性）');
+            '插件 B 应看到插件 A 修改后的值（链式传递是 HookDispatcher 的核心特性）');
     });
 
     test('插件 A 不返回时，插件 B 看到原始入参', () => {
         const seenByB = [];
-        new AnalysisHost()
+        new HookDispatcher()
             .use({ read: () => { /* 不返回 */ } })
             .use({ read: (_iid, _name, val) => { seenByB.push(val); } })
             .read(1, 'x', 'original', false, false);
@@ -132,7 +132,7 @@ describe('链式值传递', () => {
 
     test('返回 {args:[...]} 可替换后续插件的整体参数列表', () => {
         const seenByB = [];
-        new AnalysisHost()
+        new HookDispatcher()
             .use({ read: (iid, _name, val, g, sl) => ({ result: val, args: [iid, 'replaced', val, g, sl] }) })
             .use({ read: (_iid, name) => { seenByB.push(name); } })
             .read(1, 'original', undefined, false, false);
@@ -146,14 +146,14 @@ describe('链式值传递', () => {
 
 describe('异常处理', () => {
     test('插件抛出异常时 rethrow（通过 onError 阻止 process.exit）', () => {
-        const host = new AnalysisHost({ onError: () => {} });
+        const host = new HookDispatcher({ onError: () => {} });
         host.use({ read: () => { throw new Error('boom'); } });
         assert.throws(() => host.read(1, 'x', undefined, false, false), /boom/);
     });
 
     test('插件 A 抛出后不再调用插件 B', () => {
         const calledB = [];
-        const host = new AnalysisHost({ onError: () => {} });
+        const host = new HookDispatcher({ onError: () => {} });
         host.use({ read: () => { throw new Error(); } });
         host.use({ read: () => { calledB.push(true); } });
         try { host.read(1, 'x', undefined, false, false); } catch (_) {}
@@ -166,10 +166,10 @@ describe('异常处理', () => {
 // ════════════════════════════════════════════════════════════════════════════════
 
 describe('实例独立性', () => {
-    test('两个 AnalysisHost 实例互不影响', () => {
+    test('两个 HookDispatcher 实例互不影响', () => {
         const log1 = [], log2 = [];
-        const h1 = new AnalysisHost().use({ read: () => { log1.push(1); } });
-        const h2 = new AnalysisHost().use({ read: () => { log2.push(2); } });
+        const h1 = new HookDispatcher().use({ read: () => { log1.push(1); } });
+        const h2 = new HookDispatcher().use({ read: () => { log2.push(2); } });
         h1.read(1, 'x', undefined, false, false);
         assert.deepEqual(log1, [1]);
         assert.deepEqual(log2, [], 'h2 不受 h1 影响');
@@ -207,9 +207,9 @@ describe('SMemory / SMemoryPlugin', () => {
         assert.equal(ret.isBacktrack, false);
     });
 
-    test('SMemoryPlugin 可以被 AnalysisHost.use() 接受', () => {
+    test('SMemoryPlugin 可以被 HookDispatcher.use() 接受', () => {
         const mem  = new SMemory(FAKE_CONSTANTS);
-        const host = new AnalysisHost().use(new SMemoryPlugin(mem));
+        const host = new HookDispatcher().use(new SMemoryPlugin(mem));
         assert.equal(typeof host.scriptEnter, 'function');
         // 调用不应抛出
         host.scriptEnter(1, 'test_inst.js', 'test.js');
@@ -247,13 +247,13 @@ describe('LogAllAnalysis', () => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
-// 端到端：AnalysisHost + SMemoryPlugin + LogAllAnalysis 三层组合
+// 端到端：HookDispatcher + SMemoryPlugin + LogAllAnalysis 三层组合
 // ════════════════════════════════════════════════════════════════════════════════
 
 describe('端到端三层组合', () => {
     test('scriptEnter → scriptExit 不抛出', () => {
         const mem  = new SMemory(FAKE_CONSTANTS);
-        const host = new AnalysisHost()
+        const host = new HookDispatcher()
             .use(new SMemoryPlugin(mem))
             .use(new LogAllAnalysis(mem));
         host.scriptEnter(1, 'test_inst.js', 'test.js');
@@ -262,7 +262,7 @@ describe('端到端三层组合', () => {
 
     test('functionEnter → functionExit 不抛出', () => {
         const mem  = new SMemory(FAKE_CONSTANTS);
-        const host = new AnalysisHost()
+        const host = new HookDispatcher()
             .use(new SMemoryPlugin(mem))
             .use(new LogAllAnalysis(mem));
         host.scriptEnter(1, 'test_inst.js', 'test.js');
@@ -275,7 +275,7 @@ describe('端到端三层组合', () => {
 
     test('read 钩子返回值来自最后一个插件（LogAll）', () => {
         const mem  = new SMemory(FAKE_CONSTANTS);
-        const host = new AnalysisHost()
+        const host = new HookDispatcher()
             .use(new SMemoryPlugin(mem))
             .use(new LogAllAnalysis(mem));
         const ret = host.read(1, 'x', 99, false, false);

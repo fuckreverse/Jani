@@ -10,7 +10,7 @@ Jalangi2 允许开发者通过编写**分析插件（Analysis Plugin）**来监�
 
 ```mermaid
 flowchart TD
-    INIT["初始化\nnew JalangiSandbox()\nJ$.analysis = new AnalysisHost()"]
+    INIT["初始化\nnew JalangiSandbox()\nJ$.analysis = new HookDispatcher()"]
     REG["注册插件\nJ$.analysis.use(new MyAnalysis(J$))"]
     SE["onReady(cb) — 异步初始化完成\nscriptEnter — 脚本开始执行"]
     HOOKS["运行时事件循环\n每次操作触发对应钩子\nread / write / getField / binary / ..."]
@@ -409,7 +409,7 @@ class MyAnalysis {
 ## 链式注册多个分析
 
 ```js
-import { AnalysisHost }            from './src/runtime/AnalysisHost.js';
+import { HookDispatcher }            from './src/runtime/HookDispatcher.js';
 import { SMemory, SMemoryPlugin }  from './src/runtime/SMemory.js';
 import { TraceAllAnalysis }        from './src/plugins/pldi16/TraceAll.js';
 import { MyCustomAnalysis }        from './my-analysis.js';
@@ -417,7 +417,7 @@ import { MyCustomAnalysis }        from './my-analysis.js';
 const smemory = new SMemory(J$);
 J$.smemory = smemory;
 
-J$.analysis = new AnalysisHost()
+J$.analysis = new HookDispatcher()
     .use(new SMemoryPlugin(smemory))    // 先注册 SMemory，确保后续插件可用
     .use(new TraceAllAnalysis(J$))
     .use(new MyCustomAnalysis(J$));

@@ -3,7 +3,7 @@
 /// <reference types="../types.d.ts" />
 
 /**
- * AnalysisHost —— Jalangi2 运行时分析调度框架。
+ * HookDispatcher —— Jalangi2 运行时钩子分发器。
  *
  * 职责：
  *  1. 维护一个有序的分析插件列表
@@ -12,18 +12,18 @@
  *
  * 标准用法：
  *
- *   import { AnalysisHost } from './AnalysisHost.js';
+ *   import { HookDispatcher } from './HookDispatcher.js';
  *   import { SMemoryPlugin, SMemory } from './SMemory.js';
  *   import { LogAllAnalysis } from '../plugins/tutorial/LogAll.js';
  *
  *   const smemory = new SMemory();
- *   J$.analysis = new AnalysisHost()
+ *   J$.analysis = new HookDispatcher()
  *       .use(new SMemoryPlugin(smemory))
  *       .use(new LogAllAnalysis(smemory));
  *
  * observeOnly 模式（Trace 场景推荐）：
  *
- *   J$.analysis = new AnalysisHost({ observeOnly: true })
+ *   J$.analysis = new HookDispatcher({ observeOnly: true })
  *       .use(new MyTraceAnalysis());
  *
  *   // 或通过 JalangiSandbox 透传：
@@ -77,7 +77,7 @@ const RESULT_ARG_INDEX = Object.freeze({
 });
 
 /**
- * AnalysisHost —— 多插件链式调度器。
+ * HookDispatcher —— 多插件链式调度器。
  *
  * 每个 hook 方法在被调用时，会依次调用所有注册了该 hook 的插件。
  * 若某个插件的 hook 返回值中含 Array 类型的 `args` 字段，
@@ -91,7 +91,7 @@ const RESULT_ARG_INDEX = Object.freeze({
  * 保证插件无法改变原始程序的执行结果。适用于 Trace / Coverage / Profiling 等
  * 纯观测场景，消除"插件误返回值导致静默破坏原始程序语义"的风险。
  */
-class AnalysisHost {
+class HookDispatcher {
     /**
      * @param {object}   [options]
      * @param {function} [options.onError] - 插件 hook 抛出异常时的处理函数，
@@ -127,10 +127,10 @@ class AnalysisHost {
      *
      * - 只有插件中实际存在的 hook 方法才会被注册，其余忽略。
      * - 多次调用 use() 的顺序即为钩子的执行顺序。
-     * - 返回 this，支持链式：`new AnalysisHost().use(A).use(B)`。
+     * - 返回 this，支持链式：`new HookDispatcher().use(A).use(B)`。
      *
      * @param {object} plugin - 分析插件实例
-     * @returns {AnalysisHost} this
+     * @returns {HookDispatcher} this
      */
     use(plugin) {
         for (const name of HOOKS) {
@@ -190,4 +190,4 @@ function _defaultOnError(hookName, e) {
     }
 }
 
-export { AnalysisHost, HOOKS };
+export { HookDispatcher, HOOKS };

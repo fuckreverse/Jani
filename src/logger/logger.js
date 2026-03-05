@@ -39,7 +39,7 @@
  *
  * ─── 内置域名约定 ──────────────────────────────────────────────────────────────
  *
- *   'framework'    JalangiRuntime, JalangiSandbox, AnalysisHost
+ *   'framework'    JalangiRuntime, JalangiSandbox, HookDispatcher
  *   'instrument'   astUtil, pluginAnalyzer, esnstrument
  *   'logging'      LogManager, TraceLogger
  *   'backend:idb'  IdbWorkerBackend, idb-worker
@@ -109,7 +109,7 @@ function isDebugEnabled(domain) {
  *   JALANGI_DEBUG=backend:ws,backend:node
  */
 export const DOMAIN = Object.freeze({
-    /** JalangiRuntime, JalangiSandbox, AnalysisHost */
+    /** JalangiRuntime, JalangiSandbox, HookDispatcher */
     FRAMEWORK:    'framework',
     /** astUtil, pluginAnalyzer, esnstrument */
     INSTRUMENT:   'instrument',

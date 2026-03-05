@@ -10,13 +10,13 @@
  *
  * 用法示例：
  *
- *   import { AnalysisHost }             from '../../runtime/AnalysisHost.js';
+ *   import { HookDispatcher }           from '../../runtime/HookDispatcher.js';
  *   import { SMemory, SMemoryPlugin }   from '../../runtime/SMemory.js';
  *   import { LogAllAnalysis }           from './LogAll.js';
  *
  *   const smemory = new SMemory(J$.Constants);
  *   J$.smemory  = smemory;
- *   J$.analysis = new AnalysisHost()
+ *   J$.analysis = new HookDispatcher()
  *       .use(new SMemoryPlugin(smemory))
  *       .use(new LogAllAnalysis(smemory, J$));
  */
