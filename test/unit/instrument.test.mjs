@@ -330,15 +330,16 @@ describe('IID Source Map', () => {
         assert.ok(r.code.includes('J$.smap['), '应以 smap[key] 存储 source map');
     });
 
-    test('script 模式输出包含 IIFE 结构', () => {
+    test('script 模式输出不含 IIFE（var 可全局提升）', () => {
         const r = instr('var x = 1;');
-        assert.ok(r.code.includes('(function(J$)'), 'script 模式应用 IIFE 包裹 J$ 为闭包参数');
+        assert.ok(!r.code.includes('(function(J$)'), 'script 模式不应用 IIFE 包裹，var 可正常全局提升');
+        assert.ok(r.code.includes('J$.'), '插桩代码应包含 J$. 钩子调用');
     });
 
-    test('module 模式：const J$ 局部绑定而非 IIFE', () => {
+    test('module 模式：const J$ 局部绑定', () => {
         const r = instr('export const x = 1;', { sourceType: 'module' });
         assert.ok(r.code.includes('const J$ = globalThis.J$'), 'module 模式应用 const 局部绑定');
-        assert.ok(!r.code.includes('(function(J$)'),            'module 模式不应再包一层 IIFE');
+        assert.ok(!r.code.includes('(function(J$)'),            'module 模式不应包 IIFE');
     });
 
     test('smap 多文件互不覆盖：不同文件名写入不同 smap key', () => {
@@ -411,10 +412,10 @@ describe('VLCQ Source Map v3', () => {
         assert.ok(r.vlcqSourceMap.sources.some(s => s.includes('hello.js')), 'sources 应包含 hello.js');
     });
 
-    test('mappings 以若干 ";" 开头（行偏移补偿）', () => {
+    test('mappings 以 ";" 开头（行偏移补偿，script 模式 1 行）', () => {
         const r = instr('function f() { return 1; }');
-        assert.ok(r.vlcqSourceMap.mappings.startsWith(';;'),
-            `mappings 应以 ";;" 开头（2 行偏移），实际: ${JSON.stringify(r.vlcqSourceMap.mappings.slice(0, 10))}`);
+        assert.ok(r.vlcqSourceMap.mappings.startsWith(';') && !r.vlcqSourceMap.mappings.startsWith(';;'),
+            `mappings 应以单个 ";" 开头（script 模式 1 行偏移），实际: ${JSON.stringify(r.vlcqSourceMap.mappings.slice(0, 10))}`);
     });
 
     test('JALANGI DO NOT INSTRUMENT 代码不生成 vlcqSourceMap', () => {
@@ -815,7 +816,7 @@ describe('防御代码（Guard）触发验证', () => {
 describe('自定义沙盒变量名（jalangiVar）', () => {
     after(restoreConfig);
 
-    test('使用自定义变量名 __myJ 时，IIFE 包装使用该名称', () => {
+    test('使用自定义变量名 __myJ 时，钩子使用该名称', () => {
         init({ ...ALL_CONFIG }, null, null, '__myJ');
         const r = instrumentCode({ code: 'var x = 1 + 2;', origCodeFileName: 'custom.js', instCodeFileName: 'custom_i.js' });
         assert.ok(r.code.includes('__myJ'), '插桩输出应包含自定义变量名 __myJ');

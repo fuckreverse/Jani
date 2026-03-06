@@ -10,14 +10,25 @@
  *   - 配合 pluginAnalyzer 自动推导的按需 Config，插桩代码中只存在
  *     J$.W / J$.F / J$.M / J$.X1 等粗粒度钩子。
  *
- * 每条 trace 行输出格式：
+ * 每条 trace 行输出格式（由 OUTPUT_FORMAT 控制）：
  *
- *   [row:col]  <indent>原始源码文本 ; <key>=<value>
+ *   FORMAT_TREE (1) — Unicode 树形符号（seq/rc 固定宽度对齐）：
+ *     [  9] [ 687:22] │ │ │ ┬ (anonymous)(0 args)
+ *     [ 10] [3943:14] │ │ │ │ ┬ Object(1 args) arg0=Symbol(Symbol.iterator)
+ *     [ 11] [3943:14] │ │ │ │ └ return Object ={}
+ *     [ 12] [ 687:22] │ │ │ └ return (anonymous) =undefined
  *
- *   变量赋值：   [3:1]  let x = 1 ; x=1
- *   函数调用：   [5:1]  → call foo(2 args) ; arg0=1, arg1=2
- *               [5:1]  ← return foo ; result=3
- *   表达式语句： [7:1]  obj.method()
+ *   FORMAT_BLOCK (2) — #region/#endregion 折叠块（VS Code 任意文件可折叠）：
+ *     [  9] // #region [ 687:22] CALL (anonymous)(0 args)
+ *     [ 10]   // #region [3943:14] CALL Object(1 args) arg0=Symbol(Symbol.iterator)
+ *     [ 11]   // #endregion Object ={}
+ *     [ 12] // #endregion (anonymous) =undefined
+ *
+ *   FORMAT_PIPE (4) — ASCII pipe 符号（| 数量 = 调用深度）：
+ *     [  9] | | | (anonymous)(0 args) [ 687:22]
+ *     [ 10] | | | | Object(1 args) [3943:14] arg0=Symbol(Symbol.iterator)
+ *     [ 11] | | | | Object RETN ={} [3943:14]
+ *     [ 12] | | | (anonymous) RETN =undefined [ 687:22]
  *
  * 用法：
  *   import { ExecutionTraceAnalysis } from './ExecutionTrace.js';
@@ -33,10 +44,6 @@
  *   import { init } from '../instrument/esnstrument.js';
  *   const analysis = new ExecutionTraceAnalysis(J$, src, opts);
  *   init(null, undefined, undefined, undefined, [analysis]);
- *   // 框架自动检测此插件只使用了 write / invokeFunPre / invokeFun /
- *   // endExpression / functionEnter / functionExit / scriptEnter / scriptExit /
- *   // _return / _throw / declare / endExecution，
- *   // 并自动关闭 INSTR_READ / INSTR_BINARY / INSTR_GETFIELD 等高开销插桩。
  *
  * 诊断日志（直接输出到 console，不走 TraceLogger/IDB）：
  *  - JALANGI_DEBUG=analysis（Node.js）或 localStorage.jalangiDebug='analysis'（浏览器）开启 debug 级别
@@ -47,10 +54,20 @@
 import { TraceLogger } from '../logger/TraceLogger.js';
 import { createLogger, DOMAIN } from '../logger/logger.js';
 
-const MAX_BYTES  = 100;
-const INDENT_UNIT = '  ';
+const MAX_BYTES = 100;
 
 const dbg = createLogger(DOMAIN.ANALYSIS);
+
+// ── 输出格式选择（硬编码，改这里切换）────────────────────────────────────────
+//   1 = FORMAT_TREE  : Unicode 树形符号（┬ │ └），seq/rc 固定宽度对齐
+//   2 = FORMAT_BLOCK : #region/#endregion 折叠块（VS Code 任意文件可折叠）
+//   4 = FORMAT_PIPE  : ASCII pipe 符号（| 数量 = 深度）
+const OUTPUT_FORMAT = 1;
+
+// seq 显示宽度（右对齐）：超过此宽度会自动溢出，不截断
+const SEQ_WIDTH = 6;
+// rc（行:列）显示宽度（右对齐，含冒号）
+const RC_WIDTH  = 9;
 
 // ── 工具 ─────────────────────────────────────────────────────────────────────
 
@@ -64,36 +81,30 @@ function serialize(v) {
     if (t === 'boolean')   return v ? 'true' : 'false';
     if (t === 'number')    return String(v);
     if (t === 'string') {
-        // 加引号，截断过长字符串（不用 JSON.stringify 避免触发任何拦截）
         const q = v.length > MAX_BYTES ? v.slice(0, MAX_BYTES) + '…' : v;
         return `"${q.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`;
     }
     if (t === 'object') {
-        // 特殊处理 Error 及其子类（message/name/stack 不可枚举）
         if (v instanceof Error) {
             const name = v.name || 'Error';
             const msg  = v.message ? String(v.message) : '';
             const truncatedMsg = msg.length > MAX_BYTES ? msg.slice(0, MAX_BYTES) + '…' : msg;
             return `${name}: ${truncatedMsg}`;
         }
-        // Array 浅层展示
         if (Array.isArray(v)) {
-            const tag = `Array(${v.length})`;
-            return tag.length > MAX_BYTES ? tag : tag;
+            return `Array(${v.length})`;
         }
-        // 普通对象：浅层枚举自有属性，完全不调用 JSON.stringify / toJSON，
-        // 防止 toJSON 是被插桩的方法时触发 invokeFunPre → serialize 的无限递归。
         try {
             const keys = Object.keys(v);
             if (keys.length === 0) return '{}';
             const parts = [];
-            let total = 2; // '{' + '}'
+            let total = 2;
             for (const k of keys) {
                 if (total >= MAX_BYTES) { parts.push('…'); break; }
                 let vStr;
                 const vv = v[k];
                 const vt = typeof vv;
-                if (vv === null)         vStr = 'null';
+                if (vv === null)             vStr = 'null';
                 else if (vt === 'undefined') vStr = 'undefined';
                 else if (vt === 'function')  vStr = '[Function]';
                 else if (vt === 'object')    vStr = '{…}';
@@ -135,8 +146,6 @@ function extractSource(lines, loc) {
     if (!lines || !loc) return '';
     const [sl, , el, ec] = loc;
     const s0 = Math.max(sl - 1, 0), e0 = Math.min(el - 1, lines.length - 1);
-
-    // 从行首开始截取（忽略 sc），以便包含 var/const/let/return 等关键字。
     let text;
     if (s0 === e0) {
         text = lines[s0].slice(0, ec);
@@ -149,23 +158,102 @@ function extractSource(lines, loc) {
     return text.replace(/\s+/g, ' ').trim();
 }
 
-// ── 帧结构（指令级：只追踪函数调用嵌套，不收集子操作值）─────────────────────
+/** 格式化 seq：右对齐，固定 SEQ_WIDTH 位 */
+function fmtSeq(seq) {
+    return String(seq).padStart(SEQ_WIDTH);
+}
+
+/** 格式化 rc（行:列）：右对齐，固定 RC_WIDTH 位 */
+function fmtRc(rc) {
+    return rc.padStart(RC_WIDTH);
+}
+
+// ── Formatter — 格式化策略（每种格式实现 callLine / retLine / infoLine）────────
+//
+// 公共接口（三个方法）：
+//   callLine(seq, rc, depth, desc, kvStr)   → 调用行
+//   retLine (seq, rc, depth, name, result)  → 返回行
+//   infoLine(seq, rc, depth, srcText, kv)   → 普通 write/return/throw/纯副作用行
+//
+// depth = 调用栈深度（从 1 开始；depth=1 表示顶层调用）
+
+class TreeFormatter {
+    // ┬ 表示进入（call），└ 表示退出（return），│ 是延续线
+    _treePrefix(depth, tip) {
+        if (depth <= 0) return tip;
+        return '│ '.repeat(depth - 1) + tip;
+    }
+
+    callLine(seq, rc, depth, desc, kvStr) {
+        const ind = this._treePrefix(depth, '┬ ');
+        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}${desc}${kvStr ? ' ' + kvStr : ''}`;
+    }
+
+    retLine(seq, rc, depth, name, result) {
+        const ind = this._treePrefix(depth, '└ ');
+        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}return ${name} =${result}`;
+    }
+
+    infoLine(seq, rc, depth, srcText, kv) {
+        const ind = '│ '.repeat(depth);
+        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}${srcText}${kv ? ' ; ' + kv : ''}`;
+    }
+}
+
+class BlockFormatter {
+    // #region / #endregion 风格：VS Code 在任何文件中识别这两个关键字并提供折叠
+    // 每层用 2 空格缩进
+    _indent(depth) {
+        return '  '.repeat(depth);
+    }
+
+    callLine(seq, rc, depth, desc, kvStr) {
+        const ind = this._indent(depth - 1); // depth 从 1 起，depth-1 对应父层缩进
+        return `[${fmtSeq(seq)}] ${ind}// #region [${fmtRc(rc)}] CALL ${desc}${kvStr ? ' ' + kvStr : ''}`;
+    }
+
+    retLine(seq, rc, depth, name, result) {
+        const ind = this._indent(depth - 1);
+        return `[${fmtSeq(seq)}] ${ind}// #endregion ${name} =${result}  [${fmtRc(rc)}]`;
+    }
+
+    infoLine(seq, rc, depth, srcText, kv) {
+        const ind = this._indent(depth > 0 ? depth - 1 : 0);
+        return `[${fmtSeq(seq)}] ${ind}${srcText}${kv ? ' ; ' + kv : ''}  [${fmtRc(rc)}]`;
+    }
+}
+
+class PipeFormatter {
+    // | 数量 = depth，纯 ASCII
+    _pipes(depth) {
+        return '| '.repeat(depth);
+    }
+
+    callLine(seq, rc, depth, desc, kvStr) {
+        return `[${fmtSeq(seq)}] ${this._pipes(depth)}${desc} [${fmtRc(rc)}]${kvStr ? ' ' + kvStr : ''}`;
+    }
+
+    retLine(seq, rc, depth, name, result) {
+        return `[${fmtSeq(seq)}] ${this._pipes(depth)}${name} RETN =${result}  [${fmtRc(rc)}]`;
+    }
+
+    infoLine(seq, rc, depth, srcText, kv) {
+        return `[${fmtSeq(seq)}] ${this._pipes(depth)}${srcText}${kv ? ' ; ' + kv : ''}  [${fmtRc(rc)}]`;
+    }
+}
+
+function createFormatter(format) {
+    if (format === 2) return new BlockFormatter();
+    if (format === 4) return new PipeFormatter();
+    return new TreeFormatter(); // 默认方案1
+}
+
+// ── 帧结构 ────────────────────────────────────────────────────────────────────
 
 class Frame {
-    constructor(indent) {
-        this.indent    = indent;
+    constructor(depth) {
+        this.depth     = depth;
         this.doneLines = [];
-    }
-
-    addChild(callLine, innerLines, retLine) {
-        this._children = this._children ?? [];
-        this._children.push({ callLine, innerLines, retLine });
-    }
-
-    flushChildren() {
-        const result = this._children ?? [];
-        this._children = [];
-        return result;
     }
 }
 
@@ -179,17 +267,14 @@ export class ExecutionTraceAnalysis {
      *
      * === 日志后端（三选一，优先级从高到低）===
      * @param {TraceLogger} [options.logger]
-     *   直接传入已构造好的 TraceLogger 实例（最灵活，可在外部完全配置）
+     *   直接传入已构造好的 TraceLogger 实例
      *
      * @param {boolean} [options.useIdb=false]
-     *   浏览器中启用 IndexedDB（自动创建 TraceLogger，等价于传 logger with useIdb:true）
      * @param {string}  [options.dbName='jalangi-traces']
      * @param {string}  [options.storeName='execution-trace']
-     * @param {string}  [options.wsUrl]    可选同时推送到 WebSocket
-     *
+     * @param {string}  [options.wsUrl]
      * @param {string|false} [options.nodeFile='jalangi-trace.ndjson']
-     *   Node.js 下输出文件（false = 只输出控制台）
-     * @param {boolean} [options.nodeConsole=false]  Node.js 下同时输出控制台
+     * @param {boolean} [options.nodeConsole=false]
      */
     constructor(sandbox, sourceCode, options = {}) {
         this._sb    = sandbox;
@@ -197,82 +282,56 @@ export class ExecutionTraceAnalysis {
         this._lines = sourceCode ? sourceCode.split(/\r\n|\r|\n/) : null;
         this._stack     = [];
         this._callStack = [];
+        this._fmt       = createFormatter(OUTPUT_FORMAT);
 
-        // ── 建立 TraceLogger ──────────────────────────────────────────────────
         if (options.logger instanceof TraceLogger) {
-            // 外部直接传入
             this._logger = options.logger;
-            // 构造函数完成 — TraceLogger 已就绪
         } else {
-            // 根据选项自动构建
-            const {
-                useIdb    = false,
-                dbName,
-                storeName,
-                wsUrl,
-                nodeFile,
-                nodeConsole,
-            } = options;
-
+            const { useIdb = false, dbName, storeName, wsUrl, nodeFile, nodeConsole } = options;
             this._logger = new TraceLogger({
                 useIdb,
-                ...(dbName    != null && { dbName }),
-                ...(storeName != null && { storeName }),
-                ...(wsUrl     != null && { wsUrl }),
-                ...(nodeFile  !== undefined && { nodeFile }),
+                ...(dbName      != null && { dbName }),
+                ...(storeName   != null && { storeName }),
+                ...(wsUrl       != null && { wsUrl }),
+                ...(nodeFile    !== undefined && { nodeFile }),
                 ...(nodeConsole !== undefined && { nodeConsole }),
                 keyToConsole: true,
             });
-            // TraceLogger 构造完成
         }
 
-        // 启动后端初始化（异步，不阻塞构造函数）
         this._loggerReady = this._logger.init();
         this._loggerReady.catch(err => {
             dbg.error('TraceLogger init error:', err.message, err.stack ?? '');
         });
 
-        // 将 TraceLogger 挂到 sandbox.tracer，
-        // 使所有插件通过 sandbox.log() → sandbox.tracer.key() 路由到同一实例
         if (sandbox) {
             sandbox.tracer = this._logger;
         }
     }
 
-    // ── 内部日志辅助 ──────────────────────────────────────────────────────────
+    // ── 内部辅助 ──────────────────────────────────────────────────────────────
 
-    /**
-     * 输出普通 trace 行（高频，走 LogManager 缓冲后端）。
-     * @param {string} text
-     */
-    _trace(text) {
-        this._logger.trace({ type: 'trace', seq: this._seq, text });
-    }
-
-    /**
-     * 输出重点事件（低频：脚本边界、异常、汇总）。
-     * 同步写控制台，同时写后端作边界标记。
-     * @param {'info'|'warn'|'error'} level
-     * @param {string} text
-     */
     _key(level, text) {
         this._logger.key(level, text);
     }
 
-    _nextSeq() { return ++this._seq; }
-    _top()     { return this._stack[this._stack.length - 1]; }
+    _top() { return this._stack[this._stack.length - 1]; }
 
-    /** 分配 seq、输出普通行 */
-    _emit(text) {
-        this._trace(`[${this._nextSeq()}] ${text}`);
+    /** emit 已格式化好的一行（seq 由调用侧 ++this._seq 分配，再传进来）*/
+    _emitRaw(text) {
+        this._logger.trace({ type: 'trace', seq: this._seq, text });
     }
 
-    /** 根据 iid 生成带缩进的源码片段前缀 "[row:col] <indent>" */
-    _prefix(iid, indent) {
-        const loc    = getLocation(this._sb, iid);
-        const rc     = loc ? `${loc[0]}:${loc[1]}` : '?:?';
-        const indStr = INDENT_UNIT.repeat(indent);
-        return { rc, indStr, loc };
+    /** 分配新 seq 并 emit 一行（key 级别事件用）*/
+    _emitKeyLine(text) {
+        this._emitRaw(`[${fmtSeq(++this._seq)}] ${text}`);
+    }
+
+    /** 根据 iid 获取位置信息 */
+    _loc(iid) {
+        const loc = getLocation(this._sb, iid);
+        const rc  = loc ? `${loc[0]}:${loc[1]}` : '?:?';
+        return { loc, rc };
     }
 
     // ── 函数调用边界 ──────────────────────────────────────────────────────────
@@ -281,89 +340,94 @@ export class ExecutionTraceAnalysis {
         const name   = f?.name || '(anonymous)';
         const prefix = isConstructor ? 'new ' : '';
         const desc   = isMethod
-            ? `→ call .${name}(${args.length} args)`
-            : `→ ${prefix}call ${name}(${args.length} args)`;
+            ? `.${name}(${args.length} args)`
+            : `${prefix}${name}(${args.length} args)`;
 
         const kvParts = args.map((a, i) => `arg${i}=${serialize(a)}`);
         if (isMethod && base !== undefined) kvParts.unshift(`this=${serialize(base)}`);
+        const kvStr = kvParts.length ? kvParts.join(', ') : '';
 
-        const loc          = getLocation(this._sb, iid);
-        const rc           = loc ? `${loc[0]}:${loc[1]}` : '?:?';
-        const parentIndent = this._stack.length > 0 ? this._top().indent : 0;
-        const callIndent   = INDENT_UNIT.repeat(parentIndent + 1);
-        const callLineTemplate = `[${rc}] ${callIndent}${desc}${kvParts.length ? ' ; ' + kvParts.join(', ') : ''}`;
+        const { rc } = this._loc(iid);
+        const parentDepth = this._stack.length > 0 ? this._top().depth : 0;
 
-        const newIndent = parentIndent + 2;
-        this._stack.push(new Frame(newIndent));
-        this._callStack.push({ callLineTemplate, innerLines: [] });
+        const callMeta = { rc, depth: parentDepth + 1, desc, kvStr, name };
+        this._stack.push(new Frame(parentDepth + 1));
+        this._callStack.push({ callMeta });
 
-        // invokeFunPre 完成 — 栈帧已推入
         return { f, base, args, skip: false };
     }
 
     invokeFun(iid, f, base, args, result, isConstructor, isMethod) {
-        // 健壮性检查：如果栈帧已空（不正常），记录诊断日志
         if (this._stack.length === 0 || this._callStack.length === 0) {
             const name = f?.name || '(anonymous)';
             dbg.error(
-                `invokeFun: stack underflow — stack=${this._stack.length} callStack=${this._callStack.length}` +
-                ` fn=${name} iid=${iid} isConstructor=${isConstructor} isMethod=${isMethod}`
+                `invokeFun: stack underflow — stack=${this._stack.length}` +
+                ` fn=${name} iid=${iid}`
             );
             return { result };
         }
 
         const frame    = this._stack.pop();
         const callInfo = this._callStack.pop();
+        const { callMeta } = callInfo;
 
-        const name      = f?.name || '(anonymous)';
-        const loc       = getLocation(this._sb, iid);
-        const rc        = loc ? `${loc[0]}:${loc[1]}` : '?:?';
-        const retIndent = INDENT_UNIT.repeat(frame.indent > 0 ? frame.indent - 1 : 0);
-        const retLine   = `[${rc}] ${retIndent}← return ${name} ; result=${serialize(result)}`;
+        const name    = f?.name || '(anonymous)';
+        const { rc }  = this._loc(iid);
+        const retMeta = { rc, depth: callMeta.depth, name, result: serialize(result) };
 
-        // invokeFun 完成 — 栈帧已弹出
-
-        // 收集被调函数内部已产生的 doneLines（子函数内的指令 trace）
         const innerLines = frame.doneLines;
 
         const parent = this._top();
         if (parent) {
-            parent.addChild(callInfo.callLineTemplate, innerLines, retLine);
+            parent.doneLines.push({ type: 'call', callMeta, innerLines, retMeta });
         } else {
-            // 顶层调用：立即 emit
-            this._emit(callInfo.callLineTemplate);
-            for (const l of innerLines) this._emit(l);
-            this._emit(retLine);
+            this._emitFormattedCall(callMeta, innerLines, retMeta);
         }
 
         return { result };
     }
 
-    // ── 脚本进出（KEY 级别）───────────────────────────────────────────────────
+    _emitFormattedCall(callMeta, innerLines, retMeta) {
+        const callLine = this._fmt.callLine(
+            ++this._seq, callMeta.rc, callMeta.depth, callMeta.desc, callMeta.kvStr
+        );
+        this._emitRaw(callLine);
+
+        this._emitItems(innerLines);
+
+        const retLine = this._fmt.retLine(
+            ++this._seq, retMeta.rc, retMeta.depth, retMeta.name, retMeta.result
+        );
+        this._emitRaw(retLine);
+    }
+
+    // ── 脚本进出 ──────────────────────────────────────────────────────────────
 
     scriptEnter(iid, instrumentedFileName, originalFileName) {
+        // scriptEnter 分配一个 seq，作为 trace 的第一条记录
+        this._emitKeyLine(`▶ script: ${originalFileName}`);
         this._key('info', `▶ script: ${originalFileName}`);
-        this._stack.push(new Frame(1));
-        this._callStack.push({ callLineTemplate: null, innerLines: [] });
+        this._stack.push(new Frame(0));
+        this._callStack.push({ callMeta: null });
     }
 
     scriptExit(iid, wrappedExceptionVal) {
         if (this._stack.length === 0) {
-            dbg.error(`scriptExit: stack underflow (iid=${iid}) — no matching scriptEnter?`);
+            dbg.error(`scriptExit: stack underflow (iid=${iid})`);
         } else {
-            // Flush 残余的 doneLines（脚本顶层未被 endExpression flush 的行）
             const frame = this._top();
-            for (const l of frame.doneLines) this._emit(l);
+            this._emitItems(frame.doneLines);
             this._stack.pop();
             this._callStack.pop();
         }
+        const exitText = wrappedExceptionVal
+            ? `◀ script end (exception: ${serialize(wrappedExceptionVal.exception)})`
+            : `◀ script end`;
+        this._emitKeyLine(exitText);
         if (wrappedExceptionVal) {
-            const exStr = serialize(wrappedExceptionVal.exception);
-            // 脚本异常退出
-            this._key('error', `◀ script end (exception: ${exStr})`);
+            this._key('error', exitText);
         } else {
-            // 脚本正常退出
-            this._key('info', `◀ script end`);
+            this._key('info', exitText);
         }
         return { wrappedExceptionVal, isBacktrack: false };
     }
@@ -372,47 +436,30 @@ export class ExecutionTraceAnalysis {
 
     functionExit(iid, returnVal, wrappedExceptionVal) {
         if (wrappedExceptionVal) {
-            const exStr = serialize(wrappedExceptionVal.exception);
-            const loc    = getLocation(this._sb, iid);
-            const rc     = loc ? `${loc[0]}:${loc[1]}` : '?:?';
-            const indent = INDENT_UNIT.repeat(this._top()?.indent ?? 0);
-            const text   = `[${rc}] ${indent}✗ throw ; exception=${exStr}`;
-
-            // functionExit 异常分支
-            // 使用 warn 而非 error：大量混淆代码会故意用 throw-catch 作为控制流
-            // （如环境检测、反调试），这些 throw 均被外层 catch 正常捕获，程序继续运行。
-            // 用 error 级别会在浏览器控制台产生大量红色误报，误导调试。
-            this._key('warn', text);
-            this._emit(text);
+            const exStr  = serialize(wrappedExceptionVal.exception);
+            const { rc } = this._loc(iid);
+            const frame  = this._top();
+            // 压入当前帧的 doneLines，等待帧 flush 时按序输出（保持 seq 连续）
+            // 同时通过 _key 输出到控制台作警告
+            const depth = frame?.depth ?? 0;
+            frame?.doneLines.push({ type: 'info', rc, depth, srcText: '✗ throw', kv: `exception=${exStr}` });
+            // warn 级别走控制台（不占 seq，因为还未 flush）
+            this._key('warn', `[${rc}] ✗ throw ; exception=${exStr}`);
         }
         return { returnVal, wrappedExceptionVal, isBacktrack: false };
     }
 
-    // ── 指令级钩子：变量写入（赋值结果）─────────────────────────────────────
+    // ── 指令级钩子 ────────────────────────────────────────────────────────────
 
-    /**
-     * 变量写入：每次赋值立即输出一条 trace 行。
-     * 这是指令级追踪的核心——只在真正的"赋值指令"处记录，
-     * 不追踪赋值右侧表达式内部的子操作值。
-     */
     write(iid, name, val) {
         const frame = this._top();
         if (!frame) return { result: val };
-
-        const { rc, indStr, loc } = this._prefix(iid, frame.indent);
+        const { rc, loc } = this._loc(iid);
         const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
-        const line = `[${rc}] ${indStr}${srcText} ; ${name}=${serialize(val)}`;
-
-        // 将写入行追加到当前帧的 doneLines，等待帧 flush 时按顺序输出
-        frame.doneLines.push(line);
-
+        frame.doneLines.push({ type: 'info', rc, depth: frame.depth, srcText, kv: `${name}=${serialize(val)}` });
         return { result: val };
     }
 
-    /**
-     * 变量声明初始化（仅非参数、非 catch 的声明）。
-     * 效果与 write 相同，但语义上是"第一次初始化"。
-     */
     declare(iid, name, val, isArgument, argumentIndex, isCatchParam) {
         if (!isArgument && !isCatchParam) {
             this.write(iid, name, val);
@@ -420,102 +467,77 @@ export class ExecutionTraceAnalysis {
         return { result: val };
     }
 
-    // ── 控制流钩子 ────────────────────────────────────────────────────────────
-
     _return(iid, val) {
         const frame = this._top();
         if (!frame) return { result: val };
-        const { rc, indStr, loc } = this._prefix(iid, frame.indent);
+        const { rc, loc } = this._loc(iid);
         const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
-        frame.doneLines.push(`[${rc}] ${indStr}${srcText} ; (return)=${serialize(val)}`);
+        frame.doneLines.push({ type: 'info', rc, depth: frame.depth, srcText, kv: `(return)=${serialize(val)}` });
         return { result: val };
     }
 
     _throw(iid, val) {
         const frame = this._top();
         if (!frame) return { result: val };
-        const { rc, indStr, loc } = this._prefix(iid, frame.indent);
+        const { rc, loc } = this._loc(iid);
         const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
-        frame.doneLines.push(`[${rc}] ${indStr}${srcText} ; (throw)=${serialize(val)}`);
+        frame.doneLines.push({ type: 'info', rc, depth: frame.depth, srcText, kv: `(throw)=${serialize(val)}` });
         return { result: val };
     }
 
-    // ── 表达式语句末尾（非赋值/非调用的纯副作用语句）─────────────────────────
+    // ── 表达式语句末尾 ────────────────────────────────────────────────────────
 
-    /**
-     * endExpression（J$.X1）：在每条 ExpressionStatement 末尾触发。
-     *
-     * 指令级模式下，赋值和函数调用已分别在 write / invokeFun 中记录，
-     * 所以这里只处理"纯副作用语句"（如 `i++`、`delete obj.x` 等）。
-     *
-     * 同时负责 flush 当前帧已积累的 doneLines（包含本语句内产生的 write 行）。
-     */
     endExpression(iid) {
         const frame = this._top();
         if (!frame) return;
 
-        // Flush 本语句内积累的所有 write/return/throw 行
-        const lines = frame.doneLines.splice(0);
-        // 同时 flush 子函数调用行（invokeFun 已记录在 frame.addChild）
-        const children = frame.flushChildren();
+        const items = frame.doneLines.splice(0);
 
-        // 若本语句什么都没产生（纯读取表达式，如 `x`），仍记录一条源码行作标记
-        const hasContent = lines.length > 0 || children.length > 0;
-
-        if (!hasContent) {
-            // 纯副作用/纯读语句：仅记录源码位置
-            const loc    = getLocation(this._sb, iid);
-            const rc     = loc ? `${loc[0]}:${loc[1]}` : '?:?';
-            const indStr = INDENT_UNIT.repeat(frame.indent);
+        if (items.length === 0) {
+            // 纯副作用/纯读语句：只记录源码位置行
+            const { rc, loc } = this._loc(iid);
             const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
-            const line = `[${rc}] ${indStr}${srcText}`;
+            const meta = { type: 'info', rc, depth: frame.depth, srcText, kv: '' };
             if (this._stack.length <= 1) {
-                this._emit(line);
+                const line = this._fmt.infoLine(++this._seq, rc, frame.depth, srcText, '');
+                this._emitRaw(line);
             } else {
-                this._top()?.doneLines.push(line);
+                this._stack[this._stack.length - 1].doneLines.push(meta);
             }
             return;
         }
 
-        // 将积累的行送入输出（或父帧）
-        const allLines = [];
-        for (const l of lines) allLines.push(l);
-        for (const { callLine, innerLines, retLine } of children) {
-            if (callLine) allLines.push(callLine);
-            for (const l of innerLines) allLines.push(l);
-            if (retLine) allLines.push(retLine);
-        }
-
         if (this._stack.length <= 1) {
-            // 顶层：直接 emit
-            for (const l of allLines) this._emit(l);
+            this._emitItems(items);
         } else {
-            // 嵌套帧：放入父帧的 doneLines（等待父帧 flush）
-            for (const l of allLines) {
-                this._stack[this._stack.length - 1].doneLines.push(l);
+            for (const item of items) {
+                this._stack[this._stack.length - 1].doneLines.push(item);
             }
         }
     }
 
-    // ── 执行结束（KEY 级别汇总）──────────────────────────────────────────────
+    _emitItems(items) {
+        for (const item of items) {
+            if (item.type === 'info') {
+                const line = this._fmt.infoLine(++this._seq, item.rc, item.depth, item.srcText, item.kv);
+                this._emitRaw(line);
+            } else if (item.type === 'call') {
+                this._emitFormattedCall(item.callMeta, item.innerLines, item.retMeta);
+            }
+        }
+    }
+
+    // ── 执行结束 ──────────────────────────────────────────────────────────────
 
     endExecution() {
-        const residualFrames = this._stack.length;
-        if (residualFrames > 0) {
-            // 注意：residual frames 通常意味着脚本提前终止或有未捕获异常
-        }
-
-        // Flush 残余 pending 帧
         while (this._stack.length > 0) {
             const frame = this._stack.pop();
             this._callStack.pop();
-            for (const l of frame.doneLines) this._emit(l);
+            this._emitItems(frame.doneLines);
         }
 
-        // endExecution — trace 完成
         this._key('info', `=== ExecutionTrace: total ${this._seq} events ===`);
 
-        // 关闭 LogManager（等待 init 完成后再 close，避免竞态）
         this._loggerReady
             .then(() => this._logger.close())
             .catch(err => {

@@ -94,8 +94,8 @@ export function runInSandbox(instrCode, J$instance, extraGlobals = {}, timeoutMs
 /**
  * 一步完成"插桩 + 沙盒执行"，返回 { out, vars, J$, sandbox }。
  *
- * 注意：插桩后的 script 代码被 IIFE 包裹，内部的 var 声明是局部变量，
- * 不会挂到 vm sandbox 上。通过以下方式导出结果：
+ * 注意：插桩后的 script 代码直接展开（不含 IIFE），var 声明会提升到 vm sandbox
+ * 的全局作用域，但 vm sandbox 与 Node.js 全局是隔离的。通过以下方式导出结果：
  *   - sourceCode 末尾添加 "$out.变量名 = 变量名" 赋值语句
  *   - 或者通过注册 write 钩子来捕获变量写入值
  *

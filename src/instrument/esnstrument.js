@@ -1185,31 +1185,27 @@ function instrumentCode(options) {
             const newCode    = genResult.code;
             const rawVlcqMap = genResult.map;   // { version:3, sources, mappings, ... }
 
-            // 用 IIFE 将插桩代码包裹：沙盒变量（_jalangiVar，默认 'J$'）作为闭包参数传入，
-            // 而非依赖全局访问，彻底消除插桩标识符与被分析代码自身变量名的冲突风险。
-            // module 模式下 ESM 已自带私有作用域，改用 const 局部绑定即可。
+            // script 模式直接输出插桩代码，不用 IIFE 包裹，保持 var 声明的全局提升语义。
+            // module 模式 ESM 已自带私有作用域，改用 const 局部绑定。
             const jv = _jalangiVar;
             if (sourceType === 'module') {
                 // module 模式头部：1 行（`const J$ = globalThis.J$;\n`）
                 code = `const ${jv} = globalThis.${jv};\n${newCode}\n${NO_INSTR}\n`;
             } else {
-                // script 模式头部：1 行（`(function(J$){\n`）
-                code = `(function(${jv}){\n${newCode}\n}(typeof ${jv}!=='undefined'?${jv}:{}));\n${NO_INSTR}\n`;
+                // script 模式：直接输出，不包 IIFE，var 可正常提升到全局作用域
+                code = `${newCode}\n${NO_INSTR}\n`;
             }
 
             // ── VLCQ source map 行偏移补偿 ──────────────────────────────────
             // babelGenerate 生成的 map 中，插桩代码的起始行为第 1 行。
             // 但最终输出文件在这段代码前面还有：
             //   • 第 1 行：`(globalThis.J$=...);J$.smap=...;\n`（smap 注入头，1 行）
-            //   • 第 2 行：IIFE 包裹 `(function(J$){\n` 或 module const 绑定（1 行）
+            //   • script 模式：无 IIFE 包裹，偏移 = 1 行
+            //   • module 模式：const J$ = globalThis.J$; 绑定行，偏移 = 2 行
             //
-            // 因此实际偏移 = smap注入头(1行) + 包裹前缀(1行) = 2 行（script）或 2 行（module）。
             // 在 VLCQ mappings 字符串前插入 N 个 ';'（每个 ';' 代表跳过一个生成行），
             // 使调试器能正确将生成行号映射回原始代码行。
-            //
-            // 注意：smap 注入头始终是 1 行（无论 inlineSourceMap 还是精简版，都是单行字符串）。
-            // 包裹前缀（IIFE 开头 / module const）也是 1 行。合计固定偏移 2 行。
-            const HEADER_LINES = 2;   // smap 注入头(1) + 包裹前缀(1)
+            const HEADER_LINES = sourceType === 'module' ? 2 : 1;   // script=1(smap头), module=2(smap头+const绑定)
 
             if (rawVlcqMap) {
                 vlcqSourceMap = {
