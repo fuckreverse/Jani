@@ -3,12 +3,20 @@
 /**
  * @module idb-worker
  *
- * idb-worker.js — IndexedDB 写入 Worker（ESM Module Worker）。
+ * idb-worker.js — IndexedDB 写入 Worker（Classic Worker）。
  *
- * 此文件以 `{ type: 'module' }` 方式被 IdbWorkerBackend 加载，
- * 因此是一个 ES 模块（Module Worker）。不需要 `export` 导出，
- * 因为 Worker 入口点本身不需要对外暴露任何接口——
- * 所有通信通过 `self.onmessage` / `self.postMessage` 进行。
+ * 此文件以 **Classic Worker**（非 `{ type: 'module' }`）方式运行。
+ * 在浏览器 bundle 场景下，`jalangi.mjs` 的 rollup 插件
+ * `jalangi-patch-idb-worker-url` 会将文件内容读出并通过
+ * `new Blob([src], { type: 'application/javascript' })` + `URL.createObjectURL`
+ * 生成 `__idbWorkerUrl`，再将 `IdbWorkerBackend.js` 里的
+ * `new Worker(new URL(...), { type: 'module' })` 整体替换为
+ * `new Worker(__idbWorkerUrl)`（去掉 `{ type: 'module' }`）。
+ *
+ * 这样做的原因：
+ *   浏览器**不允许** Module Worker 使用 `blob:` URL，
+ *   会导致 Worker 无法启动（15s 超时）。
+ *   Classic Worker 无此限制，且本文件不需要任何 `import`，完全自包含。
  *
  * 在独立线程中运行，接收主线程通过 postMessage 发来的事件批次，
  * 写入 IndexedDB。主线程不会被 IDB 操作阻塞。

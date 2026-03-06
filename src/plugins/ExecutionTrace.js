@@ -350,6 +350,12 @@ export class ExecutionTraceAnalysis {
         const { rc } = this._loc(iid);
         const parentDepth = this._stack.length > 0 ? this._top().depth : 0;
 
+        // 如果此时栈为空，说明是脚本退出后的异步回调（setTimeout / Promise / 事件监听器等）
+        // 自动推入一个虚拟"异步根帧"，使后续 trace 正常落帧，不再静默丢失
+        if (this._stack.length === 0) {
+            this._pushAsyncRootFrame(iid);
+        }
+
         const callMeta = { rc, depth: parentDepth + 1, desc, kvStr, name };
         this._stack.push(new Frame(parentDepth + 1));
         this._callStack.push({ callMeta });
@@ -379,7 +385,15 @@ export class ExecutionTraceAnalysis {
 
         const parent = this._top();
         if (parent) {
-            parent.doneLines.push({ type: 'call', callMeta, innerLines, retMeta });
+            if (parent._isAsyncRoot) {
+                // 父帧是异步根帧：直接 emit 这次调用，然后检查根帧是否可以收尾
+                this._emitFormattedCall(callMeta, innerLines, retMeta);
+                this._maybeFlushAsyncRootFrame();
+                // 异步调用完成，少量 trace 可能达不到 RingBuffer 自动 flush 阈值，主动调度
+                this._logger.scheduleFlush?.();
+            } else {
+                parent.doneLines.push({ type: 'call', callMeta, innerLines, retMeta });
+            }
         } else {
             this._emitFormattedCall(callMeta, innerLines, retMeta);
         }
@@ -432,20 +446,78 @@ export class ExecutionTraceAnalysis {
         return { wrappedExceptionVal, isBacktrack: false };
     }
 
-    functionEnter(iid, f, dis, args) { /* 缩进由 invokeFunPre 管理 */ }
+    functionEnter(iid, f, dis, args) {
+        if (this._stack.length === 0) {
+            // 栈为空：脚本退出后被 native 代码直接调用（如浏览器直接调用注册的函数）。
+            // 推入异步根帧 + 合成帧。
+            // _feFrDepth 追踪此合成帧内部通过 native 调用触发的 Fe/Fr 嵌套深度：
+            //   = 0 时，下一个 functionExit 就是合成帧对应函数自身的出口
+            //   > 0 时，这个 functionExit 是某个内部 native 回调的出口，继续等
+            this._pushAsyncRootFrame(iid);
+            const name = f?.name || '(anonymous)';
+            const { rc } = this._loc(iid);
+            const callMeta = { rc, depth: 1, desc: `${name}(${args?.length ?? 0} args)`, kvStr: '', name };
+            const frame = new Frame(1);
+            frame._isSyntheticEntry = true;
+            frame._feFrDepth = 0;
+            this._stack.push(frame);
+            this._callStack.push({ callMeta });
+        } else {
+            // 栈不为空：只有 _stack 顶层就是合成帧时，才增加其嵌套深度计数。
+            // 如果合成帧之上还有 invokeFunPre 推的帧，则这次 Fe 属于那些帧内部，
+            // 不影响合成帧的 _feFrDepth（它们有自己的深度语义）。
+            const top = this._top();
+            if (top?._isSyntheticEntry) {
+                top._feFrDepth++;
+            }
+        }
+    }
 
     functionExit(iid, returnVal, wrappedExceptionVal) {
         if (wrappedExceptionVal) {
             const exStr  = serialize(wrappedExceptionVal.exception);
             const { rc } = this._loc(iid);
             const frame  = this._top();
-            // 压入当前帧的 doneLines，等待帧 flush 时按序输出（保持 seq 连续）
-            // 同时通过 _key 输出到控制台作警告
             const depth = frame?.depth ?? 0;
             frame?.doneLines.push({ type: 'info', rc, depth, srcText: '✗ throw', kv: `exception=${exStr}` });
-            // warn 级别走控制台（不占 seq，因为还未 flush）
             this._key('warn', `[${rc}] ✗ throw ; exception=${exStr}`);
         }
+
+        // 只有 _stack 顶层就是合成帧时，才处理它的出口逻辑
+        const top = this._top();
+        if (top?._isSyntheticEntry) {
+            if (top._feFrDepth > 0) {
+                // 还有嵌套的内部 native 回调未退出，这个 functionExit 是内部的
+                top._feFrDepth--;
+            } else {
+                // _feFrDepth === 0：合成帧对应函数本身退出了
+                const frame    = this._stack.pop();
+                const callInfo = this._callStack.pop();
+                const { callMeta } = callInfo;
+                const { rc }  = this._loc(iid);
+                const retMeta = {
+                    rc,
+                    depth:  callMeta?.depth ?? 1,
+                    name:   callMeta?.name ?? '(anonymous)',
+                    result: serialize(returnVal),
+                };
+                const parent = this._top();
+                if (parent?._isAsyncRoot) {
+                    this._emitFormattedCall(callMeta, frame.doneLines, retMeta);
+                    this._maybeFlushAsyncRootFrame();
+                    // 异步调用完成，RingBuffer 里可能只有少量 trace（达不到自动 flush 阈值），
+                    // 主动调度一次 flush 确保数据及时写入 IDB / 文件后端
+                    this._logger.scheduleFlush?.();
+                } else if (parent) {
+                    parent.doneLines.push({ type: 'call', callMeta, innerLines: frame.doneLines, retMeta });
+                } else {
+                    this._emitFormattedCall(callMeta, frame.doneLines, retMeta);
+                    // 同上，栈外直接 emit 时也调度 flush
+                    this._logger.scheduleFlush?.();
+                }
+            }
+        }
+
         return { returnVal, wrappedExceptionVal, isBacktrack: false };
     }
 
@@ -527,22 +599,99 @@ export class ExecutionTraceAnalysis {
         }
     }
 
+    // ── 异步根帧管理 ──────────────────────────────────────────────────────────
+
+    /**
+     * 脚本退出后，首次接到异步回调时推入一个虚拟"异步根帧"。
+     * 该帧带有 _isAsyncRoot 标记，用于区分正常脚本帧。
+     * _asyncRootDepth 记录当前挂起的异步调用层数，以便在全部完成时自动弹出。
+     */
+    _pushAsyncRootFrame(iid) {
+        const { rc } = this._loc(iid);
+        const frame = new Frame(0);
+        frame._isAsyncRoot     = true;
+        frame._asyncPendingCalls = 0;
+        this._stack.push(frame);
+        this._callStack.push({ callMeta: null, _isAsyncRoot: true });
+        dbg.debug(`[async] pushed async root frame at ${rc}`);
+    }
+
+    /**
+     * 每次异步调用的 invokeFun/functionExit 返回后，检查异步根帧是否仍有挂起调用。
+     * 若已无挂起调用且栈只剩根帧，弹出根帧，不做 emit（根帧本身不产生输出行）。
+     */
+    _maybeFlushAsyncRootFrame() {
+        const top = this._top();
+        if (!top?._isAsyncRoot) return;
+        // 如果栈顶就是异步根帧（即其上方已无其他帧），弹出
+        if (this._stack.length === 1) {
+            this._stack.pop();
+            this._callStack.pop();
+            dbg.debug('[async] async root frame flushed');
+        }
+    }
+
     // ── 执行结束 ──────────────────────────────────────────────────────────────
 
     endExecution() {
+        // 清理脚本主体执行时留下的残余帧（正常情况应已全部弹出）
+        while (this._stack.length > 0) {
+            const top = this._top();
+            if (top?._isAsyncRoot) {
+                // 异步根帧：脚本主体结束时可能仍有异步调用未回来，不强制弹出
+                break;
+            }
+            const frame = this._stack.pop();
+            this._callStack.pop();
+            this._emitItems(frame.doneLines);
+        }
+
+        this._key('info', `=== ExecutionTrace: script done, ${this._seq} events so far (async callbacks may still fire) ===`);
+
+        // ⚠️ 注意：此处故意 **不** 关闭 logger。
+        // 脚本主体退出后，注册的回调（setTimeout / Promise / 事件监听器等）仍会被调用，
+        // 我们需要持续追踪这些后续调用。
+        // 若要手动关闭，请调用 analysis.close() 或 analysis.flush()。
+    }
+
+    /**
+     * 手动 flush：将所有缓冲的 trace 写入后端，但不关闭 logger（可继续追踪）。
+     * 适合在特定时机强制落盘（如页面 visibilitychange、beforeunload 等）。
+     * @returns {Promise<void>}
+     */
+    async flush() {
+        // 将栈上所有异步根帧中已积累的 doneLines emit 出去
+        for (const frame of this._stack) {
+            if (frame._isAsyncRoot && frame.doneLines.length > 0) {
+                const items = frame.doneLines.splice(0);
+                this._emitItems(items);
+            }
+        }
+        await this._loggerReady;
+        await this._logger.flush?.();
+    }
+
+    /**
+     * 手动关闭：flush 后关闭 logger，不再接受新 trace。
+     * 调用后分析器将停止记录（后续钩子数据会静默丢弃）。
+     * @returns {Promise<void>}
+     */
+    async close() {
+        // 把还在栈上的所有帧的内容 emit 出去
         while (this._stack.length > 0) {
             const frame = this._stack.pop();
             this._callStack.pop();
             this._emitItems(frame.doneLines);
         }
 
-        this._key('info', `=== ExecutionTrace: total ${this._seq} events ===`);
+        this._key('info', `=== ExecutionTrace: closed, total ${this._seq} events ===`);
 
-        this._loggerReady
-            .then(() => this._logger.close())
-            .catch(err => {
-                dbg.error('endExecution: logger close error:', err.message, err.stack ?? '');
-            });
+        try {
+            await this._loggerReady;
+            await this._logger.close();
+        } catch (err) {
+            dbg.error('close: logger close error:', err.message, err.stack ?? '');
+        }
     }
 
     onReady(cb) { cb(); }

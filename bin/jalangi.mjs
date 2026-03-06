@@ -502,7 +502,15 @@ ${sandboxVar}.analysis.use(new ExecutionTraceAnalysis(${sandboxVar}, null, {
             name: 'jalangi-patch-idb-worker-url',
             transform(code, id) {
                 if (!id.includes('IdbWorkerBackend')) return null;
-                const patched = code.replace(
+                // 1. 替换 new Worker(new URL(..., import.meta.url), { type: 'module' })
+                //    → new Worker(__idbWorkerUrl)
+                //    blob: URL 不支持 Module Worker，必须去掉 { type: 'module' }
+                let patched = code.replace(
+                    /new\s+Worker\s*\(\s*new URL\s*\(\s*['"][^'"]+['"]\s*,\s*import\.meta\.url\s*\)\s*,\s*\{\s*type\s*:\s*['"]module['"]\s*\}\s*\)/g,
+                    'new Worker(__idbWorkerUrl)'
+                );
+                // 2. 同时处理没有 { type: 'module' } 的形式（向后兼容）
+                patched = patched.replace(
                     /new URL\s*\(\s*['"][^'"]+['"]\s*,\s*import\.meta\.url\s*\)/g,
                     '__idbWorkerUrl'
                 );

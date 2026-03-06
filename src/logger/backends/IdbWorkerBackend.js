@@ -14,13 +14,19 @@
  *  - flush/query/clear 采用统一的 request-response 机制，
  *    避免并发调用时覆盖 onmessage 导致响应丢失
  *
+ * Worker 加载策略：
+ *  - 源码中使用 `new URL('../workers/idb-worker.js', import.meta.url)` 引用 Worker 脚本。
+ *  - 在浏览器 bundle 场景下，jalangi.mjs 的 rollup 插件
+ *    `jalangi-patch-idb-worker-url` 会将此表达式替换为预先创建好的 `__idbWorkerUrl`
+ *    Blob URL（Classic Worker，无 { type: 'module' }），从而避免 Module Worker 不支持
+ *    blob: URL 导致的 15s 超时问题。
+ *
  * 诊断日志（直接到 console，不走 IDB）：
  *  - localStorage.jalangiDebug='backend:idb' 开启 debug 级别
  *  - error/warn 级别始终输出
  *
  * 使用方式：
  *   const backend = new IdbWorkerBackend({
- *     workerUrl: new URL('../workers/idb-worker.js', import.meta.url),
  *     dbName:    'jalangi-traces',
  *   });
  *   await backend.init();  // 等待 Worker + DB 就绪
@@ -96,11 +102,18 @@ export class IdbWorkerBackend {
         const workerUrlStr = String(this._workerUrl);
         const t0 = Date.now();
 
-        this._worker = new Worker(this._workerUrl, { type: 'module' });
+        // 注意：不传 { type: 'module' }，以 Classic Worker 方式运行。
+        // 在 bundle 场景下，jalangi.mjs rollup 插件会将 this._workerUrl 替换为
+        // 预先由 Blob 创建的 __idbWorkerUrl（Classic Worker 兼容 blob: URL）。
+        this._worker = new Worker(this._workerUrl);
         this._worker.onerror = (evt) => {
             // Worker 脚本级别错误（加载失败 / 语法错误等）
             log.error('Worker onerror:', evt.message, `(${evt.filename}:${evt.lineno})`);
             this.stats.errors++;
+            // 若 init 尚未完成，立即 reject，避免等到 15s 超时
+            if (this._readyReject) {
+                this._readyReject(new Error(`Worker load error: ${evt.message}`));
+            }
         };
         this._worker.onmessage = (evt) => this._handleMessage(evt.data);
 
@@ -313,8 +326,12 @@ export class IdbWorkerBackend {
                 } else if (msg.reqId != null) {
                     this._resolveRequest(msg.reqId, null, new Error(errMsg));
                 } else {
+                    // init 失败（无 batchId/reqId）：立即 reject init Promise，避免 15s 超时
                     log.error('Worker error (unknown origin):', errMsg);
                     if (msg.stack) log.error('Worker stack trace:', msg.stack);
+                    if (this._readyReject) {
+                        this._readyReject(new Error(errMsg));
+                    }
                 }
                 this.stats.errors++;
                 break;

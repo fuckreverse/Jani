@@ -337,6 +337,32 @@ export class TraceLogger {
     }
 
     /**
+     * 调度一次异步 flush（fire-and-forget）。
+     *
+     * 适用于异步回调产生少量 trace 的场景：
+     * 少量事件不足以触发 LogManager 的自动阈值 flush（默认 512 条），
+     * 手动调度确保这批数据能及时写入 IDB / 文件后端，而不是无限期积压在 RingBuffer 里。
+     *
+     * 使用 queueMicrotask（或 Promise.resolve）调度，不阻塞当前调用栈。
+     * 如果已有调度挂起，不重复调度（幂等）。
+     */
+    scheduleFlush() {
+        if (this._pendingScheduledFlush) return;
+        this._pendingScheduledFlush = true;
+        const schedule = typeof queueMicrotask === 'function'
+            ? queueMicrotask
+            : (fn) => Promise.resolve().then(fn);
+        schedule(() => {
+            this._pendingScheduledFlush = false;
+            if (this._mgr) {
+                this._mgr.flush().catch(err => {
+                    log.error('scheduleFlush: flush error:', err.message, err.stack ?? '');
+                });
+            }
+        });
+    }
+
+    /**
      * Flush 所有缓冲数据 + 关闭所有后端（一般在 endExecution 中调用）。
      * @returns {Promise<void>}
      */
