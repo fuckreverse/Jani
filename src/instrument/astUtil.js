@@ -126,7 +126,12 @@ function transformAst(object, visitorPost, visitorPre, context, noIgnore) {
             (type === 'MethodDefinition'        && key === 'key' && !object.computed) ||
             (type === 'ClassMethod'             && key === 'key' && !object.computed) ||
             (type === 'ClassPrivateProperty'    && key === 'key') ||
-            (type === 'PrivateName'             && key === 'id')
+            (type === 'PrivateName'             && key === 'id') ||
+            // MetaProperty（new.target、import.meta）的 meta 和 property 是保留字 Identifier，
+            // 不应被插桩（否则会破坏 MetaProperty 内部结构）。
+            (type === 'MetaProperty'            && (key === 'meta' || key === 'property')) ||
+            // ObjectMethod 的 key（如 [Symbol.iterator](){}）：@babel/types 不允许 key 是 CallExpression。
+            (type === 'ObjectMethod'            && key === 'key')
         ) {
             newContext = CONTEXT.IGNORE;
         } else if (type === 'ObjectExpression' && key === 'properties') {

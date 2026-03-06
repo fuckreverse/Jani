@@ -905,10 +905,14 @@ function createCallInitAsStatement(node, name, val, isArgumentSync, lhs, isCatch
     return [exprStmt];
 }
 
-function createCallAsFunEnterStatement(node, scopeId) {
+function createCallAsFunEnterStatement(node, scopeId, omitThis = false) {
     IID.printIidToLoc(node);
     // arguments.callee 在严格模式下会抛出 TypeError，使用 try-catch 安全降级为 undefined
     // TODO-7: scopeId 作为第五个参数传给 J$.Fe，运行时用于创建 Shadow Frame
+    //
+    // BUG-derived-constructor 修复：子类 constructor 在 super() 之前不能访问 this。
+    // 当 omitThis=true 时，J$.Fe 的 dis 参数传 undefined 而非 this，
+    // 避免 "Must call super constructor before accessing this" 错误。
 
     // BUG-11A 修复：scope.js 在函数有名为 'arguments' 的形参时会将其重命名为
     // '${jalangiVar}_arguments'，并注册到作用域表中。此处需要检查当前作用域是否有
@@ -917,6 +921,9 @@ function createCallAsFunEnterStatement(node, scopeId) {
     const argumentsIdent = (_scope && _scope.hasOwnVar(renamedArg))
         ? t.identifier(renamedArg)
         : t.identifier('arguments');
+    // dis（第3个参数）：普通函数传 this，子类 constructor 传 undefined（避免 super() 前访问 this）
+    const disNode = omitThis ? t.identifier('undefined') : t.thisExpression();
+    // argumentsIdent 保持不变
 
     // 构建 probe fn：(function(){try{return arguments.callee}catch(e){return undefined}}())
     // try { return arguments.callee }
@@ -935,12 +942,13 @@ function createCallAsFunEnterStatement(node, scopeId) {
     const probeFn = t.functionExpression(null, [], t.blockStatement([tryStmt]));
     const probeCall = t.callExpression(probeFn, []);
 
-    // J$.Fe(iid, probeCall, this, arguments [, scopeId])
+    // J$.Fe(iid, probeCall, dis, arguments [, scopeId])
     // 注意：argumentsIdent 已根据当前作用域正确选择原始或重命名的 arguments
+    // dis = this（普通函数） 或 undefined（子类 constructor，super() 前不能访问 this）
     const args = [
         IID.getIid(),
         probeCall,
-        t.thisExpression(),
+        disNode,
         argumentsIdent,
     ];
     if (scopeId !== undefined && scopeId !== null) {
@@ -1245,10 +1253,10 @@ function syncDefuns(node, scopeArg, isScript) {
     return ret;
 }
 
-function instrumentFunctionEntryExit(node, ast) {
+function instrumentFunctionEntryExit(node, ast, omitThis = false) {
     const scopeId = _scope?.id;
     const body = (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node))
-        ? createCallAsFunEnterStatement(node, scopeId)
+        ? createCallAsFunEnterStatement(node, scopeId, omitThis)
         : [];
 
     // 对 async 函数：probe fn 需要被 wrapFunBodyWithTryCatch 包裹

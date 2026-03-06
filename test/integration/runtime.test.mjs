@@ -7,6 +7,8 @@
  *  - SMemory / SMemoryPlugin：ESM 导入、状态管理
  *  - LogAllAnalysis：ESM 导入、钩子返回值格式
  *  - 端到端：三层组合（HookDispatcher + SMemoryPlugin + LogAllAnalysis）
+ *  - JalangiSandbox API 边界：getOid、getObjectVersion、getShadowStats、newAsyncContext、activateContext
+ *  - DataFlowAnalyzer 边界：backwardSlice、processRead、processCallReturn、reset
  */
 
 import { describe, test } from 'node:test';
@@ -15,6 +17,8 @@ import assert from 'node:assert/strict';
 import { HookDispatcher, HOOKS }   from '../../src/runtime/HookDispatcher.js';
 import { SMemory, SMemoryPlugin } from '../../src/runtime/SMemory.js';
 import { LogAllAnalysis }         from '../../src/plugins/tutorial/LogAll.js';
+import { JalangiSandbox }         from '../../src/runtime/JalangiSandbox.js';
+import { DataFlowAnalyzer }       from '../../src/runtime/DataFlowAnalyzer.js';
 
 // 构造一个满足 SMemory 需要的最小 Constants 对象
 const FAKE_CONSTANTS = {
@@ -280,5 +284,121 @@ describe('端到端三层组合', () => {
             .use(new LogAllAnalysis(mem));
         const ret = host.read(1, 'x', 99, false, false);
         assert.equal(ret?.result, 99, 'LogAllAnalysis.read 应返回原始 val');
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// JalangiSandbox API 边界
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('JalangiSandbox API 边界', () => {
+    test('getOid：null/undefined/primitive 均返回 null', () => {
+        const J$ = new JalangiSandbox();
+        assert.equal(J$.getOid(null),      null, 'null 应返回 null');
+        assert.equal(J$.getOid(undefined), null, 'undefined 应返回 null');
+        assert.equal(J$.getOid(42),        null, 'number 应返回 null');
+        assert.equal(J$.getOid('str'),     null, 'string 应返回 null');
+    });
+
+    test('getObjectVersion：未知对象返回 0', () => {
+        const J$ = new JalangiSandbox();
+        assert.equal(J$.getObjectVersion({}), 0, '未知对象 version 应为 0');
+    });
+
+    test('getShadowStats：初始状态 missCount=0，missLog 为空数组', () => {
+        const J$ = new JalangiSandbox({ debugShadow: true });
+        const stats = J$.getShadowStats();
+        assert.equal(stats.missCount, 0, '初始 missCount 应为 0');
+        assert.ok(Array.isArray(stats.missLog), 'missLog 应为数组');
+        assert.equal(stats.missLog.length, 0, '初始 missLog 应为空');
+    });
+
+    test('newAsyncContext：返回单调递增的上下文 ID', () => {
+        const J$ = new JalangiSandbox();
+        const c1 = J$.newAsyncContext();
+        const c2 = J$.newAsyncContext();
+        const c3 = J$.newAsyncContext();
+        assert.ok(c1 < c2,  'c1 < c2');
+        assert.ok(c2 < c3,  'c2 < c3');
+    });
+
+    test('activateContext + currentContextId：激活后可读到正确 ID', () => {
+        const J$ = new JalangiSandbox();
+        const ctxId = J$.newAsyncContext();
+        J$.activateContext(ctxId);
+        assert.equal(J$.currentContextId, ctxId, '激活后 currentContextId 应等于 ctxId');
+    });
+
+    test('instrumentEvalEnabled：默认为 false', () => {
+        const J$ = new JalangiSandbox();
+        assert.equal(J$.instrumentEvalEnabled, false, '默认应为 false');
+    });
+
+    test('instrumentEvalCode：默认直通原始代码（不插桩 eval）', () => {
+        const J$ = new JalangiSandbox();
+        const code = 'var x = 1 + 2;';
+        assert.equal(J$.instrumentEvalCode(code, 1, true), code, '应直接返回原始代码');
+    });
+
+    test('HookDispatcher.use() 注册空插件不报错', () => {
+        const J$ = new JalangiSandbox();
+        assert.doesNotThrow(() => J$.analysis.use({}), '注册空插件不应抛出');
+    });
+
+    test('HookDispatcher.use() 返回 this（支持链式调用）', () => {
+        const J$ = new JalangiSandbox();
+        const ret = J$.analysis.use({});
+        assert.equal(ret, J$.analysis, 'use() 应返回 this');
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// DataFlowAnalyzer 边界
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('DataFlowAnalyzer 边界', () => {
+    test('processWrite + backwardSlice：单节点 slice 返回自身', () => {
+        const dfa = new DataFlowAnalyzer();
+        const regId = dfa.processWrite({ iid: 1, scopeId: 0, callId: 1, name: 'x', value: 10, oid: null });
+        const slice = dfa.backwardSlice(regId);
+        assert.equal(slice.length, 1, 'slice 应为长度 1');
+        assert.equal(slice[0].value, 10, 'slice[0].value 应为 10');
+    });
+
+    test('processRead 对不存在的变量返回 undefined', () => {
+        const dfa = new DataFlowAnalyzer();
+        const r = dfa.processRead({ scopeId: 0, callId: 0, name: 'nonexistent' });
+        assert.equal(r, undefined, '不存在的变量应返回 undefined');
+    });
+
+    test('backwardSlice 多跳链：slice 按 regId 升序排列', () => {
+        const dfa = new DataFlowAnalyzer();
+        const r1 = dfa.processWrite({ iid: 1, scopeId: 0, callId: 1, name: 'a', value: 1 });
+        dfa.processRead({ scopeId: 0, callId: 1, name: 'a' });
+        const r2 = dfa.processWrite({ iid: 2, scopeId: 0, callId: 1, name: 'b', value: 2 });
+        dfa.processRead({ scopeId: 0, callId: 1, name: 'b' });
+        const r3 = dfa.processWrite({ iid: 3, scopeId: 0, callId: 1, name: 'c', value: 3 });
+        const slice = dfa.backwardSlice(r3);
+        assert.equal(slice.length, 3, 'slice 应含 3 个节点（a→b→c 依赖链）');
+        assert.ok(slice[0].regId <= slice[1].regId && slice[1].regId <= slice[2].regId,
+            'slice 应按 regId 升序排列');
+    });
+
+    test('processCallReturn 后紧跟 processWrite：建立数据依赖', () => {
+        const dfa = new DataFlowAnalyzer();
+        const retReg   = dfa.processCallReturn({ iid: 10, callId: 1, result: 42 });
+        const writeReg = dfa.processWrite({ iid: 11, scopeId: 0, callId: 1, name: 'result', value: 42 });
+        const reg = dfa.getRegister(writeReg);
+        assert.ok(reg.sources.has(retReg),
+            'processCallReturn 的 regId 应出现在后续 processWrite 的 sources 中');
+    });
+
+    test('reset：清空所有状态', () => {
+        const dfa = new DataFlowAnalyzer();
+        dfa.processWrite({ iid: 1, scopeId: 0, callId: 1, name: 'x', value: 1 });
+        dfa.reset();
+        assert.equal(dfa.registerCount, 0, 'reset 后 registerCount 应为 0');
+        assert.equal(dfa.getLastWrite(0, 1, 'x'), undefined,
+            'reset 后 getLastWrite 应返回 undefined');
     });
 });

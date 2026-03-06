@@ -9,6 +9,9 @@
  *  - ES2020：可选链、空值合并、逻辑赋值
  *  - ES2017/async：Promise、await 透传、awaitResume 钩子、contextId 独立性
  *  - 闭包 Shadow Frame 场景（7 种，覆盖 #resolveCallId 修复）
+ *  - ES2022 class 私有字段 + 继承 + super() + new.target（Bug 回归）
+ *  - Symbol.iterator 自定义迭代协议（BUG-computed-key + BUG-objectmethod-closure 回归）
+ *  - 插桩语义边界（spread/destructuring/++/delete/instanceof/freeze/for-in/observeOnly/Config 禁用）
  */
 
 import { describe, test } from 'node:test';
@@ -796,5 +799,231 @@ describe('Promise.all / Promise.race contextId 独立性', () => {
         }
         assert.equal(caught, 'boom',
             'Promise.all 中任一 reject 应导致整体 reject，错误消息应为 "boom"');
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ES2022 class 私有字段与继承（Bug 回归）
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('ES2022 class 私有字段与继承（Bug 回归）', () => {
+    test('class private fields (#n++)：私有字段后置自增语义正确', () => {
+        // BUG-private-field 修复回归：this.#n++ 不应被 J$.G/J$.P 包装（不支持 bracket notation）
+        const { out } = instrAndRun(
+            'class C { #n = 0; inc() { this.#n++; } get() { return this.#n; } } var c = new C(); c.inc(); c.inc(); $out.v = c.get();'
+        );
+        assert.equal(out.v, 2, 'inc() 调用两次后 get() 应返回 2');
+    });
+
+    test('class private fields：私有字段读取不受干扰', () => {
+        const { out } = instrAndRun(
+            'class C { #x = 10; #y = 20; sum() { return this.#x + this.#y; } } $out.v = new C().sum();'
+        );
+        assert.equal(out.v, 30, '私有字段 #x + #y 应等于 30');
+    });
+
+    test('class inherits + super()：子类 constructor 调用 super() 语义正确', () => {
+        // BUG-derived-constructor 修复回归：super() 前不能访问 this，omitThis 参数正确传入
+        const { out } = instrAndRun(
+            'class A { constructor(x) { this.x = x; } } class B extends A { constructor(x) { super(x * 2); } } var b = new B(3); $out.v = b.x;'
+        );
+        assert.equal(out.v, 6, 'B(3) 调用 super(6)，b.x 应为 6');
+    });
+
+    test('class inherits：new.target.name 在 super() 调用中正确', () => {
+        // BUG MetaProperty 修复回归：new.target 的 meta/property 不被插桩为 CallExpression
+        const { out } = instrAndRun(
+            'class A { constructor() { this.target = new.target.name; } } class B extends A { constructor() { super(); } } var b = new B(); $out.v = b.target;'
+        );
+        assert.equal(out.v, 'B', 'new.target.name 在派生类构造中应为 "B"');
+    });
+
+    test('class static method：静态方法调用语义正确', () => {
+        const { out } = instrAndRun(
+            'class MathHelper { static square(n) { return n * n; } } $out.v = MathHelper.square(5);'
+        );
+        assert.equal(out.v, 25, 'MathHelper.square(5) 应返回 25');
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Symbol.iterator 自定义迭代协议（Bug 回归）
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('Symbol.iterator 自定义迭代协议（Bug 回归）', () => {
+    test('computed ObjectMethod key [Symbol.iterator]：for-of 迭代结果正确', () => {
+        // BUG-computed-key + BUG-objectmethod-closure 修复回归：
+        //   1. ObjectMethod 的 computed key 不被插桩为 CallExpression（Babel 校验限制）
+        //   2. for...of 调用 [Symbol.iterator]()/next() 不经过 J$.F/J$.M，
+        //      #resolveCallId 的情况 4 能从 shadowFrameMap 兜底找到外层帧 callId
+        const { out } = instrAndRun(
+            'var iter = { [Symbol.iterator]() { var i = 0; return { next() { return i < 3 ? { value: i++, done: false } : { done: true }; } }; } }; var sum = 0; for (var v of iter) { sum += v; } $out.sum = sum;'
+        );
+        assert.equal(out.sum, 3, 'sum(0+1+2) 应为 3');
+    });
+
+    test('Symbol.iterator with closure over mutable state', () => {
+        // 验证迭代器闭包能正确累积状态（i 从 0 → 3，每次 next() 正确读写）
+        const { out } = instrAndRun(
+            'var iter = { [Symbol.iterator]() { var i = 10; return { next() { return i > 7 ? { value: i--, done: false } : { done: true }; } }; } }; var result = []; for (var v of iter) { result.push(v); } $out.a = result[0]; $out.b = result[1]; $out.c = result[2];'
+        );
+        assert.equal(out.a, 10, '第一次 next() 应得到 10');
+        assert.equal(out.b, 9,  '第二次 next() 应得到 9');
+        assert.equal(out.c, 8,  '第三次 next() 应得到 8');
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// 插桩语义边界（Bug 回归 + 防退化）
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('插桩语义边界（Bug 回归 + 防退化）', () => {
+    test('spread operator：展开实参语义正确', () => {
+        const { out } = instrAndRun(
+            'function sum(a,b,c){ return a+b+c; } var args = [1,2,3]; $out.v = sum(...args);'
+        );
+        assert.equal(out.v, 6, 'sum(...[1,2,3]) 应返回 6');
+    });
+
+    test('nested destructuring：嵌套解构赋值语义正确', () => {
+        const { out } = instrAndRun(
+            'var { a: { b } } = { a: { b: 99 } }; $out.v = b;'
+        );
+        assert.equal(out.v, 99, '嵌套解构 b 应为 99');
+    });
+
+    test('destructuring default values in function params', () => {
+        const { out } = instrAndRun(
+            'function f({ x = 10, y = 20 } = {}) { return x + y; } $out.v = f({ x: 1 });'
+        );
+        assert.equal(out.v, 21, 'f({x:1}) 应返回 1+20=21');
+    });
+
+    test('前置 ++ 运算：++x 返回自增后的值', () => {
+        const { out } = instrAndRun(
+            'var x = 5; var y = ++x; $out.x = x; $out.y = y;'
+        );
+        assert.equal(out.x, 6, 'x 应为 6');
+        assert.equal(out.y, 6, '++x 的结果 y 也应为 6');
+    });
+
+    test('后置 ++ 运算：x++ 返回自增前的值', () => {
+        const { out } = instrAndRun(
+            'var x = 5; var y = x++; $out.x = x; $out.y = y;'
+        );
+        assert.equal(out.x, 6, 'x 最终应为 6');
+        assert.equal(out.y, 5, 'x++ 的结果 y 应为自增前的 5');
+    });
+
+    test('delete 表达式：删除属性后 in 运算为 false', () => {
+        const { out } = instrAndRun(
+            'var obj = { a: 1 }; delete obj.a; $out.v = ("a" in obj);'
+        );
+        assert.equal(out.v, false, 'delete obj.a 后 "a" in obj 应为 false');
+    });
+
+    test('instanceof 运算：类实例识别正确', () => {
+        const { out } = instrAndRun(
+            'class A {} var a = new A(); $out.v = (a instanceof A);'
+        );
+        assert.equal(out.v, true, 'a instanceof A 应为 true');
+    });
+
+    test('WeakMap SID/IID 存储：Object.freeze 冻结函数不抛 TypeError', () => {
+        // BUG P1 修复回归：SID/IID 信息用 WeakMap 存储，不在函数上设置属性，不触发 freeze TypeError
+        const { out } = instrAndRun(
+            'var f = Object.freeze(function() { return 1; }); $out.v = f();'
+        );
+        assert.equal(out.v, 1, 'Object.freeze 的函数仍可调用');
+    });
+
+    test('多层 for-in 嵌套：内层迭代变量不污染外层', () => {
+        // BUG P2 修复回归：每个 for-in 用独立 tmpVar（J$_fk0, J$_fk1），不共享 J$._tm_p
+        const { out } = instrAndRun(
+            'var a = {x:1}; var b = {y:2}; var result = []; for (var k1 in a) { for (var k2 in b) { result.push(k1 + k2); } } $out.v = result[0];'
+        );
+        assert.equal(out.v, 'xy', '外层 k1="x" 内层 k2="y"，连接应为 "xy"');
+    });
+
+    test('for-in 局部变量不暴露到外部 scope', () => {
+        // BUG P2 修复回归：J$_fk0 是 var 声明的局部变量，不挂在 J$ 对象上
+        const { out } = instrAndRun(
+            'var obj = {a:1, b:2}; var keys = []; for (var k in obj) { keys.push(k); } $out.v = keys.length;'
+        );
+        assert.equal(out.v, 2, 'for-in 应迭代出 2 个 key');
+    });
+
+    test('observeOnly 模式：分析钩子 isBacktrack=true 被忽略，不引起死循环', () => {
+        // BUG Fr() observeOnly 修复回归：observeOnly=true 时 isBacktrack 强制忽略
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code: 'function f() { return 1; } var r = f();',
+            origCodeFileName: 'test.js',
+            instCodeFileName: 'test_inst.js',
+            inlineSourceMap: true,
+        });
+        const J$inst = new JalangiSandbox({ observeOnly: true });
+        let exitCount = 0;
+        J$inst.analysis.use({
+            functionExit(iid, returnVal) {
+                exitCount++;
+                return { returnVal, wrappedExceptionVal: undefined, isBacktrack: true };
+            }
+        });
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        // 如果代码执行到这里，说明没有因 isBacktrack 陷入死循环
+        assert.ok(exitCount >= 1, 'functionExit 钩子应至少被调用一次');
+    });
+
+    test('#callHook 保护：分析钩子内部触发 G() 不污染外层 L()', () => {
+        // BUG P3 修复回归：#callHook 保护 #lastComputedValue，钩子内的副调用不干扰外层
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code: 'var obj = { name: "test" }; var x = 1 + 2; $out.x = x;',
+            origCodeFileName: 'test.js',
+            instCodeFileName: 'test_inst.js',
+            inlineSourceMap: true,
+        });
+        const J$inst = new JalangiSandbox();
+        J$inst.analysis.use({
+            binary(iid, op, left, right, result) {
+                // 在钩子内触发 G() 读取属性，可能污染 #lastComputedValue
+                J$inst.G(999, { name: 'test' }, 'name', 0);
+            }
+        });
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal($out.x, 3, '外层 x = 1+2 在钩子副调用后仍应为 3');
+    });
+
+    test('Config INSTR_INVOKE 禁用：函数调用语义正确', () => {
+        // 验证关闭 INSTR_INVOKE 后函数调用不受影响
+        init({ ...ALL_CONFIG, INSTR_INVOKE: () => false });
+        const { code: instrCode } = instrumentCode({
+            code: 'function add(a,b) { return a+b; } $out.v = add(3, 4);',
+            origCodeFileName: 'test.js',
+            instCodeFileName: 'test_inst.js',
+            inlineSourceMap: true,
+        });
+        const J$inst = new JalangiSandbox();
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal($out.v, 7, 'INSTR_INVOKE 禁用时 add(3,4) 仍应返回 7');
+    });
+
+    test('Config INSTR_BINARY 禁用：运算结果正确', () => {
+        // 验证关闭 INSTR_BINARY 后二元运算不受影响
+        init({ ...ALL_CONFIG, INSTR_BINARY: () => false });
+        const { code: instrCode } = instrumentCode({
+            code: 'var x = 2 * 3 + 1; $out.v = x;',
+            origCodeFileName: 'test.js',
+            instCodeFileName: 'test_inst.js',
+            inlineSourceMap: true,
+        });
+        const J$inst = new JalangiSandbox();
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+        assert.equal($out.v, 7, 'INSTR_BINARY 禁用时 2*3+1 仍应为 7');
     });
 });

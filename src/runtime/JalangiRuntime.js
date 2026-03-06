@@ -503,6 +503,27 @@ export class JalangiRuntime {
                 walkCallId = this.#callIdToOuterCallId.get(walkCallId) ?? null;
             }
         }
+        // 情况 4：capturedOuterCallId 链追溯失败，直接搜索 shadowFrameMap。
+        //
+        // 适用场景：函数被 JS 引擎内部协议调用（如 for...of 的 [Symbol.iterator]() / next()），
+        // 不经过 J$.F/J$.M，导致 #pendingCapturedOuterCallId 从未被设置，capturedOuterCallId=null。
+        // 此时 capturedOuterCallId 链为空，无法通过链追溯找到外层帧。
+        //
+        // 但 #closureFrameSet 机制确保了被闭包引用的 Shadow Frame 不被清除，
+        // 所以 shadowFrameMap 中仍然有 defScopeId 对应的外层帧条目。
+        // 取所有已存在的 callId 中最大的（最近分配的，对应最近一次调用），
+        // 这在工厂模式多实例场景下是正确的（每次工厂调用分配独立的 callId）。
+        {
+            const scopeMap = this.#shadowFrameMap.get(Number(defScopeId));
+            if (scopeMap && scopeMap.size > 0) {
+                // 取最大 callId（最近分配的，对应最近一次外层函数调用）
+                let maxCallId = -Infinity;
+                for (const cid of scopeMap.keys()) {
+                    if (cid > maxCallId) maxCallId = cid;
+                }
+                return maxCallId;
+            }
+        }
         // 安全降级：回退到当前 callId，避免引入 undefined
         return this.#currentCallId;
     }
@@ -801,6 +822,33 @@ export class JalangiRuntime {
                     this.#closureRegistry.register(val, key);
                 }
             }
+        } else if (val !== null && typeof val === 'object') {
+            // 对象字面量（N_LOG_OBJECT_LIT）：为对象中所有函数属性（方法简写 ObjectMethod 等）
+            // 设置 funcClosureCallId，以便方法内通过 J$.Rl 访问外层闭包变量时能正确追踪。
+            // 背景：ObjectMethod（如 { [Symbol.iterator](){} }）不会被单独 J$.T 包装，
+            // 所以方法内的 J$.Rl 无法通过 funcClosureCallId 找到正确的外层帧 callId。
+            // 这里遍历所有属性（含 Symbol），为函数类型的属性设置 funcClosureCallId。
+            const capturedCallId = this.#currentCallId;
+            const capturedScopeId = this.#currentFunDefScopeId;
+            // 遍历所有可枚举的字符串 key 属性
+            for (const k of Object.getOwnPropertyNames(val)) {
+                const v = val[k];
+                if (typeof v === 'function' && !this.#funcClosureCallId.has(v)) {
+                    this.#funcClosureCallId.set(v, capturedCallId);
+                }
+            }
+            // 遍历 Symbol 属性（如 [Symbol.iterator]）
+            for (const s of Object.getOwnPropertySymbols(val)) {
+                const v = val[s];
+                if (typeof v === 'function' && !this.#funcClosureCallId.has(v)) {
+                    this.#funcClosureCallId.set(v, capturedCallId);
+                }
+            }
+            // 将外层帧的 (defScopeId:callId) 注册到 #closureFrameSet
+            if (capturedScopeId !== undefined) {
+                const key = `${capturedScopeId}:${capturedCallId}`;
+                this.#closureFrameSet.add(key);
+            }
         }
 
         const analysis = this.analysis;
@@ -1057,8 +1105,33 @@ export class JalangiRuntime {
         //
         // 修复：#invokeFun() 在调用函数前已将正确的 capturedOuterCallId 存入
         // #pendingCapturedOuterCallId，在此一次性读取并清空（避免跨调用泄漏）。
-        const capturedOuterCallId = this.#pendingCapturedOuterCallId;
+        let capturedOuterCallId = this.#pendingCapturedOuterCallId;
         this.#pendingCapturedOuterCallId = null;
+
+        // BUG-objectmethod-closure 后备修复：
+        // 当函数通过 JS 引擎内部协议调用（如 for...of 的 iterator.next()、
+        // Array.map 的回调等），不会经过 J$.M/J$.F，#pendingCapturedOuterCallId 为 null。
+        // 此时尝试在 #callIdStack 中搜索包含 defScopeId 的帧（Shadow Frame 存在该作用域数据），
+        // 将其 callId 作为 capturedOuterCallId，使闭包变量读取（J$.Rl）能找到正确的帧。
+        //
+        // 注意：此后备机制仅适用于"外层帧当前仍在调用栈中"的情况（动态调用的闭包），
+        // 对于"外层帧已退出"的情况（factory pattern 等），capturedOuterCallId 仍依赖
+        // #invokeFun 预传递（通过 funcClosureCallId 查找）。
+        if (capturedOuterCallId === null && defScopeId !== undefined) {
+            // 搜索调用栈，找到包含 defScopeId 的最近帧
+            for (let i = this.#callIdStack.length - 1; i >= 0; i--) {
+                const frame = this.#callIdStack[i];
+                if (frame.defScopeId === defScopeId) {
+                    capturedOuterCallId = frame.callId;
+                    break;
+                }
+                // 也检查 shadowFrameMap 中是否有该 defScopeId:frame.callId 的记录
+                if (this.#shadowFrameMap.has(defScopeId) && this.#shadowFrameMap.get(defScopeId)?.has(frame.callId)) {
+                    capturedOuterCallId = frame.callId;
+                    break;
+                }
+            }
+        }
 
         // TODO-13: 分配新 callId，压栈保存旧值
         // 同时保存父帧的 defScopeId，供 Fr() 恢复

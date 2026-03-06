@@ -197,7 +197,14 @@ function getContext(path) {
         // Babel AST: ClassProperty（class static/instance 字段声明）的 key 不应插桩
         (pt === 'ClassProperty'             && key === 'key' && !parent.computed) ||
         (pt === 'ClassPrivateProperty'      && key === 'key') ||
-        (pt === 'PrivateName'               && key === 'id')
+        (pt === 'PrivateName'               && key === 'id') ||
+        // MetaProperty（new.target、import.meta）的 meta 和 property 都是保留字 Identifier，
+        // 不应被插桩（否则 meta: Identifier('new') 会被包装为 CallExpression，破坏 MetaProperty 语法）。
+        (pt === 'MetaProperty'              && (key === 'meta' || key === 'property')) ||
+        // ObjectMethod 的 computed key（如 [Symbol.iterator](){}）：
+        // @babel/types 校验不允许 ObjectMethod.key 是 CallExpression，即使 computed=true。
+        // 故对 ObjectMethod.key 一律 IGNORE（不插桩）。
+        (pt === 'ObjectMethod'              && key === 'key')
     ) {
         return CONTEXT.IGNORE;
     }
@@ -461,7 +468,12 @@ function runInstrumentPass(file) {
             enter(path) { W.setScope(path.node); },
             exit(path) {
                 const node = path.node;
-                node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
+                // BUG-derived-constructor 修复：子类 constructor 在 super() 之前访问 this 会报错。
+                // 检测：当前方法是 constructor，且所在 class 有 superClass（即 extends XXX）。
+                // 如果是，则 instrumentFunctionEntryExit 中跳过 this 参数（传 undefined）。
+                const isDerivedConstructor = node.kind === 'constructor'
+                    && path.parentPath?.parent?.superClass != null;
+                node.body.body = W.instrumentFunctionEntryExit(node, node.body.body, isDerivedConstructor);
                 W.popScope();
                 // ClassMethod 的 try-catch 包裹：同 FunctionExpression
                 if (!node.generator && !node.async) {
@@ -475,7 +487,16 @@ function runInstrumentPass(file) {
         // 虽然在 scope.js 的 addScopes 中已正确处理，但 runInstrumentPass 的 visitor 遗漏了
         // scope 进出管理，导致该方法内的插桩代码中 _scope 指向错误。
         ObjectMethod: {
-            enter(path) { W.setScope(path.node); },
+            enter(path) {
+                W.setScope(path.node);
+                // BUG-computed-key 修复：ObjectMethod 的 computed key（如 [Symbol.iterator]）
+                // 不能被插桩（@babel/types 不允许 ObjectMethod.key 是 CallExpression）。
+                // 在 enter 时将 key 子树的节点打上 __j_instrumented 标记，使其在后续
+                // enter 时被 skip，从而跳过对 key 内部节点（如 Symbol 标识符）的插桩。
+                if (path.node.computed && path.node.key) {
+                    path.node.key.__j_instrumented = true;
+                }
+            },
             exit(path) {
                 const node = path.node;
                 node.body.body = W.instrumentFunctionEntryExit(node, node.body.body);
@@ -634,6 +655,15 @@ function runInstrumentPass(file) {
                 const calleeType = node.callee?.type;
                 if ((calleeType === 'MemberExpression' || calleeType === 'OptionalMemberExpression')
                         && node.callee.object?.name === _jalangiVar) return;
+                // BUG-super 修复：super() 调用的 callee 是 Super 节点（关键字），
+                // 不能作为普通值传入 J$.F(iid, super, 0)，否则产生语法错误。
+                // super(...args) 调用必须保持原始语义，跳过 instrumentCall。
+                if (calleeType === 'Super') return;
+                // BUG-private-field 修复：私有方法调用（this.#method()）的 callee 是
+                // MemberExpression { property: PrivateName }。
+                // J$.M(iid, base, "#method") 会调用 base["#method"]（undefined），产生 TypeError。
+                // 私有方法调用跳过 instrumentCall，保留原始语义。
+                if (calleeType === 'MemberExpression' && node.callee.property?.type === 'PrivateName') return;
                 const isEval = node.callee.type === 'Identifier' && node.callee.name === 'eval';
                 node.callee = W.instrumentCall(node, false);
                 if (isEval) node.arguments = node.arguments.map(W.wrapEvalArg);
@@ -644,6 +674,12 @@ function runInstrumentPass(file) {
             exit(path) {
                 if (ignoreSubAst(path.node)) return;
                 const node = path.node;
+                // BUG-private-field 修复：私有字段赋值（this.#n = val 或 this.#n += val）。
+                // J$.P(iid, base, "#n", val) 会将 base["#n"] 设为 val（公有属性！），
+                // 而私有字段本身不受影响，导致语义分裂。
+                // 私有字段的赋值跳过插桩，保留原始语义。
+                const leftNode = node.left;
+                if (leftNode?.type === 'MemberExpression' && leftNode.property?.type === 'PrivateName') return;
                 const ret = node.operator === '='
                     ? W.instrumentStore(node, false)
                     : W.instrumentLoadModStore(node);
@@ -655,6 +691,13 @@ function runInstrumentPass(file) {
             exit(path) {
                 if (ignoreSubAst(path.node)) return;
                 const node = path.node;
+                // BUG-private-field 修复：私有字段（this.#n++）的 argument 是
+                // MemberExpression { property: PrivateName }。
+                // 私有字段不支持 bracket notation（base["#n"]），J$.A/J$.G/J$.P 钩子无法处理，
+                // 会返回 undefined，导致数值运算产生 NaN。
+                // 对私有字段的自增/自减操作跳过插桩，保留原始语义。
+                const arg = node.argument;
+                if (arg?.type === 'MemberExpression' && arg.property?.type === 'PrivateName') return;
                 let ret = W.instrumentPreIncDec(node);
                 if (!node.prefix) ret = W.adjustIncDec(node.operator, ret);
                 if (ret !== node) replaceAndMark(path, ret);
@@ -701,6 +744,10 @@ function runInstrumentPass(file) {
             exit(path) {
                 if (ignoreSubAst(path.node)) return;
                 if (getContext(path) !== CONTEXT.RHS) return;
+                // BUG-private-field 修复：私有字段（this.#n）不支持 bracket notation，
+                // J$.G(iid, base, "#n") 会将 base["#n"] 返回 undefined。
+                // 私有字段的读取跳过 instrumentLoad，保留原始语义。
+                if (path.node.property?.type === 'PrivateName') return;
                 const ret = W.instrumentLoad(path.node, false);
                 if (ret !== path.node) replaceAndMark(path, ret);
             },
