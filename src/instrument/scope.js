@@ -51,6 +51,8 @@ class Scope {
         this.parent  = parent;
         this.isCatch = isCatch;
         this.hasWith_ = false;
+        /** @type {boolean} 是否是箭头函数作用域（ArrowFunctionExpression） */
+        this.isArrow  = false;
     }
 
     /**

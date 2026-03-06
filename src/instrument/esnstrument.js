@@ -33,12 +33,14 @@
  */
 
 import * as babelParser from '@babel/parser';
+// @ts-ignore — @babel/generator 是 CJS 模块，类型定义不包含 .default，运行时需取 .default
 import _babelGenerate   from '@babel/generator';
 // @babel/generator 是 CJS 模块，ESM 导入需取 .default
-const babelGenerate = _babelGenerate.default ?? _babelGenerate;
+const babelGenerate = /** @type {any} */ (_babelGenerate).default ?? _babelGenerate;
+// @ts-ignore — @babel/traverse 是 CJS 模块，类型定义不包含 .default，运行时需取 .default
 import _babelTraverse from '@babel/traverse';
 // @babel/traverse 是 CJS 模块，ESM 导入需取 .default
-const babelTraverse = _babelTraverse.default ?? _babelTraverse;
+const babelTraverse = /** @type {any} */ (_babelTraverse).default ?? _babelTraverse;
 
 import { JALANGI_VAR }     from '../Constants.js';
 import { CONTEXT, transformAst, setJalangiVar as setAstUtilJalangiVar } from './astUtil.js';
@@ -142,9 +144,9 @@ const cloneAst = (src) =>
  * @returns {number} CONTEXT 枚举值
  */
 function getContext(path) {
-    const parent = path.parent;
+    const parent = /** @type {any} */ (path.parent);
     if (!parent) return CONTEXT.RHS;
-    const pt = parent.type;
+    const pt = /** @type {string} */ (parent.type);
     // path.key：当节点直接位于父节点的具名属性时为属性名（如 'left'、'test'）；
     //           当节点位于数组中时为数字索引（如 0、1）。
     // path.listKey：当节点位于数组中时为该数组的属性名（如 'params'、'body'、'arguments'）；
@@ -1045,23 +1047,24 @@ const NO_INSTR = '// JALANGI DO NOT INSTRUMENT';
  * 对代码字符串进行插桩。
  *
  * @param {{
- *   isEval:           boolean,   // 是否是 eval 动态代码
- *   code:             string,    // 要插桩的代码
- *   thisIid:          number,    // eval 时的调用点 IID
- *   origCodeFileName: string,    // 原始文件名（用于 source map）
- *   instCodeFileName: string,    // 插桩后文件名
- *   inlineSourceMap:  boolean,   // 是否内联完整 source map
- *   inlineSource:     boolean,   // 是否内联原始源代码
- *   url:              string,    // 脚本的 URL（可选）
- *   isDirect:         boolean,   // eval 是否是直接调用
- *   sourceType:       string,    // 'script'（默认）或 'module'
+ *   isEval?:           boolean,   // 是否是 eval 动态代码
+ *   code:              string,    // 要插桩的代码
+ *   thisIid?:          number,    // eval 时的调用点 IID
+ *   origCodeFileName?: string,    // 原始文件名（用于 source map）
+ *   instCodeFileName?: string,    // 插桩后文件名
+ *   inlineSourceMap?:  boolean,   // 是否内联完整 source map
+ *   inlineSource?:     boolean,   // 是否内联原始源代码
+ *   url?:              string,    // 脚本的 URL（可选）
+ *   isDirect?:         boolean,   // eval 是否是直接调用
+ *   sourceType?:       string,    // 'script'（默认）或 'module'
  * }} options
  *
  * @return {{
  *   code:            string,
  *   instAST:         object,
  *   sourceMapObject: object,
- *   sourceMapString: string
+ *   sourceMapString: string,
+ *   vlcqSourceMap:   object | null
  * }}
  */
 function instrumentCode(options) {
@@ -1098,7 +1101,7 @@ function instrumentCode(options) {
         thisIid,
         inlineSource  = false,
         url,
-        isDirect,
+        isDirect      = false,
         sourceType    = 'script',
     } = options;
 
@@ -1112,8 +1115,8 @@ function instrumentCode(options) {
     // pre-hook（允许分析修改代码或跳过插桩）
     let skip = false;
     if (_analysis?.instrumentCodePre) {
-        const aret = _analysis.instrumentCodePre(thisIid, code, isDirect);
-        if (aret) { code = aret.code; skip = aret.skip; }
+        const aret = _analysis.instrumentCodePre(/** @type {number} */ (thisIid), code, isDirect);
+        if (aret) { code = /** @type {string} */ (aret.code); skip = aret.skip; }
     }
 
     let newAst;
@@ -1175,7 +1178,7 @@ function instrumentCode(options) {
                 `[jalangi] Failed to instrument ${fileName}: ${ex.message}`
             );
             wrappedErr.cause = ex;
-            wrappedErr.origCodeFileName = fileName;
+            /** @type {any} */ (wrappedErr).origCodeFileName = fileName;
             throw wrappedErr;
         }
     }
@@ -1210,7 +1213,7 @@ function instrumentCode(options) {
 
     // post-hook
     if (isEval && _analysis?.instrumentCode) {
-        const aret = _analysis.instrumentCode(thisIid, instCode, newAst, isDirect);
+        const aret = _analysis.instrumentCode(/** @type {number} */ (thisIid), instCode, newAst, isDirect);
         if (aret) instCode = aret.result;
     }
 

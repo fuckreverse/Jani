@@ -31,8 +31,9 @@
  * @module dataflow
  */
 
+// @ts-ignore — @babel/traverse 是 CJS 模块，类型定义不包含 .default，运行时需取 .default
 import _babelTraverse from '@babel/traverse';
-const babelTraverse = _babelTraverse.default ?? _babelTraverse;
+const babelTraverse = /** @type {any} */ (_babelTraverse).default ?? _babelTraverse;
 
 // ── 决策枚举 ──────────────────────────────────────────────────────────────────
 
@@ -155,11 +156,11 @@ export function analyzeDefUse(ast) {
  * 从当前 path 向上查找，找到最近的带有 Jalangi Scope（.scope 属性）的 AST 节点。
  * 这些节点由 addScopes 在 pre-pass 中附加。
  *
- * @param {NodePath} path
- * @returns {Scope|null}  Jalangi Scope 对象，或 null
+ * @param {import('@babel/traverse').NodePath} path
+ * @returns {import('./scope.js').Scope|null}  Jalangi Scope 对象，或 null
  */
 function _findJalScope(path) {
-    let cur = path;
+    let cur = /** @type {any} */ (path);
     while (cur) {
         const node = cur.node;
         if (node && node.scope) return node.scope;

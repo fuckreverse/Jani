@@ -71,7 +71,8 @@ export class JalangiSandbox extends JalangiRuntime {
     // ── 公开沙盒状态（JalangiRuntime 的钩子方法通过 this 读写这些字段）────
 
     /** iid → 源码位置映射表（{ [sid]: { [iid]: [sl,sc,el,ec], originalCodeFileName } }） */
-    smap = {};
+    /** @type {Record<number, import('../types.js').IidSourceMap>} */
+    smap = /** @type {any} */ ({});
 
     /** 当前脚本 ID */
     sid = 0;
@@ -79,8 +80,9 @@ export class JalangiSandbox extends JalangiRuntime {
     /** 当前脚本的 iid 映射（由插桩器在 Se() 前写入 J$.iids） */
     iids = null;
 
-    /** 当前分析插件（AnalysisHost 实例，支持 .use() 链式注册） */
-    analysis = null;
+    /** 当前分析插件（HookDispatcher 实例，支持 .use() 链式注册） */
+    /** @type {any} */
+    analysis = /** @type {any} */ (null);
 
     /** TraceLogger 实例（由 ExecutionTraceAnalysis 写入，供 log() 使用） */
     tracer = null;
@@ -172,7 +174,7 @@ export class JalangiSandbox extends JalangiRuntime {
             fname = fname + this.iidToLocation(entry.evalSid, entry.evalIid);
         }
 
-        const arr = entry[iid];
+        const arr = iid !== undefined ? entry[iid] : undefined;
         if (arr) {
             if (this.Results) {
                 return `<a href="javascript:iidToDisplayCodeLocation('${gid}');">(${fname}:${arr[0]}:${arr[1]}:${arr[2]}:${arr[3]})</a>`;
@@ -196,10 +198,12 @@ export class JalangiSandbox extends JalangiRuntime {
 
     async #registerExecutionTrace(options) {
         const { ExecutionTraceAnalysis } = await import('../plugins/ExecutionTrace.js');
-        this.analysis.use(new ExecutionTraceAnalysis(this, options.sourceCode ?? null, {
-            useIdb:    options.useIdb    ?? false,
-            dbName:    options.dbName,
-            storeName: options.storeName,
-        }));
+        if (this.analysis) {
+            this.analysis.use(new ExecutionTraceAnalysis(this, options.sourceCode ?? null, {
+                useIdb:    options.useIdb    ?? false,
+                dbName:    options.dbName,
+                storeName: options.storeName,
+            }));
+        }
     }
 }

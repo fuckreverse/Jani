@@ -83,6 +83,57 @@ function createBitPattern(...bits) {
  */
 export class JalangiRuntime {
 
+    // ── 子类必须提供的公开字段（由 JalangiSandbox 实现）──────────────────────
+
+    /**
+     * 当前分析插件（HookDispatcher 实例，可为 null）。
+     * 由子类（JalangiSandbox）在构造时初始化。
+     * HookDispatcher 实现了 IAnalysisPlugin 接口（hook 方法动态挂载）。
+     * 声明为 any 以避免对动态挂载方法和 observeOnly 等扩展属性的类型检查。
+     * @type {any}
+     */
+    analysis = null;
+
+    /**
+     * 所有常量对象（SPECIAL_PROP_SID、SPECIAL_PROP_IID 等）。
+     * 由子类（JalangiSandbox）提供。
+     * @type {{ SPECIAL_PROP_SID: string, SPECIAL_PROP_IID: string, [key: string]: unknown }}
+     */
+    Constants = /** @type {any} */ (undefined);
+
+    /**
+     * TraceLogger 实例（由 ExecutionTraceAnalysis 写入，供 log() 使用，可为 null）。
+     * @type {{ key?: (level: string, msg: string) => void } | null | undefined}
+     */
+    tracer = null;
+
+    /**
+     * 浏览器结果面板（可选，可为 null）。
+     * @type {{ execute?: (fn: (div: HTMLElement) => void) => void } | null | undefined}
+     */
+    Results = null;
+
+    /**
+     * iid → 源码位置映射表（`{ [sid]: IidSourceMap }`）。
+     * 由子类（JalangiSandbox）维护。
+     * @type {Record<number, import('../types.js').IidSourceMap>}
+     */
+    smap = /** @type {any} */ ({});
+
+    /**
+     * 当前脚本 ID。
+     * 由子类（JalangiSandbox）维护。
+     * @type {number}
+     */
+    sid = 0;
+
+    /**
+     * 当前脚本的 iid 映射（scriptEnter 时注册用，可为 null）。
+     * 由插桩器在 Se() 前写入 J$.iids。
+     * @type {import('../types.js').IidSourceMap | null}
+     */
+    iids = null;
+
     // ── 私有执行状态 ─────────────────────────────────────────────────────────
 
     /** 函数返回值栈（支持 finally 块中的嵌套调用） */
@@ -529,7 +580,7 @@ export class JalangiRuntime {
         this.#sidStack.push(this.sid);
         this.sid = ++this.#sidCounter;
         if (!this.smap) this.smap = {};
-        this.smap[this.sid] = this.iids;
+        this.smap[this.sid] = /** @type {import('../types.js').IidSourceMap} */ (this.iids);
     }
 
     #rollBackSid() {
@@ -1415,13 +1466,7 @@ export class JalangiRuntime {
      * }
      * ```
      *
-     * @returns {{
-     *   missCount:  number,                // Rl() 查表未命中的总次数
-     *   missLog:    Array<{iid:number, defScopeId:number, name:string, callId:number}>,
-     *                                      // 每次缺失的详细记录（仅 debugShadow=true 时有内容）
-     *   frameCount: number,                // 当前 #shadowFrameMap 中存活的帧数（调试内存泄漏用）
-     *   debugShadow: boolean,              // 是否处于调试模式
-     * }}
+     * @returns {{ missCount: number, missLog: Array<{iid:number, defScopeId:number, name:string, callId:number}>, frameCount: number, debugShadow: boolean }}
      */
     getShadowStats() {
         return {

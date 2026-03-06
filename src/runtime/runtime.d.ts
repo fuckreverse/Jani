@@ -62,6 +62,53 @@ export interface JalangiRuntimeHost {
  */
 export declare class JalangiRuntime {
 
+    // ── 子类提供的公开字段（由 JalangiSandbox 实现）──────────────────────────
+
+    /** 当前分析插件（HookDispatcher 实例，可为 null） */
+    analysis: HookDispatcher | IAnalysisPlugin | null;
+
+    /**
+     * 所有常量对象（SPECIAL_PROP_SID、SPECIAL_PROP_IID 等）。
+     * 由子类（JalangiSandbox）提供。
+     */
+    Constants: {
+        SPECIAL_PROP_SID: string;
+        SPECIAL_PROP_IID: string;
+        [key: string]: unknown;
+    };
+
+    /** TraceLogger 实例（可选） */
+    tracer: { key?: (level: string, msg: string) => void } | null | undefined;
+
+    /** 浏览器结果面板（可选） */
+    Results: { execute?: (fn: (div: HTMLElement) => void) => void } | null | undefined;
+
+    /** iid → 源码位置映射表（{ [sid]: IidSourceMap }） */
+    smap: Record<number, IidSourceMap>;
+
+    /** 当前脚本 ID */
+    sid: number;
+
+    /** 当前脚本的 iid 映射（scriptEnter 时注册用） */
+    iids: IidSourceMap | null;
+
+    // ── Shadow Frame 诊断 API ──────────────────────────────────────────────
+
+    /**
+     * 返回 Shadow Frame 的运行时统计信息。
+     */
+    getShadowStats(): {
+        missCount: number;
+        missLog: Array<{ iid: number; defScopeId: number; name: string; callId: number }>;
+        frameCount: number;
+        debugShadow: boolean;
+    };
+
+    /** 重置 Shadow Frame 统计计数器和日志 */
+    resetShadowStats(): void;
+
+    // ── 原生 eval 引用 ────────────────────────────────────────────────────
+
     /** 原生 eval 引用（供插桩代码使用） */
     EVAL_ORG: typeof eval;
 

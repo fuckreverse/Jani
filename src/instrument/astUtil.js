@@ -65,11 +65,11 @@ function ignoreSubAst(node) {
  * visitorPost 中每个方法的返回值将替换原来的节点。
  * visitorPre 中的返回值被忽略（仅用于副作用，如压栈）。
  *
- * @param {object}  object      - 当前 AST 节点
- * @param {object}  visitorPost - 后序访问者对象
- * @param {object}  visitorPre  - 前序访问者对象
- * @param {number}  context     - 当前上下文（CONTEXT 枚举值）
- * @param {boolean} noIgnore    - 为 true 时不跳过任何子树
+ * @param {object}   object      - 当前 AST 节点
+ * @param {object}   visitorPost - 后序访问者对象
+ * @param {object}  [visitorPre] - 前序访问者对象（可选）
+ * @param {number}  [context]    - 当前上下文（CONTEXT 枚举值，可选）
+ * @param {boolean} [noIgnore]   - 为 true 时不跳过任何子树（可选）
  */
 function transformAst(object, visitorPost, visitorPre, context, noIgnore) {
     const type = object.type;
