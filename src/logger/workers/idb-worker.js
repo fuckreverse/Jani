@@ -70,15 +70,13 @@ let storeName = 'events';
 /** 打开（或升级）数据库 */
 function openDB(name, store, version = 1) {
     return new Promise((resolve, reject) => {
-        dbg.debug(`openDB: opening "${name}" v${version}, store="${store}"`);
         const req = indexedDB.open(name, version);
 
         req.onupgradeneeded = (evt) => {
             const database = evt.target.result;
-            dbg.debug(`onupgradeneeded: upgrading from v${evt.oldVersion} → v${evt.newVersion}`);
             // 如果 store 不存在则创建
             if (!database.objectStoreNames.contains(store)) {
-                dbg.debug(`creating objectStore "${store}"`);
+                dbg.debug(`onupgradeneeded v${evt.oldVersion}→v${evt.newVersion}: creating objectStore "${store}"`);
                 const os = database.createObjectStore(store, {
                     keyPath:       'id',
                     autoIncrement: true,
@@ -89,16 +87,10 @@ function openDB(name, store, version = 1) {
                 os.createIndex('sid',   'sid',   { unique: false });
                 // 时间戳索引（便于按时间范围查询）
                 os.createIndex('ts',    'ts',    { unique: false });
-                dbg.debug(`objectStore "${store}" created with indexes: type, iid, sid, ts`);
-            } else {
-                dbg.debug(`objectStore "${store}" already exists — skipping creation`);
             }
         };
 
-        req.onsuccess  = (evt) => {
-            dbg.debug(`openDB success: "${name}" v${evt.target.result.version}`);
-            resolve(evt.target.result);
-        };
+        req.onsuccess  = (evt) => { resolve(evt.target.result); };
         req.onerror    = (evt) => {
             dbg.error(`openDB error for "${name}":`, evt.target.error?.message ?? evt.target.error);
             reject(evt.target.error);
@@ -124,10 +116,7 @@ function writeBatch(batch) {
             count++;
         }
 
-        tx.oncomplete = () => {
-            dbg.debug(`writeBatch: committed ${count} events`);
-            resolve(count);
-        };
+        tx.oncomplete = () => { resolve(count); };
         tx.onerror    = (evt) => {
             dbg.error('writeBatch transaction error:', evt.target.error?.message ?? evt.target.error);
             reject(evt.target.error);
@@ -143,7 +132,6 @@ function writeBatch(batch) {
 /** 查询 store 中的事件 */
 function queryEvents(filter = {}, limit = 10000) {
     return new Promise((resolve, reject) => {
-        dbg.debug(`queryEvents: filter=${JSON.stringify(filter)} limit=${limit}`);
         const tx    = db.transaction(storeName, 'readonly');
         const store = tx.objectStore(storeName);
         const results = [];
@@ -162,7 +150,6 @@ function queryEvents(filter = {}, limit = 10000) {
                 results.push(cursor.value);
                 cursor.continue();
             } else {
-                dbg.debug(`queryEvents: returned ${results.length} records`);
                 resolve(results);
             }
         };
@@ -176,14 +163,10 @@ function queryEvents(filter = {}, limit = 10000) {
 /** 清空 store */
 function clearStore() {
     return new Promise((resolve, reject) => {
-        dbg.debug(`clearStore: clearing "${storeName}"`);
         const tx    = db.transaction(storeName, 'readwrite');
         const store = tx.objectStore(storeName);
         const req   = store.clear();
-        req.onsuccess = () => {
-            dbg.debug('clearStore: done');
-            resolve();
-        };
+        req.onsuccess = () => { resolve(); };
         req.onerror   = (evt) => {
             dbg.error('clearStore error:', evt.target.error?.message ?? evt.target.error);
             reject(evt.target.error);
@@ -214,10 +197,9 @@ self.onmessage = async (evt) => {
                 dbName    = msg.dbName    ?? dbName;
                 storeName = msg.storeName ?? storeName;
                 const ver = msg.version   ?? 1;
-                dbg.debug(`init: dbName="${dbName}" storeName="${storeName}" version=${ver}`);
                 db = await openDB(dbName, storeName, ver);
+                dbg.debug(`Worker ready: db="${dbName}" store="${storeName}" v${ver}`);
                 self.postMessage({ type: 'ready', dbName, storeName });
-                dbg.debug('init: sent "ready"');
                 break;
             }
 
@@ -228,17 +210,15 @@ self.onmessage = async (evt) => {
                     return;
                 }
                 const batchSize = msg.batch?.length ?? 0;
-                dbg.debug(`write batchId=${msg.batchId} size=${batchSize} (pendingTx=${pendingTxCount + 1})`);
                 pendingTxCount++;
                 _totalBatches++;
                 _totalEvents += batchSize;
                 try {
                     const count = await writeBatch(msg.batch);
                     self.postMessage({ type: 'ack', batchId: msg.batchId, count });
-                    dbg.debug(`write ack batchId=${msg.batchId} count=${count} (totalBatches=${_totalBatches} totalEvents=${_totalEvents})`);
                 } catch (writeErr) {
                     _totalErrors++;
-                    dbg.error(`write failed batchId=${msg.batchId} (totalErrors=${_totalErrors}):`, writeErr?.message ?? writeErr);
+                    dbg.error(`write failed batchId=${msg.batchId}:`, writeErr?.message ?? writeErr);
                     self.postMessage({
                         type:    'error',
                         batchId: msg.batchId,
@@ -249,7 +229,6 @@ self.onmessage = async (evt) => {
                     pendingTxCount--;
                     // 如果有等待 flush 的 resolve，检查是否都完成了
                     if (pendingTxCount === 0 && flushResolvers.length > 0) {
-                        dbg.debug(`flush: all pending tx done, resolving ${flushResolvers.length} waiter(s)`);
                         for (const r of flushResolvers) r();
                         flushResolvers = [];
                     }
@@ -258,16 +237,11 @@ self.onmessage = async (evt) => {
             }
 
             case 'flush': {
-                dbg.debug(`flush: pendingTxCount=${pendingTxCount}`);
-                if (pendingTxCount === 0) {
-                    self.postMessage({ type: 'flushed', reqId: msg.reqId });
-                    dbg.debug('flush: no pending tx, sent "flushed" immediately');
-                } else {
+                if (pendingTxCount > 0) {
                     // 等待所有进行中事务完成
                     await new Promise(resolve => flushResolvers.push(resolve));
-                    self.postMessage({ type: 'flushed', reqId: msg.reqId });
-                    dbg.debug('flush: all tx drained, sent "flushed"');
                 }
+                self.postMessage({ type: 'flushed', reqId: msg.reqId });
                 break;
             }
 
@@ -275,7 +249,7 @@ self.onmessage = async (evt) => {
                 if (!db) {
                     dbg.warn('query: DB not initialized — returning empty');
                     self.postMessage({ type: 'queryResult', reqId: msg.reqId, events: [] });
-                    return;
+                    break;
                 }
                 const events = await queryEvents(msg.filter ?? {}, msg.limit ?? 10000);
                 self.postMessage({ type: 'queryResult', reqId: msg.reqId, events });
@@ -286,7 +260,7 @@ self.onmessage = async (evt) => {
                 if (!db) {
                     dbg.warn('clear: DB not initialized — nothing to clear');
                     self.postMessage({ type: 'cleared', reqId: msg.reqId });
-                    return;
+                    break;
                 }
                 await clearStore();
                 self.postMessage({ type: 'cleared', reqId: msg.reqId });
@@ -294,13 +268,9 @@ self.onmessage = async (evt) => {
             }
 
             case 'close': {
-                dbg.debug(`close: closing DB (totalBatches=${_totalBatches} totalEvents=${_totalEvents} errors=${_totalErrors})`);
-                if (db) {
-                    db.close();
-                    db = null;
-                }
+                if (db) { db.close(); db = null; }
+                dbg.debug(`close: batches=${_totalBatches} events=${_totalEvents} errors=${_totalErrors}`);
                 self.postMessage({ type: 'closed', reqId: msg.reqId });
-                dbg.debug('close: sent "closed"');
                 break;
             }
 
@@ -309,8 +279,7 @@ self.onmessage = async (evt) => {
         }
     } catch (err) {
         _totalErrors++;
-        dbg.error(`unhandled error in cmd="${msg.cmd}":`, err?.message ?? String(err));
-        if (err?.stack) dbg.error('stack:', err.stack);
+        dbg.error(`error in cmd="${msg.cmd}":`, err?.message ?? String(err), err?.stack ?? '');
         self.postMessage({
             type:    'error',
             batchId: msg.batchId,

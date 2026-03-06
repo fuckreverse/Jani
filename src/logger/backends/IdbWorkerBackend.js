@@ -39,6 +39,7 @@ export class IdbWorkerBackend {
      * @param {number}  [options.dbVersion=1]              数据库版本
      * @param {number}  [options.maxPendingBatches=8]      最大未确认批次数（背压）
      * @param {number}  [options.writeTimeoutMs=10000]     单批写入超时（ms）
+     * @param {boolean} [options.clearOnInit=true]         每次初始化时自动清空旧数据（页面刷新后重新记录）
      */
     constructor(options = {}) {
         const {
@@ -48,6 +49,7 @@ export class IdbWorkerBackend {
             dbVersion         = 1,
             maxPendingBatches = 8,
             writeTimeoutMs    = 10000,
+            clearOnInit       = true,
         } = options;
 
         this._workerUrl         = workerUrl;
@@ -56,6 +58,7 @@ export class IdbWorkerBackend {
         this._dbVersion         = dbVersion;
         this._maxPending        = maxPendingBatches;
         this._writeTimeoutMs    = writeTimeoutMs;
+        this._clearOnInit       = clearOnInit;
 
         this._worker            = null;
         this._ready             = false;
@@ -76,7 +79,8 @@ export class IdbWorkerBackend {
         // 统计
         this.stats = { batchCount: 0, totalEvents: 0, errors: 0, dropped: 0 };
 
-        log.debug('constructed', { dbName, storeName, dbVersion, maxPendingBatches, writeTimeoutMs });
+        // 仅在 debug 开启时输出构造参数（非关键路径）
+        log.debug('constructed', { dbName, storeName });
     }
 
     /**
@@ -86,12 +90,10 @@ export class IdbWorkerBackend {
      */
     async init() {
         if (this._ready) {
-            log.debug('init() called but already ready — skipping');
             return;
         }
 
         const workerUrlStr = String(this._workerUrl);
-        log.debug('init() — spawning Worker', { workerUrl: workerUrlStr });
         const t0 = Date.now();
 
         this._worker = new Worker(this._workerUrl, { type: 'module' });
@@ -128,7 +130,13 @@ export class IdbWorkerBackend {
         this._readyReject  = null;
         this._ready = true;
         const elapsed = Date.now() - t0;
-        log.debug(`init() complete — Worker + IDB ready in ${elapsed}ms`, { dbName: this._dbName, storeName: this._storeName });
+        log.debug(`IDB ready in ${elapsed}ms (db=${this._dbName} store=${this._storeName})`);
+
+        // 每次页面加载自动清空旧数据，避免多次刷新后数据重复积累
+        if (this._clearOnInit) {
+            await this.clear();
+            log.debug('IDB store cleared on init');
+        }
     }
 
     // ── LogBackend 接口 ────────────────────────────────────────────────────────
@@ -145,20 +153,16 @@ export class IdbWorkerBackend {
             throw new Error('IdbWorkerBackend: already closed');
         }
         if (!this._ready) {
-            log.debug('write() called before init() — auto-initializing');
             await this.init();
         }
 
         // 背压：待确认批次过多时等待（事件驱动，非忙等待）
         if (this._pending.size >= this._maxPending) {
-            log.warn(`backpressure: pending=${this._pending.size} >= maxPending=${this._maxPending}, waiting for slot (batch=${batch.length})`);
-            const t0 = Date.now();
+            log.warn(`backpressure: pending=${this._pending.size}/${this._maxPending}, waiting for slot (batch=${batch.length})`);
             await this._waitForSlot();
-            log.debug(`backpressure released after ${Date.now() - t0}ms`);
         }
 
         const batchId = ++this._batchIdCounter;
-        log.debug(`write() batchId=${batchId} events=${batch.length} pending=${this._pending.size + 1}`);
 
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
@@ -182,11 +186,7 @@ export class IdbWorkerBackend {
      * @returns {Promise<void>}
      */
     async flush() {
-        if (!this._ready || this._closed) {
-            log.debug('flush() skipped — not ready or closed');
-            return;
-        }
-        log.debug(`flush() — pending=${this._pending.size}`);
+        if (!this._ready || this._closed) return;
         return this._sendRequest('flush', 30000);
     }
 
@@ -195,18 +195,11 @@ export class IdbWorkerBackend {
      * @returns {Promise<void>}
      */
     async close() {
-        if (this._closed) {
-            log.debug('close() called but already closed — skipping');
-            return;
-        }
+        if (this._closed) return;
         this._closed = true;
         if (!this._worker) return;
 
-        log.debug('close() — flushing before close', {
-            batchCount:  this.stats.batchCount,
-            totalEvents: this.stats.totalEvents,
-            errors:      this.stats.errors,
-        });
+        log.debug(`close() — batches=${this.stats.batchCount} events=${this.stats.totalEvents} errors=${this.stats.errors}`);
 
         await this.flush().catch((err) => {
             log.error('flush() during close failed:', err.message);
@@ -219,11 +212,6 @@ export class IdbWorkerBackend {
 
         this._worker.terminate();
         this._worker = null;
-        log.debug('close() done', {
-            batchCount:  this.stats.batchCount,
-            totalEvents: this.stats.totalEvents,
-            errors:      this.stats.errors,
-        });
     }
 
     // ── 额外 API ──────────────────────────────────────────────────────────────
@@ -239,7 +227,6 @@ export class IdbWorkerBackend {
             log.warn('query() called but not ready or closed — returning []');
             return [];
         }
-        log.debug('query()', { filter, limit });
         return this._sendRequest('query', 10000, { filter, limit });
     }
 
@@ -252,7 +239,6 @@ export class IdbWorkerBackend {
             log.warn('clear() called but not ready or closed — skipping');
             return;
         }
-        log.debug('clear()');
         return this._sendRequest('clear', 10000);
     }
 
@@ -288,10 +274,9 @@ export class IdbWorkerBackend {
             case 'ready': {
                 // init() 阶段的单次就绪通知
                 if (this._readyResolve) {
-                    log.debug('Worker sent "ready"');
                     this._readyResolve();
                 } else {
-                    log.debug('unexpected "ready" message after init — ignoring');
+                    log.warn('unexpected "ready" message after init — ignoring');
                 }
                 break;
             }
@@ -300,7 +285,6 @@ export class IdbWorkerBackend {
                 if (entry) {
                     clearTimeout(entry.timer);
                     this._pending.delete(msg.batchId);
-                    log.debug(`ack batchId=${msg.batchId} count=${msg.count} pending=${this._pending.size}`);
                     entry.resolve();
                     // 背压释放：唤醒等待槽位的调用方
                     this._notifySlotWaiters();
@@ -336,22 +320,18 @@ export class IdbWorkerBackend {
                 break;
             }
             case 'flushed': {
-                log.debug(`flush complete (reqId=${msg.reqId})`);
                 this._resolveRequest(msg.reqId, undefined);
                 break;
             }
             case 'queryResult': {
-                log.debug(`query returned ${msg.events?.length ?? 0} events (reqId=${msg.reqId})`);
                 this._resolveRequest(msg.reqId, msg.events);
                 break;
             }
             case 'cleared': {
-                log.debug(`clear complete (reqId=${msg.reqId})`);
                 this._resolveRequest(msg.reqId, undefined);
                 break;
             }
             case 'closed': {
-                log.debug(`Worker sent "closed" (reqId=${msg.reqId})`);
                 this._resolveRequest(msg.reqId, undefined);
                 break;
             }

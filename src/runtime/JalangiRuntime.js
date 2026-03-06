@@ -769,7 +769,11 @@ export class JalangiRuntime {
     F(iid, f, flags) {
         const [isConstructor] = decodeBitPattern(flags, 1);
         return (...callArgs) => {
-            return (this.#lastComputedValue = this.#invokeFun(iid, this, f, callArgs, isConstructor, false));
+            // 独立函数调用（非方法调用）时，base 应为 undefined，
+            // 等价于 f() 的原始语义（非严格模式下运行时会自动补全为 globalThis）。
+            // 不能用 this（即 J$ runtime 对象），否则 setTimeout / clearTimeout 等
+            // window 绑定的 native 方法会因 this 不是 window 而抛出 Illegal invocation。
+            return (this.#lastComputedValue = this.#invokeFun(iid, undefined, f, callArgs, isConstructor, false));
         };
     }
 

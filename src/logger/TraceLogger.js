@@ -20,6 +20,9 @@
  *  - 所有 NORMAL 写入都通过 LogManager（有 RingBuffer 缓冲 + 后端分发）
  *  - KEY 日志同步写控制台，不经过 LogManager（避免 async 延迟影响可读性）
  *
+ *  - pre-init 缓冲队列：_doInit() 完成之前到来的事件暂存于 _preInitQueue，
+ *    _mgr 就绪后统一 replay，确保脚本加载阶段的 trace 不丢失。
+ *
  * 诊断日志（直接输出到 console，不走 LogManager）：
  *  - 通过 JALANGI_DEBUG=logging (Node.js 环境变量) 或
  *    localStorage.jalangiDebug='logging' (浏览器) 开启 debug 级别输出
@@ -79,6 +82,10 @@ export class TraceLogger {
      * === 通用选项 ===
      * @param {boolean} [options.keyToConsole=true]  KEY 日志是否输出到控制台（建议始终 true）
      * @param {object}  [options.logManagerOptions]  透传给 LogManager 的额外选项
+     * @param {number}  [options.preInitQueueLimit=100000]
+     *   pre-init 缓冲队列最大容量（条数）。
+     *   超出后丢弃最早的事件，防止脚本过大导致内存爆炸。
+     *   默认 10 万条，足以覆盖绝大多数脚本加载阶段。
      */
     constructor(options = {}) {
         const {
@@ -91,8 +98,9 @@ export class TraceLogger {
             nodeFile     = 'jalangi-trace.ndjson',
             nodeConsole  = false,
             // 通用
-            keyToConsole = true,
+            keyToConsole     = true,
             logManagerOptions = {},
+            preInitQueueLimit = 100000,
         } = options;
 
         this._opts = {
@@ -104,6 +112,26 @@ export class TraceLogger {
         /** @type {import('./LogManager.js').LogManager|null} */
         this._mgr  = null;
         this._ready = null;  // Promise，init() 返回的
+
+        /**
+         * pre-init 缓冲队列：在 _mgr 就绪之前到来的 trace/key 事件暂存于此。
+         *
+         * 背景：插桩脚本在加载时会立即触发 scriptEnter / write / invokeFun 等钩子，
+         * 而此时 IDB Worker 的初始化（spawn + openDB + 'ready' 握手）尚未完成，
+         * _mgr 还是 null。原先 this._mgr?.log() 的 ?. 短路会静默丢弃这段时间内的
+         * 所有事件，导致脚本初始化阶段的 trace 完全丢失。
+         *
+         * 修复策略：
+         *  - 初始化期间将事件写入 _preInitQueue（Array）
+         *  - _doInit() 完成并将 _mgr 赋值后，立即把队列内所有事件 replay 给 _mgr
+         *  - replay 完毕后将 _preInitQueue 置为 null（表示"不再需要缓冲"）
+         *
+         * null 表示初始化已完成、不再缓冲；Array（含空数组）表示仍在初始化中。
+         *
+         * @type {Array<{kind:'trace'|'key', event?: object, level?: string, text?: string}>|null}
+         */
+        this._preInitQueue      = [];
+        this._preInitQueueLimit = preInitQueueLimit;
 
         log.debug('constructed', {
             env: IS_BROWSER ? 'browser' : 'node',
@@ -119,8 +147,8 @@ export class TraceLogger {
 
     /**
      * 异步初始化后端（打开 IDB / 建立 WebSocket / 打开文件流）。
-     * 可以不 await，日志会在 init 完成前安全丢弃（LogManager 未启动不写入）。
-     * 建议在 scriptEnter 之前 await。
+     * 可以不 await；init 完成前产生的事件会缓冲在 _preInitQueue 中，
+     * 初始化完成后自动 replay 到后端，不会丢失。
      *
      * @returns {Promise<void>}
      */
@@ -129,7 +157,8 @@ export class TraceLogger {
         log.debug('init() called — starting backend initialization');
         this._ready = this._doInit().catch(err => {
             log.error('init failed, falling back to console-only:', err.message, err.stack ?? '');
-            this._mgr = null;
+            // 初始化失败：replay 缓冲队列会落空（_mgr 仍 null），但至少不应持续缓冲
+            this._flushPreInitQueue();
         });
         return this._ready;
     }
@@ -201,6 +230,8 @@ export class TraceLogger {
 
         if (backends.length === 0) {
             log.warn('no backends configured — trace data will only appear on console (KEY events)');
+            // 清空缓冲队列（无后端可写，丢弃）
+            this._flushPreInitQueue();
             return;   // 纯控制台模式，不需要 LogManager
         }
 
@@ -213,6 +244,38 @@ export class TraceLogger {
 
         const elapsed = Date.now() - t0;
         log.debug(`_doInit() complete — ${backends.length} backend(s) ready, took ${elapsed}ms`);
+
+        // ── replay pre-init 缓冲队列 ─────────────────────────────────────────
+        // 此时 _mgr 已就绪，将初始化期间积攒的事件全部写入，确保脚本加载阶段不丢失
+        this._flushPreInitQueue();
+    }
+
+    /**
+     * 将 _preInitQueue 中缓冲的事件 replay 到 _mgr，然后将队列置为 null。
+     * 若 _mgr 不可用（初始化失败），队列中的事件会被丢弃。
+     * @private
+     */
+    _flushPreInitQueue() {
+        const queue = this._preInitQueue;
+        // 先置为 null，防止 replay 过程中新事件再次入队（进入正常路径）
+        this._preInitQueue = null;
+
+        if (!queue || queue.length === 0) return;
+
+        log.debug(`replaying ${queue.length} pre-init buffered event(s) to LogManager`);
+        if (!this._mgr) {
+            // 后端初始化失败，无处写入，静默丢弃
+            log.warn(`pre-init queue dropped (${queue.length} events) — no backend available`);
+            return;
+        }
+        for (const item of queue) {
+            if (item.kind === 'trace') {
+                this._mgr.log(item.event);
+            } else if (item.kind === 'key') {
+                // key 事件的控制台输出已在入队时完成，这里只补写后端
+                this._mgr.log({ type: 'key', level: item.level, text: item.text });
+            }
+        }
     }
 
     // ── 公共 API ──────────────────────────────────────────────────────────────
@@ -220,19 +283,32 @@ export class TraceLogger {
     /**
      * 记录一条普通 trace 行（高频路径，走 LogManager 缓冲后端）。
      *
+     * 若 _mgr 尚未就绪，事件会暂存到 _preInitQueue，等 init 完成后 replay。
+     *
      * 事件格式由调用方决定；ExecutionTrace 使用：
      *   { type: 'trace', seq: number, text: string }
      *
      * @param {object} event
      */
     trace(event) {
-        this._mgr?.log(event);
+        if (this._mgr) {
+            this._mgr.log(event);
+        } else if (this._preInitQueue !== null) {
+            // _mgr 未就绪，缓冲到 pre-init 队列
+            if (this._preInitQueue.length >= this._preInitQueueLimit) {
+                // 队列满：丢弃最旧的事件（drop-oldest 策略），保留最新的
+                this._preInitQueue.shift();
+            }
+            this._preInitQueue.push({ kind: 'trace', event });
+        }
+        // _preInitQueue === null 且 _mgr === null：初始化失败后的降级，静默丢弃
     }
 
     /**
      * 记录一条重点事件（低频路径）：
      *  - 始终同步输出到控制台（当 keyToConsole=true）
      *  - 同时以 KEY 事件写入后端（便于在 IDB/文件中搜索边界）
+     *    若 _mgr 尚未就绪，写入会暂存到 _preInitQueue，等 init 完成后 replay。
      *
      * @param {'info'|'warn'|'error'} level
      * @param {string} text
@@ -248,8 +324,16 @@ export class TraceLogger {
                 _keyLogger.info(text);
             }
         }
-        // 也写入后端（标记为 key 类型，便于过滤）
-        this._mgr?.log({ type: 'key', level, text });
+        // 写入后端（标记为 key 类型，便于过滤）
+        if (this._mgr) {
+            this._mgr.log({ type: 'key', level, text });
+        } else if (this._preInitQueue !== null) {
+            // _mgr 未就绪，缓冲到 pre-init 队列（控制台输出已在上面完成）
+            if (this._preInitQueue.length >= this._preInitQueueLimit) {
+                this._preInitQueue.shift();
+            }
+            this._preInitQueue.push({ kind: 'key', level, text });
+        }
     }
 
     /**
@@ -280,6 +364,14 @@ export class TraceLogger {
      */
     get isReady() {
         return this._mgr !== null;
+    }
+
+    /**
+     * 返回当前 pre-init 缓冲队列的长度（0 表示已 replay 或队列为空）。
+     * 可用于调试，确认初始化阶段事件是否被成功缓冲。
+     */
+    get preInitQueueSize() {
+        return this._preInitQueue?.length ?? 0;
     }
 }
 
