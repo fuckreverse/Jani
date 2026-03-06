@@ -56,18 +56,61 @@ const dbg = createLogger(DOMAIN.ANALYSIS);
 
 function serialize(v) {
     const t = typeof v;
-    if (v === null)      return 'null';
-    if (v === undefined) return 'undefined';
-    if (t === 'function') return `[Function ${v.name || '(anonymous)'}]`;
-    if (t === 'symbol')   return v.toString();
-    if (t === 'object') {
-        let s;
-        try { s = JSON.stringify(v); } catch { s = Object.prototype.toString.call(v); }
-        if (s === undefined) s = String(v);
-        return s.length > MAX_BYTES ? s.slice(0, MAX_BYTES) + '…' : s;
+    if (v === null)        return 'null';
+    if (t === 'undefined') return 'undefined';
+    if (t === 'function')  return `[Function ${v.name || '(anonymous)'}]`;
+    if (t === 'symbol')    return v.toString();
+    if (t === 'bigint')    return `${v}n`;
+    if (t === 'boolean')   return v ? 'true' : 'false';
+    if (t === 'number')    return String(v);
+    if (t === 'string') {
+        // 加引号，截断过长字符串（不用 JSON.stringify 避免触发任何拦截）
+        const q = v.length > MAX_BYTES ? v.slice(0, MAX_BYTES) + '…' : v;
+        return `"${q.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`;
     }
-    const s = JSON.stringify(v);
-    return s.length > MAX_BYTES ? s.slice(0, MAX_BYTES) + '…' : s;
+    if (t === 'object') {
+        // 特殊处理 Error 及其子类（message/name/stack 不可枚举）
+        if (v instanceof Error) {
+            const name = v.name || 'Error';
+            const msg  = v.message ? String(v.message) : '';
+            const truncatedMsg = msg.length > MAX_BYTES ? msg.slice(0, MAX_BYTES) + '…' : msg;
+            return `${name}: ${truncatedMsg}`;
+        }
+        // Array 浅层展示
+        if (Array.isArray(v)) {
+            const tag = `Array(${v.length})`;
+            return tag.length > MAX_BYTES ? tag : tag;
+        }
+        // 普通对象：浅层枚举自有属性，完全不调用 JSON.stringify / toJSON，
+        // 防止 toJSON 是被插桩的方法时触发 invokeFunPre → serialize 的无限递归。
+        try {
+            const keys = Object.keys(v);
+            if (keys.length === 0) return '{}';
+            const parts = [];
+            let total = 2; // '{' + '}'
+            for (const k of keys) {
+                if (total >= MAX_BYTES) { parts.push('…'); break; }
+                let vStr;
+                const vv = v[k];
+                const vt = typeof vv;
+                if (vv === null)         vStr = 'null';
+                else if (vt === 'undefined') vStr = 'undefined';
+                else if (vt === 'function')  vStr = '[Function]';
+                else if (vt === 'object')    vStr = '{…}';
+                else if (vt === 'symbol')    vStr = vv.toString();
+                else if (vt === 'bigint')    vStr = `${vv}n`;
+                else                         vStr = String(vv);
+                const entry = `${k}:${vStr}`;
+                total += entry.length + 1;
+                parts.push(entry);
+            }
+            const s = `{${parts.join(',')}}`;
+            return s.length > MAX_BYTES ? s.slice(0, MAX_BYTES) + '…' : s;
+        } catch {
+            return Object.prototype.toString.call(v);
+        }
+    }
+    return String(v);
 }
 
 function getLocation(sandbox, iid) {
@@ -159,7 +202,7 @@ export class ExecutionTraceAnalysis {
         if (options.logger instanceof TraceLogger) {
             // 外部直接传入
             this._logger = options.logger;
-            dbg.debug('constructor: using externally provided TraceLogger');
+            // 构造函数完成 — TraceLogger 已就绪
         } else {
             // 根据选项自动构建
             const {
@@ -180,14 +223,12 @@ export class ExecutionTraceAnalysis {
                 ...(nodeConsole !== undefined && { nodeConsole }),
                 keyToConsole: true,
             });
-            dbg.debug('constructor: created TraceLogger', { useIdb, dbName, storeName });
+            // TraceLogger 构造完成
         }
 
         // 启动后端初始化（异步，不阻塞构造函数）
         this._loggerReady = this._logger.init();
-        this._loggerReady.then(() => {
-            dbg.debug('TraceLogger init complete — backend ready:', this._logger.isReady);
-        }).catch(err => {
+        this._loggerReady.catch(err => {
             dbg.error('TraceLogger init error:', err.message, err.stack ?? '');
         });
 
@@ -256,7 +297,7 @@ export class ExecutionTraceAnalysis {
         this._stack.push(new Frame(newIndent));
         this._callStack.push({ callLineTemplate, innerLines: [] });
 
-        dbg.debug(`invokeFunPre: ${desc} iid=${iid} stackDepth=${this._stack.length}`);
+        // invokeFunPre 完成 — 栈帧已推入
         return { f, base, args, skip: false };
     }
 
@@ -280,7 +321,7 @@ export class ExecutionTraceAnalysis {
         const retIndent = INDENT_UNIT.repeat(frame.indent > 0 ? frame.indent - 1 : 0);
         const retLine   = `[${rc}] ${retIndent}← return ${name} ; result=${serialize(result)}`;
 
-        dbg.debug(`invokeFun: ← ${name} iid=${iid} stackDepth=${this._stack.length}`);
+        // invokeFun 完成 — 栈帧已弹出
 
         // 收集被调函数内部已产生的 doneLines（子函数内的指令 trace）
         const innerLines = frame.doneLines;
@@ -301,7 +342,6 @@ export class ExecutionTraceAnalysis {
     // ── 脚本进出（KEY 级别）───────────────────────────────────────────────────
 
     scriptEnter(iid, instrumentedFileName, originalFileName) {
-        dbg.debug(`scriptEnter: "${originalFileName}" iid=${iid} stackDepth=${this._stack.length}`);
         this._key('info', `▶ script: ${originalFileName}`);
         this._stack.push(new Frame(1));
         this._callStack.push({ callLineTemplate: null, innerLines: [] });
@@ -319,10 +359,10 @@ export class ExecutionTraceAnalysis {
         }
         if (wrappedExceptionVal) {
             const exStr = serialize(wrappedExceptionVal.exception);
-            dbg.debug(`scriptExit: exception iid=${iid} exception=${exStr}`);
+            // 脚本异常退出
             this._key('error', `◀ script end (exception: ${exStr})`);
         } else {
-            dbg.debug(`scriptExit: normal iid=${iid}`);
+            // 脚本正常退出
             this._key('info', `◀ script end`);
         }
         return { wrappedExceptionVal, isBacktrack: false };
@@ -338,8 +378,11 @@ export class ExecutionTraceAnalysis {
             const indent = INDENT_UNIT.repeat(this._top()?.indent ?? 0);
             const text   = `[${rc}] ${indent}✗ throw ; exception=${exStr}`;
 
-            dbg.debug(`functionExit: exception at iid=${iid}: ${exStr}`);
-            this._key('error', text);
+            // functionExit 异常分支
+            // 使用 warn 而非 error：大量混淆代码会故意用 throw-catch 作为控制流
+            // （如环境检测、反调试），这些 throw 均被外层 catch 正常捕获，程序继续运行。
+            // 用 error 级别会在浏览器控制台产生大量红色误报，误导调试。
+            this._key('warn', text);
             this._emit(text);
         }
         return { returnVal, wrappedExceptionVal, isBacktrack: false };
@@ -459,7 +502,7 @@ export class ExecutionTraceAnalysis {
     endExecution() {
         const residualFrames = this._stack.length;
         if (residualFrames > 0) {
-            dbg.warn(`endExecution: ${residualFrames} residual frame(s) in stack — possible missing scriptExit/functionExit`);
+            // 注意：residual frames 通常意味着脚本提前终止或有未捕获异常
         }
 
         // Flush 残余 pending 帧
@@ -469,18 +512,12 @@ export class ExecutionTraceAnalysis {
             for (const l of frame.doneLines) this._emit(l);
         }
 
-        dbg.debug(`endExecution: total seq=${this._seq}`);
+        // endExecution — trace 完成
         this._key('info', `=== ExecutionTrace: total ${this._seq} events ===`);
 
         // 关闭 LogManager（等待 init 完成后再 close，避免竞态）
         this._loggerReady
-            .then(() => {
-                dbg.debug('endExecution: closing TraceLogger...');
-                return this._logger.close();
-            })
-            .then(() => {
-                dbg.debug('endExecution: TraceLogger closed');
-            })
+            .then(() => this._logger.close())
             .catch(err => {
                 dbg.error('endExecution: logger close error:', err.message, err.stack ?? '');
             });

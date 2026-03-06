@@ -52,6 +52,68 @@
 // ── 运行环境检测 ────────────────────────────────────────────────────────────────
 const IS_BROWSER = typeof window !== 'undefined' || typeof globalThis.self !== 'undefined';
 
+// ── 全局控制台输出限流 ──────────────────────────────────────────────────────────
+//
+// 目的：防止大规模分析场景（如 JD 安全脚本）中海量错误/警告日志把浏览器卡死。
+//
+// 行为：
+//   - 所有通过 createLogger() 产生的控制台输出（error/warn/info/debug）共享一个
+//     全局计数器，超出上限后静默丢弃，并仅打印一次"已静默"提示。
+//   - 上限默认为 100 条，可通过 setConsoleLimit(n) 调整（0 = 不限制）。
+//   - resetConsoleLimit() 重置计数器（如用于多轮测试场景）。
+//
+let _consoleCount  = 0;      // 已输出条数
+let _consoleSilent = false;  // 是否已进入静默状态
+let _consoleLimit  = 100;    // 上限（0 = 不限制）
+
+/**
+ * 设置控制台输出上限。
+ * @param {number} n  最大允许输出条数；0 表示不限制。
+ */
+export function setConsoleLimit(n) {
+    _consoleLimit = (typeof n === 'number' && n >= 0) ? n : 100;
+    _consoleCount  = 0;
+    _consoleSilent = false;
+}
+
+/**
+ * 重置计数器（不改变上限）。用于多轮执行场景。
+ */
+export function resetConsoleLimit() {
+    _consoleCount  = 0;
+    _consoleSilent = false;
+}
+
+/**
+ * 统一的控制台输出门控。
+ * 返回 true 表示本条允许输出，返回 false 表示应丢弃。
+ * 副作用：在刚超限时打印一次静默提示。
+ *
+ * @param {Function} consoleFn  console.error / console.warn / console.log / console.debug
+ * @param {string}   prefix     域名前缀字符串
+ * @param {Array}    args       原始参数
+ */
+function _gatedConsole(consoleFn, prefix, args) {
+    if (_consoleLimit === 0) {
+        // 不限制
+        consoleFn(prefix, ...args);
+        return;
+    }
+    if (_consoleSilent) return;
+
+    _consoleCount++;
+    if (_consoleCount <= _consoleLimit) {
+        consoleFn(prefix, ...args);
+    } else {
+        _consoleSilent = true;
+        // 仅打印一次静默提示（用 console.warn 确保可见）
+        console.warn(
+            `[Jalangi] 控制台输出已达上限 ${_consoleLimit} 条，后续日志静默丢弃。` +
+            `如需调整限制请调用 setConsoleLimit(n)。`
+        );
+    }
+}
+
 // ── 读取 debug 开关（惰性求值，避免初始化时序问题） ────────────────────────────
 
 /**
@@ -142,11 +204,11 @@ export const DOMAIN = Object.freeze({
 export function createLogger(domain) {
     const prefix = `[Jalangi:${domain}]`;
     return {
-        error(...args) { console.error(prefix, ...args); },
-        warn(...args)  { console.warn( prefix, ...args); },
-        info(...args)  { console.log(  prefix, ...args); },
+        error(...args) { _gatedConsole(console.error.bind(console), prefix, args); },
+        warn(...args)  { _gatedConsole(console.warn.bind(console),  prefix, args); },
+        info(...args)  { _gatedConsole(console.log.bind(console),   prefix, args); },
         debug(...args) {
-            if (isDebugEnabled(domain)) console.debug(prefix, ...args);
+            if (isDebugEnabled(domain)) _gatedConsole(console.debug.bind(console), prefix, args);
         },
     };
 }

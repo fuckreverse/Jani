@@ -560,6 +560,32 @@ log.info('沙盒已就绪');           // 始终输出到 console.log
 log.debug('flush 完成, size=', n); // 仅 debug 开关开启时输出
 ```
 
+### 控制台输出限流
+
+浏览器中分析大型脚本（如电商安全脚本）时，大量 error/warn 日志可能导致控制台卡死。
+`logger.js` 提供全局限流机制，所有 `createLogger()` 产生的输出（含 `TraceLogger.key()`）
+共享一个计数器，超出上限后静默丢弃并仅打印一次提示。
+
+```js
+import { setConsoleLimit, resetConsoleLimit } from './src/logger/logger.js';
+
+// 设置上限为 200 条（默认 100，0 = 不限制）
+setConsoleLimit(200);
+
+// 关闭限流（如 CI 环境需要完整日志）
+setConsoleLimit(0);
+
+// 多轮执行时重置计数器（不改变上限）
+resetConsoleLimit();
+```
+
+| 函数 | 说明 |
+|------|------|
+| `setConsoleLimit(n)` | 设置上限；`n=0` 关闭限流；调用同时重置计数器 |
+| `resetConsoleLimit()` | 仅重置计数器，不改变上限；用于多轮测试场景 |
+
+> **默认值**：上限为 **100** 条，适合浏览器调试场景。Node.js CI 环境建议调用 `setConsoleLimit(0)` 关闭限流。
+
 ### DOMAIN 常量
 
 ```js

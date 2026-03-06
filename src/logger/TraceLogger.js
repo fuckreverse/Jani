@@ -58,6 +58,9 @@ const IS_BROWSER = typeof window !== 'undefined' || typeof globalThis.self !== '
 
 const log = createLogger(DOMAIN.LOGGING);
 
+// 用于 TraceLogger.key() 的输出，统一享受全局限流
+const _keyLogger = createLogger('key');
+
 export class TraceLogger {
     /**
      * @param {object} [options]
@@ -236,12 +239,13 @@ export class TraceLogger {
      */
     key(level, text) {
         if (this._opts.keyToConsole) {
+            // 通过 _keyLogger 输出，统一享受全局限流
             if (level === 'error') {
-                console.error('[Jalangi]', text);
+                _keyLogger.error(text);
             } else if (level === 'warn') {
-                console.warn('[Jalangi]', text);
+                _keyLogger.warn(text);
             } else {
-                console.log('[Jalangi]', text);
+                _keyLogger.info(text);
             }
         }
         // 也写入后端（标记为 key 类型，便于过滤）
