@@ -90,7 +90,7 @@ flowchart TD
     SMemory["SMemory\n(影子内存，对象 ID 追踪)"]
     DFA["DataFlowAnalyzer\n(SSA 化 + Backward Slicing)"]
     Logger["src/logger/\n(统一日志系统)\ncreateLogger · DOMAIN · LogManager\nTraceLogger · 可插拔后端"]
-    Backend["日志后端\nMemory / NodeStream / WsBackend\nIdbWorker / TypedArray"]
+    Backend["日志后端\nMemory / NodeStream / WsBackend\nIdbWorkerBackend"]
 
     Sandbox -->|"继承"| Runtime
     Sandbox -->|"analysis 字段"| Host
@@ -123,7 +123,7 @@ flowchart TD
 | `J$.Se(iid, val, origFile)` | 脚本进入 | `scriptEnter` |
 | `J$.Sr(iid)` | 脚本退出 | `scriptExit` |
 | `J$.N(iid, name, val, flags)` | 变量声明初始化 | `declare` |
-| `J$.Aw(iid)` | `await` 恢复点，通知运行时当前异步上下文已恢复 | — |
+| `J$.Aw(iid, val, ctxId?)` | `await` 恢复点（透传 resolved value，更新当前异步上下文） | `awaitResume` |
 
 ## 技术栈
 
@@ -202,7 +202,7 @@ npm run trace-server
 
 ## 设计亮点
 
-1. **无全局污染**：插桩代码用 IIFE 包裹，沙盒变量名（默认 `J$`，可自定义）通过闭包传入
+1. **无全局污染**：`J$` 沙盒通过 `globalThis.J$` 全局单例管理（script 模式），module 模式下通过头部 `const J$ = globalThis.J$` 绑定到模块作用域，不使用 IIFE 包裹，无额外全局污染
 2. **可选 module 模式**：`sourceType: 'module'` 支持 ESM 插桩（顶层 await）
 3. **`@babel/types` 直接构建 AST**：`wrappers.js` 中所有 wrap 函数均改为用 `@babel/types` 工厂函数直接构建 AST 节点，彻底消除旧版字符串模板解析（`replaceInStatement`）的运行时 parse 开销
 4. **IID 步长 8**：同一 AST 节点的多个子操作共享一段 IID，如方法调用 `iid+2` 为内部 getField
@@ -216,5 +216,5 @@ npm run trace-server
 12. **静态 SSA def-use 分析**：`dataflow.js` 在插桩前对 AST 进行两阶段分析，生成插桩决策表（FULL / LIGHTWEIGHT / DEAD），指导统一插桩 Pass 选择最优钩子
 13. **按需 Config 推导**：`pluginAnalyzer.js` 静态扫描插件代码，自动推导最小化插桩 Config，减少不必要的插桩开销
 14. **统一日志工厂**：`src/logger/logger.js` 提供 `createLogger(domain)` + `DOMAIN` 常量，插桩器与运行时的诊断日志统一走两级（域 + 级别）分类，`debug` 级别受 `JALANGI_DEBUG` / `localStorage.jalangiDebug` 开关控制
-15. **高性能日志后端**：`TypedArrayBackend` 使用 `Float64Array` 环形缓冲区，单条写入无 GC，峰值吞吐量显著优于普通对象数组
+15. **高性能日志后端（规划中）**：`TypedArrayBackend`（尚未实现）设计使用 `Float64Array` 环形缓冲区，单条写入无 GC，峰值吞吐量显著优于普通对象数组
 16. **反插桩对抗**：`AntiDetection` 提供 `Function.prototype.toString` Hook、全局泄露检测、异步上下文包装等隐蔽性增强机制

@@ -19,11 +19,7 @@
 /**
  * AST 包装（wrap）函数库。
  *
- * 负责将插桩钩子注入到各类 AST 节点中。
- *
- * Phase 4 重构（完成）：所有 wrap 函数从 replaceInExpr 字符串模板改为
- * 直接用 @babel/types 工厂函数构建 AST，消除运行时解析开销。
- * replaceInStatement / replaceInExpr 保留为参考实现，已无内部调用方。
+ * 负责将插桩钩子注入到各类 AST 节点中，使用 @babel/types 工厂函数直接构建 AST。
  */
 
 import * as babelParser from '@babel/parser';
@@ -35,17 +31,15 @@ import { JALANGI_VAR, HOP } from '../Constants.js';
 import * as IID from './iid.js';
 
 // ─── Config 引用（由宿主调用 init(config) 注入，插桩期间只读）────────────────────
-// Config 对象通过 init() 参数注入，避免模块间循环依赖。
 let Config;
 
 // ─── 运行时变量名（由 init() 根据 jalangiVar 动态生成）────────────────────────
-// 默认值为 'J$'，可通过 init(config, jalangiVar) 覆盖。
-let _jalangiVar = JALANGI_VAR;  // 当前使用的沙盒变量名（如 'J$' 或 '__j123'）
+let _jalangiVar = JALANGI_VAR;
 
-/** 模板字符串 → 缓存的 AST body 数组（去掉 loc/start/end）。变量名改变时由 _rebuildNames 清空 */
+/** 模板字符串 → 缓存的 AST body 数组。变量名改变时由 _rebuildNames 清空 */
 const _templateCache = new Map();
 
-let RP;                         // 占位符前缀，如 'J$_'
+let RP;
 let logFunctionEnterFunName;
 let logFunctionReturnFunName;
 let logFunCallFunName;
@@ -76,10 +70,10 @@ let logSwitchRightFunName;
 let logLastFunName;
 let logX1FunName;
 let instrumentCodeFunName;
-let logReadLightFunName;  // J$.Rl 轻量变量读取钩子
-let logAwaitResumeFunName;  // J$.Aw await 恢复点钩子
+let logReadLightFunName;
+let logAwaitResumeFunName;
 
-// ─── @babel/types 辅助函数（用于直接构建 AST）───────────────────────────────
+// ─── @babel/types 辅助函数 ───────────────────────────────────────────────────
 
 /**
  * 构建 `<obj>.<prop>` 的 MemberExpression 节点（非计算属性）。
@@ -113,8 +107,7 @@ function jalangiCall(method, iidNode, ...rest) {
     return callExpr(memberExpr(_jalangiVar, method), [iidNode, ...rest]);
 }
 
-/**
- * 用给定的沙盒变量名重新生成所有运行时函数名常量 */
+/** 用给定的沙盒变量名重新生成所有运行时函数名常量 */
 function _rebuildNames(v) {
     _jalangiVar              = v;
     RP                       = `${v}_`;
@@ -148,9 +141,8 @@ function _rebuildNames(v) {
     logLastFunName           = `${v}._`;
     logX1FunName             = `${v}.X1`;
     instrumentCodeFunName    = `${v}.instrumentEvalCode`;
-    logReadLightFunName      = `${v}.Rl`;  // 轻量变量读取钩子
-    logAwaitResumeFunName    = `${v}.Aw`;  // await 恢复点钩子
-    // 模板缓存依赖占位符前缀，变量名变化时必须清空
+    logReadLightFunName      = `${v}.Rl`;
+    logAwaitResumeFunName    = `${v}.Aw`;
     _templateCache.clear();
 }
 
@@ -158,7 +150,6 @@ function _rebuildNames(v) {
 _rebuildNames(JALANGI_VAR);
 
 // ─── N_LOG_* 字面量类型常量 ────────────────────────────────────────────────────
-// 这些整数常量在运行时传给 J$.T（wrapLiteral），用于标识字面量的具体类型。
 
 const N_LOG_ARRAY_LIT       = 10;
 const N_LOG_OBJECT_LIT      = 11;
@@ -186,13 +177,7 @@ function assertAstNode(val, callerName) {
 
 /**
  * 可被 wrapWithX1（J$.X1）包装的 AST 表达式类型白名单。
- *
- * 只有真正的表达式节点才能被包装；Statement、Literal 等其他节点类型不适用。
- * 使用精确的白名单而非 type.includes('Expression') 字符串检查，
- * 避免将来 Babel 新增以 'Expression' 结尾但不适合包装的节点类型（如 'TSTypeAssertion' 等）。
- *
- * 注意：Babel 原生 AST 的字面量类型（NumericLiteral、StringLiteral 等）已由各自的
- * visitor 在插桩后被替换为 CallExpression（J$.T 调用），此处不需要单独列出。
+ * 使用精确白名单而非 type.includes('Expression') 字符串检查。
  */
 const _EXPRESSION_TYPES = new Set([
     'AssignmentExpression',
@@ -253,11 +238,8 @@ function createBitPattern(...flags) {
     return flags.reduce((acc, f) => (acc << 1) + (f ? 1 : 0), 0);
 }
 
-// ─── 模板缓存（遗留：replaceInStatement / replaceInExpr 可完全移除）─────────────
-//
-// Phase 4 已将所有 wrap 函数迁移至 @babel/types 直接构建，
-// replaceInStatement / replaceInExpr 已无任何调用方，
-// 保留以防外部测试代码直接调用（或作为参考实现）。
+// ─── 模板引擎（replaceInStatement / replaceInExpr）─────────────────────────────
+// 当前所有 wrap 函数已迁移至 @babel/types 直接构建，此处保留供外部代码引用。
 
 /**
  * 深拷贝并替换 AST 中的占位符。
@@ -349,7 +331,7 @@ const getPropertyAsAst = (ast) => {
     return createLiteralAst(prop.name);
 };
 
-// ─── wrap 函数（@babel/types 直接构建版）─────────────────────────────────────
+// ─── wrap 函数 ─────────────────────────────────────────────────────────────────
 
 function wrapPutField(node, base, offset, rvalue, isComputed) {
     assertAstNode(node,   'wrapPutField/node');
@@ -370,7 +352,6 @@ function wrapPutField(node, base, offset, rvalue, isComputed) {
 function wrapModAssign(node, base, offset, op, rvalue, isComputed, isNumber) {
     if (!Config.INSTR_PROPERTY_BINARY_ASSIGNMENT || Config.INSTR_PROPERTY_BINARY_ASSIGNMENT(op, node.computed ? null : offset.value, node)) {
         IID.printModIidToLoc(node);
-        // J$.A(iid, base, offset, op, bits)(rvalue)
         const innerCall = jalangiCall('A',
             IID.getIid(), base, offset, createLiteralAst(op),
             t.numericLiteral(createBitPattern(isComputed, isNumber))
@@ -397,7 +378,6 @@ function wrapMethodCall(node, base, offset, isCtor, isComputed) {
         return ret;
     }
     // INSTR_INVOKE 禁用时：退回原始 callee，保留语义正确性
-    // offset 可能是 StringLiteral（非计算属性名），不能直接传给 t.memberExpression 的 property
     if (base.type) {
         if (isComputed) {
             return t.memberExpression(base, offset, true);
@@ -466,7 +446,6 @@ function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal, scopeId)
 }
 
 function wrapReadWithUndefinedCheck(node, name) {
-    // J$.I(typeof name === 'undefined' ? wrapRead(...undefined) : wrapRead(...name))
     const undef = t.identifier('undefined');
     const nameId = t.identifier(name);
     const typeofExpr = t.unaryExpression('typeof', nameId);
@@ -544,7 +523,6 @@ function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration,
 function wrapWriteWithUndefinedCheck(node, name, val, lhs) {
     if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name, node)) {
         IID.printIidToLoc(node);
-        // J$.W(iid, name, val, J$.I(typeof lhs === 'undefined' ? undefined : lhs), bits)
         const lhsId = t.identifier(lhs.name);
         const typeofExpr = t.unaryExpression('typeof', lhsId);
         const isUndef = t.binaryExpression('===', typeofExpr, t.stringLiteral('undefined'));
@@ -558,18 +536,12 @@ function wrapWriteWithUndefinedCheck(node, name, val, lhs) {
     return val;
 }
 
-// 逻辑运算符集合（@babel/types 的 logicalExpression 支持的操作符）
 const _LOGICAL_OPS = new Set(['||', '&&', '??']);
-// 赋值操作符（以 '=' 结尾且非 '=='、'!='、'<='、'>='、'==='、'!=='）
 function _isAssignmentOp(op) {
     return op.endsWith('=') && op.length > 1 && !['==', '!=', '<=', '>=', '===', '!=='].includes(op);
 }
 
 function wrapRHSOfModStore(node, left, right, op) {
-    // op 可能是：
-    //  - 逻辑运算符（'||' '&&' '??'）→ t.logicalExpression
-    //  - 赋值运算符（'+=' '||='等）→ t.assignmentExpression
-    //  - 普通二元运算符（'+' '-' 等）→ t.binaryExpression
     let ret;
     if (_LOGICAL_OPS.has(op)) {
         ret = t.logicalExpression(op, left, right);
@@ -583,14 +555,12 @@ function wrapRHSOfModStore(node, left, right, op) {
 }
 
 function makeNumber(node, left) {
-    // 一元 + 将值转为数字：+left
     const ret = t.unaryExpression('+', left);
     transferLoc(ret, node);
     return ret;
 }
 
 function wrapLHSOfModStore(node, left, right) {
-    // left = right
     const ret = t.assignmentExpression('=', left, right);
     transferLoc(ret, node);
     return ret;
@@ -641,7 +611,6 @@ function wrapHash(node, ast) {
 
 function wrapEvalArg(ast) {
     IID.printIidToLoc(ast);
-    // J$.instrumentEvalCode(ast, iid, true)
     const ret = callExpr(memberExpr(_jalangiVar, 'instrumentEvalCode'), [ast, IID.getIid(), t.booleanLiteral(true)]);
     transferLoc(ret, ast);
     return ret;
@@ -701,27 +670,21 @@ function wrapLogicalOr(node, left, right) {
  *
  * `a ?? b` 语义：a 不为 null/undefined 时取 a，否则取 b。
  * 插桩：(tmp = left, J$.C(iid, tmp != null) ? J$._() : right)
+ *
+ * 使用 J$.tmp_N 成员属性而非裸标识符，避免被 deepCloneAndReplace 误识别为占位符。
  */
 function wrapLogicalNullish(node, left, right) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('??', node)) {
         IID.printCondIidToLoc(node);
-        // 每次使用唯一临时变量名，避免嵌套 ?? 运算符共享同一槽
-        // 使用 J$.tmp_N（成员属性访问）而非裸标识符，
-        // 因为以 RP 开头的裸标识符会被 deepCloneAndReplace 误识别为占位符
         const tmpProp = `tmp_${tmpVarCounter++}`;
         const tmpExpr = memberExpr(_jalangiVar, tmpProp);
         const condIid = IID.getCondIid();
 
-        // tmp = left
         const assign = t.assignmentExpression('=', tmpExpr, left);
-        // tmp != null
         const notNull = t.binaryExpression('!=', tmpExpr, t.nullLiteral());
-        // J$.C(condIid, tmp != null)
         const condCall = jalangiCall('C', condIid, notNull);
-        // J$.C(iid, tmp != null) ? J$._() : right
         const last = callExpr(memberExpr(_jalangiVar, '_'), []);
         const ternary = t.conditionalExpression(condCall, last, right);
-        // (tmp = left, J$.C(iid, tmp != null) ? J$._() : right)
         const ret = t.sequenceExpression([assign, ternary]);
         transferLoc(ret, node);
         return ret;
@@ -786,7 +749,7 @@ function getLiteralValue(funId, node) {
         case N_LOG_BOOLEAN_LIT:   return node.value;
         case N_LOG_BIGINT_LIT:    return BigInt(node.value);
         case N_LOG_NULL_LIT:      return null;
-        // Babel RegExpLiteral：{ pattern, flags } 字段，用它们重建 RegExp 对象
+        // Babel RegExpLiteral：{ pattern, flags } 字段
         case N_LOG_REGEXP_LIT:
             try { return new RegExp(node.pattern, node.flags); } catch (_) { return null; }
         case N_LOG_ARRAY_LIT:     return dummyArray;
@@ -802,16 +765,12 @@ function ifObjectExpressionHasGetterSetter(node) {
 }
 
 /**
- * 从已插桩的函数 AST 中提取 <sandboxVar>.Fe 调用的 IID（internalFunId）。
+ * 从已插桩的函数 AST 中提取 J$.Fe 调用的 IID（internalFunId）。
  *
  * 当 INSTR_TRY_CATCH_ARGUMENTS = () => false 时，函数体没有 J$.Fe 注入，
- * 此时安全地返回 undefined（让调用方生成不含 internalFunId 的 J$.T 调用）。
+ * 此时安全地返回 undefined。
  */
 function getFnIdFromAst(ast) {
-    // 函数体的第一个语句可能是：
-    //  1. ExpressionStatement(J$.Fe(...)) — 未经 wrapFunBodyWithTryCatch 的原始结构
-    //  2. LabeledStatement > WhileStatement > BlockStatement > TryStatement — 经过 wrapFunBodyWithTryCatch 后
-    //  3. 其他（当 INSTR_TRY_CATCH_ARGUMENTS 禁用时没有 Fe 注入）→ 返回 undefined
     let entryExpr = ast.body.body[0];
 
     // 透过 wrapFunBodyWithTryCatch 生成的 jalangiLabel: while(true) { try {...} ... } 结构
@@ -824,7 +783,6 @@ function getFnIdFromAst(ast) {
         }
     }
 
-    // 若第一个语句不是 ExpressionStatement，说明 Fe 未被注入（Config 禁用），安全降级
     if (entryExpr?.type !== 'ExpressionStatement') return undefined;
     const call = entryExpr.expression;
     if (call.type !== 'CallExpression') return undefined;
@@ -869,7 +827,6 @@ function wrapLiteral(node, ast, funId) {
 // ─── 语句级 wrap ──────────────────────────────────────────────────────────────
 
 function createExpressionStatement(lhs, node) {
-    // lhs = node
     const assign = t.assignmentExpression('=', lhs, node);
     const stmt = t.expressionStatement(assign);
     transferLoc(stmt.expression, node);
@@ -907,44 +864,29 @@ function createCallInitAsStatement(node, name, val, isArgumentSync, lhs, isCatch
 
 function createCallAsFunEnterStatement(node, scopeId, omitThis = false) {
     IID.printIidToLoc(node);
-    // arguments.callee 在严格模式下会抛出 TypeError，使用 try-catch 安全降级为 undefined
-    // TODO-7: scopeId 作为第五个参数传给 J$.Fe，运行时用于创建 Shadow Frame
-    //
-    // BUG-derived-constructor 修复：子类 constructor 在 super() 之前不能访问 this。
-    // 当 omitThis=true 时，J$.Fe 的 dis 参数传 undefined 而非 this，
-    // 避免 "Must call super constructor before accessing this" 错误。
 
-    // BUG-11A 修复：scope.js 在函数有名为 'arguments' 的形参时会将其重命名为
-    // '${jalangiVar}_arguments'，并注册到作用域表中。此处需要检查当前作用域是否有
-    // 该重命名变量，有则使用重命名后的标识符，否则使用原始 'arguments'。
+    // 若函数有名为 'arguments' 的形参，scope.js 已将其重命名为 '${jalangiVar}_arguments'
     const renamedArg = `${_jalangiVar}_arguments`;
     const argumentsIdent = (_scope && _scope.hasOwnVar(renamedArg))
         ? t.identifier(renamedArg)
         : t.identifier('arguments');
-    // dis（第3个参数）：普通函数传 this，子类 constructor 传 undefined（避免 super() 前访问 this）
+    // 子类 constructor 在 super() 之前不能访问 this，omitThis=true 时传 undefined
     const disNode = omitThis ? t.identifier('undefined') : t.thisExpression();
-    // argumentsIdent 保持不变
 
-    // 构建 probe fn：(function(){try{return arguments.callee}catch(e){return undefined}}())
-    // try { return arguments.callee }
+    // probe fn：(function(){try{return arguments.callee}catch(e){return undefined}}())
     const tryBlock = t.blockStatement([
         t.returnStatement(
             t.memberExpression(t.identifier('arguments'), t.identifier('callee'))
         ),
     ]);
-    // catch(e) { return undefined }
     const catchClause = t.catchClause(
         t.identifier('e'),
         t.blockStatement([t.returnStatement(t.identifier('undefined'))])
     );
     const tryStmt = t.tryStatement(tryBlock, catchClause);
-    // (function(){ ... }())
     const probeFn = t.functionExpression(null, [], t.blockStatement([tryStmt]));
     const probeCall = t.callExpression(probeFn, []);
 
-    // J$.Fe(iid, probeCall, dis, arguments [, scopeId])
-    // 注意：argumentsIdent 已根据当前作用域正确选择原始或重命名的 arguments
-    // dis = this（普通函数） 或 undefined（子类 constructor，super() 前不能访问 this）
     const args = [
         IID.getIid(),
         probeCall,
@@ -959,13 +901,8 @@ function createCallAsFunEnterStatement(node, scopeId, omitThis = false) {
     const stmt = t.expressionStatement(feCall);
     transferLoc(stmt.expression, node);
 
-    // 对于【非 async】函数：给 probe fn 添加 __j_probe 标记，
-    // 使 wrapFunBodyWithTryCatch 跳过它，防止 probe fn 获得 Fr 却没有 Fe
-    // （否则 callIdStack 会多 pop 一次，破坏闭包 Shadow Frame 的 capturedOuterCallId 追踪）。
-    //
-    // 对于【async】函数：probe fn 必须经过 wrapFunBodyWithTryCatch，
-    // 因为 async 函数自身不被 wrapFunBodyWithTryCatch 包裹（避免破坏 await 语义），
-    // probe fn 的 Fr 承担了 async 函数退出钩子的职责。
+    // 非 async 函数：probe fn 打上 __j_probe 标记，使 wrapFunBodyWithTryCatch 跳过它
+    // async 函数：probe fn 需要被 wrapFunBodyWithTryCatch 包裹，承担 async 函数退出钩子
     if (!node.async) {
         probeFn.__j_probe = true;
     }
@@ -975,15 +912,13 @@ function createCallAsFunEnterStatement(node, scopeId, omitThis = false) {
 
 function createCallAsScriptEnterStatement(node, instFile, origFile) {
     IID.printIidToLoc(node);
-    // J$.Se(iid, instFile, origFile)
     const callSe = jalangiCall('Se', IID.getIid(), createLiteralAst(instFile), createLiteralAst(origFile));
     const stmt = t.expressionStatement(callSe);
     transferLoc(stmt.expression, node);
     return [stmt];
 }
 
-// ─── for-in / catch / try-catch 包装（均已迁移至 @babel/types 直接构建）────────
-// 以下仍保留 replaceInStatement（大结构，直接构建繁琐且收益低）
+// ─── for-in / catch / try-catch 包装 ────────────────────────────────────────
 
 let labelCounter = 0;
 /** 每次插桩新文件时重置，保证插桩幂等性 */
@@ -994,12 +929,8 @@ function wrapForIn(node, left, right, body) {
     IID.printIidToLoc(node);
     const isDeclaration = (left.type === 'VariableDeclaration');
 
-    // 使用插桩时生成的唯一局部变量替代旧的 J$._tm_p 沙盒属性，消除以下副作用：
-    //   - J$._tm_p 是沙盒的可写属性，for-in J$ 或 Object.keys(J$) 会意外暴露它
-    //   - 多层 for-in 嵌套时理论上存在覆盖风险（虽顺序执行，但为消除语义干扰）
-    // 通过 tmpVarCounter 生成文件范围内唯一的变量名（var 声明，自动提升，不污染外部）
+    // 使用唯一局部变量替代旧的 J$._tm_p 沙盒属性，消除 for-in J$ 时意外暴露属性的副作用
     const tmpVarName = `${_jalangiVar}_fk${tmpVarCounter++}`;
-    // 生成 `var J$_fk{n}` 声明（插在循环前，保证变量在循环体内可见）
     const tmpVarDecl = t.variableDeclaration('var', [
         t.variableDeclarator(t.identifier(tmpVarName)),
     ]);
@@ -1007,7 +938,7 @@ function wrapForIn(node, left, right, body) {
 
     let forin;
     if (isDeclaration) {
-        // Guard: for-in 只支持单个普通标识符声明，不支持解构模式（如 for (var {a} in obj)）。
+        // for-in 只支持单个普通标识符声明，不支持解构模式
         const decl = node.left.declarations[0];
         if (!decl || decl.id.type !== 'Identifier') {
             throw new Error(
@@ -1017,27 +948,21 @@ function wrapForIn(node, left, right, body) {
             );
         }
         const name = decl.id.name;
-        // `name = tmpVar` — 作为 AssignmentExpression，供 instrumentStore 处理
         const tmp = t.assignmentExpression('=', t.identifier(name), tmpNode);
         const extra = instrumentStore(tmp, isDeclaration);
-        // for (tmpVar in right) { var name = wrapWithX1(extra.right); body... }
         const varDecl = t.variableDeclaration('var', [
             t.variableDeclarator(t.identifier(name), wrapWithX1(node, extra.right)),
         ]);
         const innerBody = t.blockStatement([varDecl, ...ensureBlockBody(body)]);
         forin = t.forInStatement(tmpNode, right, innerBody);
     } else {
-        // `left = tmpVar` — 用 AssignmentExpression 作为 left，供 instrumentStore 处理
         const tmp = t.assignmentExpression('=', left, tmpNode);
         const extra = instrumentStore(tmp, isDeclaration);
-        // for (tmpVar in right) { wrapWithX1(extra); body... }
         const x1Stmt = t.expressionStatement(wrapWithX1(node, extra));
         const innerBody = t.blockStatement([x1Stmt, ...ensureBlockBody(body)]);
         forin = t.forInStatement(tmpNode, right, innerBody);
     }
     transferLoc(forin, node);
-    // 返回 [var J$_fk{n}; for (J$_fk{n} in ...) {...}] 的语句列表
-    // 调用方（esnstrument.js ForInStatement exit）负责将其替换到 AST
     forin._jalangiTmpVarDecl = tmpVarDecl;
     return forin;
 }
@@ -1065,15 +990,13 @@ function wrapCatchClause(node, body, name) {
 /**
  * 内部工厂：生成 `jalangiLabel: while(true){ try{...} catch(J$e){...} finally{...} }` 骨架。
  *
- * 脚本（isScript=true）与函数（isScript=false）的区别在于 catch 和 finally 的内容：
+ * isScript=true（脚本体）：
+ *   catch:   J$.Ex(iid1, J$e); throw J$e;               — re-throw 保持未捕获语义
+ *   finally: J$.Sr(iid3) ? { J$.L(); continue } : { J$.L(); break }
  *
- *   isScript=true（脚本体）：
- *     catch:   J$.Ex(iid1, J$e); throw J$e;               — re-throw 保持未捕获语义
- *     finally: J$.Sr(iid3) ? { J$.L(); continue } : { J$.L(); break }
- *
- *   isScript=false（函数体）：
- *     catch:   J$.Ex(iid1, J$e);                           — 不 re-throw，让 Fr 正常执行
- *     finally: J$.Fr(iid3) ? continue : return J$.Ra()
+ * isScript=false（函数体）：
+ *   catch:   J$.Ex(iid1, J$e);                           — 不 re-throw，让 Fr 正常执行
+ *   finally: J$.Fr(iid3) ? continue : return J$.Ra()
  *
  * @param {object}  node      - 当前 AST 节点（用于 IID/loc 记录）
  * @param {Array}   bodyStmts - 原始语句数组
@@ -1088,24 +1011,19 @@ function _buildTryCatchWrapper(node, bodyStmts, isScript) {
     const labelId = t.identifier(`jalangiLabel${l}`);
     const eVar = t.identifier(`${_jalangiVar}e`);
 
-    // try { ...body }
     const tryBlock = t.blockStatement(bodyStmts);
 
-    // catch(J$e) { J$.Ex(iid1, J$e); [throw J$e;] }
     const exCall = callExpr(memberExpr(_jalangiVar, 'Ex'), [iid1, eVar]);
     const catchStmts = [t.expressionStatement(exCall)];
     if (isScript) {
-        // 脚本体必须 re-throw，保持未捕获异常语义
         catchStmts.push(t.throwStatement(t.cloneNode(eVar)));
     }
     const catchHandler = t.catchClause(eVar, t.blockStatement(catchStmts));
 
-    // finally { ... }
     const iid3 = IID.getIid();
     const contStmt = t.continueStatement(t.cloneNode(labelId));
     let finallyBlock;
     if (isScript) {
-        // J$.Sr(iid3) ? { J$.L(); continue } : { J$.L(); break }
         const srCall   = callExpr(memberExpr(_jalangiVar, 'Sr'), [iid3]);
         const lCall1   = t.expressionStatement(callExpr(memberExpr(_jalangiVar, 'L'), []));
         const lCall2   = t.expressionStatement(callExpr(memberExpr(_jalangiVar, 'L'), []));
@@ -1118,7 +1036,6 @@ function _buildTryCatchWrapper(node, bodyStmts, isScript) {
             ),
         ]);
     } else {
-        // J$.Fr(iid3) ? continue : return J$.Ra()
         const frCall = callExpr(memberExpr(_jalangiVar, 'Fr'), [iid3]);
         const raCall = callExpr(memberExpr(_jalangiVar, 'Ra'), []);
         finallyBlock = t.blockStatement([
@@ -1128,7 +1045,6 @@ function _buildTryCatchWrapper(node, bodyStmts, isScript) {
 
     const tryStmt = t.tryStatement(tryBlock, catchHandler, finallyBlock);
 
-    // jalangiLabel: while(true) { try {...} catch(...) {...} finally {...} }
     const labeled = t.labeledStatement(
         t.cloneNode(labelId),
         t.whileStatement(t.booleanLiteral(true), t.blockStatement([tryStmt]))
@@ -1146,7 +1062,6 @@ function wrapScriptBodyWithTryCatch(node, body) {
 }
 
 function wrapFunBodyWithTryCatch(node, body) {
-    // Guard: generator 和 async 函数不应进入包裹逻辑。
     if (node.generator || node.async) {
         return body;
     }
@@ -1159,7 +1074,6 @@ function wrapFunBodyWithTryCatch(node, body) {
 
 // ─── syncDefuns / instrumentFunctionEntryExit / instrumentScriptEntryExit ────
 
-/** 合法的变量类型集合（模块级常量，避免在循环内反复创建） */
 const _KNOWN_VAR_TYPES = new Set(['defun', 'lambda', 'arg', 'var']);
 
 /**
@@ -1234,12 +1148,7 @@ function syncDefuns(node, scopeArg, isScript) {
     if (!isScript) {
         if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
             if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
-                // BUG-1 fix: 不对 arguments 直接赋值（严格模式下赋值 arguments 为语法错误）。
-                // BUG-11A 修复：若函数有名为 'arguments' 的形参，scope.js 已将其重命名为
-                // '${jalangiVar}_arguments'。此处 J$.N 钩子的第三个参数（变量值）必须
-                // 使用重命名后的标识符，否则读到的是 undefined 而非实参值。
-                // 钩子名称字段（第二个参数）始终使用原始 'arguments' 字符串，
-                // 保证运行时 Shadow Frame 通过标准名称 'arguments' 查找。
+                // 若函数有名为 'arguments' 的形参，scope.js 已将其重命名为 '${jalangiVar}_arguments'
                 const renamedArg = `${_jalangiVar}_arguments`;
                 const argumentsIdent = (_scope && _scope.hasOwnVar(renamedArg))
                     ? createIdentifierAst(renamedArg)
@@ -1259,7 +1168,7 @@ function instrumentFunctionEntryExit(node, ast, omitThis = false) {
         ? createCallAsFunEnterStatement(node, scopeId, omitThis)
         : [];
 
-    // 对 async 函数：probe fn 需要被 wrapFunBodyWithTryCatch 包裹
+    // async 函数：probe fn 需要被 wrapFunBodyWithTryCatch 包裹
     if (node.async && body.length > 0
             && (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node))) {
         const feCallExpr = body[0]?.expression;
@@ -1269,7 +1178,7 @@ function instrumentFunctionEntryExit(node, ast, omitThis = false) {
         }
     }
 
-    // 对 async 函数：在 J$.Fe() 之后插入 `var __j$ctx = J$.currentCallId`
+    // async 函数：在 J$.Fe() 之后插入 `var __j$ctx = J$.currentCallId`
     const asyncCtxCapture = (node.async && (!Config.INSTR_AWAIT || Config.INSTR_AWAIT(node)))
         ? [_createAsyncCtxCaptureStatement()]
         : [];
@@ -1402,10 +1311,10 @@ function instrumentLoadModStore(node, isNumber) {
     if (node.left.type === 'Identifier') {
         let tmp0 = instrumentLoad(node.left, false);
         if (isNumber) tmp0 = makeNumber(node, instrumentLoad(tmp0, false));
-        const baseOp = node.operator.slice(0, -1);   // '||=' → '||', '+=' → '+', …
+        const baseOp = node.operator.slice(0, -1);
         let tmp1 = wrapRHSOfModStore(node.right, tmp0, node.right, baseOp);
-        // logical assignment（||= &&= ??=）：生成的 LogicalExpression 不会再被
-        // traverse 重新访问，需要在此直接注入 J$.C 钩子。
+        // logical assignment（||= &&= ??=）：生成的 LogicalExpression 不会再被 traverse 重新访问，
+        // 需要在此直接注入 J$.C 钩子
         if (baseOp === '||') tmp1 = wrapLogicalOr(tmp1, tmp0, node.right);
         else if (baseOp === '&&') tmp1 = wrapLogicalAnd(tmp1, tmp0, node.right);
         else if (baseOp === '??') tmp1 = wrapLogicalNullish(tmp1, tmp0, node.right);

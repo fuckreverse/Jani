@@ -70,7 +70,6 @@ export class NodeStreamBackend {
             log.error('stream error:', err.message);
         });
 
-        // 背压：记录 stream 是否可写
         this._drainable = true;
         this._drainPromise = null;
 
@@ -95,7 +94,6 @@ export class NodeStreamBackend {
     async write(batch) {
         if (this._closed) throw new Error('NodeStreamBackend: already closed');
 
-        // 等待上一次 drain（背压控制）
         if (!this._drainable) {
             await this._waitDrain();
         }
@@ -105,7 +103,6 @@ export class NodeStreamBackend {
         this.stats.totalEvents += batch.length;
         this.stats.bytesWritten += Buffer.byteLength(text, 'utf8');
 
-        // stream.write 返回 false 时代表需要等待 drain
         const ok = this._stream.write(text);
         if (!ok) {
             this._drainable = false;
@@ -173,7 +170,6 @@ export class NodeStreamBackend {
         return new Promise((resolve, reject) => {
             const done = () => resolve();
             if (!this._managed) {
-                // 外部 stream，不关闭，只 flush
                 this.flush().then(done, reject);
                 return;
             }

@@ -32,8 +32,6 @@ export class RingBuffer {
         this._flushThreshold = flushThreshold;
         this._overflowPolicy = overflowPolicy;
 
-        // 使用两个指针 + 固定长度数组模拟环形队列
-        // 为了避免 GC 压力，预分配数组（空槽填 undefined）
         this._buf   = new Array(capacity);
         this._head  = 0;   // 下一个可读位置
         this._tail  = 0;   // 下一个可写位置
@@ -71,7 +69,6 @@ export class RingBuffer {
                 this.stats.totalDropped++;
                 return false;
             }
-            // drop-oldest：覆盖最旧的槽，head 前移
             this._buf[this._tail] = event;
             this._tail = (this._tail + 1) % this._capacity;
             this._head = (this._head + 1) % this._capacity;
@@ -97,7 +94,7 @@ export class RingBuffer {
         const result = new Array(count);
         for (let i = 0; i < count; i++) {
             result[i]          = this._buf[this._head];
-            this._buf[this._head] = undefined;   // 释放引用
+            this._buf[this._head] = undefined;
             this._head         = (this._head + 1) % this._capacity;
         }
         this._size -= count;

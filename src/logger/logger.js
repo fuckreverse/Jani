@@ -106,15 +106,12 @@ function _gatedConsole(consoleFn, prefix, args) {
         consoleFn(prefix, ...args);
     } else {
         _consoleSilent = true;
-        // 仅打印一次静默提示（用 console.warn 确保可见）
         console.warn(
             `[Jalangi] 控制台输出已达上限 ${_consoleLimit} 条，后续日志静默丢弃。` +
             `如需调整限制请调用 setConsoleLimit(n)。`
         );
     }
 }
-
-// ── 读取 debug 开关（惰性求值，避免初始化时序问题） ────────────────────────────
 
 /**
  * 返回当前 debug 配置字符串（原始值）。

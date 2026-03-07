@@ -319,7 +319,7 @@ export class JalangiRuntime {
      */
     #aliasTable = new Map();
 
-    // ── TODO-15: 异步 ContextID 机制 —— 区分不同异步任务（async/await/Promise）──
+    // ── 异步 ContextID 机制 —— 区分不同异步任务（async/await/Promise）──────────
 
     /** 异步上下文 ID 单调递增计数器（0 = 顶层同步上下文） */
     #asyncContextIdCounter = 0;
@@ -1482,7 +1482,7 @@ export class JalangiRuntime {
     }
 
     /**
-     * TODO-15: 为新的异步任务创建独立的 ContextID。
+     * 为新的异步任务创建独立的 ContextID。
      *
      * 用于包装 setTimeout / Promise.then / setInterval 等的回调：
      * ```js
@@ -1497,7 +1497,7 @@ export class JalangiRuntime {
     }
 
     /**
-     * TODO-15: 激活指定的异步上下文。
+     * 激活指定的异步上下文。
      *
      * 在异步回调入口调用，使后续的 R/W/G/P 等 log 条目都归属到该 contextId。
      *
@@ -1508,7 +1508,7 @@ export class JalangiRuntime {
     }
 
     /**
-     * TODO-15: 返回当前激活的异步上下文 ID。
+     * 返回当前激活的异步上下文 ID。
      * 供分析器查询，用于在 log 条目上标注 contextId。
      *
      * @returns {number}  当前 ContextID（0 = 顶层同步代码）
@@ -1518,7 +1518,7 @@ export class JalangiRuntime {
     }
 
     /**
-     * TODO-15: 返回当前 CallID（最新函数调用帧的唯一 ID）。
+     * 返回当前 CallID（最新函数调用帧的唯一 ID）。
      * 供分析器和 DataFlowAnalyzer 查询，用于区分同一函数的不同调用实例。
      *
      * @returns {number}  当前 CallID（0 = 顶层脚本作用域）

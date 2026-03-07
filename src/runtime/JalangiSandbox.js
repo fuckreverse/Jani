@@ -97,10 +97,6 @@ export class JalangiSandbox extends JalangiRuntime {
         SPECIAL_PROP_SID, SPECIAL_PROP_IID, UNKNOWN, HOP, hasGetterSetter,
     };
 
-    /**
-     * BUG-RT-05 修复：私有构造函数，防止直接 new 调用。
-     * 必须通过静态工厂方法 `create(options)` 创建实例。
-     */
     constructor(options = {}) {
         super({
             debugShadow:    options.debugShadow    ?? false,

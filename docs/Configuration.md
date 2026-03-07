@@ -34,6 +34,8 @@
 | `INSTR_RETURN` | return 语句（`J$.Rt`）| `_return` |
 | `INSTR_THROW` | throw 语句（`J$.Th`）| `_throw` |
 | `INSTR_FORIN` | for-in 循环（`J$.H`）| `forinObject` |
+| `INSTR_AWAIT` | `await` 恢复点（`J$.Aw`）| `awaitResume` |
+| `INSTR_PROPERTY_BINARY_ASSIGNMENT` | 属性复合赋值（`obj.x += 1`，`J$.A`）| `putFieldPre` / `putField` |
 
 ### 采样模式字段
 
@@ -61,6 +63,8 @@ flowchart LR
         RT["INSTR_RETURN"]
         TH["INSTR_THROW"]
         FI["INSTR_FORIN"]
+    AW["INSTR_AWAIT"]
+    PBA["INSTR_PROPERTY_BINARY_ASSIGNMENT"]
     end
 
     subgraph Hooks["分析钩子"]
@@ -79,6 +83,8 @@ flowchart LR
         ret["_return"]
         thr["_throw"]
         forin["forinObject"]
+        awaitRes["awaitResume"]
+        propBin["putFieldPre / putField\n(属性复合赋值场景)"]
     end
 
     RD --> read
@@ -96,6 +102,8 @@ flowchart LR
     RT --> ret
     TH --> thr
     FI --> forin
+    AW --> awaitRes
+    PBA --> propBin
 ```
 
 ## 常用 Config 组合
@@ -119,6 +127,8 @@ const Config = {
     INSTR_RETURN:             null,
     INSTR_THROW:              null,
     INSTR_FORIN:              null,
+    INSTR_AWAIT:              null,
+    INSTR_PROPERTY_BINARY_ASSIGNMENT: null,
     ENABLE_SAMPLING:          false,
 };
 
@@ -146,6 +156,8 @@ const Config = {
     INSTR_RETURN:             () => false,
     INSTR_THROW:              () => false,
     INSTR_FORIN:              () => false,
+    INSTR_AWAIT:              () => false,
+    INSTR_PROPERTY_BINARY_ASSIGNMENT: () => false,
     ENABLE_SAMPLING:          false,
 };
 ```
@@ -169,6 +181,8 @@ const Config = {
     INSTR_RETURN:             () => false,
     INSTR_THROW:              () => false,
     INSTR_FORIN:              () => false,
+    INSTR_AWAIT:              () => false,
+    INSTR_PROPERTY_BINARY_ASSIGNMENT: () => false,
     ENABLE_SAMPLING:          false,
 };
 ```
@@ -194,7 +208,21 @@ const Config = {
 };
 ```
 
-> **注意**：细粒度控制函数接收 Babel AST 节点对象，含 `type`、`operator`、`computed`、`loc` 等字段。
+> **注意**：各字段的细粒度控制函数签名不完全相同，以下是各字段的实际调用签名：
+>
+> | Config 字段 | 调用签名 | 第一参数说明 |
+> |---|---|---|
+> | `INSTR_BINARY` | `fn(operator, node)` | 运算符字符串（如 `'+'`、`'==='`）|
+> | `INSTR_UNARY` | `fn(operator, node)` | 运算符字符串（如 `'!'`、`'typeof'`）|
+> | `INSTR_GETFIELD` | `fn(propName, node)` | 属性名字符串，计算属性（`obj[key]`）时为 `null` |
+> | `INSTR_PUTFIELD` | `fn(propName, node)` | 属性名字符串，计算属性时为 `null` |
+> | `INSTR_PROPERTY_BINARY_ASSIGNMENT` | `fn(op, propName, node)` | `op`：基础运算符（如 `'+'`），`propName`：属性名或 `null` |
+> | `INSTR_READ` / `INSTR_WRITE` | `fn(nameNode, node)` | **`nameNode` 是 `StringLiteral` AST 节点**（不是字符串），需用 `nameNode.value` 获取变量名 |
+> | `INSTR_CONDITIONAL` | `fn(kind, node)` | `kind` 为 `'&&'`/`'||'`/`'??'`/`'switch'`/`'with'`/`'other'` 等 |
+> | 其余字段 | `fn(node)` | 仅传 AST 节点 |
+>
+> 其中 `node` 始终是完整的 Babel AST 节点对象，含 `type`、`operator`、`computed`、`loc` 等字段。
+> 已知 `INSTR_READ` / `INSTR_WRITE` 的第一个参数是 AST 节点而非字符串，与其他字段不一致（见代码问题 ISSUE-07）。
 
 ### 自动推导 Config（推荐）
 
@@ -248,6 +276,6 @@ const result = instrumentCode({
 **新版（当前）区别**：
 1. Config 通过 `init(config)` 参数注入，无全局状态
 2. 移除了 `DEBUG` / `WARN` / `MAX_BUF_SIZE` / `LOG_ALL_READS_AND_BRANCHES` 等非核心字段
-3. 新增 `INSTR_INIT`（对应 `J$.N` 声明钩子）、`INSTR_END_EXPRESSION`（对应 `J$.X1`）、`INSTR_INVOKE`（对应 `J$.F`/`J$.M`）、`INSTR_RETURN`（对应 `J$.Rt`）、`INSTR_THROW`（对应 `J$.Th`）、`INSTR_FORIN`（对应 `J$.H`）
-4. 细粒度控制函数签名统一为 `(ast) => boolean`，旧版为 `(name/operator, ast) => boolean`
+3. 新增 `INSTR_INIT`（对应 `J$.N` 声明钩子）、`INSTR_END_EXPRESSION`（对应 `J$.X1`）、`INSTR_INVOKE`（对应 `J$.F`/`J$.M`）、`INSTR_RETURN`（对应 `J$.Rt`）、`INSTR_THROW`（对应 `J$.Th`）、`INSTR_FORIN`（对应 `J$.H`）、`INSTR_AWAIT`（对应 `J$.Aw`）、`INSTR_PROPERTY_BINARY_ASSIGNMENT`（对应属性复合赋值 `J$.A`）
+4. 细粒度控制函数接受 AST 节点参数；各字段签名略有差异（详见上方"细粒度控制示例"中的签名表）
 5. 新增 `pluginAnalyzer.js` 支持自动推导按需 Config

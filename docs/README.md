@@ -41,6 +41,7 @@ const Config = {
     INSTR_BINARY: null, INSTR_UNARY: null, INSTR_LITERAL: null, INSTR_INIT: null,
     INSTR_CONDITIONAL: null, INSTR_TRY_CATCH_ARGUMENTS: null, INSTR_END_EXPRESSION: null,
     INSTR_INVOKE: null, INSTR_RETURN: null, INSTR_THROW: null, INSTR_FORIN: null,
+    INSTR_AWAIT: null, INSTR_PROPERTY_BINARY_ASSIGNMENT: null,
     ENABLE_SAMPLING: false,
 };
 init(Config);
@@ -105,7 +106,6 @@ src/
       NodeStreamBackend.js
       WsBackend.js
       IdbWorkerBackend.js
-      TypedArrayBackend.js   ← 高性能 Float64Array 环形缓冲区
     workers/
       idb-worker.js    ← IndexedDB Worker（Blob URL 内联）
   plugins/             ← 示例分析插件

@@ -52,16 +52,18 @@ classDiagram
     class JalangiSandbox {
         +smap
         +sid
+        +lastSid
         +iids
         +analysis: HookDispatcher
         +tracer: TraceLogger
         +Constants
         +smemory: SMemory
-        +iidToLocation(iid)
+        +iidToLocation(sid, iid)
         +getGlobalIID(iid)
         +newAsyncContext()
         +activateContext(ctxId)
         +currentContextId
+        +currentCallId
         +getShadowStats()
         +resetShadowStats()
     }
@@ -90,19 +92,30 @@ classDiagram
 
 ## JalangiSandbox — 完整沙盒
 
+> **推荐**：使用静态异步工厂方法 `JalangiSandbox.create(options)` 创建实例，
+> 而非直接 `new JalangiSandbox()`，以确保异步插件（如 ExecutionTraceAnalysis）在使用前已完全注册，避免早期 trace 事件丢失。
+
 ```js
 import { JalangiSandbox } from './src/runtime/JalangiSandbox.js';
 
-// 最简用法：纯 analysis，不需要 IndexedDB
-const J$ = globalThis.J$ = new JalangiSandbox();
+// 推荐方式：使用 create() 异步工厂方法
+const J$ = globalThis.J$ = await JalangiSandbox.create();
 J$.analysis.use(new MyAnalysis(J$));
 
-// 完整用法：内置 ExecutionTrace + IndexedDB 持久化
-const J$ = globalThis.J$ = new JalangiSandbox({
+// 带 ExecutionTrace 的完整用法
+const J$ = globalThis.J$ = await JalangiSandbox.create({
+    withExecutionTrace: true,
     useIdb:    true,
     dbName:    'jalangi-traces',
     storeName: 'execution-trace',
 });
+
+// 纯观测模式（插件无法修改执行结果）
+const J$ = globalThis.J$ = await JalangiSandbox.create({ observeOnly: true });
+
+// 同步创建（不需要异步插件时仍可用 new，但需要手动 await）
+const J$ = globalThis.J$ = new JalangiSandbox();
+J$.analysis.use(new MyAnalysis(J$));
 
 // 扩展：追加更多分析插件
 J$.analysis.use(new AnotherAnalysis(J$));
@@ -118,10 +131,12 @@ J$.analysis.use(new AnotherAnalysis(J$));
 | `withExecutionTrace` | `boolean` | `false` | 是否自动注册内置 ExecutionTraceAnalysis 插件 |
 | `sourceCode` | `string` | — | 原始源码（ExecutionTrace 用，可选） |
 | `debugShadow` | `boolean` | `false` | 是否开启 Shadow Frame 调试模式。开启后每次 `Rl()` 查表未命中时，递增 miss 计数器并写入 miss 日志，同时向 `console.warn` 输出诊断信息。可通过 `getShadowStats()` 查询结果 |
+| `observeOnly` | `boolean` | `false` | 纯观测模式。`true` 时所有插件钩子仍正常调用，但返回值被完全忽略——插件无法通过 `result`/`skip`/`isBacktrack` 等字段修改原始程序的执行。适用于 Trace / Coverage / Profiling 等纯观测场景 |
+| `instrumentEval` | `boolean` | `false` | 是否对 `eval` / `new Function` 动态创建的代码进行插桩。默认 `false`：eval/Function 直接透传原始调用，语义完全保持原样。设为 `true` 则恢复旧式行为（动态代码也被插桩分析） |
 
-### 公开字段
+### 公开字段与 Getter
 
-| 字段 | 类型 | 说明 |
+| 字段/Getter | 类型 | 说明 |
 |------|------|------|
 | `smap` | `object` | iid → 源码位置映射表 `{ [sid]: { [iid]: [sl,sc,el,ec] } }` |
 | `sid` | `number` | 当前脚本 ID（`Sr()` 执行后会回滚，脚本结束后为 0） |
@@ -131,18 +146,31 @@ J$.analysis.use(new AnotherAnalysis(J$));
 | `tracer` | `TraceLogger\|null` | TraceLogger 实例（由 ExecutionTraceAnalysis 写入） |
 | `Constants` | `object` | 所有全局常量（APPLY、CALL、HOP、JALANGI_VAR 等） |
 | `smemory` | `SMemory\|null` | Shadow Memory 实例（启用后由 SMemoryPlugin 写入） |
+| `currentCallId` | `number`（getter）| 当前函数调用帧的唯一 ID（0 = 顶层脚本作用域），可供分析器查询以区分同一函数的不同调用实例 |
+| `currentContextId` | `number`（getter）| 当前激活的异步上下文 ID（0 = 顶层同步代码）|
 
 ### 位置查询
 
+`iidToLocation(sid, iid)` 接受脚本 ID 和指令 ID，返回可读的源码位置字符串。
+也接受 `"sid:iid"` 格式的全局 IID 字符串作为第一个参数（此时第二个参数可省略）。
+
 ```js
-// 根据 iid 获取源码位置
-const loc = J$.iidToLocation(iid);
-// → "example.js:(1:1)-(1:10)"
+// 根据 (sid, iid) 获取源码位置（推荐，常用于 analysis 回调中）
+const loc = J$.iidToLocation(J$.lastSid, iid);
+// → "(example.js:3:5:3:15)"
+
+// 也接受 "sid:iid" 格式的全局 IID 字符串
+const loc2 = J$.iidToLocation('1:42');
+// → "(example.js:1:1:1:10)"
 
 // 获取全局唯一 IID（含 sid 前缀）
 const globalIid = J$.getGlobalIID(iid);
 // → "1:42"
 ```
+
+> **注意**：旧文档中的 `J$.iidToLocation(iid)` 单参数用法是错误的。
+> `iidToLocation` 需要两个参数 `(sid, iid)`，或一个 `"sid:iid"` 格式字符串。
+> 在 analysis 回调中常通过 `J$.lastSid` 获取当前脚本 ID。
 
 ## JalangiRuntime — 钩子实现
 
@@ -401,7 +429,7 @@ const stats = J$.getShadowStats();
 // stats.frameCount  → 当前存活的 Shadow Frame 帧数（调试内存泄漏用）
 // stats.debugShadow → 是否处于调试模式
 
-// 用 iidToLocation 将 iid 转成源码位置
+// 用 iidToLocation 将 iid 转成源码位置（需传入 lastSid 和 iid）
 stats.missLog.forEach(({ iid, name }) => {
     console.log(`  ${name} @ ${J$.iidToLocation(J$.lastSid, iid)}`);
 });
@@ -512,9 +540,9 @@ setTimeout(createContextWrapper(originalCallback, J$), delay);
 2. `J$.Sr(iid)` —— 脚本退出时弹出 sid，恢复父脚本上下文
 
 ```js
-// 源码位置查询示例
-J$.iidToLocation(iid);
-// → "example.js:(3:5)-(3:15)"
+// 源码位置查询示例（需传入 sid 和 iid 两个参数）
+J$.iidToLocation(J$.lastSid, iid);
+// → "(example.js:3:5:3:15)"
 ```
 
 ## eval 和 Function 动态代码处理
@@ -654,7 +682,6 @@ flowchart TD
         NS["NodeStreamBackend\n(Node.js 流 / 写文件)"]
         WS["WsBackend\n(WebSocket，传输到 trace server)"]
         IDB["IdbWorkerBackend\n(IndexedDB Worker，浏览器持久化)"]
-        TA["TypedArrayBackend\n(Float64Array 环形缓冲区\n零 GC，高吞吐量)"]
     end
 
     LOGGER -.->|"各模块 import"| TL
@@ -666,7 +693,6 @@ flowchart TD
     ES --> NS
     ES --> WS
     ES --> IDB
-    ES --> TA
 ```
 
 | 组件 | 文件 | 说明 |
@@ -680,26 +706,11 @@ flowchart TD
 | `NodeStreamBackend` | `backends/NodeStreamBackend.js` | Node.js 流（写文件、stdout）|
 | `WsBackend` | `backends/WsBackend.js` | WebSocket 后端（传输到 trace server）|
 | `IdbWorkerBackend` | `backends/IdbWorkerBackend.js` | IndexedDB Worker 后端（浏览器持久化）|
-| `TypedArrayBackend` | `backends/TypedArrayBackend.js` | **高性能 TypedArray 环形缓冲区**后端（零 GC、可导出 `.bin`）|
 
-### TypedArrayBackend — 高性能环形缓冲区
-
-`TypedArrayBackend` 实现了与 `MemoryBackend` 相同的接口，但内部使用预分配的 `Float64Array`
-环形缓冲区写入，写入速度比 `Array.push(obj)` 快 10-100 倍，且不产生 GC 压力。
-
-```js
-import { TypedArrayBackend } from './src/logger/backends/TypedArrayBackend.js';
-
-const backend = new TypedArrayBackend({ capacity: 1_000_000 });
-
-// 导出二进制（用于离线分析）
-const buf = backend.exportBinary();
-
-// 调试读取（最近 100 条）
-const events = backend.getEvents(100);
-```
-
-每条 log 条目编码为 5 个 Float64（40 字节），字段含义：`entryType | iid | scopeId:callId(packed) | contextId | valueKey`。
+> **注意**：`TypedArrayBackend`（`backends/TypedArrayBackend.js`）在文档的早期版本中有描述，
+> 但该文件**目前尚未实现**，`src/logger/backends/` 目录中不存在此文件。
+> 若需要高性能零 GC 的环形缓冲区后端，请参考 `MemoryBackend` 的接口自行实现，
+> 或等待后续版本更新。
 
 ## DataFlowAnalyzer — 运行时 SSA 数据流分析
 

@@ -283,14 +283,12 @@ export class SMemoryPlugin {
 //   J$.smemory = smemory;
 //   host.use(new SMemoryPlugin(smemory));
 
-// BUG-RT-06 修复：集成到现有 HookDispatcher 而非覆盖。
+// 集成到现有 HookDispatcher 而非覆盖。
 // 若 J$.analysis 已是 HookDispatcher 实例（支持 .use() 方法），则将 SMemoryPlugin
 // 注册为插件，保留其他已注册的分析。否则才直接赋值（向后兼容旧式单一分析）。
 //
-// BUG-7 修复：使用 globalThis.J$ 替代裸 J$ 引用。
-// 在纯 ESM 环境中，裸 `J$` 访问的是模块顶层作用域内的标识符，
-// 而非挂在全局对象上的 J$。改用 globalThis.J$ 语义明确，
-// 无论在 ESM、CJS 还是浏览器脚本环境中行为一致。
+// 使用 globalThis.J$ 而非裸 J$ 引用：在纯 ESM 环境中，裸 `J$` 访问的是模块顶层
+// 作用域标识符，而非全局对象上的 J$。globalThis.J$ 语义明确，各环境行为一致。
 if (typeof globalThis.J$ !== 'undefined') {
     const J$ = globalThis.J$;
     const smemory = new SMemory(J$);

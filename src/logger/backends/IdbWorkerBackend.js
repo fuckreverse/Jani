@@ -85,7 +85,6 @@ export class IdbWorkerBackend {
         // 统计
         this.stats = { batchCount: 0, totalEvents: 0, errors: 0, dropped: 0 };
 
-        // 仅在 debug 开启时输出构造参数（非关键路径）
         log.debug('constructed', { dbName, storeName });
     }
 
@@ -102,12 +101,8 @@ export class IdbWorkerBackend {
         const workerUrlStr = String(this._workerUrl);
         const t0 = Date.now();
 
-        // 注意：不传 { type: 'module' }，以 Classic Worker 方式运行。
-        // 在 bundle 场景下，jalangi.mjs rollup 插件会将 this._workerUrl 替换为
-        // 预先由 Blob 创建的 __idbWorkerUrl（Classic Worker 兼容 blob: URL）。
         this._worker = new Worker(this._workerUrl);
         this._worker.onerror = (evt) => {
-            // Worker 脚本级别错误（加载失败 / 语法错误等）
             log.error('Worker onerror:', evt.message, `(${evt.filename}:${evt.lineno})`);
             this.stats.errors++;
             // 若 init 尚未完成，立即 reject，避免等到 15s 超时
@@ -117,7 +112,6 @@ export class IdbWorkerBackend {
         };
         this._worker.onmessage = (evt) => this._handleMessage(evt.data);
 
-        // 等待 Worker ready（在 _handleMessage 中处理；init 阶段用临时 Promise 桥接）
         await new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
                 const msg = `Worker init timeout after 15s (workerUrl=${workerUrlStr})`;
@@ -125,7 +119,6 @@ export class IdbWorkerBackend {
                 reject(new Error('IdbWorkerBackend: Worker init timeout'));
             }, 15000);
 
-            // 在 _handleMessage 里增加一个单次 'ready' 路由
             this._readyResolve = () => { clearTimeout(timeout); resolve(); };
             this._readyReject  = (e) => { clearTimeout(timeout); reject(e); };
 
@@ -134,7 +127,6 @@ export class IdbWorkerBackend {
                 dbName:    this._dbName,
                 storeName: this._storeName,
                 version:   this._dbVersion,
-                // 把 debug 开关同步给 Worker（Worker 内无法读取 localStorage）
                 debugDomain: isDebugEnabled(DOMAIN.BACKEND_IDB) ? DOMAIN.BACKEND_IDB : null,
             });
         });
@@ -145,7 +137,6 @@ export class IdbWorkerBackend {
         const elapsed = Date.now() - t0;
         log.debug(`IDB ready in ${elapsed}ms (db=${this._dbName} store=${this._storeName})`);
 
-        // 每次页面加载自动清空旧数据，避免多次刷新后数据重复积累
         if (this._clearOnInit) {
             await this.clear();
             log.debug('IDB store cleared on init');
@@ -169,7 +160,6 @@ export class IdbWorkerBackend {
             await this.init();
         }
 
-        // 背压：待确认批次过多时等待（事件驱动，非忙等待）
         if (this._pending.size >= this._maxPending) {
             log.warn(`backpressure: pending=${this._pending.size}/${this._maxPending}, waiting for slot (batch=${batch.length})`);
             await this._waitForSlot();
@@ -285,7 +275,6 @@ export class IdbWorkerBackend {
     _handleMessage(msg) {
         switch (msg.type) {
             case 'ready': {
-                // init() 阶段的单次就绪通知
                 if (this._readyResolve) {
                     this._readyResolve();
                 } else {
@@ -307,7 +296,6 @@ export class IdbWorkerBackend {
                 break;
             }
             case 'error': {
-                // 可能是 write 错误（有 batchId）或通用错误
                 const errMsg = msg.message ?? 'unknown error';
                 if (msg.batchId != null) {
                     const entry = this._pending.get(msg.batchId);
@@ -326,7 +314,6 @@ export class IdbWorkerBackend {
                 } else if (msg.reqId != null) {
                     this._resolveRequest(msg.reqId, null, new Error(errMsg));
                 } else {
-                    // init 失败（无 batchId/reqId）：立即 reject init Promise，避免 15s 超时
                     log.error('Worker error (unknown origin):', errMsg);
                     if (msg.stack) log.error('Worker stack trace:', msg.stack);
                     if (this._readyReject) {

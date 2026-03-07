@@ -69,7 +69,6 @@ esnstrument.js        ← 所有上述模块 + @babel/parser + @babel/generator
 | `backends/NodeStreamBackend.js` | Node.js 流（写文件、stdout）|
 | `backends/WsBackend.js` | WebSocket 后端（传输到 trace server）|
 | `backends/IdbWorkerBackend.js` | IndexedDB Worker 后端（浏览器持久化）|
-| `backends/TypedArrayBackend.js` | 高性能 TypedArray 后端（零 GC）|
 | `workers/idb-worker.js` | IndexedDB Worker 脚本（Blob URL 内联）|
 
 ---

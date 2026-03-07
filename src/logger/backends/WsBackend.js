@@ -300,7 +300,6 @@ export class WsBackend {
 
     _serialize(batchId, batch) {
         if (this._format === 'binary') {
-            // 头部加 batchId（4 字节） + 标准批次二进制
             const { serializeBatchToBinary: serialize } = this._getSerializer();
             const batchBuf = serialize(batch);
             const out      = new ArrayBuffer(4 + batchBuf.byteLength);
@@ -309,12 +308,10 @@ export class WsBackend {
             new Uint8Array(out, 4).set(new Uint8Array(batchBuf));
             return out;
         } else {
-            // NDJSON 文本，包含 batchId
             return JSON.stringify({ batchId, events: batch.map(safeEventForJSON) }) + '\n';
         }
     }
 
-    // 懒加载序列化函数（避免循环依赖时机问题）
     _getSerializer() {
         if (!this._serializerCache) {
             this._serializerCache = { serializeBatchToBinary };

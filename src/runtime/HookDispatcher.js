@@ -168,7 +168,7 @@ class HookDispatcher {
                         ret = r;
                     }
                 } catch (e) {
-                    // BUG-1 修复：先取出 _onError 再检查是否为函数，防止
+                    // 先取出 _onError 再检查是否为函数，防止
                     // _onError 被替换为非函数时 onError()() 抛出 TypeError，
                     // 掩盖原始异常，造成难以调试的双重异常问题。
                     const errHandler = onError();

@@ -166,11 +166,17 @@ mindmap
 
 **返回值**：`{ base, offset, val, skip }` 或 `undefined`。
 
+> **注意**：`isOpAssign` 在普通属性赋值（`obj.x = val`，经由 `J$.P`）场景下**始终为 `false`**。
+> 属性复合赋值（`obj.x += 1` 等）走独立的 `J$.A` 钩子（由 `INSTR_PROPERTY_BINARY_ASSIGNMENT` 控制），
+> 不会触发 `putFieldPre` / `putField`。
+
 #### `putField(iid, base, offset, val, isComputed, isOpAssign)`
 
 属性写入之**后**触发。
 
 **返回值**：`{ result }` 或 `undefined`。
+
+> **注意**：同 `putFieldPre`，通过 `J$.P` 路径触发时 `isOpAssign` 始终为 `false`。
 
 ---
 
@@ -285,9 +291,9 @@ mindmap
 |------|---------|
 | `iid` | 指令 ID（`await` 表达式所在位置） |
 | `contextId` | 本次 async 函数调用的唯一上下文 ID（由插桩在 async 函数入口注入的 `J$__ctx` 局部变量带出） |
-| `val` | `await` 的 resolved value（注意：返回将被忧略，无法修改它） |
+| `val` | `await` 的 resolved value（注意：返回将被忽略，无法修改它） |
 
-返回将被忧略（`val` 由 `J$.Aw` 直接透传，不支持修改）。
+返回将被忽略（`val` 由 `J$.Aw` 直接透传，不支持修改）。
 
 **常见用途**：在 `awaitResume` 中需要用 `contextId` 来关联同一次 async 函数调用中多次 await 的事件。同一次调用的所有 `awaitResume` 共享相同的 `contextId`；不同次调用（即使是同一函数）的 `contextId` 必不相同。
 
@@ -347,7 +353,7 @@ binary(iid, op, left, right, result) {
 // 示例：阻止某个方法调用
 invokeFunPre(iid, f, base, args) {
     if (f.name === 'dangerousMethod') {
-        console.warn('Blocked dangerous call at', this._sandbox.iidToLocation(iid));
+        console.warn('Blocked dangerous call at', this._sandbox.iidToLocation(this._sandbox.lastSid, iid));
         return { f, base, args, skip: true };
     }
 }
@@ -371,8 +377,8 @@ class MyAnalysis {
     }
 
     read(iid, name, val, isGlobal) {
-        const loc = this._sandbox.iidToLocation(iid);
-        // → "example.js:(3:5)-(3:10)"
+        const loc = this._sandbox.iidToLocation(this._sandbox.lastSid, iid);
+        // → "(example.js:3:5:3:10)"
         console.log(`Read ${name} at ${loc}`);
         return { result: val };
     }
@@ -440,7 +446,7 @@ export class CheckNaNAnalysis {
     binary(iid, op, left, right, result) {
         if (typeof result === 'number' && isNaN(result)
                 && !isNaN(left) && !isNaN(right)) {
-            const loc = this._sandbox.iidToLocation(iid);
+            const loc = this._sandbox.iidToLocation(this._sandbox.lastSid, iid);
             this._nanLocations.push({
                 op, left, right, loc,
                 message: `NaN produced by ${left} ${op} ${right} at ${loc}`,
@@ -451,7 +457,7 @@ export class CheckNaNAnalysis {
 
     read(iid, name, val, isGlobal) {
         if (typeof val === 'number' && isNaN(val) && isGlobal) {
-            const loc = this._sandbox.iidToLocation(iid);
+            const loc = this._sandbox.iidToLocation(this._sandbox.lastSid, iid);
             this._nanLocations.push({
                 name, loc,
                 message: `NaN read from global ${name} at ${loc}`,

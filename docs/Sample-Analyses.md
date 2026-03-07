@@ -19,6 +19,7 @@ mindmap
       BranchCoverage.js
       SkipFunction.js
       ChangeSematicsOfMult.js
+      CheckUndefinedConcatenatedToString.js
       CountObjectsPerAllocationSite.js
       BackTrackLoop.js
     dlint 代码质量检测
@@ -37,6 +38,7 @@ mindmap
     coverage 代码覆盖率
       AddCoverage.js
       ProcessCoverage.js
+      SpecialCoverage.js
     根目录
       ExecutionTrace.js
       ScriptLocal.js
@@ -59,6 +61,7 @@ src/plugins/
     BranchCoverage.js    ← 分支覆盖（PLDI 版本）
     SkipFunction.js      ← 跳过函数执行示例
     ChangeSematicsOfMult.js    ← 修改乘法语义示例
+    CheckUndefinedConcatenatedToString.js ← undefined 字符串拼接检测（PLDI 版本）
     BackTrackLoop.js           ← 回溯循环（PLDI 版本）
     CountObjectsPerAllocationSite.js ← 按分配点统计对象数
   dlint/                 ← 代码质量检测（DLint）
@@ -170,6 +173,17 @@ J$.analysis.use(new SMemoryPlugin(smemory))
 
 在 `LogLoadStore` 基础上，追加对象分配点（allocation site）信息。
 可回答"这个对象是在哪里创建的"这一问题。
+
+---
+
+### CheckUndefinedConcatenatedToString — undefined 字符串拼接检测（PLDI 版本）
+
+**文件**：`src/plugins/pldi16/CheckUndefinedConcatenatedToString.js`
+
+检测 `undefined` 被意外拼接到字符串的情况（如 `"value: " + undefined`，结果为 `"value: undefined"`）。
+是 `dlint/ConcatUndefinedToString.js` 的 PLDI 论文版本，使用 `getGlobalIID` + `iidToLocation` 输出报告。
+
+**检测目标**：二元 `+` 运算，结果为字符串，且左操作数或右操作数为 `undefined`。
 
 ---
 

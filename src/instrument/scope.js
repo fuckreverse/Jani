@@ -22,7 +22,6 @@ import _babelTraverse from '@babel/traverse';
 const babelTraverse = _babelTraverse.default ?? _babelTraverse;
 
 // ─── ScopeID 计数器 ──────────────────────────────────────────────────────────
-// 每次 instrumentCode 调用前通过 resetScopeCounter() 重置，保证插桩幂等性
 
 let _scopeIdCounter = 0;
 
@@ -125,12 +124,10 @@ class Scope {
     usesWith()      { return this.hasWith_; }
 }
 
-// ─── arguments 重命名常量 ─────────────────────────────────────────────────────
+// ─── arguments 重命名 ─────────────────────────────────────────────────────────
 
 const FROM_NAME = 'arguments';
-// 注意：实际重命名目标名（toName）在 addScopes 函数内动态生成：
-//   const toName = `${jalangiVar}_arguments`;
-// 这样可以支持自定义 jalangiVar，不在模块顶层硬编码。
+// 实际重命名目标名（toName）在 addScopes 函数内动态生成：`${jalangiVar}_arguments`
 
 /**
  * 从一个可能是任意模式（pattern）的参数节点中收集所有绑定的标识符名称。
@@ -164,19 +161,9 @@ function collectParamNames(param, collected) {
 }
 
 /**
- * BUG-2 修复：递归将解构参数 pattern 中所有名为 fromName 的 Identifier 节点
- * 的 name 属性改为 toName（就地修改 AST 节点）。
+ * 递归将解构参数 pattern 中所有名为 fromName 的 Identifier 节点的 name 改为 toName（就地修改 AST）。
  *
- * registerParam 的解构分支只调用 collectParamNames 收集名称，
- * 但没有对名为 'arguments' 的绑定节点执行重命名，导致作用域表中注册的是
- * 'arguments' 而非 '${jalangiVar}_arguments'，与后续 wrappers.js 的处理不一致。
- *
- * 使用时机：在 collectParamNames 之前调用，先完成 AST 就地重命名，
- * 再让 collectParamNames 收集（已重命名后的）名称。
- *
- * @param {object} param    - 参数 pattern 节点
- * @param {string} fromName - 需要被替换的名称（通常为 'arguments'）
- * @param {string} toName   - 替换目标名称（通常为 '${jalangiVar}_arguments'）
+ * 必须在 collectParamNames 之前调用，确保作用域表中注册的名称与 wrappers.js 期望一致。
  */
 function renameArgumentsInPattern(param, fromName, toName) {
     if (!param) return;
@@ -188,7 +175,6 @@ function renameArgumentsInPattern(param, fromName, toName) {
             renameArgumentsInPattern(param.argument, fromName, toName);
             break;
         case 'AssignmentPattern':
-            // 只处理左侧绑定目标，右侧默认值不是绑定名
             renameArgumentsInPattern(param.left, fromName, toName);
             break;
         case 'ObjectPattern':
@@ -196,7 +182,6 @@ function renameArgumentsInPattern(param, fromName, toName) {
                 if (prop.type === 'RestElement') {
                     renameArgumentsInPattern(prop, fromName, toName);
                 } else {
-                    // prop.value 是绑定目标（可能是嵌套 pattern 或 Identifier）
                     renameArgumentsInPattern(prop.value, fromName, toName);
                 }
             }
@@ -217,19 +202,14 @@ function renameArgumentsInPattern(param, fromName, toName) {
  * 遍历 AST，为每个作用域节点附加 .scope（Jalangi Scope 对象），
  * 并完成 `arguments` → `J$_arguments` 重命名。
  *
- * 使用 @babel/traverse 替代旧版自定义 transformAst 实现，
- * 确保对所有 ES2022+ 语法（可选链、解构、class 私有字段等）都能正确遍历。
- *
  * @param {object} fileOrProgram - 解析得到的 AST（File 节点或 Program 节点均可）
  * @param {string} [jalangiVar]  - 沙盒变量名（默认 JALANGI_VAR）
  */
 function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
-    // @babel/traverse 需要 File 节点；若传入的是 Program，向上包一层
     const fileNode = (fileOrProgram.type === 'File')
         ? fileOrProgram
         : { type: 'File', program: fileOrProgram, errors: [] };
 
-    // 遍历时访问的 Program 节点（用于附加 scope）
     const programNode = fileNode.program;
 
     const toName = `${jalangiVar}_arguments`;
@@ -242,9 +222,7 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
             if (param.name === FROM_NAME) param.name = toName;
             currentScope.addVar(param.name, 'arg');
         } else {
-            // BUG-2 修复：解构参数中可能含名为 'arguments' 的绑定（如 function f({arguments}){}）。
-            // 必须先对 AST 节点就地重命名，再收集名称，保证注册到作用域表中的名称
-            // 与 wrappers.js 期望的 '${jalangiVar}_arguments' 一致。
+            // 解构参数中可能含名为 'arguments' 的绑定，先重命名再收集
             renameArgumentsInPattern(param, FROM_NAME, toName);
             const names = [];
             collectParamNames(param, names);
@@ -277,7 +255,6 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
             case 'ObjectMethod':
                 node.params.forEach(registerParam);
                 break;
-            // Program: currentScope 就是顶层全局作用域
         }
     }
 
@@ -290,7 +267,6 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
     // ── @babel/traverse visitor ─────────────────────────────────────────────
 
     babelTraverse(fileNode, {
-        // ─── 作用域节点：进入时建新 scope ────────────────────────────────────
         Program: {
             enter(path) {
                 currentScope = new Scope(null, false);
@@ -319,10 +295,7 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
             exit:  exitScope,
         },
 
-        // ─── ClassDeclaration：将类名注册到当前（外层）作用域 ────────────────
-        // 架构-3 修复：class 声明绑定的语义等同于 const（TDZ + 不可重赋值），
-        // 应使用 'const' kind，而非原来的 'let'。
-        // 这与 ClassExpression 中 addVar(..., 'const') 的处理保持一致。
+        // class 声明的语义等同于 const（TDZ + 不可重赋值）
         ClassDeclaration: {
             enter(path) {
                 if (path.node.id) {
@@ -331,7 +304,7 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
             },
         },
 
-        // ─── ClassExpression：有 id 时建独立作用域（类名只在类内可见）────────
+        // ClassExpression 有 id 时建独立作用域（类名只在类内可见）
         ClassExpression: {
             enter(path) {
                 if (path.node.id) {
@@ -347,7 +320,6 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
             },
         },
 
-        // ─── VariableDeclarator：注册 var / let / const 变量 ─────────────────
         VariableDeclarator: {
             enter(path) {
                 const declarationNode = path.parentPath?.node;
@@ -364,7 +336,6 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
             },
         },
 
-        // ─── CatchClause：建 catch 作用域 ─────────────────────────────────────
         CatchClause: {
             enter(path) {
                 const node = path.node;
@@ -382,26 +353,21 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
             exit: exitScope,
         },
 
-        // ─── Identifier：arguments 重命名 + eval 检测 ─────────────────────────
         Identifier(path) {
             const node = path.node;
 
-            // eval 出现在任何地方 → 标记整条作用域链
             if (node.name === 'eval') {
                 currentScope?.addEval();
             }
 
             // arguments 重命名：只处理 RHS（读取）上下文
-            // 使用 path.isReferencedIdentifier() 而非手动判断上下文
             if (node.name === FROM_NAME && path.isReferencedIdentifier()) {
-                // 只有当前作用域链中存在 J$_arguments（即函数已注册该参数）时才重命名
                 if (currentScope?.hasOwnVar(toName)) {
                     node.name = toName;
                 }
             }
         },
 
-        // ─── arguments 重命名：UpdateExpression 操作数 ───────────────────────
         UpdateExpression(path) {
             const node = path.node;
             if (node.argument.type === 'Identifier'
@@ -411,7 +377,6 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
             }
         },
 
-        // ─── arguments 重命名：AssignmentExpression 左侧 ────────────────────
         AssignmentExpression(path) {
             const node = path.node;
             if (node.left.type === 'Identifier'
@@ -421,7 +386,6 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
             }
         },
 
-        // ─── WithStatement：标记当前作用域链使用了 with ───────────────────────
         WithStatement(path) {
             currentScope?.addWith();
         },

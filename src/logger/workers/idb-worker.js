@@ -3,62 +3,27 @@
 /**
  * @module idb-worker
  *
- * idb-worker.js — IndexedDB 写入 Worker（Classic Worker）。
- *
- * 此文件以 **Classic Worker**（非 `{ type: 'module' }`）方式运行。
- * 在浏览器 bundle 场景下，`jalangi.mjs` 的 rollup 插件
- * `jalangi-patch-idb-worker-url` 会将文件内容读出并通过
- * `new Blob([src], { type: 'application/javascript' })` + `URL.createObjectURL`
- * 生成 `__idbWorkerUrl`，再将 `IdbWorkerBackend.js` 里的
- * `new Worker(new URL(...), { type: 'module' })` 整体替换为
- * `new Worker(__idbWorkerUrl)`（去掉 `{ type: 'module' }`）。
- *
- * 这样做的原因：
- *   浏览器**不允许** Module Worker 使用 `blob:` URL，
- *   会导致 Worker 无法启动（15s 超时）。
- *   Classic Worker 无此限制，且本文件不需要任何 `import`，完全自包含。
- *
- * 在独立线程中运行，接收主线程通过 postMessage 发来的事件批次，
- * 写入 IndexedDB。主线程不会被 IDB 操作阻塞。
+ * IndexedDB 写入 Worker（Classic Worker，完全自包含，无 import）。
+ * 由 IdbWorkerBackend 通过 postMessage 驱动，在独立线程中执行 IDB 操作。
  *
  * 消息协议（主线程 → Worker）：
- *   { cmd: 'init', dbName: string, storeName: string, version: number, debugDomain?: string|null }
- *     → 打开/升级数据库，完成后回复 { type: 'ready' }
- *
+ *   { cmd: 'init', dbName, storeName, version, debugDomain? }
+ *     → { type: 'ready' }
  *   { cmd: 'write', batch: Array, batchId: number }
- *     → 批量写入，完成后回复 { type: 'ack', batchId, count }
- *       失败时回复 { type: 'error', batchId, message, stack }
+ *     → { type: 'ack', batchId, count } | { type: 'error', batchId, message, stack }
+ *   { cmd: 'flush', reqId }
+ *     → { type: 'flushed', reqId }
+ *   { cmd: 'query', reqId, filter?, limit? }
+ *     → { type: 'queryResult', reqId, events: Array }
+ *   { cmd: 'clear', reqId }
+ *     → { type: 'cleared', reqId }
+ *   { cmd: 'close', reqId }
+ *     → { type: 'closed', reqId }
  *
- *   { cmd: 'flush', reqId: number }
- *     → 确认所有进行中事务完成，回复 { type: 'flushed', reqId }
- *
- *   { cmd: 'query', reqId: number, filter?: object, limit?: number }
- *     → 查询所有事件，回复 { type: 'queryResult', reqId, events: Array }
- *
- *   { cmd: 'clear', reqId: number }
- *     → 清空 store，回复 { type: 'cleared', reqId }
- *
- *   { cmd: 'close', reqId: number }
- *     → 关闭数据库连接，回复 { type: 'closed', reqId }
- *
- * 存储格式：
- *   每条事件作为一个 IDB record，key = autoIncrement。
- *   record 结构：{ ts: DOMHighResTimeStamp, ...event }
- *
- * 诊断日志：
- *   Worker 内使用 console.debug/warn/error 直接输出到浏览器 DevTools Console。
- *   通过 init 消息中的 debugDomain 字段控制 debug 级别开关
- *   （由 IdbWorkerBackend 根据 isDebugEnabled('backend:idb') 决定是否传入）；
- *   warn/error 始终输出。
- *
- * 注意：Worker 内无法直接 import src/logger/logger.js（Worker 上下文路径问题），
- * 因此使用内联的轻量 dbg 对象，行为与 createLogger 一致。
+ * 存储格式：每条事件为一个 IDB record，结构：{ ts: DOMHighResTimeStamp, ...event }
  */
 
-// ── 诊断日志工具（Worker 内，直接到 console）──────────────────────────────────
-//
-// debug 开关由主线程在 init 消息中传入（debugDomain 非 null 即开启）；
-// 初始化前默认关闭，以减少噪声。
+// debug 开关由主线程 init 消息中的 debugDomain 字段控制。
 let _debugEnabled = false;
 
 const dbg = {
@@ -82,18 +47,15 @@ function openDB(name, store, version = 1) {
 
         req.onupgradeneeded = (evt) => {
             const database = evt.target.result;
-            // 如果 store 不存在则创建
             if (!database.objectStoreNames.contains(store)) {
                 dbg.debug(`onupgradeneeded v${evt.oldVersion}→v${evt.newVersion}: creating objectStore "${store}"`);
                 const os = database.createObjectStore(store, {
                     keyPath:       'id',
                     autoIncrement: true,
                 });
-                // 按事件类型建索引（便于查询）
                 os.createIndex('type',  'type',  { unique: false });
                 os.createIndex('iid',   'iid',   { unique: false });
                 os.createIndex('sid',   'sid',   { unique: false });
-                // 时间戳索引（便于按时间范围查询）
                 os.createIndex('ts',    'ts',    { unique: false });
             }
         };
@@ -104,7 +66,6 @@ function openDB(name, store, version = 1) {
             reject(evt.target.error);
         };
         req.onblocked  = () => {
-            // 有其他连接阻塞了升级，等待它们关闭
             dbg.warn(`DB upgrade blocked for "${name}" — another connection is still open`);
         };
     });
@@ -119,8 +80,7 @@ function writeBatch(batch) {
 
         let count = 0;
         for (const event of batch) {
-            // 添加时间戳，不修改原始事件（浅拷贝）
-            store.put({ ts, ...event });
+                store.put({ ts, ...event });
             count++;
         }
 
@@ -146,7 +106,6 @@ function queryEvents(filter = {}, limit = 10000) {
 
         let req;
         if (filter.type) {
-            // 按类型索引查询
             req = store.index('type').openCursor(IDBKeyRange.only(filter.type));
         } else {
             req = store.openCursor();
@@ -200,7 +159,6 @@ self.onmessage = async (evt) => {
         switch (msg.cmd) {
 
             case 'init': {
-                // 读取主线程传来的 debug 开关
                 if (msg.debugDomain != null) _debugEnabled = true;
                 dbName    = msg.dbName    ?? dbName;
                 storeName = msg.storeName ?? storeName;
@@ -235,7 +193,6 @@ self.onmessage = async (evt) => {
                     });
                 } finally {
                     pendingTxCount--;
-                    // 如果有等待 flush 的 resolve，检查是否都完成了
                     if (pendingTxCount === 0 && flushResolvers.length > 0) {
                         for (const r of flushResolvers) r();
                         flushResolvers = [];
@@ -246,7 +203,6 @@ self.onmessage = async (evt) => {
 
             case 'flush': {
                 if (pendingTxCount > 0) {
-                    // 等待所有进行中事务完成
                     await new Promise(resolve => flushResolvers.push(resolve));
                 }
                 self.postMessage({ type: 'flushed', reqId: msg.reqId });
@@ -297,7 +253,6 @@ self.onmessage = async (evt) => {
     }
 };
 
-// Worker 错误兜底
 self.onerror = (evt) => {
     console.error('[Jalangi:backend:idb] Uncaught Worker error:', evt.message, `(${evt.filename}:${evt.lineno})`);
 };

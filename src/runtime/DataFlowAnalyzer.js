@@ -236,8 +236,7 @@ export class DataFlowAnalyzer {
             if (mappedOid !== baseOid) continue;
 
             const regId  = ++this.#regIdCounter;
-            // BUG-3 修复：与 getAliasesForOid 保持一致，使用 slice(2).join(':') 防御性处理
-            // 变量名理论上不含 ':'，但防御性写法避免将来引入 ':' 时静默截断 kName。
+            // 防御性处理：变量名理论上不含 ':'，但用 slice(2).join(':') 避免将来引入时静默截断。
             const _parts  = key.split(':');
             const kScopeId = _parts[0];
             const kCallId  = _parts[1];
@@ -357,8 +356,8 @@ export class DataFlowAnalyzer {
             }
         }
 
-        // BUG-RT-04 修复：按 regId 升序排列（而非 iid）以正确反映运行时执行顺序。
-        // iid 是编译时静态分配的，同一指令在循环中多次执行时 iid 相同，无法区分执行顺序。
+        // 按 regId 升序排列（而非 iid）以正确反映运行时执行顺序。
+        // iid 是编译时静态分配的，同一指令在循环中多次执行时 iid 相同，无法区分执行顺序；
         // regId 是单调递增的运行时序号，才能正确还原执行时间顺序。
         return result.sort((a, b) => a.regId - b.regId);
     }

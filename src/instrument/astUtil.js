@@ -86,9 +86,7 @@ function transformAst(object, visitorPost, visitorPre, context, noIgnore) {
         let newContext;
 
         if (
-            // ImportDeclaration.source（如 import "./foo.js" 中的 "./foo.js"）不应插桩
             (type === 'ImportDeclaration'       && key === 'source') ||
-            // ExportDeclaration.source 同理（如 export { x } from "./foo.js" 中的 "./foo.js"）
             (type === 'ExportNamedDeclaration'  && key === 'source') ||
             (type === 'ExportAllDeclaration'    && key === 'source') ||
             (type === 'AssignmentExpression'  && key === 'left') ||
@@ -127,10 +125,9 @@ function transformAst(object, visitorPost, visitorPre, context, noIgnore) {
             (type === 'ClassMethod'             && key === 'key' && !object.computed) ||
             (type === 'ClassPrivateProperty'    && key === 'key') ||
             (type === 'PrivateName'             && key === 'id') ||
-            // MetaProperty（new.target、import.meta）的 meta 和 property 是保留字 Identifier，
-            // 不应被插桩（否则会破坏 MetaProperty 内部结构）。
+            // MetaProperty（new.target、import.meta）的 meta 和 property 是保留字，不应被插桩
             (type === 'MetaProperty'            && (key === 'meta' || key === 'property')) ||
-            // ObjectMethod 的 key（如 [Symbol.iterator](){}）：@babel/types 不允许 key 是 CallExpression。
+            // ObjectMethod.key：@babel/types 不允许 key 是 CallExpression
             (type === 'ObjectMethod'            && key === 'key')
         ) {
             newContext = CONTEXT.IGNORE;
@@ -145,24 +142,15 @@ function transformAst(object, visitorPost, visitorPre, context, noIgnore) {
             newContext = CONTEXT.PARAMS;
         } else if (context === CONTEXT.OEXP) {
             newContext = CONTEXT.OEXP2;
-        // NOTE: OEXP2 && key==='key' 已由上方 `Property.key && !object.computed` 规则覆盖，
-        //       此处不需要再单独判断。
         } else if (context === CONTEXT.PARAMS) {
             newContext = CONTEXT.IGNORE;
-        // 解构绑定模式（ObjectPattern / ArrayPattern）内部的所有子节点均为绑定目标，
-        // 不应被插桩为读取操作。
-        // - ObjectPattern.properties 中的 ObjectProperty（Babel AST 特有类型）的 key（非计算属性）
-        //   和 value（绑定目标 Identifier/嵌套 Pattern）均应 IGNORE。
-        // - ObjectProperty 的 shorthand 形式：key 和 value 指向同一 Identifier，均不应插桩。
+        // ObjectPattern / ArrayPattern 内部的所有子节点均为绑定目标，不插桩
         } else if (
             (type === 'ObjectProperty' && key === 'key' && !object.computed) ||
             (type === 'ObjectProperty' && key === 'value' && context === CONTEXT.IGNORE)
         ) {
             newContext = CONTEXT.IGNORE;
-        // 当 object 本身是数组（type === undefined，即数组容器节点）时，
-        // 数组索引对应的子元素直接继承父上下文。
-        // 场景：ObjectPattern.properties / ArrayPattern.elements 等数组字段在
-        // 遍历其元素时，context 应从父节点传播，而非重置为 RHS。
+        // 数组容器节点：元素直接继承父上下文
         } else if (type === undefined) {
             newContext = context;
         } else if (object.key && key === 'value' && object.kind === 'get') {

@@ -493,18 +493,23 @@ flowchart LR
 | `read` | `INSTR_READ` |
 | `write` | `INSTR_WRITE` |
 | `getFieldPre` / `getField` | `INSTR_GETFIELD` |
-| `putFieldPre` / `putField` | `INSTR_PUTFIELD` |
+| `putFieldPre` / `putField` | `INSTR_PUTFIELD`, `INSTR_PROPERTY_BINARY_ASSIGNMENT` |
 | `binaryPre` / `binary` | `INSTR_BINARY` |
 | `unaryPre` / `unary` | `INSTR_UNARY` |
 | `literal` | `INSTR_LITERAL` |
 | `declare` | `INSTR_INIT`, `INSTR_TRY_CATCH_ARGUMENTS` |
 | `conditional` | `INSTR_CONDITIONAL` |
 | `functionEnter` / `functionExit` | `INSTR_TRY_CATCH_ARGUMENTS` |
+| `scriptEnter` / `scriptExit` | `INSTR_TRY_CATCH_ARGUMENTS` |
 | `endExpression` | `INSTR_END_EXPRESSION` |
 | `invokeFunPre` / `invokeFun` | `INSTR_INVOKE` |
 | `_return` | `INSTR_RETURN` |
 | `_throw` | `INSTR_THROW` |
 | `forinObject` | `INSTR_FORIN` |
+| `awaitResume` | `INSTR_AWAIT` |
+
+> **注意**：`_with` hook 在 `pluginAnalyzer.js` 中映射到 `INSTR_CONDITIONAL`（而非 `INSTR_TRY_CATCH_ARGUMENTS`），
+> 这可能是一个潜在问题（参见代码问题文档）。
 
 ### 示例
 
@@ -526,28 +531,30 @@ init(null, undefined, undefined, undefined, ['./src/plugins/dlint/CheckNaN.js'])
 
 ```js
 // 输出结构（精简版）
-(globalThis.J$ = globalThis.J$ || {});
-J$.smap = J$.smap || {};
-J$.smap["example_inst.js"] = { nBranches: 4, originalCodeFileName: "example.js", ... };
-J$.iids = { nBranches: 4, originalCodeFileName: "example.js", ... };
-(function(J$){
-    // 插桩后的代码体
-    // ...
-}(typeof J$!=='undefined'?J$:{}));
+// 第 1 行：smap 注入头（script 模式 = 1 行头）
+(globalThis.J$=globalThis.J$||{});J$.smap=J$.smap||{};J$.smap["example_inst.js"]={nBranches:4,...};J$.iids={nBranches:4,...};
+// 第 2 行起：插桩后的代码体（直接输出，不再用 IIFE 包裹）
+var x = J$.B(9, '+', J$.T(17, 1, 22, false), J$.T(25, 2, 22, false), 0);
 // JALANGI DO NOT INSTRUMENT
 ```
+
+> **注意**：script 模式不再使用 IIFE（`(function(J$){...}(...))`）包裹。
+> 插桩后代码直接输出，`J$` 通过头部 `globalThis.J$` 初始化单例。
 
 ### module 模式
 
 ```js
-(globalThis.J$ = globalThis.J$ || {});
-J$.smap = J$.smap || {};
-J$.smap["example_inst.js"] = { ... };
-J$.iids = { ... };
+// 第 1 行：smap 注入头
+(globalThis.J$=globalThis.J$||{});J$.smap=J$.smap||{};J$.smap["example_inst.js"]={...};J$.iids={...};
+// 第 2 行：const 绑定（把全局单例绑定到模块内作用域）
 const J$ = globalThis.J$;
-// 插桩后的代码体
+// 第 3 行起：插桩后的代码体
+// ...
 // JALANGI DO NOT INSTRUMENT
 ```
+
+> **注意**：module 模式无法用 `var` 赋全局，却需要 `J$` 在整个模块作用域内可用。
+> 因此头部附加一行 `const J$ = globalThis.J$` 将全局单例绑定到模块内。
 
 ### `// JALANGI DO NOT INSTRUMENT`
 

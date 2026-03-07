@@ -41,12 +41,7 @@ const log = createLogger(DOMAIN.LOGGING);
 // 判断运行环境
 const IS_BROWSER = typeof window !== 'undefined' || typeof self !== 'undefined';
 
-/**
- * 调度一个低优先级的异步任务：
- *  - 浏览器：优先用 queueMicrotask（比 Promise.resolve 更快），
- *            回退 setTimeout(0)
- *  - Node.js：setImmediate（在 I/O 回调之后、下一次 tick 之前执行）
- */
+/** 调度一个低优先级的异步任务（浏览器用 queueMicrotask，Node.js 用 setImmediate）。 */
 const scheduleAsync = (() => {
     if (!IS_BROWSER && typeof setImmediate === 'function') {
         return (fn) => setImmediate(fn);
@@ -111,7 +106,6 @@ export class LogManager {
             log.debug(`periodic flush enabled: every ${flushIntervalMs}ms`);
         }
 
-        // 自动关闭钩子
         if (autoClose) {
             this._bindAutoClose();
         }
@@ -130,7 +124,6 @@ export class LogManager {
         this._ring.push(event);
         this.stats.totalLogged++;
 
-        // 达到阈值时调度一次异步 flush（同一微任务批次内只调度一次）
         if (!this._flushPending && this._ring.shouldFlush) {
             this._flushPending = true;
             scheduleAsync(() => this._doFlush());
@@ -163,10 +156,8 @@ export class LogManager {
             this._flushTimer = null;
         }
 
-        // 最后一次 flush（确保 RingBuffer 中剩余事件全部发出）
         await this._drainAll();
 
-        // 关闭所有后端
         const closeResults = await Promise.allSettled(this._backends.map(b => b.close?.()));
         for (let i = 0; i < closeResults.length; i++) {
             const r = closeResults[i];
@@ -226,7 +217,6 @@ export class LogManager {
 
         if (this._ring.size === 0) return;
         if (this._backends.length === 0) {
-            // 没有后端：直接丢弃（避免无限积压）
             const dropped = this._ring.size;
             this._ring.drain();
             log.warn(`_doFlush: no backends configured, dropped ${dropped} events`);
@@ -239,7 +229,6 @@ export class LogManager {
         this.stats.totalFlushed += batch.length;
         log.debug(`_doFlush: writing batch of ${batch.length} events to ${this._backends.length} backend(s) (totalFlushed=${this.stats.totalFlushed})`);
 
-        // 并行写入所有后端，单个失败不影响其他
         const results = await Promise.allSettled(
             this._backends.map(b => b.write(batch))
         );
@@ -247,7 +236,6 @@ export class LogManager {
             const r = results[i];
             if (r.status === 'rejected') {
                 this.stats.flushErrors++;
-                // 输出完整错误信息（含 stack trace），便于排查后端问题
                 log.error(
                     `backend[${i}] write failed (batch=${batch.length}, totalErrors=${this.stats.flushErrors}):`,
                     r.reason?.message ?? r.reason
@@ -258,7 +246,6 @@ export class LogManager {
             }
         }
 
-        // 如果 RingBuffer 仍有数据，继续调度（处理积压）
         if (this._ring.size > 0) {
             log.debug(`_doFlush: ring still has ${this._ring.size} events, scheduling next flush`);
             scheduleAsync(() => this._doFlush());
@@ -273,7 +260,6 @@ export class LogManager {
             await this._doFlush();
         }
         if (rounds > 0) log.debug(`_drainAll done in ${rounds} round(s)`);
-        // 通知所有后端 flush（确保 IO 写入完成）
         const flushResults = await Promise.allSettled(this._backends.map(b => b.flush?.()));
         for (let i = 0; i < flushResults.length; i++) {
             const r = flushResults[i];
@@ -286,19 +272,16 @@ export class LogManager {
     /** 绑定自动关闭钩子 */
     _bindAutoClose() {
         if (IS_BROWSER) {
-            // 浏览器：beforeunload 同步 flush（注意：异步操作在此处可能被截断）
             // pagehide 比 beforeunload 更可靠（在 bfcache 下也会触发）
             const handler = () => {
                 log.debug('auto-close: page unload — draining sync');
-                // 同步清空 RingBuffer（无法 await，尽力而为）
-                this._drainAllSync();
+                    this._drainAllSync();
             };
             if (typeof addEventListener === 'function') {
                 addEventListener('pagehide',     handler, { once: true });
                 addEventListener('beforeunload', handler, { once: true });
             }
         } else {
-            // Node.js：监听进程退出信号
             const handler = async () => {
                 log.debug('auto-close: process signal — closing');
                 await this.close();
@@ -326,7 +309,6 @@ export class LogManager {
                 if (typeof backend.writeSync === 'function') {
                     backend.writeSync(batch);
                 } else {
-                    // 触发异步写入（不 await），尽力而为
                     backend.write(batch).catch((err) => {
                         log.error('_drainAllSync: async write failed:', err.message);
                     });

@@ -193,7 +193,6 @@ export function serializeBatchToBinary(events) {
     // 第一遍：序列化每条，收集 ArrayBuffer
     const bufs = events.map(serializeEventToBinary);
 
-    // 计算总大小：4（count）+ 每条 4（长度前缀）+ 每条数据
     let total = 4;
     for (const b of bufs) total += 4 + b.byteLength;
 
@@ -277,8 +276,6 @@ export function deserializeBatchFromBinary(buf) {
     for (let i = 0; i < count; i++) {
         const size    = view.getUint32(offset, true);
         offset       += 4;
-        // Q-2 修复：移除未使用的 subView 变量（死代码）。
-        // deserializeEventFromBinary 接受共享整个 buffer 的 DataView + offset，无需 subView。
         const { event } = deserializeEventFromBinary(new DataView(buf), offset);
         events[i] = event;
         offset   += size;
