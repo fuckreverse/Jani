@@ -28,7 +28,7 @@ export class LogLoadStoreAllocAnalysis {
         this._sandbox.log(this._cacheStr + str);
     }
 
-    invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
+    callPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
         this._indentation++;
         return { f, base, args, skip: false };
     }
@@ -41,7 +41,7 @@ export class LogLoadStoreAllocAnalysis {
         return { result: val };
     }
 
-    invokeFun(iid, f, base, args, val, isConstructor, isMethod, functionIid, functionSid) {
+    call(iid, f, base, args, val, isConstructor, isMethod, functionIid, functionSid) {
         this._indentation--;
         if (isConstructor && typeof val === 'object' && val !== null) {
             const sobj = this._sandbox.smemory.getShadowObjectOfObject(val);

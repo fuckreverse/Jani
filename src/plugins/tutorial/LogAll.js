@@ -52,11 +52,11 @@ class LogAllAnalysis {
 
     // ── 函数调用 ───────────────────────────────────────────────────────────────
 
-    invokeFunPre(iid, f, base, args, isConstructor, isMethod) {
+    callPre(iid, f, base, args, isConstructor, isMethod) {
         return { f, base, args, skip: false };
     }
 
-    invokeFun(iid, f, base, args, result, isConstructor, isMethod) {
+    call(iid, f, base, args, result, isConstructor, isMethod) {
         return { result };
     }
 
@@ -68,7 +68,7 @@ class LogAllAnalysis {
 
     // ── for-in ─────────────────────────────────────────────────────────────────
 
-    forinObject(iid, val) {
+    forIn(iid, val) {
         return { result: val };
     }
 
@@ -131,9 +131,9 @@ class LogAllAnalysis {
 
     // ── 控制流 ─────────────────────────────────────────────────────────────────
 
-    _return(iid, val)  { return { result: val }; }
-    _throw(iid, val)   { return { result: val }; }
-    _with(iid, val)    { return { result: val }; }
+    returnStmt(iid, val)  { return { result: val }; }
+    throwStmt(iid, val)   { return { result: val }; }
+    withStmt(iid, val)    { return { result: val }; }
 
     // ── 函数进出 ────────────────────────────────────────────────────────────────
 
@@ -189,7 +189,7 @@ class LogAllAnalysis {
 
     endExecution() {}
 
-    runInstrumentedFunctionBody(iid, f, functionIid) {
+    shouldInstrumentFn(iid, f, functionIid) {
         return false;
     }
 

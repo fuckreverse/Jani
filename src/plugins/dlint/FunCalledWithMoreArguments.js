@@ -32,7 +32,7 @@ export class FunCalledWithMoreArguments {
         this._info    = {};
     }
 
-    invokeFunPre(iid, f, base, args, isConstructor, isMethod) {
+    callPre(iid, f, base, args, isConstructor, isMethod) {
         // 只检查有 length 属性的普通函数（排除内置/native 函数，其 length 可能不反映真实参数数）
         // BUG-PLG-01 修复：跳过含 rest 参数的函数。
         // f.length 只计算第一个 rest 参数之前的形参数量，因此 function f(a, ...rest) 的 length=1，

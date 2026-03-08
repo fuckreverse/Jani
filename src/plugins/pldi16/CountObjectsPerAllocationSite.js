@@ -23,7 +23,7 @@ export class CountObjectsPerAllocationSiteAnalysis {
         }
     }
 
-    invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
+    callPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
         if (isConstructor) {
             const id = this._sandbox.getGlobalIID(iid);
             this._allocCount[id] = (this._allocCount[id] | 0) + 1;

@@ -28,10 +28,10 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'url';
 import { dirname, join }  from 'path';
 
+import { init, instrumentCode } from '../../src/instrument/esnstrument.js';
 import {
-    init, instrumentCode,
     analyzePluginHooks, buildConfigFromHooks, buildConfigFromPlugins, fullConfig,
-} from '../../src/instrument/esnstrument.js';
+} from '../../src/instrument/pluginAnalyzer.js';
 import { ALL_CONFIG, instr } from '../helpers/shared-helpers.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -52,19 +52,19 @@ describe('ES5 基础语法', () => {
         const r = instr('var x = 1 + 2; console.log(x);');
         assert.ok(r.code.includes('J$.B('),  '应注入二元运算钩子 J$.B');
         assert.ok(r.code.includes('J$.W('),  '应注入写入钩子 J$.W');
-        assert.ok(r.code.includes('J$.N('),  '应注入变量初始化钩子 J$.N');
+        assert.ok(r.code.includes('J$.Dc('),  '应注入变量初始化钩子 J$.Dc');
     });
 
     test('function 声明', () => {
         const r = instr('function foo(a) { return a + 1; }');
         assert.ok(r.code.includes('J$.Fe('), '应注入函数入口钩子 J$.Fe');
-        assert.ok(r.code.includes('J$.Fr('), '应注入函数返回钩子 J$.Fr');
+        assert.ok(r.code.includes('J$.Fx('), '应注入函数返回钩子 J$.Fx');
         assert.ok(r.code.includes('J$.B('),  '应注入二元运算钩子 J$.B');
     });
 
     test('for-in 循环', () => {
         const r = instr('var o = {a:1}; for (var k in o) { console.log(k); }');
-        assert.ok(r.code.includes('J$.H('), '应注入 hash 钩子用于 for-in 右侧');
+        assert.ok(r.code.includes('J$.Fi('), '应注入 hash 钩子用于 for-in 右侧');
         assert.ok(r.code.includes('J$.W('), '应注入写入钩子（for-in 变量赋值）');
     });
 
@@ -89,7 +89,7 @@ describe('ES5 基础语法', () => {
 
     test('try-catch-finally', () => {
         const r = instr('try { x(); } catch(e) { console.log(e); } finally { done(); }');
-        assert.ok(r.code.includes('J$.Se('), '应注入脚本入口钩子 J$.Se');
+        assert.ok(r.code.includes('J$.Se('), '应注入脚本入口钩子 J$.Spe');
     });
 });
 
@@ -182,7 +182,7 @@ describe('ES2017 async/await', () => {
     test('async / await — 插桩结构检查', () => {
         const r = instr('async function fetchData() { var data = await fetch("/api"); return data.json(); }');
         assert.ok(r.code.includes('J$.Fe('),  'async 函数应注入 J$.Fe');
-        assert.ok(r.code.includes('J$.Fr('),  'async 函数应注入返回钩子 J$.Fr');
+        assert.ok(r.code.includes('J$.Fx('),  'async 函数应注入返回钩子 J$.Fx');
         assert.ok(r.code.includes('J$.Aw('),  'await 表达式应注入 J$.Aw 钩子');
     });
 
@@ -305,7 +305,7 @@ describe('ESM import/export', () => {
     test('export default function', () => {
         const r = instr('export default function greet(name) { return `Hello, ${name}`; }', { sourceType: 'module' });
         assert.ok(r.code.includes('J$.Fe('), 'export default function 应注入 J$.Fe');
-        assert.ok(r.code.includes('J$.Fr('), '函数应注入返回钩子 J$.Fr');
+        assert.ok(r.code.includes('J$.Fx('), '函数应注入返回钩子 J$.Fx');
     });
 });
 
@@ -501,7 +501,7 @@ describe('Config 选择性禁用', () => {
 
     test('INSTR_INIT = () => false 时不注入变量初始化钩子', () => {
         init({ ...ALL_CONFIG, INSTR_INIT: () => false });
-        assert.ok(!instr('var x = 1;').code.includes('J$.N('), '不应有 J$.N 初始化钩子');
+        assert.ok(!instr('var x = 1;').code.includes('J$.Dc('), '不应有 J$.N 初始化钩子');
     });
 
     test('INSTR_INVOKE = () => false 时不注入函数调用钩子', () => {
@@ -524,12 +524,12 @@ describe('Config 选择性禁用', () => {
     test('INSTR_FORIN = () => false 时不注入 for-in 钩子', () => {
         init({ ...ALL_CONFIG, INSTR_FORIN: () => false });
         const r = instr('for (var k in obj) { k; }');
-        assert.ok(!r.code.includes('J$.H('), '不应有 J$.H for-in 钩子');
+        assert.ok(!r.code.includes('J$.Fi('), '不应有 J$.H for-in 钩子');
     });
 
     test('INSTR_END_EXPRESSION = () => false 时不注入 X1 表达式末尾钩子', () => {
         init({ ...ALL_CONFIG, INSTR_END_EXPRESSION: () => false });
-        assert.ok(!instr('1 + 2;').code.includes('J$.X1('), '不应有 J$.X1 表达式末尾钩子');
+        assert.ok(!instr('1 + 2;').code.includes('J$.Xe('), '不应有 J$.X1 表达式末尾钩子');
     });
 
     test('INSTR_TRY_CATCH_ARGUMENTS = () => false 时不注入 try-catch 包裹', () => {
@@ -575,7 +575,7 @@ describe('Config 选择性禁用', () => {
         init({ ...ALL_CONFIG, INSTR_FORIN: () => false });
         // module 模式使用 export 语法，for-in 内部使用普通变量
         const r = instr('export var keys = []; for (var k in {}) { keys.push(k); }', { sourceType: 'module' });
-        assert.ok(!r.code.includes('J$.H('),
+        assert.ok(!r.code.includes('J$.Fi('),
             'module 模式下 INSTR_FORIN 禁用时不应注入 J$.H');
     });
 });
@@ -683,13 +683,13 @@ describe('BUG 回归测试', () => {
     test('BUG2: ENABLE_SAMPLING 模式不应崩溃', () => {
         init({ ...ALL_CONFIG, ENABLE_SAMPLING: true });
         const r = instr('function f() { return 1; }');
-        assert.ok(r.code.includes('J$.S('), 'ENABLE_SAMPLING 模式应注入采样钩子 J$.S');
+        assert.ok(r.code.includes('J$.Sp('), 'ENABLE_SAMPLING 模式应注入采样钩子 J$.Sp');
     });
 
     test('BUG2b: ENABLE_SAMPLING 辅助函数 wrapper 不应被 mergeBodies 错误处理', () => {
         init({ ...ALL_CONFIG, ENABLE_SAMPLING: true });
         const r = instr('function outer() { function inner() { return 2; } return inner(); }');
-        assert.ok(r.code.includes('J$.S('), '嵌套函数 ENABLE_SAMPLING 应正常产出');
+        assert.ok(r.code.includes('J$.Sp('), '嵌套函数 ENABLE_SAMPLING 应正常产出');
     });
 
     test('BUG3: 箭头函数参数不应被错误标记为全局变量', () => {
@@ -722,7 +722,7 @@ describe('BUG 回归测试', () => {
     test('BUG4: strict mode 函数中 arguments 初始化不应产生赋值语句', () => {
         const r = instr('"use strict"; function f(a) { return a; }');
         assert.ok(!r.code.match(/\barguments\s*=/), '严格模式下不应出现 arguments = ... 赋值语句');
-        assert.ok(r.code.includes('J$.N('), '应存在 J$.N 调用以通知运行时 arguments 初始化');
+        assert.ok(r.code.includes('J$.Dc('), '应存在 J$.N 调用以通知运行时 arguments 初始化');
     });
 
     test('BUG5: generator 函数的 yield 不应被 while(true)try/finally 破坏', () => {
@@ -888,26 +888,26 @@ describe('按需插桩（pluginAnalyzer）', () => {
             assert.equal(config.INSTR_TRY_CATCH_ARGUMENTS, null,   'declare 需要 INSTR_TRY_CATCH_ARGUMENTS');
         });
 
-        test('invokeFunPre/invokeFun 需要 INSTR_INVOKE', () => {
-            const config = buildConfigFromHooks(new Set(['invokeFunPre', 'invokeFun']));
+        test('callPre/call 需要 INSTR_INVOKE', () => {
+            const config = buildConfigFromHooks(new Set(['callPre', 'call']));
             assert.equal(config.INSTR_INVOKE, null, 'invoke 钩子应开启 INSTR_INVOKE');
         });
 
         test('_return 需要 INSTR_RETURN', () => {
-            const config = buildConfigFromHooks(new Set(['_return']));
+            const config = buildConfigFromHooks(new Set(['returnStmt']));
             assert.equal(config.INSTR_RETURN, null,                'INSTR_RETURN 应被开启');
             assert.equal(typeof config.INSTR_THROW, 'function',   'INSTR_THROW 不需要，应被禁用');
         });
 
         test('_throw 需要 INSTR_THROW', () => {
-            const config = buildConfigFromHooks(new Set(['_throw']));
+            const config = buildConfigFromHooks(new Set(['throwStmt']));
             assert.equal(config.INSTR_THROW, null,                 'INSTR_THROW 应被开启');
             assert.equal(typeof config.INSTR_RETURN, 'function',  'INSTR_RETURN 不需要，应被禁用');
         });
 
-        test('forinObject 需要 INSTR_FORIN', () => {
-            const config = buildConfigFromHooks(new Set(['forinObject']));
-            assert.equal(config.INSTR_FORIN, null, 'forinObject 钩子应开启 INSTR_FORIN');
+        test('forIn 需要 INSTR_FORIN', () => {
+            const config = buildConfigFromHooks(new Set(['forIn']));
+            assert.equal(config.INSTR_FORIN, null, 'forIn 钩子应开启 INSTR_FORIN');
         });
 
         test('endExecution/onReady 不映射任何 Config 字段', () => {
@@ -948,10 +948,10 @@ describe('按需插桩（pluginAnalyzer）', () => {
         });
 
         test('静态 usedHooks 声明优先', () => {
-            class MyPlugin { static usedHooks = ['invokeFunPre', 'invokeFun']; }
+            class MyPlugin { static usedHooks = ['callPre', 'call']; }
             const hooks = analyzePluginHooks([new MyPlugin()]);
-            assert.ok(hooks.has('invokeFunPre'), 'usedHooks 声明的 invokeFunPre 应被识别');
-            assert.ok(hooks.has('invokeFun'),    'usedHooks 声明的 invokeFun 应被识别');
+            assert.ok(hooks.has('callPre'), 'usedHooks 声明的 callPre 应被识别');
+            assert.ok(hooks.has('call'),    'usedHooks 声明的 call 应被识别');
         });
     });
 
@@ -1004,7 +1004,7 @@ describe('按需插桩（pluginAnalyzer）', () => {
         test('关闭 INSTR_FORIN 时，for-in 不注入 J$.H/J$.I', () => {
             init(buildConfigFromHooks(new Set(['binary'])));
             const r = instrumentCode({ code: 'for (var k in obj) { console.log(k); }', origCodeFileName: 'forin-off.js', instCodeFileName: 'forin-off_i.js' });
-            assert.ok(!r.code.includes('J$.H('), '关闭 INSTR_FORIN 时 J$.H 不应出现');
+            assert.ok(!r.code.includes('J$.Fi('), '关闭 INSTR_FORIN 时 J$.H 不应出现');
         });
 
         test('init() 传 plugins 参数自动推导 Config', () => {

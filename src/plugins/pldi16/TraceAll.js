@@ -65,17 +65,17 @@ export class TraceAllAnalysis {
 
     _loc(iid) { return this._sandbox.iidToLocation(this._sandbox.sid, iid); }
 
-    invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
+    callPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
         const argsStr = args.map((a, i) => `, args[${i}]=${this._getValue(a)}`).join('');
-        this._log(`invokeFunPre(iid=${iid}, f=${this._getValue(f)}, base=${this._getValue(base)}${argsStr}, isConstructor=${isConstructor}, isMethod=${isMethod}, functionIid=${functionIid}, functionSid=${functionSid}) of function created at ${this._sandbox.iidToLocation(functionSid, functionIid)} at ${this._loc(iid)}`);
+        this._log(`callPre(iid=${iid}, f=${this._getValue(f)}, base=${this._getValue(base)}${argsStr}, isConstructor=${isConstructor}, isMethod=${isMethod}, functionIid=${functionIid}, functionSid=${functionSid}) of function created at ${this._sandbox.iidToLocation(functionSid, functionIid)} at ${this._loc(iid)}`);
         this._indentation++;
         return { f, base, args, skip: false };
     }
 
-    invokeFun(iid, f, base, args, result, isConstructor, isMethod, functionIid, functionSid) {
+    call(iid, f, base, args, result, isConstructor, isMethod, functionIid, functionSid) {
         this._indentation--;
         const argsStr = args.map((a, i) => `, args[${i}]=${this._getValue(a)}`).join('');
-        this._log(`invokeFun(iid=${iid}, f=${this._getValue(f)}, base=${this._getValue(base)}, result=${this._getValue(result)}${argsStr}, isConstructor=${isConstructor}, isMethod=${isMethod}, functionIid=${functionIid}, functionSid=${functionSid}) of function created at ${this._sandbox.iidToLocation(functionSid, functionIid)} at ${this._loc(iid)}`);
+        this._log(`call(iid=${iid}, f=${this._getValue(f)}, base=${this._getValue(base)}, result=${this._getValue(result)}${argsStr}, isConstructor=${isConstructor}, isMethod=${isMethod}, functionIid=${functionIid}, functionSid=${functionSid}) of function created at ${this._sandbox.iidToLocation(functionSid, functionIid)} at ${this._loc(iid)}`);
         return { result };
     }
 
@@ -84,8 +84,8 @@ export class TraceAllAnalysis {
         return { result: val };
     }
 
-    forinObject(iid, val) {
-        this._log(`forinObject(iid=${iid}, val=${this._getValue(val)}) at ${this._loc(iid)}`);
+    forIn(iid, val) {
+        this._log(`forIn(iid=${iid}, val=${this._getValue(val)}) at ${this._loc(iid)}`);
         return { result: val };
     }
 
@@ -126,18 +126,18 @@ export class TraceAllAnalysis {
         return { result: val };
     }
 
-    _return(iid, val) {
-        this._log(`_return(iid=${iid}, val=${this._getValue(val)}) at ${this._loc(iid)}`);
+    returnStmt(iid, val) {
+        this._log(`returnStmt(iid=${iid}, val=${this._getValue(val)}) at ${this._loc(iid)}`);
         return { result: val };
     }
 
-    _throw(iid, val) {
-        this._log(`_throw(iid=${iid}, val=${this._getValue(val)}) at ${this._loc(iid)}`);
+    throwStmt(iid, val) {
+        this._log(`throwStmt(iid=${iid}, val=${this._getValue(val)}) at ${this._loc(iid)}`);
         return { result: val };
     }
 
-    _with(iid, val) {
-        this._log(`_with(iid=${iid}, val=${this._getValue(val)}) at ${this._loc(iid)}`);
+    withStmt(iid, val) {
+        this._log(`withStmt(iid=${iid}, val=${this._getValue(val)}) at ${this._loc(iid)}`);
         return { result: val };
     }
 
@@ -207,8 +207,8 @@ export class TraceAllAnalysis {
         this._log('endExecution()');
     }
 
-    runInstrumentedFunctionBody(iid, f, functionIid, functionSid) {
-        this._log(`runInstrumentedFunctionBody(iid=${iid}, f=${this._getValue(f)}, functionIid=${functionIid}, functionSid=${functionSid}) of function created at ${this._sandbox.iidToLocation(functionSid, functionIid)} at ${this._loc(iid)}`);
+    shouldInstrumentFn(iid, f, functionIid, functionSid) {
+        this._log(`shouldInstrumentFn(iid=${iid}, f=${this._getValue(f)}, functionIid=${functionIid}, functionSid=${functionSid}) of function created at ${this._sandbox.iidToLocation(functionSid, functionIid)} at ${this._loc(iid)}`);
         return false;
     }
 

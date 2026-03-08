@@ -76,8 +76,8 @@ J$.analysis.use(new ReadCountAnalysis(J$));
 mindmap
   root((分析钩子))
     函数调用
-      invokeFunPre
-      invokeFun
+      callPre
+      call
     属性访问
       getFieldPre
       getField
@@ -96,10 +96,10 @@ mindmap
       unary
     条件与控制流
       conditional
-      _return
-      _throw
-      _with
-      forinObject
+      returnStmt
+      throwStmt
+      withStmt
+      forIn
     函数生命周期
       functionEnter
       functionExit
@@ -114,12 +114,12 @@ mindmap
       endExpression
       instrumentCodePre
       instrumentCode
-      runInstrumentedFunctionBody
+      shouldInstrumentFn
 ```
 
 ### 函数调用
 
-#### `invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid)`
+#### `callPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid)`
 
 函数/方法/构造器调用之**前**触发。
 
@@ -136,9 +136,9 @@ mindmap
 
 **返回值**：`{ f, base, args, skip }` 或 `undefined`。
 - 修改 `f` / `base` / `args` 可替换调用目标或参数
-- `skip: true` 跳过函数调用（仍会触发 `invokeFun`，result 为 undefined）
+- `skip: true` 跳过函数调用（仍会触发 `call`，result 为 undefined）
 
-#### `invokeFun(iid, f, base, args, result, isConstructor, isMethod, functionIid, functionSid)`
+#### `call(iid, f, base, args, result, isConstructor, isMethod, functionIid, functionSid)`
 
 函数/方法/构造器调用之**后**触发。
 
@@ -167,7 +167,7 @@ mindmap
 **返回值**：`{ base, offset, val, skip }` 或 `undefined`。
 
 > **注意**：`isOpAssign` 在普通属性赋值（`obj.x = val`，经由 `J$.P`）场景下**始终为 `false`**。
-> 属性复合赋值（`obj.x += 1` 等）走独立的 `J$.A` 钩子（由 `INSTR_PROPERTY_BINARY_ASSIGNMENT` 控制），
+> 属性复合赋值（`obj.x += 1` 等）走独立的 `J$.Ca` 钩子（由 `INSTR_PROPERTY_BINARY_ASSIGNMENT` 控制），
 > 不会触发 `putFieldPre` / `putField`。
 
 #### `putField(iid, base, offset, val, isComputed, isOpAssign)`
@@ -248,7 +248,7 @@ mindmap
 
 **返回值**：`{ result }` 或 `undefined`。修改 result 可控制分支走向。
 
-#### `_return(iid, val)` / `_throw(iid, val)` / `_with(iid, val)`
+#### `returnStmt(iid, val)` / `throwStmt(iid, val)` / `withStmt(iid, val)`
 
 `return` / `throw` / `with` 语句触发。
 
@@ -275,7 +275,7 @@ mindmap
 
 ### 其他
 
-#### `forinObject(iid, val)`
+#### `forIn(iid, val)`
 
 `for-in` 循环迭代对象时触发。
 
@@ -351,7 +351,7 @@ binary(iid, op, left, right, result) {
 }
 
 // 示例：阻止某个方法调用
-invokeFunPre(iid, f, base, args) {
+callPre(iid, f, base, args) {
     if (f.name === 'dangerousMethod') {
         console.warn('Blocked dangerous call at', this._sandbox.iidToLocation(this._sandbox.lastSid, iid));
         return { f, base, args, skip: true };

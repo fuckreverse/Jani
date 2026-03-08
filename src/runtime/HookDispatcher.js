@@ -37,14 +37,14 @@ const log = createLogger(DOMAIN.FRAMEWORK);
 
 /** 所有可能的钩子名称（与 JalangiRuntime.js 运行时保持一致）。 */
 const HOOKS = Object.freeze([
-    '_return', '_throw', '_with',
+    'returnStmt', 'throwStmt', 'withStmt',
     'binaryPre', 'binary', 'conditional',
     'declare', 'endExecution', 'endExpression',
-    'forinObject', 'functionEnter', 'functionExit',
+    'forIn', 'functionEnter', 'functionExit',
     'getFieldPre', 'getField', 'instrumentCodePre',
-    'instrumentCode', 'invokeFunPre', 'invokeFun',
+    'instrumentCode', 'callPre', 'call',
     'literal', 'onReady', 'putFieldPre',
-    'putField', 'read', 'runInstrumentedFunctionBody',
+    'putField', 'read', 'shouldInstrumentFn',
     'scriptEnter', 'scriptExit', 'unaryPre',
     'unary', 'write',
     // async/await 恢复点钩子（J$.Aw 触发）
@@ -67,13 +67,13 @@ const RESULT_ARG_INDEX = Object.freeze({
     read:        2,   // read(iid, name, val, ...)
     getField:    3,   // getField(iid, base, offset, val, ...)
     putField:    3,   // putField(iid, base, offset, val, ...)
-    invokeFun:   4,   // invokeFun(iid, f, base, args, result, ...)
+    call:        4,   // call(iid, f, base, args, result, ...)
     literal:     1,   // literal(iid, val, ...)
     conditional: 1,   // conditional(iid, result, ...)
-    forinObject: 1,   // forinObject(iid, val, ...)
+    forIn:       1,   // forIn(iid, val, ...)
     declare:     2,   // declare(iid, name, val, ...)
-    _return:     1,   // _return(iid, val, ...)
-    _throw:      1,   // _throw(iid, val, ...)
+    returnStmt:  1,   // returnStmt(iid, val, ...)
+    throwStmt:   1,   // throwStmt(iid, val, ...)
 });
 
 /**

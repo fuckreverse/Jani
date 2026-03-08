@@ -46,7 +46,7 @@ import { addScopes, resetScopeCounter } from './scope.js';
 import { analyzeDefUse }  from './dataflow.js';
 import * as IID            from './iid.js';
 import * as W              from './wrappers.js';
-import { analyzePluginHooks, buildConfigFromHooks, buildConfigFromPlugins, fullConfig } from './pluginAnalyzer.js';
+import { buildConfigFromPlugins } from './pluginAnalyzer.js';
 const { instrumentArrowFunctionBody } = W;
 
 // ─── Config 注入（由宿主在使用前调用 init() 设置）──────────────────────────────
@@ -105,11 +105,9 @@ const {
 
 function regExpToJSON() {
     return {
-        type:       'J$.AST.REGEXP',
-        value:      this.source,
-        glb:        this.global,
-        ignoreCase: this.ignoreCase,
-        multiline:  this.multiline,
+        type:  'J$.AST.REGEXP',
+        value: this.source,
+        flags: this.flags,  // 使用 this.flags 完整序列化所有标志（d/g/i/m/s/u/v/y）
     };
 }
 
@@ -121,8 +119,7 @@ function JSONStringifyHandler(key, value) {
 
 function JSONParseHandler(key, value) {
     if (typeof value === 'object' && value?.type === 'J$.AST.REGEXP') {
-        const flags = `${value.glb ? 'g' : ''}${value.ignoreCase ? 'i' : ''}${value.multiline ? 'm' : ''}`;
-        return RegExp(value.value, flags);
+        return RegExp(value.value, value.flags ?? '');
     }
     return value;
 }
@@ -273,7 +270,7 @@ function mergeBodies(node) {
             callee: {
                 type: 'MemberExpression',
                 object:   { type: 'Identifier', name: JALANGI_VAR },
-                property: { type: 'Identifier', name: 'S' },
+                property: { type: 'Identifier', name: 'Sp' },
                 computed: false,
             },
             arguments: [
@@ -1151,4 +1148,6 @@ function instrumentEvalCode(code, iid, isDirect) {
     }).code;
 }
 
-export { init, instrumentCode, instrumentEvalCode, analyzePluginHooks, buildConfigFromHooks, buildConfigFromPlugins, fullConfig };
+// pluginAnalyzer 工具函数（analyzePluginHooks/buildConfigFromHooks/buildConfigFromPlugins/fullConfig）
+// 请直接从 './pluginAnalyzer.js' 导入，不在此再导出。
+export { init, instrumentCode, instrumentEvalCode };

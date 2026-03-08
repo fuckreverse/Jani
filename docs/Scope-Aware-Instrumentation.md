@@ -216,15 +216,15 @@ function _findDefScope(scope, name) {
 
 ### 2.5 向钩子传入 scopeId
 
-`J$.R`、`J$.W`、`J$.Fe`、`J$.N` 均增加尾部可选参数 `scopeId`，所有变化**向后兼容**——现有分析插件不修改签名即可继续工作。
+`J$.R`、`J$.W`、`J$.Fe`、`J$.Dc` 均增加尾部可选参数 `scopeId`，所有变化**向后兼容**——现有分析插件不修改签名即可继续工作。
 
 | 钩子 | 改造后签名 |
 |------|-----------|
 | `J$.R`  | `(iid, name, val, flags, scopeId?)` |
 | `J$.W`  | `(iid, name, val, lhs, flags, scopeId?)` |
 | `J$.Fe` | `(iid, f, dis, args, scopeId?)` |
-| `J$.Fr` | `(iid)` → 返回 `isBacktrack`（不变） |
-| `J$.N`  | `(iid, name, val, flags, scopeId?)` |
+| `J$.Fx` | `(iid)` → 返回 `isBacktrack`（不变） |
+| `J$.Dc` | `(iid, name, val, flags, scopeId?)` |
 | `J$.Rl` | `(iid, defScopeId, name)`（**新增**） |
 | `J$.Aw` | `(iid, val, ctxId)`（**新增**） |
 
@@ -418,7 +418,7 @@ flowchart LR
     end
 
     FE["J$.Fe(iid, f, dis, args, defScopeId)\n函数进入"] -->|"分配新 callId\n(defScopeId, callId) 入栈"| CID
-    FR["J$.Fr(iid)\n函数退出"] -->|"弹栈，恢复 callId"| CID
+    FR["J$.Fx(iid)\n函数退出"] -->|"弹栈，恢复 callId"| CID
     W["J$.W(..., defScopeId)\n变量写入"] -->|"shadowFrameSet(defScopeId, callId, name, val)"| SFM
     R["J$.R(..., defScopeId)\n全量读取"] -->|"同步 shadowFrame"| SFM
     Rl["J$.Rl(iid, defScopeId, name)\n轻量读取"] -->|"shadowFrameLookup(defScopeId, callId, name)"| SFM
@@ -811,8 +811,8 @@ const visitorAntiDetection = {
 | `J$.W`  | `(iid, name, val, lhs, flags, scopeId?)` | 变量写入，增加可选 scopeId |
 | `J$.Rl` | `(iid, defScopeId, name)` | **新增**：轻量读取，从 Shadow Frame 查值 |
 | `J$.Fe` | `(iid, f, dis, args, scopeId?)` | 函数进入，增加可选 scopeId（Shadow Frame 压栈用） |
-| `J$.Fr` | `(iid)` → 返回 `isBacktrack` | Shadow Frame 弹栈在运行时内部处理，签名不变 |
-| `J$.N`  | `(iid, name, val, flags, scopeId?)` | 变量声明初始化，增加可选 scopeId |
+| `J$.Fx` | `(iid)` → 返回 `isBacktrack` | Shadow Frame 弹栈在运行时内部处理，签名不变 |
+| `J$.Dc` | `(iid, name, val, flags, scopeId?)` | 变量声明初始化，增加可选 scopeId |
 | `J$.Aw` | `(iid, val, ctxId?)` | **新增**：await 恢复点，透传 resolved value，更新 `#currentContextId`，触发 `awaitResume` 回调 |
 
 **向后兼容**：所有新增参数均为**尾部追加可选参数**，现有分析插件不修改签名即可继续工作。
@@ -826,7 +826,7 @@ const visitorAntiDetection = {
 当前项目直接在 Babel AST 上插桩并原样输出，这是正确决策：
 - 降级 `async/await → Promise.then` 会改变 `arguments.callee` 和 `Function.length`，可能触发恶意代码的反调试逻辑
 - 降级 `class → function` 会让 `instanceof` 行为不一致
-- 降级 `let/const → var` 会消除 TDZ（Temporal Dead Zone）。为了避免在未降级的情况下触发 TDZ `ReferenceError`，插桩器在作用域顶部同步变量（`J$.N`）时，会跳过 `let`、`const` 和 `class` 声明。
+- 降级 `let/const → var` 会消除 TDZ（Temporal Dead Zone）。为了避免在未降级的情况下触发 TDZ `ReferenceError`，插桩器在作用域顶部同步变量（`J$.Dc`）时，会跳过 `let`、`const` 和 `class` 声明。
 
 `wrapFunBodyWithTryCatch` 已明确排除 async 和 generator 函数。
 
@@ -863,7 +863,7 @@ const visitorAntiDetection = {
 | `resetScopeCounter()` 幂等重置 | `scope.js` / `esnstrument.js` | ✅ |
 | 变量声明 kind 记录（const/let/var） | `scope.js` | ✅ |
 | `arguments` 参数重命名（简单标识符 + 所有解构形式）| `scope.js` — `renameArgumentsInPattern()` | ✅ |
-| `wrappers.js` 中 `J$.Fe` / `J$.N` 读取重命名后标识符 | `wrappers.js` | ✅ |
+| `wrappers.js` 中 `J$.Fe` / `J$.Dc` 读取重命名后标识符 | `wrappers.js` | ✅ |
 | `_findDefScope()` 沿链查找定义域 | `esnstrument.js` | ✅ |
 | 向 `J$.R/W/Fe/N` 传入 `defScopeId` | `esnstrument.js` | ✅ |
 | `J$.Rl` 轻量读取路径（插桩端生成） | `esnstrument.js` | ✅ |
@@ -898,7 +898,7 @@ const visitorAntiDetection = {
 
 | ID | 问题描述 | 修复位置 |
 |----|---------|---------|
-| BUG-11A | `J$.Fe` / `J$.N` 中硬编码 `arguments` 标识符，导致重命名后读取 `undefined` | `wrappers.js` — `createCallAsFunEnterStatement`、`syncDefuns` |
+| BUG-11A | `J$.Fe` / `J$.Dc` 中硬编码 `arguments` 标识符，导致重命名后读取 `undefined` | `wrappers.js` — `createCallAsFunEnterStatement`、`syncDefuns` |
 | BUG-2 | 解构参数中的 `arguments` 绑定未就地重命名，作用域表名称不同步 | `scope.js` — 新增 `renameArgumentsInPattern()`，在 `collectParamNames` 之前调用 |
 | BUG-1 | `HookDispatcher._makeDispatcher` 中 `onError()` 调用可能掩盖原始异常（双重异常风险）| `HookDispatcher.js` — 先取出 handler 再判断类型后调用 |
 | BUG-3 | `DataFlowAnalyzer.processPutField()` 的 key 解析用 `:` 拆分，含冒号的变量名被截断 | `DataFlowAnalyzer.js` — 改为 `entry.scopeId`/`entry.callId`/`entry.name` 直接读取 |

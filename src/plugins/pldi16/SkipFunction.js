@@ -11,7 +11,7 @@
  */
 
 export class SkipFunctionAnalysis {
-    invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
+    callPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
         // 如果全局定义了 evilFunction 且当前调用的是它，则跳过执行
         if (typeof evilFunction === 'function' && f === evilFunction) {
             return { f, base, args, skip: true };

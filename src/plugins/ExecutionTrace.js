@@ -336,7 +336,7 @@ export class ExecutionTraceAnalysis {
 
     // ── 函数调用边界 ──────────────────────────────────────────────────────────
 
-    invokeFunPre(iid, f, base, args, isConstructor, isMethod) {
+    callPre(iid, f, base, args, isConstructor, isMethod) {
         const name   = f?.name || '(anonymous)';
         const prefix = isConstructor ? 'new ' : '';
         const desc   = isMethod
@@ -363,11 +363,11 @@ export class ExecutionTraceAnalysis {
         return { f, base, args, skip: false };
     }
 
-    invokeFun(iid, f, base, args, result, isConstructor, isMethod) {
+    call(iid, f, base, args, result, isConstructor, isMethod) {
         if (this._stack.length === 0 || this._callStack.length === 0) {
             const name = f?.name || '(anonymous)';
             dbg.error(
-                `invokeFun: stack underflow — stack=${this._stack.length}` +
+                `call: stack underflow — stack=${this._stack.length}` +
                 ` fn=${name} iid=${iid}`
             );
             return { result };
@@ -464,7 +464,7 @@ export class ExecutionTraceAnalysis {
             this._callStack.push({ callMeta });
         } else {
             // 栈不为空：只有 _stack 顶层就是合成帧时，才增加其嵌套深度计数。
-            // 如果合成帧之上还有 invokeFunPre 推的帧，则这次 Fe 属于那些帧内部，
+            // 如果合成帧之上还有 callPre 推的帧，则这次 Fe 属于那些帧内部，
             // 不影响合成帧的 _feFrDepth（它们有自己的深度语义）。
             const top = this._top();
             if (top?._isSyntheticEntry) {
@@ -539,7 +539,7 @@ export class ExecutionTraceAnalysis {
         return { result: val };
     }
 
-    _return(iid, val) {
+    returnStmt(iid, val) {
         const frame = this._top();
         if (!frame) return { result: val };
         const { rc, loc } = this._loc(iid);
@@ -548,7 +548,7 @@ export class ExecutionTraceAnalysis {
         return { result: val };
     }
 
-    _throw(iid, val) {
+    throwStmt(iid, val) {
         const frame = this._top();
         if (!frame) return { result: val };
         const { rc, loc } = this._loc(iid);
@@ -617,7 +617,7 @@ export class ExecutionTraceAnalysis {
     }
 
     /**
-     * 每次异步调用的 invokeFun/functionExit 返回后，检查异步根帧是否仍有挂起调用。
+     * 每次异步调用的 call/functionExit 返回后，检查异步根帧是否仍有挂起调用。
      * 若已无挂起调用且栈只剩根帧，弹出根帧，不做 emit（根帧本身不产生输出行）。
      */
     _maybeFlushAsyncRootFrame() {

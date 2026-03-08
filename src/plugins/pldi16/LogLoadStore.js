@@ -28,12 +28,12 @@ export class LogLoadStoreAnalysis {
         this._sandbox.log(this._cacheStr + str);
     }
 
-    invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
+    callPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
         this._indentation++;
         return { f, base, args, skip: false };
     }
 
-    invokeFun(iid, f, base, args, result, isConstructor, isMethod, functionIid, functionSid) {
+    call(iid, f, base, args, result, isConstructor, isMethod, functionIid, functionSid) {
         this._indentation--;
         return { result };
     }

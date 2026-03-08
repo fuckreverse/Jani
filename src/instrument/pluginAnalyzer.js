@@ -33,10 +33,10 @@ const log = createLogger(DOMAIN.INSTRUMENT);
  * 凡是出现在插件中的方法名，都视为"使用了该 Hook"。
  */
 export const ALL_HOOKS = new Set([
-    'invokeFunPre',
-    'invokeFun',
+    'callPre',
+    'call',
     'literal',
-    'forinObject',
+    'forIn',
     'declare',
     'getFieldPre',
     'getField',
@@ -44,9 +44,9 @@ export const ALL_HOOKS = new Set([
     'putField',
     'read',
     'write',
-    '_return',
-    '_throw',
-    '_with',
+    'returnStmt',
+    'throwStmt',
+    'withStmt',
     'functionEnter',
     'functionExit',
     'scriptEnter',
@@ -60,7 +60,7 @@ export const ALL_HOOKS = new Set([
     'instrumentCode',
     'endExpression',
     'endExecution',
-    'runInstrumentedFunctionBody',
+    'shouldInstrumentFn',
     'onReady',
     'awaitResume',
 ]);
@@ -77,14 +77,14 @@ export const ALL_HOOKS = new Set([
  */
 const HOOK_TO_CONFIG_FIELDS = {
     // 函数调用
-    invokeFunPre:   ['INSTR_INVOKE'],
-    invokeFun:      ['INSTR_INVOKE'],
+    callPre:        ['INSTR_INVOKE'],
+    call:           ['INSTR_INVOKE'],
 
     // 字面量
     literal:        ['INSTR_LITERAL'],
 
     // for-in
-    forinObject:    ['INSTR_FORIN'],
+    forIn:          ['INSTR_FORIN'],
 
     // 变量声明
     declare:        ['INSTR_INIT', 'INSTR_TRY_CATCH_ARGUMENTS'],
@@ -101,9 +101,9 @@ const HOOK_TO_CONFIG_FIELDS = {
     write:          ['INSTR_WRITE'],
 
     // 控制流
-    _return:        ['INSTR_RETURN'],
-    _throw:         ['INSTR_THROW'],
-    _with:          ['INSTR_CONDITIONAL'],
+    returnStmt:     ['INSTR_RETURN'],
+    throwStmt:      ['INSTR_THROW'],
+    withStmt:       ['INSTR_WITH'],
 
     // 函数进出（functionEnter/Exit 需要 try-catch 包裹 + arguments 声明两者）
     functionEnter:  ['INSTR_TRY_CATCH_ARGUMENTS'],
@@ -132,7 +132,7 @@ const HOOK_TO_CONFIG_FIELDS = {
 
     // 以下钩子不需要插桩支持（纯运行时事件），不映射 Config 字段
     endExecution:              [],
-    runInstrumentedFunctionBody: [],
+    shouldInstrumentFn: [],
     onReady:                   [],
 };
 
@@ -156,6 +156,7 @@ export const ALL_CONFIG_FIELDS = new Set([
     'INSTR_THROW',
     'INSTR_FORIN',
     'INSTR_AWAIT',
+    'INSTR_WITH',
     'INSTR_PROPERTY_BINARY_ASSIGNMENT',
 ]);
 

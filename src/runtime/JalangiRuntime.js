@@ -8,7 +8,7 @@
  * 本模块实现了插桩代码在运行时调用的所有 J$.xxx 函数：
  *   R（read）、W（write）、G（getField）、P（putField）、
  *   B（binary）、U（unary）、F（funcCall）、M（methodCall）、
- *   T（literal）、N（declare）、Fe/Fr（functionEnter/Exit）、
+ *   T（literal）、Dc（declare）、Fe/Fx（functionEnter/Exit）、
  *   Se/Sr（scriptEnter/Exit）、C/C1/C2（conditional）等。
  *
  * 推荐用法（通过 JalangiSandbox 自动组装）：
@@ -137,7 +137,7 @@ export class JalangiRuntime {
     // ── 私有执行状态 ─────────────────────────────────────────────────────────
 
     /** 函数返回值栈（支持 finally 块中的嵌套调用） */
-    #returnStack = [];
+    #retStack = [];
 
     /** switch 语句嵌套时保存外层 switchLeft */
     #switchKeyStack = [];
@@ -169,7 +169,7 @@ export class JalangiRuntime {
      */
     #currentFunDefScopeId = undefined;
 
-    // ── TODO-13: CallID 机制 —— 区分同一函数的不同调用（递归/闭包/异步） ────
+    // ── CallID 机制 —— 区分同一函数的不同调用（递归/闭包/异步） ──────────────
 
     /** 调用 ID 全局单调计数器 */
     #callIdCounter = 0;
@@ -249,7 +249,7 @@ export class JalangiRuntime {
      * **问题根源**：Fe() 的 `f` 参数是 probe 函数（arguments.callee 探针）的返回值，
      * 而非实际被调用的函数。因此 `funcClosureCallId.get(f)` 无法获取正确的外层 callId。
      *
-     * **解决方案**：在 #invokeFun() 中调用函数前，预先从 funcClosureCallId 查出正确的
+     * **解决方案**：在 #callFn() 中调用函数前，预先从 funcClosureCallId 查出正确的
      * capturedOuterCallId 并存入此字段；Fe() 从这里读取（一次性消费后立即清空）。
      *
      * null 表示无预传递值（非闭包函数调用，或外层帧仍在栈中不需要此机制）。
@@ -296,7 +296,7 @@ export class JalangiRuntime {
      */
     #funcSidIidMap = new WeakMap();
 
-    // ── TODO-14: 对象 OID 机制 —— 为对象/数组/函数分配唯一 ID，支持别名追踪 ──
+    // ── 对象 OID 机制 —— 为对象/数组/函数分配唯一 ID，支持别名追踪 ──────────
 
     /** OID 单调递增计数器（0 保留，表示"非对象"） */
     #oidCounter = 0;
@@ -394,7 +394,7 @@ export class JalangiRuntime {
     #pushSwitchKey() { this.#switchKeyStack.push(this.#switchLeft); }
     #popSwitchKey()  { this.#switchLeft = this.#switchKeyStack.pop(); }
 
-    // ── TODO-11: Shadow Frame 工具方法 ──────────────────────────────────────
+    // ── Shadow Frame 工具方法 ──────────────────────────────────────────────────
 
     /**
      * 查找 Shadow Frame 中变量的值。
@@ -553,7 +553,7 @@ export class JalangiRuntime {
         }
     }
 
-    // ── TODO-14: OID 工具方法 ────────────────────────────────────────────────
+    // ── OID 工具方法 ─────────────────────────────────────────────────────────
 
     /**
      * 为对象/数组/函数获取或分配 OID（Object ID）。
@@ -632,7 +632,7 @@ export class JalangiRuntime {
      *   - super()  → A 构造函数内 new.target 仍为 B（JS 引擎自动传递）
      *
      * 若未来需要支持动态 newTarget（如 Proxy 或 Reflect.construct 的第三参数不同），
-     * 可在 #invokeFun 中预传递 newTarget 并在此处消费。
+     * 可在 #callFn 中预传递 newTarget 并在此处消费。
      *
      * @param {Function} Constructor  构造函数
      * @param {Array}    args         参数列表
@@ -723,14 +723,14 @@ export class JalangiRuntime {
         return entry ? entry.sid : getPropSafe(f, this.Constants.SPECIAL_PROP_SID);
     }
 
-    #invokeFun(iid, base, f, args, isConstructor, isMethod) {
+    #callFn(iid, base, f, args, isConstructor, isMethod) {
         let aret, skip = false, result;
         const analysis = this.analysis;
 
-        if (analysis?.invokeFunPre) {
+        if (analysis?.callPre) {
             // P3: 调用 pre 钩子时保护 #lastComputedValue
             const _fIid = this.#getFuncIid(f), _fSid = this.#getFuncSid(f);
-            aret = this.#callHook(() => analysis.invokeFunPre(iid, f, base, args, isConstructor, isMethod, _fIid, _fSid));
+            aret = this.#callHook(() => analysis.callPre(iid, f, base, args, isConstructor, isMethod, _fIid, _fSid));
             if (aret) {
                 f    = aret.f;
                 base = aret.base;
@@ -752,8 +752,8 @@ export class JalangiRuntime {
             this.#pendingCapturedOuterCallId = null;
         }
 
-        if (analysis?.invokeFun) {
-            aret = analysis.invokeFun(iid, f, base, args, result, isConstructor, isMethod,
+        if (analysis?.call) {
+            aret = analysis.call(iid, f, base, args, result, isConstructor, isMethod,
                 this.#getFuncIid(f), this.#getFuncSid(f));
             if (aret) result = aret.result;
         }
@@ -765,7 +765,7 @@ export class JalangiRuntime {
     // 公开运行时钩子（插桩代码直接调用）
     // ══════════════════════════════════════════════════════════════════════════
 
-    /** 函数调用（F(iid, f, flags)(...args)） */
+    /** 函数调用（F(iid, f, flags)(...args)） — Function call */
     F(iid, f, flags) {
         const [isConstructor] = decodeBitPattern(flags, 1);
         return (...callArgs) => {
@@ -773,20 +773,24 @@ export class JalangiRuntime {
             // 等价于 f() 的原始语义（非严格模式下运行时会自动补全为 globalThis）。
             // 不能用 this（即 J$ runtime 对象），否则 setTimeout / clearTimeout 等
             // window 绑定的 native 方法会因 this 不是 window 而抛出 Illegal invocation。
-            return (this.#lastComputedValue = this.#invokeFun(iid, undefined, f, callArgs, isConstructor, false));
+            return (this.#lastComputedValue = this.#callFn(iid, undefined, f, callArgs, isConstructor, false));
         };
     }
 
-    /** 方法调用（M(iid, base, offset, flags)(...args)） */
+    /** 方法调用（M(iid, base, offset, flags)(...args)） — Method call */
     M(iid, base, offset, flags) {
         const [isConstructor, isComputed] = decodeBitPattern(flags, 2);
         const f = this.G(iid + 2, base, offset, createBitPattern(isComputed, false, true));
         return (...callArgs) => {
-            return (this.#lastComputedValue = this.#invokeFun(iid, base, f, callArgs, isConstructor, true));
+            return (this.#lastComputedValue = this.#callFn(iid, base, f, callArgs, isConstructor, true));
         };
     }
 
-    /** 忽略（Identity，占位用） */
+    /**
+     * 透传占位符（Identity）。
+     * 插桩器在某些不需要实际操作的位置注入此调用，保持 AST 结构一致性。
+     * @internal 不对应任何 JS 语义操作，无分析回调。
+     */
     I(val) { return val; }
 
     /** 字面量（对象/函数/数组/正则/原始值） */
@@ -805,14 +809,13 @@ export class JalangiRuntime {
             }
         }
 
-        // TODO-14: 为对象/数组/函数分配 OID（创建点记录到 #oidMap）
-        // type: 0=object, 1=function, 2=array, 3=regex（均为引用类型）
+        // OID 分配：为对象/数组/函数分配唯一 ID（创建点记录到 #oidMap）
         // 通过 #getOrCreateOid 统一处理，非引用类型自动跳过
         this.#getOrCreateOid(val);
 
-        // TODO-13: 为函数字面量记录"创建时外层帧 callId"，用于闭包场景的 #resolveCallId。
+        // CallID 机制：为函数字面量记录"创建时外层帧 callId"，用于闭包场景的 #resolveCallId。
         // 同时将外层帧的 (defScopeId:callId) 注册到 #closureFrameSet，
-        // 告知 Fr() "该帧有闭包引用，退出时不要立即清除 Shadow Frame"。
+        // 告知 Fx() "该帧有闭包引用，退出时不要立即清除 Shadow Frame"。
         if (typeof val === 'function') {
             this.#funcClosureCallId.set(val, this.#currentCallId);
             // 当前正在某函数帧内（而非顶层脚本）才需要注册
@@ -864,30 +867,30 @@ export class JalangiRuntime {
         return (this.#lastComputedValue = val);
     }
 
-    /** for-in 对象包装 */
-    H(iid, val) {
+    /** for-in 对象包装 — ForIn（J$.Fi）*/
+    Fi(iid, val) {
         const analysis = this.analysis;
-        if (analysis?.forinObject) {
-            const aret = analysis.forinObject(iid, val);
+        if (analysis?.forIn) {
+            const aret = analysis.forIn(iid, val);
             if (aret) val = aret.result;
         }
         return val;
     }
 
-    /** 变量声明初始化 */
-    N(iid, name, val, flags) {
+    /** 变量声明初始化 — Declare（J$.Dc）*/
+    Dc(iid, name, val, flags) {
         const [isArgument, isLocalSync, isCatchParam] = decodeBitPattern(flags, 3);
         const analysis = this.analysis;
 
         if (isArgument) this.#argIndex++;
 
-        if (!isLocalSync && analysis?.declare) {
+        if (!isLocalSync && analysis?.declare) {  // callback 名称保持 declare
             const idx  = (isArgument && this.#argIndex > 1) ? this.#argIndex - 2 : -1;
             const aret = analysis.declare(iid, name, val, isArgument, idx, isCatchParam);
             if (aret) val = aret.result;
         }
 
-        // TODO-11: 形参/局部变量初始化时，将值写入 Shadow Frame，确保 Rl() 能读到正确值。
+            // 形参/局部变量初始化时，将值写入 Shadow Frame，确保 Rl() 能读到正确值。
         // isLocalSync=true 的变量（如闭包变量同步）已有其他机制处理，此处跳过避免重复。
         // name === 'arguments' 的情况不写入 Shadow Frame（不需要按名查找 arguments）。
         if (!isLocalSync && name !== 'arguments' && this.#currentFunDefScopeId !== undefined) {
@@ -947,7 +950,7 @@ export class JalangiRuntime {
 
         if (!skip) base[offset] = val;
 
-        // TODO-14: 属性写入时递增对象版本号（使分析器能检测到对象结构变化）
+        // OID 版本：属性写入时递增对象版本号（使分析器能检测到对象结构变化）
         const oid = this.#getOrCreateOid(base);
         if (oid !== null) {
             this.#objectVersions.set(oid, (this.#objectVersions.get(oid) ?? 0) + 1);
@@ -961,13 +964,12 @@ export class JalangiRuntime {
         return (this.#lastComputedValue = val);
     }
 
-    /** 变量读取 */
-    // TODO-7: 第五个参数 defScopeId 由插桩器注入（来自 wrapRead）
+    /** 变量读取 — Read variable（J$.R）。第五个参数 defScopeId 由插桩器注入（来自 wrapRead）。 */
     R(iid, name, val, flags, defScopeId) {
         const [isGlobal, isScriptLocal] = decodeBitPattern(flags, 2);
         const analysis = this.analysis;
 
-        // TODO-11: 若有 defScopeId，同步更新 Shadow Frame（确保 Rl 能读到最新值）
+            // 若有 defScopeId，同步更新 Shadow Frame（确保 Rl 能读到最新值）
         // 使用 #resolveCallId 支持闭包访问外层作用域的情况
         if (!isGlobal && defScopeId !== undefined) {
             this.#shadowSet(defScopeId, this.#resolveCallId(defScopeId), name, val);
@@ -982,7 +984,7 @@ export class JalangiRuntime {
     }
 
     /**
-     * TODO-12: 轻量变量读取钩子（J$.Rl）。
+     * 轻量变量读取钩子（J$.Rl）。
      * 不接收 value 参数，直接从 Shadow Frame 查找变量值。
      * 当 Shadow Frame 中没有缓存时，通过 #onShadowMiss 记录诊断信息并返回 undefined。
      *
@@ -1014,8 +1016,7 @@ export class JalangiRuntime {
         return (this.#lastComputedValue = val);
     }
 
-    /** 变量写入 */
-    // TODO-7/11: 第六个参数 defScopeId 由插桩器注入（来自 wrapWrite）
+    /** 变量写入 — Write variable（J$.W）。第六个参数 defScopeId 由插桩器注入。 */
     W(iid, name, val, lhs, flags, defScopeId) {
         const [isGlobal, isScriptLocal, isDeclaration] = decodeBitPattern(flags, 3);
         const analysis = this.analysis;
@@ -1025,13 +1026,13 @@ export class JalangiRuntime {
             if (aret) val = aret.result;
         }
 
-        // TODO-11: 若有 defScopeId，同步写入 Shadow Frame（非全局变量才需要）
+            // 若有 defScopeId，同步写入 Shadow Frame（非全局变量才需要）
         // 使用 #resolveCallId 支持闭包写回外层作用域变量
         if (!isGlobal && defScopeId !== undefined) {
             const resolvedCallId = this.#resolveCallId(defScopeId);
             this.#shadowSet(defScopeId, resolvedCallId, name, val);
 
-            // TODO-14: 记录别名（右值是对象/数组/函数时，记录变量 → OID 映射）
+            // OID 别名：右值是对象/数组/函数时，记录变量 → OID 映射（用于对象别名分析）
             const oid = this.#getOrCreateOid(val);
             if (oid !== null) {
                 this.#aliasTable.set(`${defScopeId}:${resolvedCallId}:${name}`, oid);
@@ -1049,11 +1050,11 @@ export class JalangiRuntime {
         }
     }
 
-    /** with 语句 */
-    Wi(iid, val) {
+    /** with 语句 — With statement（J$.Wt）*/
+    Wt(iid, val) {
         const analysis = this.analysis;
-        if (analysis?._with) {
-            const aret = analysis._with(iid, val);
+        if (analysis?.withStmt) {
+            const aret = analysis.withStmt(iid, val);
             if (aret) val = aret.result;
         }
         return val;
@@ -1064,55 +1065,57 @@ export class JalangiRuntime {
         this.#wrappedExceptionVal = { exception: e };
     }
 
-    /** throw 语句 */
+    /** throw 语句 — Throw statement（J$.Th）*/
     Th(iid, val) {
         const analysis = this.analysis;
-        if (analysis?._throw) {
-            const aret = analysis._throw(iid, val);
+        if (analysis?.throwStmt) {
+            const aret = analysis.throwStmt(iid, val);
             if (aret) val = aret.result;
         }
         return (this.#lastComputedValue = val);
     }
 
-    /** return 语句 */
+    /** return 语句 — Return statement（J$.Rt）*/
     Rt(iid, val) {
         const analysis = this.analysis;
-        if (analysis?._return) {
-            const aret = analysis._return(iid, val);
+        if (analysis?.returnStmt) {
+            const aret = analysis.returnStmt(iid, val);
             if (aret) val = aret.result;
         }
-        this.#returnStack.pop();
-        this.#returnStack.push(val);
+        this.#retStack.pop();
+        this.#retStack.push(val);
         return (this.#lastComputedValue = val);
     }
 
-    /** 函数真正返回时（由 finally 包装调用），读取 Rt 存储的返回值 */
-    Ra() {
-        const returnVal           = this.#returnStack.pop();
+    /**
+     * 从返回值栈弹出 Rt 存入的函数返回值，在 finally 块中被 Fx 调用。
+     * @internal 内部流程协同件，不对应任何 JS 语义操作，无分析回调。
+     */
+    Rv() {
+        const returnVal           = this.#retStack.pop();
         this.#wrappedExceptionVal = undefined;
         return returnVal;
     }
 
-    /** 函数进入 */
-    // TODO-13: 第五个参数 defScopeId 由插桩器注入（来自 createCallAsFunEnterStatement）
+    /** 函数进入 — Function Enter（J$.Fe）。第五个参数 defScopeId 由插桩器注入。 */
     Fe(iid, f, dis, args, defScopeId) {
         this.#argIndex = 0;
-        this.#returnStack.push(undefined);
+        this.#retStack.push(undefined);
         this.#wrappedExceptionVal = undefined;
         this.#updateSid(f);
 
-        // 闭包修复：从 #pendingCapturedOuterCallId 读取外层帧 callId（由 #invokeFun 预传递）。
+        // 闭包修复：从 #pendingCapturedOuterCallId 读取外层帧 callId（由 #callFn 预传递）。
         //
         // 背景：Fe() 的 `f` 参数是 probe fn（arguments.callee 探针）的返回值，不是被调用函数。
         // probe fn 在函数体执行时才被创建，没有被 T() 记录，所以 funcClosureCallId.get(probe_fn)
         // 取不到正确的外层 callId。
         //
-        // 修复：#invokeFun() 在调用函数前已将正确的 capturedOuterCallId 存入
+        // 修复：#callFn() 在调用函数前已将正确的 capturedOuterCallId 存入
         // #pendingCapturedOuterCallId，在此一次性读取并清空（避免跨调用泄漏）。
         let capturedOuterCallId = this.#pendingCapturedOuterCallId;
         this.#pendingCapturedOuterCallId = null;
 
-        // BUG-objectmethod-closure 后备修复：
+        // 后备修复（ObjectMethod 闭包场景）：
         // 当函数通过 JS 引擎内部协议调用（如 for...of 的 iterator.next()、
         // Array.map 的回调等），不会经过 J$.M/J$.F，#pendingCapturedOuterCallId 为 null。
         // 此时尝试在 #callIdStack 中搜索包含 defScopeId 的帧（Shadow Frame 存在该作用域数据），
@@ -1120,7 +1123,7 @@ export class JalangiRuntime {
         //
         // 注意：此后备机制仅适用于"外层帧当前仍在调用栈中"的情况（动态调用的闭包），
         // 对于"外层帧已退出"的情况（factory pattern 等），capturedOuterCallId 仍依赖
-        // #invokeFun 预传递（通过 funcClosureCallId 查找）。
+        // #callFn 预传递（通过 funcClosureCallId 查找）。
         if (capturedOuterCallId === null && defScopeId !== undefined) {
             // 搜索调用栈，找到包含 defScopeId 的最近帧
             for (let i = this.#callIdStack.length - 1; i >= 0; i--) {
@@ -1137,8 +1140,8 @@ export class JalangiRuntime {
             }
         }
 
-        // TODO-13: 分配新 callId，压栈保存旧值
-        // 同时保存父帧的 defScopeId，供 Fr() 恢复
+        // 分配新 callId，压栈保存旧值
+        // 同时保存父帧的 defScopeId，供 Fx() 恢复
         // capturedOuterCallId：此函数在创建时外层帧的 callId（闭包绑定）
         this.#callIdStack.push({
             callId: this.#currentCallId,
@@ -1150,16 +1153,16 @@ export class JalangiRuntime {
         if (capturedOuterCallId !== null && capturedOuterCallId !== undefined) {
             this.#callIdToOuterCallId.set(this.#currentCallId, capturedOuterCallId);
         }
-        // TODO-11: 记录当前函数的 defScopeId，供 N() 初始化形参到 Shadow Frame
+        // 记录当前函数的 defScopeId，供 Dc() 初始化形参到 Shadow Frame
         this.#currentFunDefScopeId = defScopeId;
 
         this.analysis?.functionEnter?.(iid, f, dis, args);
     }
 
-    /** 函数退出 */
-    Fr(iid) {
+    /** 函数退出 — Function eXit（J$.Fx）。弹出调用帧，执行 finally 清理。 */
+    Fx(iid) {
         let isBacktrack = false;
-        let returnVal   = this.#returnStack.pop();
+        let returnVal   = this.#retStack.pop();
         const analysis  = this.analysis;
 
         if (analysis?.functionExit) {
@@ -1175,14 +1178,14 @@ export class JalangiRuntime {
 
         this.#rollBackSid();
 
-        // TODO-13: 弹出 callId 栈，恢复调用方的 callId
+        // 弹出 callId 栈，恢复调用方的 callId
         const frame = this.#callIdStack.pop();
         if (frame) {
             const leavingCallId    = this.#currentCallId;
             const leavingScopeId   = this.#currentFunDefScopeId;
             const { callId: parentCallId, defScopeId: parentDefScopeId } = frame;
 
-            // TODO-13 闭包修复：退出时不立即清除 Shadow Frame。
+                    // 闭包修复：退出时不立即清除 Shadow Frame。
             // 若该帧的 (scopeId:callId) 已被 #closureFrameSet 注册（说明有内层闭包在引用），
             // 则保留 Shadow Frame 数据，让内层闭包函数能继续读取。
             // 否则（无闭包引用）才立即清除，节省内存。
@@ -1201,18 +1204,17 @@ export class JalangiRuntime {
             // 恢复父帧的 defScopeId
             this.#currentFunDefScopeId = parentDefScopeId;
 
-            // BUG-RT-03 修复：清除 #callIdToOuterCallId 映射，防止内存泄漏。
+            // 退出时清除 #callIdToOuterCallId 映射，防止内存泄漏。
             // 当函数退出时，若没有闭包在引用此帧，可安全删除，允许 GC 回收。
             // 若有闭包引用（isReferencedByClosure=true），则保留链条，
             // 使得内层闭包的 #resolveCallId() 能继续沿链找到祖父层及以上的变量。
-            // （FinalizationRegistry 回调会在闭包函数被 GC 后负责清理 closureFrameSet，
-            //   届时再通过 FinalizationRegistry 删除）
+            // （FinalizationRegistry 回调会在闭包函数被 GC 后负责清理 closureFrameSet）
             if (!isReferencedByClosure) {
                 this.#callIdToOuterCallId.delete(leavingCallId);
             }
         }
 
-        if (!isBacktrack) this.#returnStack.push(returnVal);
+        if (!isBacktrack) this.#retStack.push(returnVal);
 
         // 重新抛出未捕获异常，保持异常控制流
         if (this.#wrappedExceptionVal !== undefined) {
@@ -1224,7 +1226,7 @@ export class JalangiRuntime {
         return isBacktrack;
     }
 
-    /** 脚本进入 */
+    /** 脚本进入 — Script Enter（J$.Se）*/
     Se(iid, val, origFileName) {
         this.#createAndAssignNewSid();
         // 保存最近一次进入的脚本 sid（Se() 完成后 sid 指向当前脚本，但 Sr() 之后会 rollback）
@@ -1234,7 +1236,7 @@ export class JalangiRuntime {
         this.#lastComputedValue = undefined;
     }
 
-    /** 脚本退出 */
+    /** 脚本退出 — Script exit（J$.Sr）*/
     Sr(iid) {
         const analysis = this.analysis;
         let isBacktrack;
@@ -1259,8 +1261,8 @@ export class JalangiRuntime {
         return isBacktrack;
     }
 
-    /** 复合赋值（+=、-= 等） */
-    A(iid, base, offset, op, flags) {
+    /** 复合赋值 — Compound Assign（J$.Ca）：+=、-= 等 */
+    Ca(iid, base, offset, op, flags) {
         const [isComputed, isNumber] = decodeBitPattern(flags, 2);
         let oprnd1 = this.G(iid + 2, base, offset, createBitPattern(isComputed, true, false));
         if (isNumber) oprnd1 = +oprnd1;
@@ -1270,7 +1272,7 @@ export class JalangiRuntime {
         };
     }
 
-    /** 二元运算 */
+    /** 二元运算 — Binary op（J$.B）*/
     B(iid, op, left, right, flags) {
         const [isComputed, isOpAssign, isSwitchCaseComparison] = decodeBitPattern(flags, 3);
         const analysis = this.analysis;
@@ -1361,8 +1363,12 @@ export class JalangiRuntime {
         return (this.#lastComputedValue = result);
     }
 
-    /** 返回上一个 C() 存入的原始判断值 */
-    _() { return (this.#lastComputedValue = this.#lastVal); }
+    /**
+     * 返回上一个 C() 存入的原始条件值，用于 &&/||/?? 短路求值的非执行分支。
+     * 插桩产物：`J$.C(iid, a) ? b : J$.Lv()` 表示 `a && b`。
+     * @internal 内部状态读取器，不对应独立的 JS 语义操作。
+     */
+    Lv() { return (this.#lastComputedValue = this.#lastVal); }
 
     /** switch 判别式（记录 switchLeft） */
     C1(iid, left) {
@@ -1370,22 +1376,40 @@ export class JalangiRuntime {
         return (this.#lastComputedValue = left);
     }
 
-    /** switch case 标签比较（C1 === C2） */
+    /**
+     * switch case 标签比较（switch 判别式由 C1 存储，每个 case 标签调用一次 C2）。
+     *
+     * 关键语义：switch 语句使用严格相等 `===` 比较判别式与 case 标签；
+     * 因此 C2 **必须返回 case 标签的原始值** `right`，让 JS 引擎自己做 `===` 匹配。
+     * （如果返回布尔比较结果，switch 会错误地与 true/false 比较，导致所有 case 失配）
+     *
+     * 若分析插件通过 `conditional` 钩子想要强制该 case 匹配（返回 {result:true}），
+     * 则改为返回 `this.#switchLeft`，让 switch 的 `===` 自然匹配成功。
+     */
     C2(iid, right) {
         const analysis = this.analysis;
-        let result = this.B(iid + 1, '===', this.#switchLeft, right, createBitPattern(false, false, true));
+        // 通知 binary 分析器这次 === 比较（副作用：分析记录，但 B() 的返回值不影响控制流）
+        this.B(iid + 1, '===', this.#switchLeft, right, createBitPattern(false, false, true));
+
+        // 计算实际比较结果，用于通知 conditional 分析器
+        const matchResult = this.#switchLeft === right;
 
         if (analysis?.conditional) {
-            const aret = analysis.conditional(iid, result);
+            const aret = analysis.conditional(iid, matchResult);
             if (aret) {
-                if (result && !aret.result) {
-                    right = !right;
-                } else if (result && aret.result) {
-                    right = this.#switchLeft;
+                // 分析器可以通过返回 { result: true/false } 强制匹配/失配
+                // 若强制匹配（原本不匹配），返回 switchLeft 使 === 成立
+                // 若强制失配（原本匹配），返回与 switchLeft 不等的值（使用 right 的非严格对立）
+                if (aret.result && !matchResult) {
+                    // 强制匹配：返回 switchLeft 让 switch 认为这个 case 匹配
+                    return (this.#lastComputedValue = this.#switchLeft);
                 }
+                // 强制失配 (!aret.result && matchResult)：返回 right（原始值），JS 引擎会继续比较其他 case
+                // 不需要特殊处理，继续走下面的 return right
             }
         }
 
+        // 正常情况：返回原始 case 标签值，让 switch 语句自行做 === 比较
         return (this.#lastComputedValue = right);
     }
 
@@ -1400,11 +1424,11 @@ export class JalangiRuntime {
         return (this.#lastComputedValue = left);
     }
 
-    /** 采样模式：判断是否执行插桩版函数体 */
-    S(iid, f) {
+    /** 采样判断 — Sampling（J$.Sp）：判断是否执行插桩版函数体 */
+    Sp(iid, f) {
         const analysis = this.analysis;
-        if (analysis?.runInstrumentedFunctionBody) {
-            return analysis.runInstrumentedFunctionBody(
+        if (analysis?.shouldInstrumentFn) {
+            return analysis.shouldInstrumentFn(
                 iid, f,
                 this.#getFuncIid(f),
                 this.#getFuncSid(f)
@@ -1413,11 +1437,15 @@ export class JalangiRuntime {
         return true;
     }
 
-    /** 返回最后一个计算值 */
+    /**
+     * 返回最后一个计算值（#lastComputedValue）。
+     * 脚本体 finally 块中用于保留脚本最终值，使 Sr() 的回退逻辑能正确恢复。
+     * @internal 内部状态读取器，不对应独立的 JS 语义操作。
+     */
     L() { return this.#lastComputedValue; }
 
-    /** 顶层表达式语句结束标记 */
-    X1(iid, val) {
+    /** 表达式语句结束标记 — eXpression End（J$.Xe）*/
+    Xe(iid, val) {
         this.analysis?.endExpression?.(iid);
         return (this.#lastComputedValue = val);
     }
@@ -1443,7 +1471,7 @@ export class JalangiRuntime {
         }
     }
 
-    // ── TODO-15: 异步 ContextID 公开接口 ────────────────────────────────────
+    // ── 异步 ContextID 公开接口 ──────────────────────────────────────────────
 
     /**
      * await 恢复点钩子（J$.Aw）。

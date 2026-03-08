@@ -40,7 +40,7 @@ describe('HOOKS 常量', () => {
     test('HOOKS 包含所有预期钩子名', () => {
         const expected = ['read', 'write', 'getField', 'putField', 'binary', 'unary',
             'functionEnter', 'functionExit', 'scriptEnter', 'scriptExit',
-            'invokeFun', 'invokeFunPre', 'literal', 'conditional', 'endExecution'];
+            'call', 'callPre', 'literal', 'conditional', 'endExecution'];
         for (const name of expected) {
             assert.ok(HOOKS.includes(name), `HOOKS 中应包含 "${name}"`);
         }

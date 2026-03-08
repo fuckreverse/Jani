@@ -22,7 +22,6 @@
  * 负责将插桩钩子注入到各类 AST 节点中，使用 @babel/types 工厂函数直接构建 AST。
  */
 
-import * as babelParser from '@babel/parser';
 import _babelTypes from '@babel/types';
 // @babel/types 是 CJS 模块，ESM 导入需取 .default
 const t = _babelTypes.default ?? _babelTypes;
@@ -35,43 +34,6 @@ let Config;
 
 // ─── 运行时变量名（由 init() 根据 jalangiVar 动态生成）────────────────────────
 let _jalangiVar = JALANGI_VAR;
-
-/** 模板字符串 → 缓存的 AST body 数组。变量名改变时由 _rebuildNames 清空 */
-const _templateCache = new Map();
-
-let RP;
-let logFunctionEnterFunName;
-let logFunctionReturnFunName;
-let logFunCallFunName;
-let logMethodCallFunName;
-let logAssignFunName;
-let logPutFieldFunName;
-let logGetFieldFunName;
-let logScriptEntryFunName;
-let logScriptExitFunName;
-let logReadFunName;
-let logWriteFunName;
-let logIFunName;
-let logHashFunName;
-let logLitFunName;
-let logInitFunName;
-let logReturnFunName;
-let logThrowFunName;
-let logReturnAggrFunName;
-let logUncaughtExceptionFunName;
-let logLastComputedFunName;
-let logTmpVarName;
-let logWithFunName;
-let logBinaryOpFunName;
-let logUnaryOpFunName;
-let logConditionalFunName;
-let logSwitchLeftFunName;
-let logSwitchRightFunName;
-let logLastFunName;
-let logX1FunName;
-let instrumentCodeFunName;
-let logReadLightFunName;
-let logAwaitResumeFunName;
 
 // ─── @babel/types 辅助函数 ───────────────────────────────────────────────────
 
@@ -107,47 +69,7 @@ function jalangiCall(method, iidNode, ...rest) {
     return callExpr(memberExpr(_jalangiVar, method), [iidNode, ...rest]);
 }
 
-/** 用给定的沙盒变量名重新生成所有运行时函数名常量 */
-function _rebuildNames(v) {
-    _jalangiVar              = v;
-    RP                       = `${v}_`;
-    logFunctionEnterFunName  = `${v}.Fe`;
-    logFunctionReturnFunName = `${v}.Fr`;
-    logFunCallFunName        = `${v}.F`;
-    logMethodCallFunName     = `${v}.M`;
-    logAssignFunName         = `${v}.A`;
-    logPutFieldFunName       = `${v}.P`;
-    logGetFieldFunName       = `${v}.G`;
-    logScriptEntryFunName    = `${v}.Se`;
-    logScriptExitFunName     = `${v}.Sr`;
-    logReadFunName           = `${v}.R`;
-    logWriteFunName          = `${v}.W`;
-    logIFunName              = `${v}.I`;
-    logHashFunName           = `${v}.H`;
-    logLitFunName            = `${v}.T`;
-    logInitFunName           = `${v}.N`;
-    logReturnFunName         = `${v}.Rt`;
-    logThrowFunName          = `${v}.Th`;
-    logReturnAggrFunName     = `${v}.Ra`;
-    logUncaughtExceptionFunName = `${v}.Ex`;
-    logLastComputedFunName   = `${v}.L`;
-    logTmpVarName            = `${v}._tm_p`;
-    logWithFunName           = `${v}.Wi`;
-    logBinaryOpFunName       = `${v}.B`;
-    logUnaryOpFunName        = `${v}.U`;
-    logConditionalFunName    = `${v}.C`;
-    logSwitchLeftFunName     = `${v}.C1`;
-    logSwitchRightFunName    = `${v}.C2`;
-    logLastFunName           = `${v}._`;
-    logX1FunName             = `${v}.X1`;
-    instrumentCodeFunName    = `${v}.instrumentEvalCode`;
-    logReadLightFunName      = `${v}.Rl`;
-    logAwaitResumeFunName    = `${v}.Aw`;
-    _templateCache.clear();
-}
-
-// 模块加载时用默认值初始化一次
-_rebuildNames(JALANGI_VAR);
+// 模块加载时 _jalangiVar 已通过声明赋初值（JALANGI_VAR），此处无需额外初始化。
 
 // ─── N_LOG_* 字面量类型常量 ────────────────────────────────────────────────────
 
@@ -238,75 +160,6 @@ function createBitPattern(...flags) {
     return flags.reduce((acc, f) => (acc << 1) + (f ? 1 : 0), 0);
 }
 
-// ─── 模板引擎（replaceInStatement / replaceInExpr）─────────────────────────────
-// 当前所有 wrap 函数已迁移至 @babel/types 直接构建，此处保留供外部代码引用。
-
-/**
- * 深拷贝并替换 AST 中的占位符。
- */
-function deepCloneAndReplace(node, args) {
-    if (node === null || typeof node !== 'object') return node;
-
-    if (Array.isArray(node)) {
-        const result = [];
-        for (const item of node) {
-            const replaced = deepCloneAndReplace(item, args);
-            if (Array.isArray(replaced)) result.push(...replaced);
-            else result.push(replaced);
-        }
-        return result;
-    }
-
-    if (node.type === 'Identifier' && node.name.startsWith(RP)) {
-        return args[parseInt(node.name.slice(RP.length), 10)];
-    }
-
-    if (node.type === 'BlockStatement') {
-        const newBody = deepCloneAndReplace(node.body, args);
-        if (newBody.length === 1
-                && newBody[0]?.type === 'ExpressionStatement'
-                && Array.isArray(newBody[0].expression)) {
-            return { type: 'BlockStatement', body: newBody[0].expression };
-        }
-        return { type: 'BlockStatement', body: newBody };
-    }
-
-    const obj = {};
-    for (const key of Object.keys(node)) {
-        if (key !== 'loc' && key !== 'start' && key !== 'end') {
-            obj[key] = deepCloneAndReplace(node[key], args);
-        }
-    }
-    return obj;
-}
-
-function replaceInStatement(code, ...args) {
-    let cached = _templateCache.get(code);
-    if (!cached) {
-        try {
-            const file = babelParser.parse(code, {
-                sourceType: 'script',
-                plugins: [
-                    'optionalChaining',
-                    'nullishCoalescingOperator',
-                    'logicalAssignment',
-                ],
-            });
-            cached = JSON.parse(JSON.stringify(file.program.body));
-            _templateCache.set(code, cached);
-        } catch (e) {
-            throw new Error(
-                `[jalangi] replaceInStatement failed to parse template:\n  ${code}\n  Cause: ${e.message}`
-            );
-        }
-    }
-    return deepCloneAndReplace(cached, [undefined, ...args]);
-}
-
-function replaceInExpr(code, ...args) {
-    return replaceInStatement(code, ...args)[0].expression;
-}
-
 // ─── 作用域引用（由 esnstrument.js 的 visitor 动态管理）──────────────────────
 
 let _scope = null;
@@ -352,7 +205,7 @@ function wrapPutField(node, base, offset, rvalue, isComputed) {
 function wrapModAssign(node, base, offset, op, rvalue, isComputed, isNumber) {
     if (!Config.INSTR_PROPERTY_BINARY_ASSIGNMENT || Config.INSTR_PROPERTY_BINARY_ASSIGNMENT(op, node.computed ? null : offset.value, node)) {
         IID.printModIidToLoc(node);
-        const innerCall = jalangiCall('A',
+        const innerCall = jalangiCall('Ca',
             IID.getIid(), base, offset, createLiteralAst(op),
             t.numericLiteral(createBitPattern(isComputed, isNumber))
         );
@@ -430,7 +283,7 @@ function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal, scopeId)
             `This usually means a destructuring pattern's .id.name (undefined) was passed instead of an Identifier.name.`
         );
     }
-    if (!Config.INSTR_READ || Config.INSTR_READ(name, node)) {
+    if (!Config.INSTR_READ || Config.INSTR_READ(name.value, node)) {
         IID.printIidToLoc(node);
         const iidNode = isReUseIid ? IID.getPrevIidNoInc() : IID.getIid();
         const bitsNode = t.numericLiteral(createBitPattern(isGlobal, isScriptLocal));
@@ -484,7 +337,7 @@ function wrapAwait(node, argument) {
  * 签名: J$.Rl(iid, defScopeId, name) → value
  */
 function wrapReadLightweight(node, name, defScopeId) {
-    if (!Config.INSTR_READ || Config.INSTR_READ(name, node)) {
+    if (!Config.INSTR_READ || Config.INSTR_READ(name.value, node)) {
         IID.printIidToLoc(node);
         const ret = jalangiCall('Rl',
             IID.getIid(),
@@ -506,7 +359,7 @@ function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration,
             `This usually means a destructuring pattern's .id.name (undefined) was passed instead of an Identifier.name.`
         );
     }
-    if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name, node)) {
+    if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name.value, node)) {
         IID.printIidToLoc(node);
         const bitsNode = t.numericLiteral(createBitPattern(isGlobal, isScriptLocal, isDeclaration));
         const args = [IID.getIid(), name, val, lhs, bitsNode];
@@ -521,7 +374,7 @@ function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration,
 }
 
 function wrapWriteWithUndefinedCheck(node, name, val, lhs) {
-    if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name, node)) {
+    if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name.value, node)) {
         IID.printIidToLoc(node);
         const lhsId = t.identifier(lhs.name);
         const typeofExpr = t.unaryExpression('typeof', lhsId);
@@ -592,7 +445,7 @@ function wrapWithX1(node, ast) {
     if (!Config.INSTR_END_EXPRESSION || Config.INSTR_END_EXPRESSION(node)) {
         if (!ast || !_EXPRESSION_TYPES.has(ast.type)) return ast;
         IID.printIidToLoc(node);
-        const ret = jalangiCall('X1', IID.getIid(), ast);
+        const ret = jalangiCall('Xe', IID.getIid(), ast);
         transferLoc(ret, node);
         return ret;
     }
@@ -602,7 +455,7 @@ function wrapWithX1(node, ast) {
 function wrapHash(node, ast) {
     if (!Config.INSTR_FORIN || Config.INSTR_FORIN(node)) {
         IID.printIidToLoc(node);
-        const ret = jalangiCall('H', IID.getIid(), ast);
+        const ret = jalangiCall('Fi', IID.getIid(), ast);
         transferLoc(ret, node);
         return ret;
     }
@@ -642,9 +495,9 @@ function wrapBinaryOp(node, left, right, operator, isComputed) {
 function wrapLogicalAnd(node, left, right) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('&&', node)) {
         IID.printCondIidToLoc(node);
-        // J$.C(iid, left) ? right : J$._()
+        // J$.C(iid, left) ? right : J$.Lv()
         const test = jalangiCall('C', IID.getCondIid(), left);
-        const last = callExpr(memberExpr(_jalangiVar, '_'), []);
+        const last = callExpr(memberExpr(_jalangiVar, 'Lv'), []);
         const ret = t.conditionalExpression(test, right, last);
         transferLoc(ret, node);
         return ret;
@@ -655,9 +508,9 @@ function wrapLogicalAnd(node, left, right) {
 function wrapLogicalOr(node, left, right) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('||', node)) {
         IID.printCondIidToLoc(node);
-        // J$.C(iid, left) ? J$._() : right
+        // J$.C(iid, left) ? J$.Lv() : right
         const test = jalangiCall('C', IID.getCondIid(), left);
-        const last = callExpr(memberExpr(_jalangiVar, '_'), []);
+        const last = callExpr(memberExpr(_jalangiVar, 'Lv'), []);
         const ret = t.conditionalExpression(test, last, right);
         transferLoc(ret, node);
         return ret;
@@ -669,9 +522,9 @@ function wrapLogicalOr(node, left, right) {
  * 插桩 nullish coalescing 运算符 (??)。
  *
  * `a ?? b` 语义：a 不为 null/undefined 时取 a，否则取 b。
- * 插桩：(tmp = left, J$.C(iid, tmp != null) ? J$._() : right)
+ * 插桩：(tmp = left, J$.C(iid, tmp != null) ? J$.Lv() : right)
  *
- * 使用 J$.tmp_N 成员属性而非裸标识符，避免被 deepCloneAndReplace 误识别为占位符。
+ * 使用 J$.tmp_N 成员属性而非裸标识符，避免误识别为占位符。
  */
 function wrapLogicalNullish(node, left, right) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('??', node)) {
@@ -683,7 +536,7 @@ function wrapLogicalNullish(node, left, right) {
         const assign = t.assignmentExpression('=', tmpExpr, left);
         const notNull = t.binaryExpression('!=', tmpExpr, t.nullLiteral());
         const condCall = jalangiCall('C', condIid, notNull);
-        const last = callExpr(memberExpr(_jalangiVar, '_'), []);
+        const last = callExpr(memberExpr(_jalangiVar, 'Lv'), []);
         const ternary = t.conditionalExpression(condCall, last, right);
         const ret = t.sequenceExpression([assign, ternary]);
         transferLoc(ret, node);
@@ -713,9 +566,9 @@ function wrapSwitchTest(node, test) {
 }
 
 function wrapWith(node) {
-    if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('with', node)) {
+    if (!Config.INSTR_WITH || Config.INSTR_WITH(node)) {
         IID.printIidToLoc(node);
-        const ret = jalangiCall('Wi', IID.getIid(), node);
+        const ret = jalangiCall('Wt', IID.getIid(), node);
         transferLoc(ret, node);
         return ret;
     }
@@ -850,7 +703,7 @@ function createCallInitAsStatement(node, name, val, isArgumentSync, lhs, isCatch
     }
     IID.printIidToLoc(node);
     const bitsNode = t.numericLiteral(createBitPattern(isArgumentSync, false, isCatchParam));
-    const callN = jalangiCall('N', IID.getIid(), name, val, bitsNode);
+    const callN = jalangiCall('Dc', IID.getIid(), name, val, bitsNode);
     let exprStmt;
     if (isAssign) {
         const assign = t.assignmentExpression('=', lhs, callN);
@@ -1026,7 +879,7 @@ function _buildTryCatchWrapper(node, bodyStmts, isScript) {
     if (isScript) {
         const srCall   = callExpr(memberExpr(_jalangiVar, 'Sr'), [iid3]);
         const lCall1   = t.expressionStatement(callExpr(memberExpr(_jalangiVar, 'L'), []));
-        const lCall2   = t.expressionStatement(callExpr(memberExpr(_jalangiVar, 'L'), []));
+        const lCall2   = t.expressionStatement(callExpr(memberExpr(_jalangiVar, 'L'), []));  // L() is @internal
         const breakStmt = t.breakStatement(t.cloneNode(labelId));
         finallyBlock = t.blockStatement([
             t.ifStatement(
@@ -1036,8 +889,8 @@ function _buildTryCatchWrapper(node, bodyStmts, isScript) {
             ),
         ]);
     } else {
-        const frCall = callExpr(memberExpr(_jalangiVar, 'Fr'), [iid3]);
-        const raCall = callExpr(memberExpr(_jalangiVar, 'Ra'), []);
+        const frCall = callExpr(memberExpr(_jalangiVar, 'Fx'), [iid3]);
+        const raCall = callExpr(memberExpr(_jalangiVar, 'Rv'), []);
         finallyBlock = t.blockStatement([
             t.ifStatement(frCall, contStmt, t.returnStatement(raCall)),
         ]);
@@ -1293,10 +1146,12 @@ function instrumentLoad(ast, isTypeof) {
                 }
             }
 
+            // isGlobal 作为 isScriptLocal 传入：全局作用域中的变量 isScriptLocal = isGlobal
             return wrapRead(ast, createLiteralAst(ast.name), ast, false, false, isGlobal, defScope?.id);
         } else if (isTypeof) {
             return wrapReadWithUndefinedCheck(ast, ast.name);
         } else {
+            // 未声明变量：isGlobal=false（无法确定全局性），isScriptLocal=true（假定脚本局部全局变量）
             return wrapRead(ast, createLiteralAst(ast.name), ast, false, true, false);
         }
     } else if (ast.type === 'MemberExpression') {
@@ -1367,7 +1222,7 @@ function init(config, jalangiVar) {
     const v = (typeof jalangiVar === 'string' && /^[A-Za-z_$][\w$]*$/.test(jalangiVar))
         ? jalangiVar
         : JALANGI_VAR;
-    if (v !== _jalangiVar) _rebuildNames(v);
+    if (v !== _jalangiVar) _jalangiVar = v;
 }
 
 /**

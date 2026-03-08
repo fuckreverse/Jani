@@ -24,7 +24,7 @@
  *
  * 事件类型枚举（EVENT_TYPE）与 JalangiRuntime.js 钩子一一对应：
  *   read / write / getField / putField / binary / unary / literal
- *   declare / invokeFun / functionEnter / functionExit
+ *   declare / call / functionEnter / functionExit
  *   scriptEnter / scriptExit / conditional / endExpression
  */
 

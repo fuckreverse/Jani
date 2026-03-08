@@ -9,7 +9,7 @@
  *
  * 所有回调均可以"什么都不返回"，此时执行行为不受影响（被动观测模式）。
  * 若需要修改执行行为，可从回调中返回含特定字段的对象：
- *  - putFieldPre / invokeFunPre：返回 { skip: true } 可跳过对应操作
+ *  - putFieldPre / callPre：返回 { skip: true } 可跳过对应操作
  *  - write / read / getField 等：返回 { result: newVal } 可替换结果值
  *  - functionExit / scriptExit：返回 { isBacktrack: true } 可重新执行函数/脚本体
  *
@@ -52,7 +52,7 @@ export class AnalysisTemplate {
      * @param {number}   functionSid   - 函数定义处的 sid
      * @returns {{ f, base, args, skip }|undefined}
      */
-    invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {
+    callPre(iid, f, base, args, isConstructor, isMethod, functionIid, functionSid) {  // was invokeFunPre
         return { f, base, args, skip: false };
     }
 
@@ -70,7 +70,7 @@ export class AnalysisTemplate {
      * @param {number}   functionSid   - 函数定义处的 sid
      * @returns {{ result }|undefined}
      */
-    invokeFun(iid, f, base, args, result, isConstructor, isMethod, functionIid, functionSid) {
+    call(iid, f, base, args, result, isConstructor, isMethod, functionIid, functionSid) {
         return { result };
     }
 
@@ -97,7 +97,7 @@ export class AnalysisTemplate {
      * @param {*}      val - 被迭代的对象
      * @returns {{ result }|undefined}
      */
-    forinObject(iid, val) {
+    forIn(iid, val) {
         return { result: val };
     }
 
@@ -220,7 +220,7 @@ export class AnalysisTemplate {
      * @param {*}      val - 返回值
      * @returns {{ result }|undefined}
      */
-    _return(iid, val) {
+    returnStmt(iid, val) {
         return { result: val };
     }
 
@@ -230,7 +230,7 @@ export class AnalysisTemplate {
      * @param {*}      val - 抛出的值
      * @returns {{ result }|undefined}
      */
-    _throw(iid, val) {
+    throwStmt(iid, val) {
         return { result: val };
     }
 
@@ -240,7 +240,7 @@ export class AnalysisTemplate {
      * @param {*}      val - with 的参数值
      * @returns {{ result }|undefined}
      */
-    _with(iid, val) {
+    withStmt(iid, val) {
         return { result: val };
     }
 
@@ -444,7 +444,7 @@ export class AnalysisTemplate {
      * @param {number}   functionSid - 函数定义处的 sid
      * @returns {boolean}
      */
-    runInstrumentedFunctionBody(iid, f, functionIid, functionSid) {
+    shouldInstrumentFn(iid, f, functionIid, functionSid) {
         return false;
     }
 

@@ -78,9 +78,10 @@ esnstrument.js        ← 所有上述模块 + @babel/parser + @babel/generator
 ### 每次修改后必须运行单测
 
 ```bash
-node test/instrument.test.mjs
-# 或
 npm test
+# 或
+node --test test/unit/instrument.test.mjs
+node --test test/integration/e2e.test.mjs
 ```
 
 所有用例全部通过后再提交。
@@ -91,7 +92,9 @@ npm test
 
 | 文件 | 状态 | 内容 |
 |------|------|------|
-| `test/instrument.test.mjs` | ✅ 当前主测试 | 插桩器端到端集成测试，覆盖 ES5～ES2022、source map、Config 禁用等（当前 98 个用例）|
+| `test/unit/instrument.test.mjs` | ✅ 当前主单元测试 | 插桩器端到端集成测试，覆盖 ES5～ES2022、source map、Config 禁用等 |
+| `test/integration/e2e.test.mjs` | ✅ 当前运行时集成测试 | 插桩后代码运行行为验证（控制流、属性、二元运算、异步等）|
+| `test/integration/hooks.test.mjs` | ✅ 当前钩子集成测试 | 分析回调钩子操作验证 |
 | `test/_legacy_astring.js` | ⚠️ 废弃（保留备查） | 重构前验证 astring 本身的临时脚本，用 CommonJS + 旧式全局加载 |
 | `test/_legacy_class_debug.js` | ⚠️ 废弃（保留备查） | 重构前调试 class 插桩的单次脚本，用 CommonJS |
 | `test/_legacy_modern_syntax.js` | ⚠️ 废弃（保留备查） | 重构前现代语法冒烟测试，已合并进主测试 |
@@ -99,7 +102,7 @@ npm test
 | `test/_legacy_instDirTests.js` | ⚠️ 废弃（保留备查） | 依赖 `src/commands/instrument`（尚未 ESM 化） |
 
 **原则**：
-1. **优先修改 `test/instrument.test.mjs`**，不要为每个小改动新建文件
+1. **优先修改 `test/unit/instrument.test.mjs` 或 `test/integration/e2e.test.mjs`**，不要为每个小改动新建文件
 2. 只有当测试主题与现有文件**明显不同**（如新增 runtime 测试、Config 测试）时，才新建文件
 3. 每个测试用例要有明确注释说明测试目标，失败时信息要有诊断价值
 4. 避免重复：同一行为只在一处测试
@@ -148,14 +151,14 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 | `INSTR_BINARY` | 二元运算（`J$.B`）|
 | `INSTR_UNARY` | 一元运算（`J$.U`）|
 | `INSTR_LITERAL` | 字面量（`J$.T`）|
-| `INSTR_INIT` | 变量声明初始化（`J$.N`）|
+| `INSTR_INIT` | 变量声明初始化（`J$.Dc`）|
 | `INSTR_CONDITIONAL` | 条件表达式 / switch（`J$.C`）|
 | `INSTR_TRY_CATCH_ARGUMENTS` | 函数/脚本 try-catch 包裹 |
-| `INSTR_END_EXPRESSION` | 表达式语句末尾标记（`J$.X1`）|
+| `INSTR_END_EXPRESSION` | 表达式语句末尾标记（`J$.Xe`）|
 | `INSTR_INVOKE` | 函数/方法调用（`J$.F` / `J$.M`）|
 | `INSTR_RETURN` | return 语句（`J$.Rt`）|
 | `INSTR_THROW` | throw 语句（`J$.Th`）|
-| `INSTR_FORIN` | for-in 循环（`J$.H`）|
+| `INSTR_FORIN` | for-in 循环（`J$.Fi`）|
 | `ENABLE_SAMPLING` | 是否启用采样模式 |
 
 > 快捷方式：`import { fullConfig } from './src/instrument/pluginAnalyzer.js'` 可获得所有字段均为 `null` 的全量 Config。
@@ -179,11 +182,10 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 - `CONTEXT.METHOD` → `MethodDefinition.value`，不把 FunctionExpression 当独立字面量包装
 - `CONTEXT.GETTER` / `CONTEXT.SETTER` → getter/setter 内的函数，同上
 
-### 模板缓存（wrappers.js）
+### AST 包装函数（wrappers.js）
 
-`replaceInStatement(templateStr, ...args)` 第一次会用 `@babel/parser` 解析模板字符串并缓存，
-后续通过 `deepCloneAndReplace` 深拷贝复用，避免重复 parse 开销。
-占位符约定：模板中用 `J$_1`、`J$_2` … 作占位符（`RP` 前缀 = `"J$_"`）。
+`wrappers.js` 中所有 wrap 函数均使用 `@babel/types` 工厂函数直接构建 AST 节点，
+彻底消除了旧版字符串模板解析（`replaceInStatement`）的运行时 parse 开销。
 
 ### `@babel/parser` 与 `@babel/generator` 注意事项
 

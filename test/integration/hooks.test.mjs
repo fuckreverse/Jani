@@ -6,12 +6,12 @@
  *
  * 覆盖范围：
  *  - write / read / binary / getField / putField 钩子参数验证
- *  - functionEnter / functionExit / invokeFun 钩子触发
- *  - literal / conditional / scriptEnter / scriptExit / forinObject 钩子
+ *  - functionEnter / functionExit / call 钩子触发
+ *  - literal / conditional / scriptEnter / scriptExit / forIn 钩子
  *  - 端到端：binary/write/getField 结果修改
  *  - 端到端：多插件链式执行顺序
  *  - 端到端：NaN 检测插件
- *  - 端到端：invokeFunPre skip 跳过函数调用
+ *  - 端到端：callPre skip 跳过函数调用
  *  - 端到端：_throw 观测异常
  *  - 端到端：iidToLocation 解析位置信息
  */
@@ -147,21 +147,21 @@ describe('Spy 钩子参数验证', () => {
         assert.ok(calls.get('functionExit').length >= 1,  'functionExit 应至少触发一次');
     });
 
-    test('invokeFun 钩子记录函数调用结果', () => {
+    test('call 钩子记录函数调用结果', () => {
         const { code: instrCode } = (() => {
             init({ ...ALL_CONFIG });
             return instrumentCode({ code: 'function square(n) { return n * n; } var r = square(5);', origCodeFileName: 'spy-invoke.js', instCodeFileName: 'spy-invoke_inst.js', inlineSourceMap: true });
         })();
         const J$inst = new JalangiSandbox();
-        const { plugin, calls } = createSpy('invokeFun');
+        const { plugin, calls } = createSpy('call');
         J$inst.analysis.use(plugin);
         runInSandbox(instrCode, J$inst);
 
-        // invokeFun(iid, f, base, args, result, isConstructor, isMethod, ...)
-        const invCalls = calls.get('invokeFun');
+        // call(iid, f, base, args, result, isConstructor, isMethod, ...)
+        const invCalls = calls.get('call');
         const squareCall = invCalls.find(([_iid, _f, _base, args, result]) =>
             Array.isArray(args) && args[0] === 5 && result === 25);
-        assert.ok(squareCall !== undefined, 'invokeFun 钩子应记录 square(5) 返回 25');
+        assert.ok(squareCall !== undefined, 'call 钩子应记录 square(5) 返回 25');
     });
 
     test('literal 钩子对对象字面量触发', () => {
@@ -210,22 +210,22 @@ describe('Spy 钩子参数验证', () => {
         assert.equal(calls.get('scriptExit').length,  1, 'scriptExit 应触发一次');
     });
 
-    test('forinObject 在 for-in 时触发，val 是被枚举对象', () => {
+    test('forIn 在 for-in 时触发，val 是被枚举对象', () => {
         const { code: instrCode } = (() => {
             init({ ...ALL_CONFIG });
             return instrumentCode({ code: 'var obj = {a:1, b:2}; var keys=[]; for (var k in obj) keys.push(k);', origCodeFileName: 'spy-forin.js', instCodeFileName: 'spy-forin_inst.js', inlineSourceMap: true });
         })();
         const J$inst = new JalangiSandbox();
-        const { plugin, calls } = createSpy('forinObject');
+        const { plugin, calls } = createSpy('forIn');
         J$inst.analysis.use(plugin);
         runInSandbox(instrCode, J$inst);
 
-        const foCalls = calls.get('forinObject');
-        assert.ok(foCalls.length > 0, 'forinObject 钩子应至少触发一次');
-        // forinObject(iid, val) — val 应是被枚举的对象
+        const foCalls = calls.get('forIn');
+        assert.ok(foCalls.length > 0, 'forIn 钩子应至少触发一次');
+        // forIn(iid, val) — val 应是被枚举的对象
         const objCall = foCalls.find(([_iid, val]) =>
             val !== null && typeof val === 'object' && 'a' in val);
-        assert.ok(objCall !== undefined, 'forinObject 传入的 val 应是被枚举的对象');
+        assert.ok(objCall !== undefined, 'forIn 传入的 val 应是被枚举的对象');
     });
 
     test('unary 钩子被调用，op 和操作数正确', () => {
@@ -291,7 +291,7 @@ describe('Spy 钩子参数验证', () => {
         assert.ok(cDecl !== undefined, 'declare 钩子应记录局部变量 c（isArgument=false）');
     });
 
-    test('_return 钩子在函数返回时触发，val 正确', () => {
+    test('returnStmt 钩子在函数返回时触发，val 正确', () => {
         const { code: instrCode } = (() => {
             init({ ...ALL_CONFIG });
             return instrumentCode({
@@ -302,15 +302,15 @@ describe('Spy 钩子参数验证', () => {
             });
         })();
         const J$inst = new JalangiSandbox();
-        const { plugin, calls } = createSpy('_return');
+        const { plugin, calls } = createSpy('returnStmt');
         J$inst.analysis.use(plugin);
         runInSandbox(instrCode, J$inst);
 
-        const retCalls = calls.get('_return');
-        assert.ok(retCalls.length > 0, '_return 钩子应至少触发一次');
-        // _return(iid, val) — val 应是实际返回值
+        const retCalls = calls.get('returnStmt');
+        assert.ok(retCalls.length > 0, 'returnStmt 钩子应至少触发一次');
+        // returnStmt(iid, val) — val 应是实际返回值
         const ret12 = retCalls.find(([_iid, val]) => val === 12);
-        assert.ok(ret12 !== undefined, '_return 钩子应记录 double(6) 的返回值 12');
+        assert.ok(ret12 !== undefined, 'returnStmt 钩子应记录 double(6) 的返回值 12');
     });
 });
 
@@ -477,7 +477,7 @@ describe('端到端分析插件场景', () => {
         assert.equal(violations[0].op, '+', '违规运算符应为 +');
     });
 
-    test('invokeFunPre 可跳过函数调用（skip=true）', () => {
+    test('callPre 可跳过函数调用（skip=true）', () => {
         init({ ...ALL_CONFIG });
         const { code: instrCode } = instrumentCode({
             code: `
@@ -491,16 +491,16 @@ describe('端到端分析插件场景', () => {
         });
         const J$inst = new JalangiSandbox();
         J$inst.analysis.use({
-            invokeFunPre(_iid, f, base, args) {
+            callPre(_iid, f, base, args) {
                 if (f && f.name === 'square') return { f, base, args, skip: true };
             },
-            invokeFun(_iid, f, _base, _args, _result) {
+            call(_iid, f, _base, _args, _result) {
                 if (f && f.name === 'square') return { result: 999 };
             }
         });
         const $out = {};
         runInSandbox(instrCode, J$inst, { $out });
-        assert.equal($out.r, 999, 'invokeFunPre skip=true 后 r 应被改写为 999');
+        assert.equal($out.r, 999, 'callPre skip=true 后 r 应被改写为 999');
     });
 
     test('_throw 在 try-catch 中被分析插件观测', () => {
@@ -519,7 +519,7 @@ describe('端到端分析插件场景', () => {
         const J$inst = new JalangiSandbox();
         const throwEvents = [];
         J$inst.analysis.use({
-            _throw(_iid, val) { throwEvents.push(val); }
+            throwStmt(_iid, val) { throwEvents.push(val); }
         });
         const $out = {};
         runInSandbox(instrCode, J$inst, { $out });
@@ -640,7 +640,7 @@ describe('observeOnly 模式', () => {
         assert.equal($out.y, 42, 'observeOnly 模式下 write 钩子的 result 被忽略，y 仍应为 42');
     });
 
-    test('observeOnly=true：invokeFunPre skip=true 被忽略，函数正常调用', () => {
+    test('observeOnly=true：callPre skip=true 被忽略，函数正常调用', () => {
         init({ ...ALL_CONFIG });
         const { code: instrCode } = instrumentCode({
             code: 'function double(n) { return n * 2; } $out.r = double(5);',
@@ -651,16 +651,16 @@ describe('observeOnly 模式', () => {
         const J$inst = new JalangiSandbox({ observeOnly: true });
         J$inst.analysis.use({
             // 试图跳过 double 函数的调用
-            invokeFunPre(_iid, f, base, args) {
+            callPre(_iid, f, base, args) {
                 if (f && f.name === 'double') return { f, base, args, skip: true };
             },
-            invokeFun(_iid, f) {
+            call(_iid, f) {
                 if (f && f.name === 'double') return { result: -1 };
             }
         });
         const $out = {};
         runInSandbox(instrCode, J$inst, { $out });
-        assert.equal($out.r, 10, 'observeOnly 模式下 invokeFunPre skip 被忽略，double(5) 应正常执行返回 10');
+        assert.equal($out.r, 10, 'observeOnly 模式下 callPre skip 被忽略，double(5) 应正常执行返回 10');
     });
 
     test('observeOnly=true：getField 钩子返回 result 被忽略，属性读取不受影响', () => {

@@ -431,7 +431,8 @@ function ensureDir(filePath) {
  */
 async function loadInstrumenter(sandboxVar, analyses) {
     const instrModule = await import(`${ROOT_DIR}/src/instrument/esnstrument.js`);
-    const { init, instrumentCode, buildConfigFromPlugins, fullConfig } = instrModule;
+    const { init, instrumentCode } = instrModule;
+    const { buildConfigFromPlugins, fullConfig } = await import(`${ROOT_DIR}/src/instrument/pluginAnalyzer.js`);
 
     let config;
     if (analyses && analyses.length > 0) {

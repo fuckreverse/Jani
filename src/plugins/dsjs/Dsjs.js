@@ -198,7 +198,7 @@ export class DsjsAnalysis {
 
     // ── 分析钩子 ─────────────────────────────────────────────────────────────
 
-    invokeFunPre(iid, f, base, args, isConstructor, isMethod) {
+    callPre(iid, f, base, args, isConstructor, isMethod) {
         const protoMethods = [
             'concat', 'indexOf', 'join', 'lastIndexOf', 'pop',
             'push', 'reverse', 'shift', 'slice', 'sort', 'splice', 'unshift',
@@ -214,7 +214,7 @@ export class DsjsAnalysis {
         return { f, base, args, skip: false };
     }
 
-    invokeFun(iid, f, base, args, result, isConstructor, isMethod) {
+    call(iid, f, base, args, result, isConstructor, isMethod) {
         const giid = this._sandbox.getGlobalIID(iid);
         if (isConstructor) {
             this._checkArrayUniformity(giid, result);
@@ -230,7 +230,7 @@ export class DsjsAnalysis {
         return { result: val };
     }
 
-    forinObject(iid, val) {
+    forIn(iid, val) {
         const giid = this._sandbox.getGlobalIID(iid);
         this._forInUse(giid, val);
         return { result: val };

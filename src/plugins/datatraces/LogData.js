@@ -59,7 +59,7 @@ export class LogDataAnalysis {
         return 'P';
     }
 
-    invokeFunPre(iid, f, base, args, isConstructor, isMethod, functionIid) {
+    callPre(iid, f, base, args, isConstructor, isMethod, functionIid) {
         this._lastiid = iid;
         this._lastsid = this._sandbox.sid;
     }
@@ -126,7 +126,7 @@ export class LogDataAnalysis {
         twSmap.stopTracing();
     }
 
-    runInstrumentedFunctionBody(iid, f, functionIid) { return false; }
+    shouldInstrumentFn(iid, f, functionIid) { return false; }
 
     onReady(cb) { cb(); }
 }

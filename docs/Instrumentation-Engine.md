@@ -232,7 +232,7 @@ J$.M(iid, obj, 'method', flags)(args)
 'hello'       → J$.T(iid, 'hello', J$.N_LOG_STRING_LIT, false)
 {}            → J$.T(iid, {}, J$.N_LOG_OBJECT_LIT, false)
 []            → J$.T(iid, [], J$.N_LOG_ARRAY_LIT, false)
-function() {} → J$.T(iid, function() { J$.Fe(iid2, ...); ... J$.Fr(iid3); }, J$.N_LOG_FUNCTION_LIT, false)
+function() {} → J$.T(iid, function() { J$.Fe(iid2, ...); ... J$.Fx(iid3); }, J$.N_LOG_FUNCTION_LIT, false)
 ```
 
 ### 二元/一元运算
@@ -266,13 +266,13 @@ function foo(a, b) {
         // ... 原函数体（插桩后）
         return J$.Rt(iid2, returnVal);
     } finally {
-        J$.Fr(iid3);
+        J$.Fx(iid3);
     }
 }
 ```
 
 > **注意**：箭头函数（`ArrowFunctionExpression`）没有独立的 `arguments` / `this`，
-> 不注入 `J$.Fe` / `J$.Fr`，但仍然插桩其体内的所有表达式。
+> 不注入 `J$.Fe` / `J$.Fx`，但仍然插桩其体内的所有表达式。
 
 ## IID（指令 ID）系统
 
@@ -280,7 +280,7 @@ function foo(a, b) {
 
 | 计数器 | 用途 | 初始值 |
 |--------|------|--------|
-| `memIid` | 主计数器（R/W/G/P/F/M/T/N/Fe/Fr/Se/Sr） | `9`（eval: `13`） |
+| `memIid` | 主计数器（R/W/G/P/F/M/T/Dc/Fe/Fx/Se/Sr） | `9`（eval: `13`） |
 | `condIid` | 条件/switch 计数器（C/C1/C2） | `8`（eval: `12`） |
 | `opIid` | 运算符计数器（B/U） | `10`（eval: `14`） |
 
@@ -314,10 +314,10 @@ function foo(a, b) {
 | 嵌套解构 / 默认值 / RestElement | `function f({a: {arguments}})` | ✅ 重命名（BUG-2 修复）|
 
 **`wrappers.js` 中的对应处理**：`createCallAsFunEnterStatement`（生成 `J$.Fe` 调用）和
-`syncDefuns`（生成 `J$.N` arguments 初始化）均会检查当前作用域是否存在 `${_jalangiVar}_arguments`
+`syncDefuns`（生成 `J$.Dc` arguments 初始化）均会检查当前作用域是否存在 `${_jalangiVar}_arguments`
 变量——若存在，则使用重命名后的标识符，而非硬编码的 `arguments`（BUG-11A 修复）。
 
-> **重要**：`J$.N(iid, "arguments", ...)` 和 `J$.Fe(iid, f, this, ...)` 中的
+> **重要**：`J$.Dc(iid, "arguments", ...)` 和 `J$.Fe(iid, f, this, ...)` 中的
 > **名称字符串**始终使用原始 `"arguments"`，只有 **AST 标识符节点**（变量读取部分）使用重命名后的名称。
 > 这保证了运行时 Shadow Frame 通过标准名称 `"arguments"` 查找，不受重命名影响。
 
@@ -502,14 +502,13 @@ flowchart LR
 | `functionEnter` / `functionExit` | `INSTR_TRY_CATCH_ARGUMENTS` |
 | `scriptEnter` / `scriptExit` | `INSTR_TRY_CATCH_ARGUMENTS` |
 | `endExpression` | `INSTR_END_EXPRESSION` |
-| `invokeFunPre` / `invokeFun` | `INSTR_INVOKE` |
-| `_return` | `INSTR_RETURN` |
-| `_throw` | `INSTR_THROW` |
-| `forinObject` | `INSTR_FORIN` |
+| `callPre` / `call` | `INSTR_INVOKE` |
+| `returnStmt` | `INSTR_RETURN` |
+| `throwStmt` | `INSTR_THROW` |
+| `forIn` | `INSTR_FORIN` |
 | `awaitResume` | `INSTR_AWAIT` |
 
-> **注意**：`_with` hook 在 `pluginAnalyzer.js` 中映射到 `INSTR_CONDITIONAL`（而非 `INSTR_TRY_CATCH_ARGUMENTS`），
-> 这可能是一个潜在问题（参见代码问题文档）。
+> **注意**：`withStmt` hook 在 `pluginAnalyzer.js` 中映射到 `INSTR_WITH`（独立的 with 语句控制开关）。
 
 ### 示例
 

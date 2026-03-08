@@ -26,16 +26,16 @@
 | `INSTR_BINARY` | 二元运算（`J$.B`）| `binaryPre` / `binary` |
 | `INSTR_UNARY` | 一元运算（`J$.U`）| `unaryPre` / `unary` |
 | `INSTR_LITERAL` | 字面量（`J$.T`）| `literal` |
-| `INSTR_INIT` | 变量声明初始化（`J$.N`）| `declare` |
+| `INSTR_INIT` | 变量声明初始化（`J$.Dc`）| `declare` |
 | `INSTR_CONDITIONAL` | 条件表达式 / switch（`J$.C`）| `conditional` |
 | `INSTR_TRY_CATCH_ARGUMENTS` | 函数/脚本 try-catch 包裹 | `functionEnter` / `functionExit` / `scriptEnter` / `scriptExit` |
-| `INSTR_END_EXPRESSION` | 表达式语句末尾标记（`J$.X1`）| `endExpression` |
-| `INSTR_INVOKE` | 函数/方法调用（`J$.F` / `J$.M`）| `invokeFunPre` / `invokeFun` |
-| `INSTR_RETURN` | return 语句（`J$.Rt`）| `_return` |
-| `INSTR_THROW` | throw 语句（`J$.Th`）| `_throw` |
-| `INSTR_FORIN` | for-in 循环（`J$.H`）| `forinObject` |
+| `INSTR_END_EXPRESSION` | 表达式语句末尾标记（`J$.Xe`）| `endExpression` |
+| `INSTR_INVOKE` | 函数/方法调用（`J$.F` / `J$.M`）| `callPre` / `call` |
+| `INSTR_RETURN` | return 语句（`J$.Rt`）| `returnStmt` |
+| `INSTR_THROW` | throw 语句（`J$.Th`）| `throwStmt` |
+| `INSTR_FORIN` | for-in 循环（`J$.Fi`）| `forIn` |
 | `INSTR_AWAIT` | `await` 恢复点（`J$.Aw`）| `awaitResume` |
-| `INSTR_PROPERTY_BINARY_ASSIGNMENT` | 属性复合赋值（`obj.x += 1`，`J$.A`）| `putFieldPre` / `putField` |
+| `INSTR_PROPERTY_BINARY_ASSIGNMENT` | 属性复合赋值（`obj.x += 1`，`J$.Ca`）| `putFieldPre` / `putField` |
 
 ### 采样模式字段
 
@@ -79,10 +79,10 @@ flowchart LR
         cond["conditional"]
         fnLife["functionEnter / functionExit\nscriptEnter / scriptExit"]
         endExpr["endExpression"]
-        invoke["invokeFunPre / invokeFun"]
-        ret["_return"]
-        thr["_throw"]
-        forin["forinObject"]
+        invoke["callPre / call"]
+        ret["returnStmt"]
+        thr["throwStmt"]
+        forin["forIn"]
         awaitRes["awaitResume"]
         propBin["putFieldPre / putField\n(属性复合赋值场景)"]
     end
@@ -276,6 +276,6 @@ const result = instrumentCode({
 **新版（当前）区别**：
 1. Config 通过 `init(config)` 参数注入，无全局状态
 2. 移除了 `DEBUG` / `WARN` / `MAX_BUF_SIZE` / `LOG_ALL_READS_AND_BRANCHES` 等非核心字段
-3. 新增 `INSTR_INIT`（对应 `J$.N` 声明钩子）、`INSTR_END_EXPRESSION`（对应 `J$.X1`）、`INSTR_INVOKE`（对应 `J$.F`/`J$.M`）、`INSTR_RETURN`（对应 `J$.Rt`）、`INSTR_THROW`（对应 `J$.Th`）、`INSTR_FORIN`（对应 `J$.H`）、`INSTR_AWAIT`（对应 `J$.Aw`）、`INSTR_PROPERTY_BINARY_ASSIGNMENT`（对应属性复合赋值 `J$.A`）
+3. 新增 `INSTR_INIT`（对应 `J$.Dc` 声明钩子）、`INSTR_END_EXPRESSION`（对应 `J$.Xe`）、`INSTR_INVOKE`（对应 `J$.F`/`J$.M`）、`INSTR_RETURN`（对应 `J$.Rt`）、`INSTR_THROW`（对应 `J$.Th`）、`INSTR_FORIN`（对应 `J$.Fi`）、`INSTR_AWAIT`（对应 `J$.Aw`）、`INSTR_PROPERTY_BINARY_ASSIGNMENT`（对应属性复合赋值 `J$.Ca`）
 4. 细粒度控制函数接受 AST 节点参数；各字段签名略有差异（详见上方"细粒度控制示例"中的签名表）
 5. 新增 `pluginAnalyzer.js` 支持自动推导按需 Config

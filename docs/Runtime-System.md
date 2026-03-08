@@ -34,14 +34,14 @@ classDiagram
         +U(iid, op, left)
         +C(iid, cond)
         +Fe(iid, f, dis, args, defScopeId?)
-        +Fr(iid)
+        +Fx(iid)
         +Se(iid, val, origFile)
         +Sr(iid)
-        +N(iid, name, val, flags)
+        +Dc(iid, name, val, flags)
         +Aw(iid, val, ctxId?)
         +Rt(iid, val)
         +Th(iid, val)
-        -#returnStack
+        -#retStack
         -#switchKeyStack
         -#sidStack
         -#callIdCounter
@@ -187,8 +187,8 @@ const globalIid = J$.getGlobalIID(iid);
 | `W(iid, name, val, lhs, flags, defScopeId?)` | 变量写入（兼更新 Shadow Frame） | `write(iid, name, val, lhs, isGlobal, isScriptLocal)` |
 | `G(iid, base, offset, flags)` | 属性读取 | `getFieldPre` → `getField` |
 | `P(iid, base, offset, val, flags)` | 属性写入 | `putFieldPre` → `putField` |
-| `F(iid, f, flags)` | 函数调用 | `invokeFunPre` → `invokeFun` |
-| `M(iid, base, offset, flags)` | 方法调用 | `invokeFunPre` → `invokeFun` |
+| `F(iid, f, flags)` | 函数调用 | `callPre` → `call` |
+| `M(iid, base, offset, flags)` | 方法调用 | `callPre` → `call` |
 | `T(iid, val, type, hasGS)` | 字面量创建 | `literal` |
 | `B(iid, op, left, right, flags)` | 二元运算 | `binaryPre` → `binary` |
 | `U(iid, op, left)` | 一元运算 | `unaryPre` → `unary` |
@@ -196,15 +196,15 @@ const globalIid = J$.getGlobalIID(iid);
 | `C1(iid, val)` | switch 键值 | — |
 | `C2(iid, val)` | case 标签值 | — |
 | `Fe(iid, f, dis, args, defScopeId?)` | 函数进入（分配 CallID，创建 Shadow Frame） | `functionEnter` |
-| `Fr(iid)` | 函数退出（弹出 CallID 栈，清除 Shadow Frame） | `functionExit` |
+| `Fx(iid)` | 函数退出（弹出 CallID 栈，清除 Shadow Frame） | `functionExit` |
 | `Se(iid, val, origFile)` | 脚本进入（同时记录 `J$.lastSid`，不随 `Sr()` 回滚） | `scriptEnter` |
 | `Sr(iid)` | 脚本退出（回滚 `sid`，但 `lastSid` 保留，可在脚本完成后仍能查询位置映射） | `scriptExit` |
-| `N(iid, name, val, flags)` | 变量声明 | `declare` |
-| `Rt(iid, val)` | return 值 | `_return` |
-| `Th(iid, val)` | throw 值 | `_throw` |
-| `Wi(iid, val)` | with 对象 | `_with` |
-| `H(iid, val)` | for-in 对象 | `forinObject` |
-| `X1(iid, val)` | 表达式语句末尾 | `endExpression` |
+| `Dc(iid, name, val, flags)` | 变量声明 | `declare` |
+| `Rt(iid, val)` | return 值 | `returnStmt` |
+| `Th(iid, val)` | throw 值 | `throwStmt` |
+| `Wt(iid, val)` | with 对象 | `withStmt` |
+| `Fi(iid, val)` | for-in 对象 | `forIn` |
+| `Xe(iid, val)` | 表达式语句末尾 | `endExpression` |
 | `Aw(iid, val, ctxId?)` | await 恢复点（透传 resolved value，更新 `#currentContextId`） | `awaitResume(iid, contextId, val)` |
 
 ### 钩子执行三段式（以 G / getField 为例）
@@ -258,15 +258,15 @@ host.use(new SMemoryPlugin(smemory))
 ### 支持的钩子名称
 
 ```
-_return, _throw, _with,
+returnStmt, throwStmt, withStmt,
 awaitResume,
 binaryPre, binary, conditional,
 declare, endExecution, endExpression,
-forinObject, functionEnter, functionExit,
+forIn, functionEnter, functionExit,
 getFieldPre, getField, instrumentCodePre,
-instrumentCode, invokeFunPre, invokeFun,
+instrumentCode, callPre, call,
 literal, onReady, putFieldPre,
-putField, read, runInstrumentedFunctionBody,
+putField, read, shouldInstrumentFn,
 scriptEnter, scriptExit, unaryPre,
 unary, write
 ```
@@ -287,13 +287,13 @@ unary, write
 | `read` | 2（read(iid, name, **val**, ...)）|
 | `getField` | 3（getField(iid, base, offset, **val**, ...)）|
 | `putField` | 3（putField(iid, base, offset, **val**, ...)）|
-| `invokeFun` | 4（invokeFun(iid, f, base, args, **result**, ...)）|
+| `call` | 4（call(iid, f, base, args, **result**, ...)）|
 | `literal` | 1（literal(iid, **val**, ...)）|
 | `conditional` | 1（conditional(iid, **result**, ...)）|
-| `forinObject` | 1（forinObject(iid, **val**, ...)）|
+| `forIn` | 1（forIn(iid, **val**, ...)）|
 | `declare` | 2（declare(iid, name, **val**, ...)）|
-| `_return` | 1（_return(iid, **val**, ...)）|
-| `_throw` | 1（_throw(iid, **val**, ...)）|
+| `returnStmt` | 1（returnStmt(iid, **val**, ...)）|
+| `throwStmt` | 1（throwStmt(iid, **val**, ...)）|
 
 ### 错误处理
 
@@ -368,7 +368,7 @@ const orig = smemory.getOriginalObject(id);
 解决同一函数在递归、闭包、异步并发场景下局部变量的区分问题：
 
 - `Fe(iid, f, dis, args, defScopeId)` — 分配新 CallID，将 `(旧 callId, defScopeId)` 压栈
-- `Fr(iid)` — 弹出栈顶，恢复调用方的 CallID，同时清除本次调用的 Shadow Frame
+- `Fx(iid)` — 弹出栈顶，恢复调用方的 CallID，同时清除本次调用的 Shadow Frame
 
 ### Shadow Frame
 
@@ -395,14 +395,14 @@ flowchart LR
     Rl --> HOOK_R
 ```
 
-**适用条件**（插桩器静态判断）：局部变量、无 `eval`/`with`、非 `catch` 参数、非 `arguments`、**非箭头函数参数**（箭头函数无 `Fe`/`Fr` 钩子，Shadow Frame 不会初始化其形参，因此强制走全量 `R` 路径）。
+**适用条件**（插桩器静态判断）：局部变量、无 `eval`/`with`、非 `catch` 参数、非 `arguments`、**非箭头函数参数**（箭头函数无 `Fe`/`Fx` 钩子，Shadow Frame 不会初始化其形参，因此强制走全量 `R` 路径）。
 
 ### Shadow Frame 内存管理与闭包
 
-当函数退出（`Fr`）时，通常会清除其对应的 Shadow Frame。但如果该函数内创建了闭包，闭包可能会在未来访问这些局部变量。
+当函数退出（`Fx`）时，通常会清除其对应的 Shadow Frame。但如果该函数内创建了闭包，闭包可能会在未来访问这些局部变量。
 为了解决这个问题，`JalangiRuntime` 引入了 **闭包引用计数** 和 **垃圾回收注册表（FinalizationRegistry）**：
 1. 在 `T`（字面量创建）钩子中，如果创建的是函数（闭包），则将其外层帧的 `(defScopeId, callId)` 记录到 `#closureFrameSet`，并递增引用计数。
-2. `Fr` 退出时，如果当前帧在 `#closureFrameSet` 中，则**不清除** Shadow Frame。
+2. `Fx` 退出时，如果当前帧在 `#closureFrameSet` 中，则**不清除** Shadow Frame。
 3. 将闭包函数注册到 `FinalizationRegistry`。当闭包函数被 JS 引擎垃圾回收时，自动递减引用计数；当计数归零时，安全地清理对应的 Shadow Frame，防止内存泄漏。
 
 ### Shadow Frame 诊断 API
