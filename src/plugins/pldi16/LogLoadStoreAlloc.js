@@ -33,7 +33,7 @@ export class LogLoadStoreAllocAnalysis {
         return { f, base, args, skip: false };
     }
 
-    literal(iid, val, hasGetterSetter) {
+    evalLiteral(iid, val, hasGetterSetter) {
         if (typeof val === 'object' && val !== null) {
             const sobj = this._sandbox.smemory.getShadowObjectOfObject(val);
             if (sobj) sobj.allocSite = this._sandbox.iidToLocation(this._sandbox.sid, iid);

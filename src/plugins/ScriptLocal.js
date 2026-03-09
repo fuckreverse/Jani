@@ -37,11 +37,11 @@ export class ScriptLocalAnalysis {
         return 'local';
     }
 
-    read(iid, name, val, isGlobal, isScriptLocal) {
+    readVar(iid, name, val, isGlobal, isScriptLocal) {
         this._log(`Reading from ${name} (${ScriptLocalAnalysis._writeFlags(isGlobal, isScriptLocal)})`);
     }
 
-    write(iid, name, val, lhs, isGlobal, isScriptLocal) {
+    writeVar(iid, name, val, lhs, isGlobal, isScriptLocal) {
         this._log(`Writing to ${name} (${ScriptLocalAnalysis._writeFlags(isGlobal, isScriptLocal)})`);
     }
 }

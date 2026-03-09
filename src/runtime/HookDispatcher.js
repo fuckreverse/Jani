@@ -7,7 +7,7 @@
  *
  * 职责：
  *  1. 维护一个有序的分析插件列表
- *  2. 将每个运行时钩子（read / write / getField …）以"链式调用"的方式
+ *  2. 将每个运行时钩子（readVar / writeVar / getField …）以"链式调用"的方式
  *     依次分发给所有已注册的插件
  *
  * 标准用法：
@@ -38,15 +38,15 @@ const log = createLogger(DOMAIN.FRAMEWORK);
 /** 所有可能的钩子名称（与 JalangiRuntime.js 运行时保持一致）。 */
 const HOOKS = Object.freeze([
     'returnStmt', 'throwStmt', 'withStmt',
-    'binaryPre', 'binary', 'conditional',
-    'declare', 'endExecution', 'endExpression',
-    'forIn', 'functionEnter', 'functionExit',
+    'binaryPre', 'binary', 'evalCond',
+    'declareVar', 'endExecution', 'endExpression',
+    'forInStmt', 'functionEnter', 'functionExit',
     'getFieldPre', 'getField', 'instrumentCodePre',
     'instrumentCode', 'callPre', 'call',
-    'literal', 'onReady', 'putFieldPre',
-    'putField', 'read', 'shouldInstrumentFn',
+    'evalLiteral', 'onReady', 'putFieldPre',
+    'putField', 'readVar', 'shouldInstrumentFn',
     'scriptEnter', 'scriptExit', 'unaryPre',
-    'unary', 'write',
+    'unary', 'writeVar',
     // async/await 恢复点钩子（J$.Aw 触发）
     'awaitResume',
 ]);
@@ -57,23 +57,23 @@ const HOOKS = Object.freeze([
  * 当某个插件返回 `{ result }` 时，调度器会将 `args[RESULT_ARG_INDEX[hookName]]`
  * 更新为新的 result 值，使后续插件能看到上一个插件修改后的值。
  *
- * 未列出的钩子（如 `declare`、`scriptEnter` 等）返回值语义不是 `result`，
+ * 未列出的钩子（如 `declareVar`、`scriptEnter` 等）返回值语义不是 `result`，
  * 不进行此传递。
  */
 const RESULT_ARG_INDEX = Object.freeze({
-    binary:      4,   // binary(iid, op, left, right, result, ...)
-    unary:       2,   // unary(iid, op, val, ...)
-    write:       2,   // write(iid, name, val, ...)
-    read:        2,   // read(iid, name, val, ...)
-    getField:    3,   // getField(iid, base, offset, val, ...)
-    putField:    3,   // putField(iid, base, offset, val, ...)
-    call:        4,   // call(iid, f, base, args, result, ...)
-    literal:     1,   // literal(iid, val, ...)
-    conditional: 1,   // conditional(iid, result, ...)
-    forIn:       1,   // forIn(iid, val, ...)
-    declare:     2,   // declare(iid, name, val, ...)
-    returnStmt:  1,   // returnStmt(iid, val, ...)
-    throwStmt:   1,   // throwStmt(iid, val, ...)
+    binary:       4,   // binary(iid, op, left, right, result, ...)
+    unary:        2,   // unary(iid, op, val, ...)
+    writeVar:     2,   // writeVar(iid, name, val, ...)
+    readVar:      2,   // readVar(iid, name, val, ...)
+    getField:     3,   // getField(iid, base, offset, val, ...)
+    putField:     3,   // putField(iid, base, offset, val, ...)
+    call:         4,   // call(iid, f, base, args, result, ...)
+    evalLiteral:  1,   // evalLiteral(iid, val, ...)
+    evalCond:     1,   // evalCond(iid, result, ...)
+    forInStmt:    1,   // forInStmt(iid, val, ...)
+    declareVar:   2,   // declareVar(iid, name, val, ...)
+    returnStmt:   1,   // returnStmt(iid, val, ...)
+    throwStmt:    1,   // throwStmt(iid, val, ...)
 });
 
 /**

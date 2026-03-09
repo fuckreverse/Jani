@@ -16,7 +16,7 @@ export class CountObjectsPerAllocationSiteAnalysis {
         this._allocCount = {};
     }
 
-    literal(iid, val, hasGetterSetter) {
+    evalLiteral(iid, val, hasGetterSetter) {
         if (typeof val === 'object' && val !== null) {
             const id = this._sandbox.getGlobalIID(iid);
             this._allocCount[id] = (this._allocCount[id] | 0) + 1;

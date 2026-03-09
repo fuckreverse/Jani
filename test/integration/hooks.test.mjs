@@ -52,13 +52,13 @@ describe('Spy 钩子参数验证', () => {
             return instrumentCode({ code: 'var x = 42;', origCodeFileName: 'spy-write.js', instCodeFileName: 'spy-write_inst.js', inlineSourceMap: true });
         })();
         const J$inst = new JalangiSandbox();
-        const { plugin, calls } = createSpy('write');
+        const { plugin, calls } = createSpy('writeVar');
         J$inst.analysis.use(plugin);
         runInSandbox(instrCode, J$inst);
 
-        const writeCalls = calls.get('write');
+        const writeCalls = calls.get('writeVar');
         assert.ok(writeCalls.length > 0, 'write 钩子应至少被调用一次');
-        // write(iid, name, val, lhs, isGlobal, isScriptLocal)
+        // writeVar(iid, name, val, lhs, isGlobal, isScriptLocal)
         const xWrite = writeCalls.find(([_iid, name]) => name === 'x');
         assert.ok(xWrite !== undefined, 'write 钩子中应有变量 x 的写入');
         assert.equal(xWrite[2], 42, 'write 钩子传入的 val 应等于 42');
@@ -70,13 +70,13 @@ describe('Spy 钩子参数验证', () => {
             return instrumentCode({ code: 'var x = 10; var y = x + 1;', origCodeFileName: 'spy-read.js', instCodeFileName: 'spy-read_inst.js', inlineSourceMap: true });
         })();
         const J$inst = new JalangiSandbox();
-        const { plugin, calls } = createSpy('read');
+        const { plugin, calls } = createSpy('readVar');
         J$inst.analysis.use(plugin);
         runInSandbox(instrCode, J$inst);
 
-        const readCalls = calls.get('read');
+        const readCalls = calls.get('readVar');
         assert.ok(readCalls.length > 0, 'read 钩子应至少被调用一次');
-        // read(iid, name, val, isGlobal, isScriptLocal)
+        // readVar(iid, name, val, isGlobal, isScriptLocal)
         const xRead = readCalls.find(([_iid, name, val]) => name === 'x' && val === 10);
         assert.ok(xRead !== undefined, 'read 钩子中应有 x=10 的读取记录');
     });
@@ -170,12 +170,12 @@ describe('Spy 钩子参数验证', () => {
             return instrumentCode({ code: 'var obj = { a: 1, b: 2 };', origCodeFileName: 'spy-literal.js', instCodeFileName: 'spy-literal_inst.js', inlineSourceMap: true });
         })();
         const J$inst = new JalangiSandbox();
-        const { plugin, calls } = createSpy('literal');
+        const { plugin, calls } = createSpy('evalLiteral');
         J$inst.analysis.use(plugin);
         runInSandbox(instrCode, J$inst);
 
-        // literal(iid, val, hasGetterSetter)
-        const litCalls = calls.get('literal');
+        // evalLiteral(iid, val, hasGetterSetter)
+        const litCalls = calls.get('evalLiteral');
         const objLit = litCalls.find(([_iid, val]) =>
             val !== null && typeof val === 'object' && 'a' in val && 'b' in val);
         assert.ok(objLit !== undefined, 'literal 钩子应记录对象字面量 { a:1, b:2 }');
@@ -187,12 +187,12 @@ describe('Spy 钩子参数验证', () => {
             return instrumentCode({ code: 'var x = 5; var r = (x > 3) ? "big" : "small"; $out.r = r;', origCodeFileName: 'spy-cond.js', instCodeFileName: 'spy-cond_inst.js', inlineSourceMap: true });
         })();
         const J$inst = new JalangiSandbox();
-        const { plugin, calls } = createSpy('conditional');
+        const { plugin, calls } = createSpy('evalCond');
         J$inst.analysis.use(plugin);
         const $out = {};
         runInSandbox(instrCode, J$inst, { $out });
 
-        assert.ok(calls.get('conditional').length > 0, 'conditional 钩子应至少触发一次');
+        assert.ok(calls.get('evalCond').length > 0, 'conditional 钩子应至少触发一次');
         assert.equal($out.r, 'big', '三元运算结果应为 "big"');
     });
 
@@ -216,13 +216,13 @@ describe('Spy 钩子参数验证', () => {
             return instrumentCode({ code: 'var obj = {a:1, b:2}; var keys=[]; for (var k in obj) keys.push(k);', origCodeFileName: 'spy-forin.js', instCodeFileName: 'spy-forin_inst.js', inlineSourceMap: true });
         })();
         const J$inst = new JalangiSandbox();
-        const { plugin, calls } = createSpy('forIn');
+        const { plugin, calls } = createSpy('forInStmt');
         J$inst.analysis.use(plugin);
         runInSandbox(instrCode, J$inst);
 
-        const foCalls = calls.get('forIn');
+        const foCalls = calls.get('forInStmt');
         assert.ok(foCalls.length > 0, 'forIn 钩子应至少触发一次');
-        // forIn(iid, val) — val 应是被枚举的对象
+        // forInStmt(iid, val) — val 应是被枚举的对象
         const objCall = foCalls.find(([_iid, val]) =>
             val !== null && typeof val === 'object' && 'a' in val);
         assert.ok(objCall !== undefined, 'forIn 传入的 val 应是被枚举的对象');
@@ -266,13 +266,13 @@ describe('Spy 钩子参数验证', () => {
             });
         })();
         const J$inst = new JalangiSandbox();
-        const { plugin, calls } = createSpy('declare');
+        const { plugin, calls } = createSpy('declareVar');
         J$inst.analysis.use(plugin);
         runInSandbox(instrCode, J$inst);
 
-        const declareCalls = calls.get('declare');
+        const declareCalls = calls.get('declareVar');
         assert.ok(declareCalls.length > 0, 'declare 钩子应至少触发一次');
-        // declare(iid, name, val, isArgument, argumentIndex, isCatchParam)
+        // declareVar(iid, name, val, isArgument, argumentIndex, isCatchParam)
         // 验证：参数 a=3，isArgument=true，argumentIndex 应为 0
         const aDecl = declareCalls.find(([_iid, name, val, isArg]) =>
             name === 'a' && val === 3 && isArg === true);
@@ -348,7 +348,7 @@ describe('端到端分析插件场景', () => {
         });
         const J$inst = new JalangiSandbox();
         J$inst.analysis.use({
-            write(_iid, name, val) {
+            writeVar(_iid, name, val) {
                 if (name === 'x') return { result: val + 1000 };
             }
         });
@@ -442,9 +442,9 @@ describe('端到端分析插件场景', () => {
         const J$inst = new JalangiSandbox();
         const log = [];
         J$inst.analysis
-            .use({ write: () => { log.push('A'); } })
-            .use({ write: () => { log.push('B'); } })
-            .use({ write: () => { log.push('C'); } });
+            .use({ writeVar: () => { log.push('A'); } })
+            .use({ writeVar: () => { log.push('B'); } })
+            .use({ writeVar: () => { log.push('C'); } });
         runInSandbox(instrCode, J$inst);
         // 三个插件对同一个 write 均触发，且按注册顺序
         assert.ok(log.includes('A') && log.includes('B') && log.includes('C'),
@@ -714,10 +714,10 @@ describe('observeOnly 模式', () => {
         assert.equal(host.observeOnly, true, 'HookDispatcher 构造后 observeOnly 应为 true');
         // 注册一个试图修改值的插件
         let called = false;
-        host.use({ read(_iid, _name, val) { called = true; return { result: 999 }; } });
-        // 直接调用 read 分发器：原始 val=5，插件试图改为 999
-        const ret = host.read(1, 'x', 5, false, false);
-        assert.ok(called, 'read 钩子应被调用');
+        host.use({ readVar(_iid, _name, val) { called = true; return { result: 999 }; } });
+        // 直接调用 readVar 分发器：原始 val=5，插件试图改为 999
+        const ret = host.readVar(1, 'x', 5, false, false);
+        assert.ok(called, 'readVar 钩子应被调用');
         // observeOnly 下返回值被忽略，调度器本身返回值也为 undefined（不再是插件的返回对象）
         assert.equal(ret, undefined, 'observeOnly 模式下调度器返回 undefined（插件返回值被丢弃）');
     });

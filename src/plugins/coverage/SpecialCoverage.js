@@ -51,7 +51,7 @@ export class SpecialCoverageAnalysis {
         this._branchSidToFileName = [];
     }
 
-    conditional(iid, result) {
+    evalCond(iid, result) {
         const branchInfo = this._getBranchInfo();
         if (result) {
             branchInfo[iid]     = 1;

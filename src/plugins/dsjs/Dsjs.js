@@ -223,14 +223,14 @@ export class DsjsAnalysis {
         return { result };
     }
 
-    literal(iid, val, hasGetterSetter) {
+    evalLiteral(iid, val, hasGetterSetter) {
         const giid = this._sandbox.getGlobalIID(iid);
         this._checkArrayUniformity(giid, val);
         this._getCreateObjectInfo(giid, val, false);
         return { result: val };
     }
 
-    forIn(iid, val) {
+    forInStmt(iid, val) {
         const giid = this._sandbox.getGlobalIID(iid);
         this._forInUse(giid, val);
         return { result: val };

@@ -35,15 +35,15 @@ const log = createLogger(DOMAIN.INSTRUMENT);
 export const ALL_HOOKS = new Set([
     'callPre',
     'call',
-    'literal',
-    'forIn',
-    'declare',
+    'evalLiteral',
+    'forInStmt',
+    'declareVar',
     'getFieldPre',
     'getField',
     'putFieldPre',
     'putField',
-    'read',
-    'write',
+    'readVar',
+    'writeVar',
     'returnStmt',
     'throwStmt',
     'withStmt',
@@ -55,7 +55,7 @@ export const ALL_HOOKS = new Set([
     'binary',
     'unaryPre',
     'unary',
-    'conditional',
+    'evalCond',
     'instrumentCodePre',
     'instrumentCode',
     'endExpression',
@@ -81,13 +81,13 @@ const HOOK_TO_CONFIG_FIELDS = {
     call:           ['INSTR_INVOKE'],
 
     // 字面量
-    literal:        ['INSTR_LITERAL'],
+    evalLiteral:    ['INSTR_LITERAL'],
 
     // for-in
-    forIn:          ['INSTR_FORIN'],
+    forInStmt:      ['INSTR_FORIN'],
 
     // 变量声明
-    declare:        ['INSTR_INIT', 'INSTR_TRY_CATCH_ARGUMENTS'],
+    declareVar:     ['INSTR_INIT', 'INSTR_TRY_CATCH_ARGUMENTS'],
 
     // 属性访问
     getFieldPre:    ['INSTR_GETFIELD'],
@@ -97,8 +97,8 @@ const HOOK_TO_CONFIG_FIELDS = {
     putField:       ['INSTR_PUTFIELD', 'INSTR_PROPERTY_BINARY_ASSIGNMENT'],
 
     // 变量读写
-    read:           ['INSTR_READ'],
-    write:          ['INSTR_WRITE'],
+    readVar:        ['INSTR_READ'],
+    writeVar:       ['INSTR_WRITE'],
 
     // 控制流
     returnStmt:     ['INSTR_RETURN'],
@@ -118,7 +118,7 @@ const HOOK_TO_CONFIG_FIELDS = {
     binary:         ['INSTR_BINARY'],
     unaryPre:       ['INSTR_UNARY'],
     unary:          ['INSTR_UNARY'],
-    conditional:    ['INSTR_CONDITIONAL'],
+    evalCond:       ['INSTR_CONDITIONAL'],
 
     // eval 插桩（instrumentCodePre/Code 始终由 eval 调用触发，不受 Config 控制，此处不映射）
     instrumentCodePre: [],

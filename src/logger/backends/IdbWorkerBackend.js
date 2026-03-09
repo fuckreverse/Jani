@@ -178,7 +178,7 @@ export class IdbWorkerBackend {
 
             this._pending.set(batchId, { resolve, reject, timer });
 
-            this._worker.postMessage({ cmd: 'write', batch, batchId });
+            this._worker.postMessage({ cmd: 'writeVar', batch, batchId });
             this.stats.batchCount++;
             this.stats.totalEvents += batch.length;
         });

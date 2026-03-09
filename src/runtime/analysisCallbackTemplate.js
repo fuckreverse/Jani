@@ -30,7 +30,7 @@
  * @example
  * import { AnalysisTemplate } from './analysisCallbackTemplate.js';
  * class MyAnalysis extends AnalysisTemplate {
- *     read(iid, name, val, isGlobal, isScriptLocal) {
+ *     readVar(iid, name, val, isGlobal, isScriptLocal) {
  *         console.log(`Read ${name} = ${val}`);
  *     }
  * }
@@ -84,7 +84,7 @@ export class AnalysisTemplate {
      * @param {boolean} hasGetterSetter - 是否含 getter/setter 的对象字面量
      * @returns {{ result }|undefined}
      */
-    literal(iid, val, hasGetterSetter) {
+    evalLiteral(iid, val, hasGetterSetter) {
         return { result: val };
     }
 
@@ -97,7 +97,7 @@ export class AnalysisTemplate {
      * @param {*}      val - 被迭代的对象
      * @returns {{ result }|undefined}
      */
-    forIn(iid, val) {
+    forInStmt(iid, val) {
         return { result: val };
     }
 
@@ -114,7 +114,7 @@ export class AnalysisTemplate {
      * @param {boolean} isCatchParam  - 是否为 catch 参数
      * @returns {{ result }|undefined}
      */
-    declare(iid, name, val, isArgument, argumentIndex, isCatchParam) {
+    declareVar(iid, name, val, isArgument, argumentIndex, isCatchParam) {
         return { result: val };
     }
 
@@ -193,7 +193,7 @@ export class AnalysisTemplate {
      * @param {boolean} isScriptLocal - 是否用 var 声明的全局作用域变量
      * @returns {{ result }|undefined}
      */
-    read(iid, name, val, isGlobal, isScriptLocal) {
+    readVar(iid, name, val, isGlobal, isScriptLocal) {
         return { result: val };
     }
 
@@ -208,7 +208,7 @@ export class AnalysisTemplate {
      * @param {boolean} isScriptLocal - 是否用 var 声明的全局作用域变量
      * @returns {{ result }|undefined}
      */
-    write(iid, name, val, lhs, isGlobal, isScriptLocal) {
+    writeVar(iid, name, val, lhs, isGlobal, isScriptLocal) {
         return { result: val };
     }
 
@@ -361,7 +361,7 @@ export class AnalysisTemplate {
      * @param {*}      result - 条件表达式的值
      * @returns {{ result }|undefined}
      */
-    conditional(iid, result) {
+    evalCond(iid, result) {
         return { result };
     }
 

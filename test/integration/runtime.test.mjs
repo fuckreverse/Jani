@@ -38,9 +38,9 @@ describe('HOOKS 常量', () => {
     });
 
     test('HOOKS 包含所有预期钩子名', () => {
-        const expected = ['read', 'write', 'getField', 'putField', 'binary', 'unary',
+        const expected = ['readVar', 'writeVar', 'getField', 'putField', 'binary', 'unary',
             'functionEnter', 'functionExit', 'scriptEnter', 'scriptExit',
-            'call', 'callPre', 'literal', 'conditional', 'endExecution'];
+            'call', 'callPre', 'evalLiteral', 'evalCond', 'endExecution'];
         for (const name of expected) {
             assert.ok(HOOKS.includes(name), `HOOKS 中应包含 "${name}"`);
         }
@@ -61,7 +61,7 @@ describe('HookDispatcher 构造与基本行为', () => {
 
     test('未注册任何插件时，钩子调用返回 undefined', () => {
         const host = new HookDispatcher();
-        assert.equal(host.read(1, 'x', 42, false, false), undefined);
+        assert.equal(host.readVar(1, 'x', 42, false, false), undefined);
     });
 });
 
@@ -72,31 +72,31 @@ describe('HookDispatcher 构造与基本行为', () => {
 describe('use() 注册插件', () => {
     test('use() 返回 this，支持链式语法', () => {
         const host = new HookDispatcher();
-        assert.equal(host.use({ read: () => {} }), host);
+        assert.equal(host.use({ readVar: () => {} }), host);
     });
 
     test('use().use() 链式注册，顺序即执行顺序', () => {
         const order = [];
         new HookDispatcher()
-            .use({ read: () => { order.push(1); } })
-            .use({ read: () => { order.push(2); } })
-            .read(1, 'x', undefined, false, false);
+            .use({ readVar: () => { order.push(1); } })
+            .use({ readVar: () => { order.push(2); } })
+            .readVar(1, 'x', undefined, false, false);
         assert.deepEqual(order, [1, 2]);
     });
 
     test('只注册插件中实现的 hook，未实现的不触发', () => {
         const calls = [];
         const host = new HookDispatcher()
-            .use({ read: () => { calls.push('read'); } });
-        host.read(1, 'x', undefined, false, false);
-        host.write(1, 'x', 42, undefined, false, false);
-        assert.deepEqual(calls, ['read'], '只有 read 被调用');
+            .use({ readVar: () => { calls.push('readVar'); } });
+        host.readVar(1, 'x', undefined, false, false);
+        host.writeVar(1, 'x', 42, undefined, false, false);
+        assert.deepEqual(calls, ['readVar'], '只有 read 被调用');
     });
 
     test('同一插件多次 use() 会导致重复调用', () => {
         const calls = [];
-        const plugin = { read: () => { calls.push(1); } };
-        new HookDispatcher().use(plugin).use(plugin).read(1, 'x', undefined, false, false);
+        const plugin = { readVar: () => { calls.push(1); } };
+        new HookDispatcher().use(plugin).use(plugin).readVar(1, 'x', undefined, false, false);
         assert.deepEqual(calls, [1, 1], '重复注册应重复调用');
     });
 });
@@ -108,9 +108,9 @@ describe('use() 注册插件', () => {
 describe('链式值传递', () => {
     test('最后一个有返回值的插件决定最终返回值', () => {
         const host = new HookDispatcher()
-            .use({ read: () => ({ result: 'first' }) })
-            .use({ read: () => ({ result: 'last'  }) });
-        assert.equal(host.read(1, 'x', undefined, false, false).result, 'last');
+            .use({ readVar: () => ({ result: 'first' }) })
+            .use({ readVar: () => ({ result: 'last'  }) });
+        assert.equal(host.readVar(1, 'x', undefined, false, false).result, 'last');
     });
 
     test('插件 A 返回 {result} 时，插件 B 看到修改后的值（链式传递语义）', () => {
@@ -118,9 +118,9 @@ describe('链式值传递', () => {
         // 后续插件看到的对应参数会被替换为 newVal（链式 taint/shadow 传递）
         const seenByB = [];
         new HookDispatcher()
-            .use({ read: (_iid, _name, _val) => ({ result: 'MODIFIED' }) })
-            .use({ read: (_iid, _name, val)  => { seenByB.push(val); } })
-            .read(1, 'x', 'original', false, false);
+            .use({ readVar: (_iid, _name, _val) => ({ result: 'MODIFIED' }) })
+            .use({ readVar: (_iid, _name, val)  => { seenByB.push(val); } })
+            .readVar(1, 'x', 'original', false, false);
         assert.deepEqual(seenByB, ['MODIFIED'],
             '插件 B 应看到插件 A 修改后的值（链式传递是 HookDispatcher 的核心特性）');
     });
@@ -128,18 +128,18 @@ describe('链式值传递', () => {
     test('插件 A 不返回时，插件 B 看到原始入参', () => {
         const seenByB = [];
         new HookDispatcher()
-            .use({ read: () => { /* 不返回 */ } })
-            .use({ read: (_iid, _name, val) => { seenByB.push(val); } })
-            .read(1, 'x', 'original', false, false);
+            .use({ readVar: () => { /* 不返回 */ } })
+            .use({ readVar: (_iid, _name, val) => { seenByB.push(val); } })
+            .readVar(1, 'x', 'original', false, false);
         assert.deepEqual(seenByB, ['original'], '插件 A 无返回时，插件 B 看到原始值');
     });
 
     test('返回 {args:[...]} 可替换后续插件的整体参数列表', () => {
         const seenByB = [];
         new HookDispatcher()
-            .use({ read: (iid, _name, val, g, sl) => ({ result: val, args: [iid, 'replaced', val, g, sl] }) })
-            .use({ read: (_iid, name) => { seenByB.push(name); } })
-            .read(1, 'original', undefined, false, false);
+            .use({ readVar: (iid, _name, val, g, sl) => ({ result: val, args: [iid, 'replaced', val, g, sl] }) })
+            .use({ readVar: (_iid, name) => { seenByB.push(name); } })
+            .readVar(1, 'original', undefined, false, false);
         assert.deepEqual(seenByB, ['replaced']);
     });
 });
@@ -151,16 +151,16 @@ describe('链式值传递', () => {
 describe('异常处理', () => {
     test('插件抛出异常时 rethrow（通过 onError 阻止 process.exit）', () => {
         const host = new HookDispatcher({ onError: () => {} });
-        host.use({ read: () => { throw new Error('boom'); } });
-        assert.throws(() => host.read(1, 'x', undefined, false, false), /boom/);
+        host.use({ readVar: () => { throw new Error('boom'); } });
+        assert.throws(() => host.readVar(1, 'x', undefined, false, false), /boom/);
     });
 
     test('插件 A 抛出后不再调用插件 B', () => {
         const calledB = [];
         const host = new HookDispatcher({ onError: () => {} });
-        host.use({ read: () => { throw new Error(); } });
-        host.use({ read: () => { calledB.push(true); } });
-        try { host.read(1, 'x', undefined, false, false); } catch (_) {}
+        host.use({ readVar: () => { throw new Error(); } });
+        host.use({ readVar: () => { calledB.push(true); } });
+        try { host.readVar(1, 'x', undefined, false, false); } catch (_) {}
         assert.deepEqual(calledB, [], '插件 B 不应被调用');
     });
 });
@@ -172,9 +172,9 @@ describe('异常处理', () => {
 describe('实例独立性', () => {
     test('两个 HookDispatcher 实例互不影响', () => {
         const log1 = [], log2 = [];
-        const h1 = new HookDispatcher().use({ read: () => { log1.push(1); } });
-        const h2 = new HookDispatcher().use({ read: () => { log2.push(2); } });
-        h1.read(1, 'x', undefined, false, false);
+        const h1 = new HookDispatcher().use({ readVar: () => { log1.push(1); } });
+        const h2 = new HookDispatcher().use({ readVar: () => { log2.push(2); } });
+        h1.readVar(1, 'x', undefined, false, false);
         assert.deepEqual(log1, [1]);
         assert.deepEqual(log2, [], 'h2 不受 h1 影响');
     });
@@ -194,7 +194,7 @@ describe('SMemory / SMemoryPlugin', () => {
     test('SMemoryPlugin 实现了必要的 hook 方法', () => {
         const mem    = new SMemory(FAKE_CONSTANTS);
         const plugin = new SMemoryPlugin(mem);
-        for (const name of ['literal', 'declare', 'functionEnter', 'functionExit', 'scriptEnter', 'scriptExit']) {
+        for (const name of ['evalLiteral', 'declareVar', 'functionEnter', 'functionExit', 'scriptEnter', 'scriptExit']) {
             assert.equal(typeof plugin[name], 'function', `SMemoryPlugin.${name} 应存在`);
         }
     });
@@ -226,15 +226,15 @@ describe('SMemory / SMemoryPlugin', () => {
 // ════════════════════════════════════════════════════════════════════════════════
 
 describe('LogAllAnalysis', () => {
-    test('无参构造正常，read/write/getField 方法存在', () => {
+    test('无参构造正常，readVar/writeVar/getField 方法存在', () => {
         const a = new LogAllAnalysis();
-        assert.equal(typeof a.read,     'function');
-        assert.equal(typeof a.write,    'function');
+        assert.equal(typeof a.readVar,  'function');
+        assert.equal(typeof a.writeVar, 'function');
         assert.equal(typeof a.getField, 'function');
     });
 
-    test('read 返回 {result: val}', () => {
-        const ret = new LogAllAnalysis().read(1, 'x', 42, false, false);
+    test('readVar 返回 {result: val}', () => {
+        const ret = new LogAllAnalysis().readVar(1, 'x', 42, false, false);
         assert.equal(ret.result, 42);
     });
 
@@ -277,13 +277,13 @@ describe('端到端三层组合', () => {
         host.scriptExit(1, undefined);
     });
 
-    test('read 钩子返回值来自最后一个插件（LogAll）', () => {
+    test('readVar 钩子返回值来自最后一个插件（LogAll）', () => {
         const mem  = new SMemory(FAKE_CONSTANTS);
         const host = new HookDispatcher()
             .use(new SMemoryPlugin(mem))
             .use(new LogAllAnalysis(mem));
-        const ret = host.read(1, 'x', 99, false, false);
-        assert.equal(ret?.result, 99, 'LogAllAnalysis.read 应返回原始 val');
+        const ret = host.readVar(1, 'x', 99, false, false);
+        assert.equal(ret?.result, 99, 'LogAllAnalysis.readVar 应返回原始 val');
     });
 });
 

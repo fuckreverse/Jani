@@ -18,13 +18,13 @@ export class FrameAnalysisPlugin {
         this._sandbox.frames = frames;   // 其他分析可通过 sandbox.frames 访问
     }
 
-    literal(iid, val, hasGetterSetter) {
+    evalLiteral(iid, val, hasGetterSetter) {
         if (typeof val === 'function') {
             this._frames.defineFunction(val);
         }
     }
 
-    declare(iid, name, val, isArgument, argumentIndex, isCatchParam) {
+    declareVar(iid, name, val, isArgument, argumentIndex, isCatchParam) {
         this._frames.initialize(name);
     }
 

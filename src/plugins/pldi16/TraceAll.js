@@ -79,17 +79,17 @@ export class TraceAllAnalysis {
         return { result };
     }
 
-    literal(iid, val, hasGetterSetter) {
+    evalLiteral(iid, val, hasGetterSetter) {
         this._log(`literal(iid=${iid}, val=${this._getValue(val)}, hasGetterSetter=${hasGetterSetter}) at ${this._loc(iid)}`);
         return { result: val };
     }
 
-    forIn(iid, val) {
+    forInStmt(iid, val) {
         this._log(`forIn(iid=${iid}, val=${this._getValue(val)}) at ${this._loc(iid)}`);
         return { result: val };
     }
 
-    declare(iid, name, val, isArgument, argumentIndex, isCatchParam) {
+    declareVar(iid, name, val, isArgument, argumentIndex, isCatchParam) {
         this._log(`declare(iid=${iid}, name=${name}, val=${this._getValue(val)}, isArgument=${isArgument}, argumentIndex=${argumentIndex}, isCatchParam=${isCatchParam}) at ${this._loc(iid)}`);
         return { result: val };
     }
@@ -116,12 +116,12 @@ export class TraceAllAnalysis {
         return { result: val };
     }
 
-    read(iid, name, val, isGlobal, isScriptLocal) {
+    readVar(iid, name, val, isGlobal, isScriptLocal) {
         this._log(`read(iid=${iid}, name=${name}, val=${this._getValue(val)}, isGlobal=${isGlobal}, isScriptLocal=${isScriptLocal}) with frameId=${this._getFrameID(name)} at ${this._loc(iid)}`);
         return { result: val };
     }
 
-    write(iid, name, val, lhs, isGlobal, isScriptLocal) {
+    writeVar(iid, name, val, lhs, isGlobal, isScriptLocal) {
         this._log(`write(iid=${iid}, name=${name}, val=${this._getValue(val)}, lhs=${this._getValue(lhs)}, isGlobal=${isGlobal}, isScriptLocal=${isScriptLocal}) with frameId=${this._getFrameID(name)} at ${this._loc(iid)}`);
         return { result: val };
     }
@@ -184,7 +184,7 @@ export class TraceAllAnalysis {
         return { result };
     }
 
-    conditional(iid, result) {
+    evalCond(iid, result) {
         this._log(`conditional(iid=${iid}, result=${this._getValue(result)}) at ${this._loc(iid)}`);
         return { result };
     }

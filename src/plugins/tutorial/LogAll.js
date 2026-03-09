@@ -62,19 +62,19 @@ class LogAllAnalysis {
 
     // ── 字面量 ─────────────────────────────────────────────────────────────────
 
-    literal(iid, val, hasGetterSetter) {
+    evalLiteral(iid, val, hasGetterSetter) {
         return { result: val };
     }
 
     // ── for-in ─────────────────────────────────────────────────────────────────
 
-    forIn(iid, val) {
+    forInStmt(iid, val) {
         return { result: val };
     }
 
     // ── 变量声明 ────────────────────────────────────────────────────────────────
 
-    declare(iid, name, val, isArgument, argumentIndex, isCatchParam) {
+    declareVar(iid, name, val, isArgument, argumentIndex, isCatchParam) {
         return { result: val };
     }
 
@@ -121,11 +121,11 @@ class LogAllAnalysis {
 
     // ── 变量读写 ────────────────────────────────────────────────────────────────
 
-    read(iid, name, val, isGlobal, isScriptLocal) {
+    readVar(iid, name, val, isGlobal, isScriptLocal) {
         return { result: val };
     }
 
-    write(iid, name, val, lhs, isGlobal, isScriptLocal) {
+    writeVar(iid, name, val, lhs, isGlobal, isScriptLocal) {
         return { result: val };
     }
 
@@ -169,7 +169,7 @@ class LogAllAnalysis {
         return { result };
     }
 
-    conditional(iid, result) {
+    evalCond(iid, result) {
         return { result };
     }
 

@@ -523,7 +523,7 @@ export class ExecutionTraceAnalysis {
 
     // ── 指令级钩子 ────────────────────────────────────────────────────────────
 
-    write(iid, name, val) {
+    writeVar(iid, name, val) {
         const frame = this._top();
         if (!frame) return { result: val };
         const { rc, loc } = this._loc(iid);
@@ -532,9 +532,9 @@ export class ExecutionTraceAnalysis {
         return { result: val };
     }
 
-    declare(iid, name, val, isArgument, argumentIndex, isCatchParam) {
+    declareVar(iid, name, val, isArgument, argumentIndex, isCatchParam) {
         if (!isArgument && !isCatchParam) {
-            this.write(iid, name, val);
+            this.writeVar(iid, name, val);
         }
         return { result: val };
     }

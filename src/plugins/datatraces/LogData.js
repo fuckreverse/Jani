@@ -92,13 +92,13 @@ export class LogDataAnalysis {
         }
     }
 
-    read(iid, name, val, isGlobal, isScriptLocal) {
+    readVar(iid, name, val, isGlobal, isScriptLocal) {
         const mem  = this._sandbox.smemory;
         const sf   = mem.getShadowFrame(name);
         this._logEvent(`R,${this._sandbox.sid},${iid},${mem.getIDFromShadowObjectOrFrame(sf)},${this._getStringIndex(name)},${this._getValue(val)},${this._getType(val)}`);
     }
 
-    write(iid, name, val, lhs, isGlobal, isScriptLocal) {
+    writeVar(iid, name, val, lhs, isGlobal, isScriptLocal) {
         const mem  = this._sandbox.smemory;
         const sf   = mem.getShadowFrame(name);
         this._logEvent(`W,${this._sandbox.sid},${iid},${mem.getIDFromShadowObjectOrFrame(sf)},${this._getStringIndex(name)},${this._getValue(val)},${this._getType(val)}`);

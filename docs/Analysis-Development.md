@@ -13,7 +13,7 @@ flowchart TD
     INIT["初始化\nnew JalangiSandbox()\nJ$.analysis = new HookDispatcher()"]
     REG["注册插件\nJ$.analysis.use(new MyAnalysis(J$))"]
     SE["onReady(cb) — 异步初始化完成\nscriptEnter — 脚本开始执行"]
-    HOOKS["运行时事件循环\n每次操作触发对应钩子\nread / write / getField / binary / ..."]
+    HOOKS["运行时事件循环\n每次操作触发对应钩子\nreadVar / writeVar / getField / binary / ..."]
     FN_LIFE["函数生命周期\nfunctionEnter → [函数体执行] → functionExit"]
     SR["scriptExit — 脚本执行完毕"]
     END["endExecution — 程序结束\n输出分析结果"]
@@ -42,7 +42,7 @@ export class ReadCountAnalysis {
         this._readCounts = {};
     }
 
-    read(iid, name, val, isGlobal, isScriptLocal) {
+    readVar(iid, name, val, isGlobal, isScriptLocal) {
         this._readCounts[name] = (this._readCounts[name] ?? 0) + 1;
         return { result: val };  // 不修改值
     }
@@ -84,22 +84,22 @@ mindmap
       putFieldPre
       putField
     变量读写
-      read
-      write
+      readVar
+      writeVar
     字面量与声明
-      literal
-      declare
+      evalLiteral
+      declareVar
     运算
       binaryPre
       binary
       unaryPre
       unary
     条件与控制流
-      conditional
+      evalCond
       returnStmt
       throwStmt
       withStmt
-      forIn
+      forInStmt
     函数生命周期
       functionEnter
       functionExit
@@ -182,9 +182,12 @@ mindmap
 
 ### 变量读写
 
-#### `read(iid, name, val, isGlobal, isScriptLocal)`
+#### `readVar(iid, name, val, isGlobal, isScriptLocal)`
 
-变量读取之后触发。
+变量读取之**后**触发（仅 Post，无对应 Pre）。
+
+> **设计说明**：变量读取前无法预知即将读到的值，Pre 无法提供有意义的参数，
+> 因此只提供 Post 版本（值已知，可观测/替换）。
 
 | 参数 | 说明 |
 |------|------|
@@ -195,9 +198,12 @@ mindmap
 
 **返回值**：`{ result }` 或 `undefined`。
 
-#### `write(iid, name, val, lhs, isGlobal, isScriptLocal)`
+#### `writeVar(iid, name, val, lhs, isGlobal, isScriptLocal)`
 
-变量写入之前触发。`lhs` 是写入前的旧值。
+变量写入之**前**触发（仅 Pre，无对应 Post）。`lhs` 是写入前的旧值。
+
+> **设计说明**：变量写操作关注的是"写入前能否修改/拦截值"，写完后可通过 `readVar` 观测结果，
+> 不需要单独的 Post 版本，因此只提供 Pre 版本。
 
 **返回值**：`{ result }` 或 `undefined`。
 
@@ -205,13 +211,16 @@ mindmap
 
 ### 字面量与声明
 
-#### `literal(iid, val, hasGetterSetter)`
+#### `evalLiteral(iid, val, hasGetterSetter)`
 
-字面量（数字/字符串/布尔/null/对象/数组/函数/正则/BigInt）创建后触发。
+字面量（数字/字符串/布尔/null/对象/数组/函数/正则/BigInt）创建后触发（仅 Post，无对应 Pre）。
+
+> **设计说明**：字面量是编译期常量，创建前无可修改的内容，Pre 没有意义；
+> 只在字面量值确定后通知分析器。
 
 **返回值**：`{ result }` 或 `undefined`。
 
-#### `declare(iid, name, val, isArgument, argumentIndex, isCatchParam)`
+#### `declareVar(iid, name, val, isArgument, argumentIndex, isCatchParam)`
 
 作用域开始时，对每个局部变量/形参/函数声明触发。
 
@@ -242,15 +251,54 @@ mindmap
 
 ### 条件与控制流
 
-#### `conditional(iid, result)`
+#### `evalCond(iid, result)`
 
-条件判断时触发（`if`, `while`, `?:`, `&&`, `||`, `switch` 等）。
+条件判断时触发（`if`, `while`, `?:`, `&&`, `||`, `switch` 等）（仅 Post，无对应 Pre）。
+
+> **设计说明**：条件表达式本身的求值结果才是这个钩子的输入，"求值前"等同于还没有可观测的条件值，
+> Pre 无法提供有意义的参数；因此只在条件值确定后触发，允许分析器修改分支走向。
 
 **返回值**：`{ result }` 或 `undefined`。修改 result 可控制分支走向。
 
 #### `returnStmt(iid, val)` / `throwStmt(iid, val)` / `withStmt(iid, val)`
 
 `return` / `throw` / `with` 语句触发。
+
+---
+
+### 命名体系说明：Pre/Post 与 Enter/Exit
+
+回调接口中存在**两套**表示"操作边界"的命名体系，它们并非命名疏忽，而是描述两类本质不同的语义：
+
+**Pre/Post 体系**（`getFieldPre`/`getField`、`callPre`/`call`、`binaryPre`/`binary` 等）
+
+- 描述**单个原子表达式**的两个时间点
+- Pre 和 Post 的参数高度重叠，Post 只是多了 `result`
+- 两次调用之间**几乎没有其他代码执行**（紧密包裹同一个表达式）
+- Pre 提供拦截能力（`skip: true`），Post 提供结果替换（`result: newVal`）
+- 类比：对一次数据库查询语句的 before/after hook
+
+**Enter/Exit 体系**（`functionEnter`/`functionExit`、`scriptEnter`/`scriptExit`）
+
+- 描述**一个执行作用域**（函数体 / 脚本体）的两个边界
+- Enter 和 Exit 的参数**完全不同**：Enter 拿到 `f/dis/args`，Exit 拿到 `returnVal/wrappedExceptionVal`
+- 两次调用之间可以有**任意行代码执行**，期间还可触发无数其他钩子（递归嵌套也是合法的）
+- Enter 的返回值被忽略（无法阻止函数体执行），Exit 支持 `isBacktrack`（MultiSE 符号执行用）
+- 类比：数据库事务的 BEGIN / COMMIT
+
+**两套体系的关键区别一览**：
+
+| 维度 | Pre/Post | Enter/Exit |
+|------|---------|-----------|
+| 对应的 JS 单元 | 单个表达式/运算 | 完整执行作用域（函数体/脚本） |
+| 两端参数关系 | 高度对称，Post 多 `result` | 完全不同，各自独立 |
+| 之间是否有其他钩子 | 否（紧密包裹） | 是（任意多个） |
+| Pre/Enter 能否阻止执行 | 能（`skip: true`）| 否 |
+| Post/Exit 能否修改结果 | 能（`result: newVal`）| Exit 只能修改 `returnVal` |
+
+> **常见困惑**：`functionEnter` ≠ "函数的 `callPre`"。`callPre` 在**调用方**上下文中触发（此时
+> 被调函数还未执行），`functionEnter` 在**被调函数体内部**触发（`this` 和参数已绑定完毕）。
+> 两者都会触发，顺序为 `callPre` → `functionEnter` → 函数体 → `functionExit` → `call`。
 
 ---
 
@@ -275,7 +323,7 @@ mindmap
 
 ### 其他
 
-#### `forIn(iid, val)`
+#### `forInStmt(iid, val)`
 
 `for-in` 循环迭代对象时触发。
 
@@ -376,7 +424,7 @@ class MyAnalysis {
         this._sandbox = sandbox;
     }
 
-    read(iid, name, val, isGlobal) {
+    readVar(iid, name, val, isGlobal) {
         const loc = this._sandbox.iidToLocation(this._sandbox.lastSid, iid);
         // → "(example.js:3:5:3:10)"
         console.log(`Read ${name} at ${loc}`);
@@ -455,7 +503,7 @@ export class CheckNaNAnalysis {
         return { result };
     }
 
-    read(iid, name, val, isGlobal) {
+    readVar(iid, name, val, isGlobal) {
         if (typeof val === 'number' && isNaN(val) && isGlobal) {
             const loc = this._sandbox.iidToLocation(this._sandbox.lastSid, iid);
             this._nanLocations.push({

@@ -25,7 +25,7 @@ export class SmemTestAnalysis {
         return v;
     }
 
-    literal(iid, val, hasGetterSetter) {
+    evalLiteral(iid, val, hasGetterSetter) {
         if (typeof val === 'function') {
             this._sandbox.log(`Function id:${this._getValue(val)}`);
         }
@@ -43,13 +43,13 @@ export class SmemTestAnalysis {
         this._sandbox.log(`PUT_FIELD ${mem.getIDFromShadowObjectOrFrame(shadowObj.owner)}.${offset} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 
-    read(iid, name, val, isGlobal, isScriptLocal) {
+    readVar(iid, name, val, isGlobal, isScriptLocal) {
         const mem       = this._sandbox.smemory;
         const shadowObj = mem.getShadowFrame(name);
         this._sandbox.log(`READ ${mem.getIDFromShadowObjectOrFrame(shadowObj)}.${name} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 
-    write(iid, name, val, lhs, isGlobal, isScriptLocal) {
+    writeVar(iid, name, val, lhs, isGlobal, isScriptLocal) {
         const mem       = this._sandbox.smemory;
         const shadowObj = mem.getShadowFrame(name);
         this._sandbox.log(`WRITE ${mem.getIDFromShadowObjectOrFrame(shadowObj)}.${name} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);

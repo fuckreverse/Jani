@@ -870,7 +870,7 @@ describe('按需插桩（pluginAnalyzer）', () => {
         });
 
         test('只用 read 时只开启 INSTR_READ', () => {
-            const config = buildConfigFromHooks(new Set(['read']));
+            const config = buildConfigFromHooks(new Set(['readVar']));
             assert.equal(config.INSTR_READ, null,          'INSTR_READ 应为 null');
             assert.equal(typeof config.INSTR_WRITE, 'function', 'INSTR_WRITE 应被禁用');
             assert.equal(typeof config.INSTR_BINARY, 'function', 'INSTR_BINARY 应被禁用');
@@ -883,7 +883,7 @@ describe('按需插桩（pluginAnalyzer）', () => {
         });
 
         test('declare 需要 INSTR_INIT + INSTR_TRY_CATCH_ARGUMENTS', () => {
-            const config = buildConfigFromHooks(new Set(['declare']));
+            const config = buildConfigFromHooks(new Set(['declareVar']));
             assert.equal(config.INSTR_INIT, null,                  'declare 需要 INSTR_INIT');
             assert.equal(config.INSTR_TRY_CATCH_ARGUMENTS, null,   'declare 需要 INSTR_TRY_CATCH_ARGUMENTS');
         });
@@ -906,7 +906,7 @@ describe('按需插桩（pluginAnalyzer）', () => {
         });
 
         test('forIn 需要 INSTR_FORIN', () => {
-            const config = buildConfigFromHooks(new Set(['forIn']));
+            const config = buildConfigFromHooks(new Set(['forInStmt']));
             assert.equal(config.INSTR_FORIN, null, 'forIn 钩子应开启 INSTR_FORIN');
         });
 
@@ -936,7 +936,7 @@ describe('按需插桩（pluginAnalyzer）', () => {
             const hooks = analyzePluginHooks([pluginPath]);
             assert.ok(hooks.has('binary'),       'CheckNaN 应包含 binary');
             assert.ok(hooks.has('endExecution'), 'CheckNaN 应包含 endExecution');
-            assert.ok(!hooks.has('read'),        'CheckNaN 不应包含 read');
+            assert.ok(!hooks.has('readVar'),        'CheckNaN 不应包含 read');
         });
 
         test('从实例对象扫描（运行时反射）', () => {
@@ -944,7 +944,7 @@ describe('按需插桩（pluginAnalyzer）', () => {
             const hooks = analyzePluginHooks([instance]);
             assert.ok(hooks.has('binary'),       '实例扫描应发现 binary');
             assert.ok(hooks.has('endExecution'), '实例扫描应发现 endExecution');
-            assert.ok(!hooks.has('read'),        '实例扫描不应发现 read');
+            assert.ok(!hooks.has('readVar'),        '实例扫描不应发现 read');
         });
 
         test('静态 usedHooks 声明优先', () => {
@@ -982,14 +982,14 @@ describe('按需插桩（pluginAnalyzer）', () => {
         });
 
         test('只开 INSTR_READ 时，输出不含 J$.B（binary 钩子）', () => {
-            init(buildConfigFromHooks(new Set(['read'])));
+            init(buildConfigFromHooks(new Set(['readVar'])));
             const r = instrumentCode({ code: 'var x = 1 + 2; var y = x;', origCodeFileName: 'on-demand2.js', instCodeFileName: 'on-demand2_i.js' });
             assert.ok(r.code.includes('J$.R('),  '变量读取应被插桩');
             assert.ok(!r.code.includes('J$.B('), '二元运算不应被插桩');
         });
 
         test('关闭 INSTR_INVOKE 时，函数调用不注入 J$.F/J$.M', () => {
-            init(buildConfigFromHooks(new Set(['read'])));
+            init(buildConfigFromHooks(new Set(['readVar'])));
             const r = instrumentCode({ code: 'function foo() {} foo(); var obj = { bar: function(){} }; obj.bar();', origCodeFileName: 'invoke-off.js', instCodeFileName: 'invoke-off_i.js' });
             assert.ok(!r.code.includes('J$.F('), '关闭 INSTR_INVOKE 时 J$.F 不应出现');
             assert.ok(!r.code.includes('J$.M('), '关闭 INSTR_INVOKE 时 J$.M 不应出现');

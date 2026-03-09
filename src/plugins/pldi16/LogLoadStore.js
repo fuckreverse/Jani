@@ -50,14 +50,14 @@ export class LogLoadStoreAnalysis {
         this._log(`Store of object(id=${id}).${offset}) at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
     }
 
-    read(iid, name, val, isGlobal, isScriptLocal) {
+    readVar(iid, name, val, isGlobal, isScriptLocal) {
         const mem     = this._sandbox.smemory;
         const frameId = mem.getIDFromShadowObjectOrFrame(mem.getShadowFrame(name));
         this._log(`Load of frame(id=${frameId}).${name} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);
         return { result: val };
     }
 
-    write(iid, name, val, lhs, isGlobal, isScriptLocal) {
+    writeVar(iid, name, val, lhs, isGlobal, isScriptLocal) {
         const mem     = this._sandbox.smemory;
         const frameId = mem.getIDFromShadowObjectOrFrame(mem.getShadowFrame(name));
         this._log(`Store of frame(id=${frameId}).${name} at ${this._sandbox.iidToLocation(this._sandbox.sid, iid)}`);

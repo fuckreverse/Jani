@@ -9,7 +9,7 @@
  * 消息协议（主线程 → Worker）：
  *   { cmd: 'init', dbName, storeName, version, debugDomain? }
  *     → { type: 'ready' }
- *   { cmd: 'write', batch: Array, batchId: number }
+ *   { cmd: 'writeVar', batch: Array, batchId: number }
  *     → { type: 'ack', batchId, count } | { type: 'error', batchId, message, stack }
  *   { cmd: 'flush', reqId }
  *     → { type: 'flushed', reqId }
@@ -169,7 +169,7 @@ self.onmessage = async (evt) => {
                 break;
             }
 
-            case 'write': {
+            case 'writeVar': {
                 if (!db) {
                     dbg.error(`write batchId=${msg.batchId}: DB not initialized`);
                     self.postMessage({ type: 'error', batchId: msg.batchId, message: 'DB not initialized' });

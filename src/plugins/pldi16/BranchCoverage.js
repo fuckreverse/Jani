@@ -17,7 +17,7 @@ export class BranchCoverageAnalysis {
         this._falseBranches = {};
     }
 
-    conditional(iid, result) {
+    evalCond(iid, result) {
         const id = this._sandbox.getGlobalIID(iid);
         if (result) {
             this._trueBranches[id]  = (this._trueBranches[id]  | 0) + 1;

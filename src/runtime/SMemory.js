@@ -243,11 +243,11 @@ export class SMemory {
 
 export class SMemoryPlugin {
     constructor(smemory) {
-        this.literal = (iid, val /*, hasGetterSetter */) => {
+        this.evalLiteral = (iid, val /*, hasGetterSetter */) => {
             smemory.defineFunction(val);
         };
 
-        this.declare = (iid, name /*, val, isArgument, argumentIndex, isCatchParam */) => {
+        this.declareVar = (iid, name /*, val, isArgument, argumentIndex, isCatchParam */) => {
             smemory.initialize(name);
         };
 

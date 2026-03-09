@@ -859,8 +859,8 @@ export class JalangiRuntime {
         }
 
         const analysis = this.analysis;
-        if (analysis?.literal) {
-            const aret = analysis.literal(iid, val, hasGetterSetter);
+        if (analysis?.evalLiteral) {
+            const aret = analysis.evalLiteral(iid, val, hasGetterSetter);
             if (aret) val = aret.result;
         }
 
@@ -870,8 +870,8 @@ export class JalangiRuntime {
     /** for-in 对象包装 — ForIn（J$.Fi）*/
     Fi(iid, val) {
         const analysis = this.analysis;
-        if (analysis?.forIn) {
-            const aret = analysis.forIn(iid, val);
+        if (analysis?.forInStmt) {
+            const aret = analysis.forInStmt(iid, val);
             if (aret) val = aret.result;
         }
         return val;
@@ -884,9 +884,9 @@ export class JalangiRuntime {
 
         if (isArgument) this.#argIndex++;
 
-        if (!isLocalSync && analysis?.declare) {  // callback 名称保持 declare
+        if (!isLocalSync && analysis?.declareVar) {
             const idx  = (isArgument && this.#argIndex > 1) ? this.#argIndex - 2 : -1;
-            const aret = analysis.declare(iid, name, val, isArgument, idx, isCatchParam);
+            const aret = analysis.declareVar(iid, name, val, isArgument, idx, isCatchParam);
             if (aret) val = aret.result;
         }
 
@@ -975,8 +975,8 @@ export class JalangiRuntime {
             this.#shadowSet(defScopeId, this.#resolveCallId(defScopeId), name, val);
         }
 
-        if (analysis?.read) {
-            const aret = analysis.read(iid, name, val, isGlobal, isScriptLocal);
+        if (analysis?.readVar) {
+            const aret = analysis.readVar(iid, name, val, isGlobal, isScriptLocal);
             if (aret) val = aret.result;
         }
 
@@ -1008,8 +1008,8 @@ export class JalangiRuntime {
         const analysis = this.analysis;
 
         // 通知分析插件（若有 read 钩子，用 isGlobal=false/isScriptLocal=false）
-        if (analysis?.read) {
-            const aret = analysis.read(iid, name, val, false, false);
+        if (analysis?.readVar) {
+            const aret = analysis.readVar(iid, name, val, false, false);
             if (aret) return (this.#lastComputedValue = aret.result);
         }
 
@@ -1021,8 +1021,8 @@ export class JalangiRuntime {
         const [isGlobal, isScriptLocal, isDeclaration] = decodeBitPattern(flags, 3);
         const analysis = this.analysis;
 
-        if (analysis?.write) {
-            const aret = analysis.write(iid, name, val, lhs, isGlobal, isScriptLocal);
+        if (analysis?.writeVar) {
+            const aret = analysis.writeVar(iid, name, val, lhs, isGlobal, isScriptLocal);
             if (aret) val = aret.result;
         }
 
@@ -1394,8 +1394,8 @@ export class JalangiRuntime {
         // 计算实际比较结果，用于通知 conditional 分析器
         const matchResult = this.#switchLeft === right;
 
-        if (analysis?.conditional) {
-            const aret = analysis.conditional(iid, matchResult);
+        if (analysis?.evalCond) {
+            const aret = analysis.evalCond(iid, matchResult);
             if (aret) {
                 // 分析器可以通过返回 { result: true/false } 强制匹配/失配
                 // 若强制匹配（原本不匹配），返回 switchLeft 使 === 成立
@@ -1416,8 +1416,8 @@ export class JalangiRuntime {
     /** 条件表达式 */
     C(iid, left) {
         const analysis = this.analysis;
-        if (analysis?.conditional) {
-            const aret = analysis.conditional(iid, left);
+        if (analysis?.evalCond) {
+            const aret = analysis.evalCond(iid, left);
             if (aret) left = aret.result;
         }
         this.#lastVal = left;
