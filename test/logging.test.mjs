@@ -57,21 +57,25 @@ describe('RingBuffer', () => {
         assert.equal(rb.size, 6);
     });
 
-    test('drop-oldest 溢出策略', () => {
-        const rb = new RingBuffer({ capacity: 4, overflowPolicy: 'drop-oldest' });
-        for (let i = 0; i < 6; i++) rb.push(i);
-        assert.equal(rb.size, 4);
-        assert.equal(rb.stats.totalDropped, 2);
-        // 最旧的 0,1 被丢弃，剩 2,3,4,5
-        assert.deepEqual(rb.drain(), [2, 3, 4, 5]);
+    test('自动扩容：超过容量时不丢弃，而是扩容', () => {
+        const rb = new RingBuffer({ capacity: 4 });
+        for (let i = 0; i < 10; i++) rb.push(i);
+        // 不丢弃，size 应该等于实际 push 数量
+        assert.equal(rb.size, 10);
+        assert.equal(rb.stats.totalDropped, 0);
+        // 扩容至少发生一次
+        assert.ok(rb.stats.totalResizes >= 1);
+        // 所有数据完整保留
+        assert.deepEqual(rb.drain(), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     });
 
-    test('drop-newest 溢出策略', () => {
-        const rb = new RingBuffer({ capacity: 3, overflowPolicy: 'drop-newest' });
-        for (let i = 0; i < 5; i++) rb.push(i);
-        assert.equal(rb.size, 3);
-        assert.equal(rb.stats.totalDropped, 2);
-        assert.deepEqual(rb.drain(), [0, 1, 2]);
+    test('扩容后环形绕回仍然正确', () => {
+        const rb = new RingBuffer({ capacity: 4 });
+        // 填满后触发扩容
+        for (let i = 0; i < 6; i++) rb.push(i);
+        assert.ok(rb.stats.totalResizes >= 1);
+        // 验证数据完整性
+        assert.deepEqual(rb.drain(), [0, 1, 2, 3, 4, 5]);
     });
 
     test('shouldFlush 在阈值时返回 true', () => {
@@ -402,24 +406,36 @@ describe('NodeStreamBackend', () => {
 
 /**
  * 启动一个轻量 WebSocket mock 服务：
- *  - 接收二进制帧：[u32 batchId][rest]
- *  - 立即回 ack：[u32 batchId]
- *  - 收集所有 batchId 到 received[]
+ *  - 接收二进制帧：[u32 batchId][rest]，回二进制 ack
+ *  - 接收文本帧（NDJSON）：{batchId, events:[...]}，回 JSON ack
+ *  - 收集所有 batchId 到 received[]，收集事件到 events[]
  */
 function startMockServer(port) {
     const received = [];
+    const events   = [];
     const http = createServer();
     const wss  = new WebSocketServer({ server: http });
 
     wss.on('connection', (ws) => {
         ws.binaryType = 'arraybuffer';
         ws.on('message', (data, isBinary) => {
-            const buf     = isBinary ? data : Buffer.from(data).buffer;
-            const batchId = new DataView(buf instanceof ArrayBuffer ? buf : buf.buffer).getUint32(0, true);
-            received.push(batchId);
-            const ack = new ArrayBuffer(4);
-            new DataView(ack).setUint32(0, batchId, true);
-            ws.send(ack);
+            if (isBinary) {
+                // 二进制帧：[u32 batchId][serializeBatchToBinary output]
+                const buf     = data instanceof Buffer
+                    ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+                    : data;
+                const batchId = new DataView(buf).getUint32(0, true);
+                received.push(batchId);
+                const ack = new ArrayBuffer(4);
+                new DataView(ack).setUint32(0, batchId, true);
+                ws.send(ack);
+            } else {
+                // 文本帧：NDJSON { batchId, events: [...] }
+                const msg = JSON.parse(data.toString());
+                received.push(msg.batchId);
+                for (const ev of (msg.events ?? [])) events.push(ev);
+                ws.send(JSON.stringify({ type: 'ack', batchId: msg.batchId }));
+            }
         });
     });
 
@@ -427,6 +443,7 @@ function startMockServer(port) {
         http.listen(port, () => {
             resolve({
                 received,
+                events,
                 close: () => new Promise(r => { wss.close(); http.close(r); }),
             });
         });
@@ -486,6 +503,43 @@ describe('WsBackend + trace-server 端到端回路', () => {
 
             // 9 条事件，每批 3 条 → 3 批
             assert.equal(server.received.length, 3, `期望 3 批，实际 ${server.received.length}`);
+        } finally {
+            await server.close();
+        }
+    });
+
+    // ExecutionTrace 使用 ndjson 格式（{type:'trace', seq, text} 无法用二进制编码）
+    test('WsBackend ndjson 格式：文本帧正确发送和 ack，字段完整保留', async () => {
+        const server = await startMockServer(WS_PORT + 2);
+        try {
+            const { WsBackend } = await import('../src/logger/backends/WsBackend.js');
+            const backend = new WsBackend({
+                url:         `ws://127.0.0.1:${WS_PORT + 2}`,
+                format:      'ndjson',   // ExecutionTrace 实际使用的格式
+                autoConnect: true,
+                windowSize:  4,
+            });
+
+            await new Promise(r => setTimeout(r, 200));
+
+            // 模拟 ExecutionTrace 写入的事件（type 不在 EVENT_TYPE 枚举里）
+            const traceBatch = [
+                { type: 'trace', seq: 1, text: '[  1] [1:1] CALL foo(0 args)' },
+                { type: 'trace', seq: 2, text: '[  2] [2:3] x=42' },
+                { type: 'key',   level: 'info', text: '▶ script: test.js' },
+            ];
+            await backend.write(traceBatch);
+            await backend.flush();
+            await backend.close();
+
+            assert.equal(server.received.length, 1, `期望 1 批，实际 ${server.received.length}`);
+            assert.equal(server.events.length, 3, `期望 3 条事件，实际 ${server.events.length}`);
+            // 验证字段完整（ndjson 不会丢失 seq/text/level）
+            assert.equal(server.events[0].type,  'trace');
+            assert.equal(server.events[0].seq,   1);
+            assert.equal(server.events[0].text,  '[  1] [1:1] CALL foo(0 args)');
+            assert.equal(server.events[2].type,  'key');
+            assert.equal(server.events[2].level, 'info');
         } finally {
             await server.close();
         }

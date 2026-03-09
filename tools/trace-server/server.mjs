@@ -7,7 +7,7 @@
  * 接收来自浏览器 WsBackend 的事件批次，写入本地文件（NDJSON 格式）。
  *
  * 启动：
- *   node tools/trace-server/server.mjs [--port 9229] [--out trace.ndjson] [--format binary|ndjson]
+ *   node tools/trace-server/server.mjs [--port 9229] [--out trace.ndjson] [--format binary|ndjson] [--no-text-only]
  *
  * 协议（见 WsBackend.js）：
  *   二进制模式：
@@ -18,8 +18,8 @@
  *     服务端 → 客户端：JSON 行 { type: 'ack', batchId }
  *
  * 输出格式（磁盘）：
- *   不论接收格式，统一将每条事件输出为 NDJSON（一行一个 JSON 对象）。
- *   这使得输出文件可以用 `jq` 等工具直接分析。
+ *   默认（--text-only）：trace 类型事件只写入 text 字段的纯文本，其余事件仍为 JSON。
+ *   --no-text-only：所有事件统一输出为 NDJSON（一行一个 JSON 对象），可用 `jq` 直接分析。
  */
 
 import { createServer }   from 'node:http';
@@ -40,18 +40,20 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const { values: args } = parseArgs({
     options: {
-        port:   { type: 'string',  default: '9229'           },
-        out:    { type: 'string',  default: 'trace.ndjson'   },
-        format: { type: 'string',  default: 'binary'         },  // binary | ndjson
-        verbose:{ type: 'boolean', default: false            },
+        port:      { type: 'string',  default: '9229'           },
+        out:       { type: 'string',  default: 'trace.ndjson'   },
+        format:    { type: 'string',  default: 'binary'         },  // binary | ndjson
+        verbose:   { type: 'boolean', default: false            },
+        'text-only': { type: 'boolean', default: true           },  // trace 事件只存 text
     },
     strict: false,
 });
 
-const PORT    = parseInt(args.port, 10);
-const OUT     = resolve(args.out);
-const FORMAT  = args.format === 'ndjson' ? 'ndjson' : 'binary';
-const VERBOSE = args.verbose;
+const PORT      = parseInt(args.port, 10);
+const OUT       = resolve(args.out);
+const FORMAT    = args.format === 'ndjson' ? 'ndjson' : 'binary';
+const VERBOSE   = args.verbose;
+const TEXT_ONLY = args['text-only'];
 
 // ─── 文件输出流 ────────────────────────────────────────────────────────────────
 
@@ -128,25 +130,34 @@ wss.on('connection', (ws, req) => {
 
             let batchId, events;
 
-            if (isBinary || data instanceof Buffer) {
+            if (isBinary) {
                 // 二进制格式：[u32 batchId][rest = serializeBatchToBinary output]
-                const buf  = data instanceof Buffer ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) : data;
+                // Node.js ws 库的 message 事件：isBinary=true 时 data 是 Buffer；
+                // isBinary=false（文本帧）时 data 也是 Buffer，但需走 NDJSON 路径，
+                // 因此必须以 isBinary 标志为唯一判据，不能用 data instanceof Buffer。
+                const buf  = data instanceof Buffer
+                    ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+                    : data;  // 浏览器端 ArrayBuffer
                 const view = new DataView(buf);
                 batchId    = view.getUint32(0, true);
                 // 剩余部分是标准批次格式
                 const rest = buf.slice(4);
                 events     = deserializeBatchFromBinary(rest);
             } else {
-                // NDJSON 格式
+                // NDJSON 格式（文本帧）：{ batchId, events: [...] }
                 const msg  = JSON.parse(data.toString());
                 batchId    = msg.batchId;
                 events     = msg.events ?? [];
             }
 
-            // 写入文件（NDJSON，每条一行）
+            // 写入文件（每条一行）
             let line = '';
             for (const ev of events) {
-                line += JSON.stringify(ev) + '\n';
+                if (TEXT_ONLY && ev.type === 'trace' && ev.text != null) {
+                    line += ev.text + '\n';
+                } else {
+                    line += JSON.stringify(ev) + '\n';
+                }
             }
             if (line) outStream.write(line);
 
@@ -157,8 +168,9 @@ wss.on('connection', (ws, req) => {
                 console.log(`[server] batch #${batchId}: ${events.length} events`);
             }
 
-            // 发送 ack
-            if (isBinary || FORMAT === 'binary') {
+            // 发送 ack：格式与收到的帧类型保持一致
+            // 二进制帧 → 4 字节二进制 ack；文本帧（NDJSON）→ JSON ack
+            if (isBinary) {
                 const ack = new ArrayBuffer(4);
                 new DataView(ack).setUint32(0, batchId, true);
                 ws.send(ack);
@@ -192,6 +204,7 @@ httpServer.listen(PORT, () => {
     console.log(`[server]   Stats     : http://0.0.0.0:${PORT}/stats`);
     console.log(`[server]   Output    : ${OUT}`);
     console.log(`[server]   Format    : ${FORMAT}`);
+    console.log(`[server]   Text-only : ${TEXT_ONLY}`);
 });
 
 // ─── 优雅关闭 ──────────────────────────────────────────────────────────────────

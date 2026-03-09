@@ -56,10 +56,9 @@ export class LogManager {
     /**
      * @param {object} [options]
      * @param {Array}  [options.backends=[]]        后端实例列表（均实现 write/flush/close）
-     * @param {number} [options.capacity=65536]     RingBuffer 容量（事件条数）
+     * @param {number} [options.capacity=65536]     RingBuffer 初始容量（满后自动扩容，不丢弃）
      * @param {number} [options.flushThreshold=512] 达到此数量时触发异步 flush
      * @param {number} [options.flushIntervalMs=0]  定时 flush 间隔（ms），0 = 不启用
-     * @param {'drop-oldest'|'drop-newest'} [options.overflowPolicy='drop-oldest']
      * @param {number} [options.drainBatchSize=1024] 每次 drain 最多取多少条
      * @param {boolean} [options.autoClose=true]    是否自动监听 unload/SIGTERM 关闭
      */
@@ -69,14 +68,13 @@ export class LogManager {
             capacity        = 65536,
             flushThreshold  = 512,
             flushIntervalMs = 0,
-            overflowPolicy  = 'drop-oldest',
             drainBatchSize  = 1024,
             autoClose       = true,
         } = options;
 
         this._backends       = [...backends];
         this._drainBatchSize = drainBatchSize;
-        this._ring           = new RingBuffer({ capacity, flushThreshold, overflowPolicy });
+        this._ring           = new RingBuffer({ capacity, flushThreshold });
 
         this._flushPending   = false;   // 防止重复调度 flush
         this._closed         = false;
@@ -94,7 +92,6 @@ export class LogManager {
             capacity,
             flushThreshold,
             flushIntervalMs,
-            overflowPolicy,
             drainBatchSize,
         });
 

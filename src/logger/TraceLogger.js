@@ -73,6 +73,9 @@ export class TraceLogger {
      * @param {string}  [options.dbName='jalangi-traces']
      * @param {string}  [options.storeName='execution-trace']
      * @param {string}  [options.wsUrl]              可选：同时推送到 WebSocket 服务
+     * @param {'ndjson'|'binary'} [options.wsFormat='ndjson']
+     *   WsBackend 消息格式。ExecutionTrace 事件（{type,seq,text}）无法用 binary 编码，
+     *   必须用 ndjson；仅当后端接收的是低层钩子事件（含 iid/sid/value）时才用 binary。
      *
      * === Node.js 选项 ===
      * @param {string|false} [options.nodeFile='jalangi-trace.ndjson']
@@ -82,10 +85,6 @@ export class TraceLogger {
      * === 通用选项 ===
      * @param {boolean} [options.keyToConsole=true]  KEY 日志是否输出到控制台（建议始终 true）
      * @param {object}  [options.logManagerOptions]  透传给 LogManager 的额外选项
-     * @param {number}  [options.preInitQueueLimit=100000]
-     *   pre-init 缓冲队列最大容量（条数）。
-     *   超出后丢弃最早的事件，防止脚本过大导致内存爆炸。
-     *   默认 10 万条，足以覆盖绝大多数脚本加载阶段。
      */
     constructor(options = {}) {
         const {
@@ -94,17 +93,17 @@ export class TraceLogger {
             dbName       = 'jalangi-traces',
             storeName    = 'execution-trace',
             wsUrl        = undefined,
+            wsFormat     = 'ndjson',
             // Node.js
             nodeFile     = 'jalangi-trace.ndjson',
             nodeConsole  = false,
             // 通用
             keyToConsole     = true,
             logManagerOptions = {},
-            preInitQueueLimit = 100000,
         } = options;
 
         this._opts = {
-            useIdb, dbName, storeName, wsUrl,
+            useIdb, dbName, storeName, wsUrl, wsFormat,
             nodeFile, nodeConsole, keyToConsole,
             logManagerOptions,
         };
@@ -116,10 +115,10 @@ export class TraceLogger {
         /**
          * pre-init 缓冲队列：_mgr 就绪前暂存事件，就绪后统一 replay，确保脚本加载阶段不丢失。
          * null 表示初始化已完成；Array（含空数组）表示仍在初始化中。
+         * 注意：不再设置上限，避免丢失事件（大脚本可能产生大量早期 trace）。
          * @type {Array<{kind:'trace'|'key', event?: object, level?: string, text?: string}>|null}
          */
-        this._preInitQueue      = [];
-        this._preInitQueueLimit = preInitQueueLimit;
+        this._preInitQueue = [];
 
         log.debug('constructed', {
             env: IS_BROWSER ? 'browser' : 'node',
@@ -180,7 +179,7 @@ export class TraceLogger {
                     const { WsBackend } = await import('./backends/WsBackend.js');
                     const ws = new WsBackend({
                         url:         opts.wsUrl,
-                        format:      'binary',
+                        format:      opts.wsFormat ?? 'ndjson',
                         autoConnect: true,
                     });
                     await ws.connect().catch(err => {
@@ -273,9 +272,7 @@ export class TraceLogger {
         if (this._mgr) {
             this._mgr.log(event);
         } else if (this._preInitQueue !== null) {
-            if (this._preInitQueue.length >= this._preInitQueueLimit) {
-                this._preInitQueue.shift();
-            }
+            // 无上限，确保不丢失任何事件
             this._preInitQueue.push({ kind: 'trace', event });
         }
     }
@@ -303,9 +300,7 @@ export class TraceLogger {
         if (this._mgr) {
             this._mgr.log({ type: 'key', level, text });
         } else if (this._preInitQueue !== null) {
-            if (this._preInitQueue.length >= this._preInitQueueLimit) {
-                this._preInitQueue.shift();
-            }
+            // 无上限，确保不丢失任何事件
             this._preInitQueue.push({ kind: 'key', level, text });
         }
     }

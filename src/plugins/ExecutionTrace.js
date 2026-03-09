@@ -12,6 +12,14 @@
  *
  * 每条 trace 行输出格式（由 OUTPUT_FORMAT 控制）：
  *
+ *   FORMAT_FLAT (8) — 平铺流式输出（默认）：无调用栈缩进，每个事件立即输出，不等函数返回。
+ *     适合脚本退出后外部调用被插桩函数的场景（解决异步/延迟调用 trace 丢失问题）。
+ *     [  9] [687:22] CALL (anonymous)(0 args)
+ *     [ 10] [3943:14] CALL Object(1 args) arg0=Symbol(Symbol.iterator)
+ *     [ 11] [3943:14] RETN Object ={}
+ *     [ 12] [687:22] RETN (anonymous) =undefined
+ *     [ 13] [105:8] x=42
+ *
  *   FORMAT_TREE (1) — Unicode 树形符号（seq/rc 固定宽度对齐）：
  *     [  9] [ 687:22] │ │ │ ┬ (anonymous)(0 args)
  *     [ 10] [3943:14] │ │ │ │ ┬ Object(1 args) arg0=Symbol(Symbol.iterator)
@@ -59,10 +67,11 @@ const MAX_BYTES = 100;
 const dbg = createLogger(DOMAIN.ANALYSIS);
 
 // ── 输出格式选择（硬编码，改这里切换）────────────────────────────────────────
+//   8 = FORMAT_FLAT  : 平铺流式输出（默认），无缩进，每事件立即输出，不等函数返回
 //   1 = FORMAT_TREE  : Unicode 树形符号（┬ │ └），seq/rc 固定宽度对齐
 //   2 = FORMAT_BLOCK : #region/#endregion 折叠块（VS Code 任意文件可折叠）
 //   4 = FORMAT_PIPE  : ASCII pipe 符号（| 数量 = 深度）
-const OUTPUT_FORMAT = 1;
+const OUTPUT_FORMAT = 8;
 
 // seq 显示宽度（右对齐）：超过此宽度会自动溢出，不截断
 const SEQ_WIDTH = 6;
@@ -242,10 +251,29 @@ class PipeFormatter {
     }
 }
 
+class FlatFormatter {
+    // 平铺流式格式：无缩进，无调用栈表示，每条事件独立一行，立即输出。
+    // CALL 标记函数进入，RETN 标记函数返回；info 行直接输出源码文本。
+    // depth 参数保留接口兼容但不使用。
+
+    callLine(seq, rc, _depth, desc, kvStr) {
+        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] CALL ${desc}${kvStr ? ' ' + kvStr : ''}`;
+    }
+
+    retLine(seq, rc, _depth, name, result) {
+        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] RETN ${name} =${result}`;
+    }
+
+    infoLine(seq, rc, _depth, srcText, kv) {
+        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${srcText}${kv ? ' ; ' + kv : ''}`;
+    }
+}
+
 function createFormatter(format) {
+    if (format === 1) return new TreeFormatter();
     if (format === 2) return new BlockFormatter();
     if (format === 4) return new PipeFormatter();
-    return new TreeFormatter(); // 默认方案1
+    return new FlatFormatter(); // 默认方案8
 }
 
 // ── 帧结构 ────────────────────────────────────────────────────────────────────
@@ -283,6 +311,8 @@ export class ExecutionTraceAnalysis {
         this._stack     = [];
         this._callStack = [];
         this._fmt       = createFormatter(OUTPUT_FORMAT);
+        // FORMAT_FLAT（8）模式：每个事件立即 emit，不通过 Frame.doneLines 缓冲
+        this._flat = !(OUTPUT_FORMAT === 1 || OUTPUT_FORMAT === 2 || OUTPUT_FORMAT === 4);
 
         if (options.logger instanceof TraceLogger) {
             this._logger = options.logger;
@@ -348,6 +378,16 @@ export class ExecutionTraceAnalysis {
         const kvStr = kvParts.length ? kvParts.join(', ') : '';
 
         const { rc } = this._loc(iid);
+
+        if (this._flat) {
+            // 平铺模式：立即输出 CALL 行，只用轻量元数据栈（不缓冲 doneLines）
+            const callMeta = { rc, depth: 1, desc, kvStr, name };
+            this._callStack.push({ callMeta });
+            const line = this._fmt.callLine(++this._seq, rc, 1, desc, kvStr);
+            this._emitRaw(line);
+            return { f, base, args, skip: false };
+        }
+
         const parentDepth = this._stack.length > 0 ? this._top().depth : 0;
 
         // 如果此时栈为空，说明是脚本退出后的异步回调（setTimeout / Promise / 事件监听器等）
@@ -364,6 +404,22 @@ export class ExecutionTraceAnalysis {
     }
 
     call(iid, f, base, args, result, isConstructor, isMethod) {
+        if (this._flat) {
+            // 平铺模式：CALL 行已在 callPre 输出，此处只输出 RETN 行
+            if (this._callStack.length === 0) {
+                const name = f?.name || '(anonymous)';
+                dbg.error(`call(flat): callStack underflow — fn=${name} iid=${iid}`);
+                return { result };
+            }
+            const callInfo = this._callStack.pop();
+            const name   = callInfo.callMeta?.name ?? (f?.name || '(anonymous)');
+            const { rc } = this._loc(iid);
+            const line   = this._fmt.retLine(++this._seq, rc, 1, name, serialize(result));
+            this._emitRaw(line);
+            this._logger.scheduleFlush?.();
+            return { result };
+        }
+
         if (this._stack.length === 0 || this._callStack.length === 0) {
             const name = f?.name || '(anonymous)';
             dbg.error(
@@ -421,18 +477,22 @@ export class ExecutionTraceAnalysis {
         // scriptEnter 分配一个 seq，作为 trace 的第一条记录
         this._emitKeyLine(`▶ script: ${originalFileName}`);
         this._key('info', `▶ script: ${originalFileName}`);
-        this._stack.push(new Frame(0));
-        this._callStack.push({ callMeta: null });
+        if (!this._flat) {
+            this._stack.push(new Frame(0));
+            this._callStack.push({ callMeta: null });
+        }
     }
 
     scriptExit(iid, wrappedExceptionVal) {
-        if (this._stack.length === 0) {
-            dbg.error(`scriptExit: stack underflow (iid=${iid})`);
-        } else {
-            const frame = this._top();
-            this._emitItems(frame.doneLines);
-            this._stack.pop();
-            this._callStack.pop();
+        if (!this._flat) {
+            if (this._stack.length === 0) {
+                dbg.error(`scriptExit: stack underflow (iid=${iid})`);
+            } else {
+                const frame = this._top();
+                this._emitItems(frame.doneLines);
+                this._stack.pop();
+                this._callStack.pop();
+            }
         }
         const exitText = wrappedExceptionVal
             ? `◀ script end (exception: ${serialize(wrappedExceptionVal.exception)})`
@@ -447,6 +507,32 @@ export class ExecutionTraceAnalysis {
     }
 
     functionEnter(iid, f, dis, args) {
+        if (this._flat) {
+            // 平铺模式：直接 emit CALL 行（对应 functionEnter 无 callPre 的情况：
+            // 脚本退出后 native 直接调用，或者 callPre 之后进入函数体）。
+            // 用 _flatFnDepth 追踪嵌套深度，只有最外层函数才需要 emit（callPre 负责外层调用的 CALL）。
+            // 注意：callPre 路径会先 emit CALL，此处 functionEnter 只处理无 callPre 的直接调用。
+            // 判断标准：_callStack 顶层是否已有由 callPre 推入的待匹配记录（_fromCallPre 标记）。
+            // 简化实现：用 _flatFnStack 跟踪每次 functionEnter 是否已由 callPre 覆盖
+            if (!this._flatFnStack) this._flatFnStack = [];
+            const topCall = this._callStack.length > 0 ? this._callStack[this._callStack.length - 1] : null;
+            if (topCall && !topCall._feCovered) {
+                // 已有 callPre 对应的记录，标记为已覆盖，不再重复 emit CALL
+                topCall._feCovered = true;
+                this._flatFnStack.push({ _coveredByCallPre: true });
+            } else {
+                // 无 callPre：native 直接调用（脚本退出后），emit CALL 行
+                const name = f?.name || '(anonymous)';
+                const { rc } = this._loc(iid);
+                const callMeta = { rc, depth: 1, desc: `${name}(${args?.length ?? 0} args)`, kvStr: '', name };
+                this._callStack.push({ callMeta, _directFe: true });
+                this._flatFnStack.push({ _coveredByCallPre: false });
+                const line = this._fmt.callLine(++this._seq, rc, 1, callMeta.desc, '');
+                this._emitRaw(line);
+            }
+            return;
+        }
+
         if (this._stack.length === 0) {
             // 栈为空：脚本退出后被 native 代码直接调用（如浏览器直接调用注册的函数）。
             // 推入异步根帧 + 合成帧。
@@ -474,6 +560,33 @@ export class ExecutionTraceAnalysis {
     }
 
     functionExit(iid, returnVal, wrappedExceptionVal) {
+        if (this._flat) {
+            if (wrappedExceptionVal) {
+                const exStr  = serialize(wrappedExceptionVal.exception);
+                const { rc } = this._loc(iid);
+                const line = this._fmt.infoLine(++this._seq, rc, 0, '✗ throw', `exception=${exStr}`);
+                this._emitRaw(line);
+                this._key('warn', `[${rc}] ✗ throw ; exception=${exStr}`);
+            }
+
+            if (!this._flatFnStack) this._flatFnStack = [];
+            const fnEntry = this._flatFnStack.pop();
+            if (fnEntry && !fnEntry._coveredByCallPre) {
+                // 对应 _directFe 路径（无 callPre），需要输出 RETN 行
+                if (this._callStack.length > 0) {
+                    const callInfo = this._callStack.pop();
+                    const name   = callInfo.callMeta?.name ?? '(anonymous)';
+                    const { rc } = this._loc(iid);
+                    const line   = this._fmt.retLine(++this._seq, rc, 1, name, serialize(returnVal));
+                    this._emitRaw(line);
+                    this._logger.scheduleFlush?.();
+                }
+            }
+            // 对应 callPre 覆盖路径：RETN 行已在 call() 里输出，此处无需额外处理
+
+            return { returnVal, wrappedExceptionVal, isBacktrack: false };
+        }
+
         if (wrappedExceptionVal) {
             const exStr  = serialize(wrappedExceptionVal.exception);
             const { rc } = this._loc(iid);
@@ -524,10 +637,15 @@ export class ExecutionTraceAnalysis {
     // ── 指令级钩子 ────────────────────────────────────────────────────────────
 
     writeVar(iid, name, val) {
-        const frame = this._top();
-        if (!frame) return { result: val };
         const { rc, loc } = this._loc(iid);
         const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
+        if (this._flat) {
+            const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, `${name}=${serialize(val)}`);
+            this._emitRaw(line);
+            return { result: val };
+        }
+        const frame = this._top();
+        if (!frame) return { result: val };
         frame.doneLines.push({ type: 'info', rc, depth: frame.depth, srcText, kv: `${name}=${serialize(val)}` });
         return { result: val };
     }
@@ -540,19 +658,29 @@ export class ExecutionTraceAnalysis {
     }
 
     returnStmt(iid, val) {
-        const frame = this._top();
-        if (!frame) return { result: val };
         const { rc, loc } = this._loc(iid);
         const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
+        if (this._flat) {
+            const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, `(return)=${serialize(val)}`);
+            this._emitRaw(line);
+            return { result: val };
+        }
+        const frame = this._top();
+        if (!frame) return { result: val };
         frame.doneLines.push({ type: 'info', rc, depth: frame.depth, srcText, kv: `(return)=${serialize(val)}` });
         return { result: val };
     }
 
     throwStmt(iid, val) {
-        const frame = this._top();
-        if (!frame) return { result: val };
         const { rc, loc } = this._loc(iid);
         const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
+        if (this._flat) {
+            const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, `(throw)=${serialize(val)}`);
+            this._emitRaw(line);
+            return { result: val };
+        }
+        const frame = this._top();
+        if (!frame) return { result: val };
         frame.doneLines.push({ type: 'info', rc, depth: frame.depth, srcText, kv: `(throw)=${serialize(val)}` });
         return { result: val };
     }
@@ -560,6 +688,16 @@ export class ExecutionTraceAnalysis {
     // ── 表达式语句末尾 ────────────────────────────────────────────────────────
 
     endExpression(iid) {
+        if (this._flat) {
+            // 平铺模式：endExpression 对应"纯副作用/纯读语句"（没有 writeVar/callPre 等钩子的表达式）。
+            // 此时输出一条源码位置行，作为该语句的存在记录。
+            const { rc, loc } = this._loc(iid);
+            const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
+            const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, '');
+            this._emitRaw(line);
+            return;
+        }
+
         const frame = this._top();
         if (!frame) return;
 

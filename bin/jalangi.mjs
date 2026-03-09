@@ -166,6 +166,8 @@ function printHelp(sub = null) {
   --db-name <n>        IndexedDB 数据库名（默认 jalangi-traces）
   --store-name <n>     ObjectStore 名（默认 execution-trace）
   --no-idb             不启用 IndexedDB（仅 console 输出 trace）
+  --ws-url <url>       WebSocket 服务地址（如 ws://127.0.0.1:9229/trace）
+                         不传则禁用 WS；可与 --no-idb 同时使用（纯 WS 模式）
   --minify             压缩运行时 bundle（rollup + terser）
 
 示例：
@@ -278,6 +280,7 @@ function parseInstrumentOpts(argv) {
         dbName:        'jalangi-traces',
         storeName:     'execution-trace',
         useIdb:        true,
+        wsUrl:         null,
         minify:        false,
         // 输入文件
         file:          null,
@@ -297,6 +300,7 @@ function parseInstrumentOpts(argv) {
             case '--db-name':           opts.dbName        = argv[++i]; break;
             case '--store-name':        opts.storeName     = argv[++i]; break;
             case '--no-idb':            opts.useIdb        = false;     break;
+            case '--ws-url':            opts.wsUrl         = argv[++i]; break;
             case '--minify':            opts.minify        = true;      break;
             default:
                 if (a.startsWith('--')) { log.error(`未知选项: ${a}`); process.exit(1); }
@@ -480,6 +484,7 @@ ${sandboxVar}.analysis.use(new ExecutionTraceAnalysis(${sandboxVar}, null, {
     useIdb:    ${opts.useIdb},
     dbName:    ${JSON.stringify(opts.dbName)},
     storeName: ${JSON.stringify(opts.storeName)},
+    ${opts.wsUrl ? `wsUrl: ${JSON.stringify(opts.wsUrl)},` : '// wsUrl not configured'}
 }));
 `;
 
@@ -487,7 +492,7 @@ ${sandboxVar}.analysis.use(new ExecutionTraceAnalysis(${sandboxVar}, null, {
         './backends/IdbWorkerBackend.js':  SRC('logger', 'backends', 'IdbWorkerBackend.js'),
         './LogManager.js':                 SRC('logger', 'LogManager.js'),
         '../plugins/ExecutionTrace.js':    '\0stub:ExecutionTrace',
-        './backends/WsBackend.js':         '\0stub:WsBackend',
+        './backends/WsBackend.js':         opts.wsUrl ? SRC('logger', 'backends', 'WsBackend.js') : '\0stub:WsBackend',
         './backends/NodeStreamBackend.js': '\0stub:NodeStreamBackend',
         './backends/MemoryBackend.js':     '\0stub:MemoryBackend',
     };
@@ -528,7 +533,7 @@ ${sandboxVar}.analysis.use(new ExecutionTraceAnalysis(${sandboxVar}, null, {
             },
             load(id) {
                 const stubs = {
-                    '\0stub:WsBackend':         'export const WsBackend = undefined;',
+                    '\0stub:WsBackend':         'export class WsBackend {}',  // stub（未配置 wsUrl 时）
                     '\0stub:NodeStreamBackend': 'export const NodeStreamBackend = undefined;',
                     '\0stub:MemoryBackend':     'export const MemoryBackend = undefined;',
                     '\0stub:ExecutionTrace':    'export const ExecutionTraceAnalysis = undefined;',
