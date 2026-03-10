@@ -61,77 +61,23 @@
 
 import { TraceLogger } from '../logger/TraceLogger.js';
 import { createLogger, DOMAIN } from '../logger/logger.js';
-
-const MAX_BYTES = 100;
+import { serialize } from '../utils/serialize.js';
+import {
+    FORMAT_FLAT, FORMAT_TREE, FORMAT_BLOCK, FORMAT_PIPE,
+    fmtSeq,
+    createFormatter,
+} from '../utils/traceFormatters.js';
 
 const dbg = createLogger(DOMAIN.ANALYSIS);
 
 // ── 输出格式选择（硬编码，改这里切换）────────────────────────────────────────
-//   8 = FORMAT_FLAT  : 平铺流式输出（默认），无缩进，每事件立即输出，不等函数返回
-//   1 = FORMAT_TREE  : Unicode 树形符号（┬ │ └），seq/rc 固定宽度对齐
-//   2 = FORMAT_BLOCK : #region/#endregion 折叠块（VS Code 任意文件可折叠）
-//   4 = FORMAT_PIPE  : ASCII pipe 符号（| 数量 = 深度）
-const OUTPUT_FORMAT = 8;
-
-// seq 显示宽度（右对齐）：超过此宽度会自动溢出，不截断
-const SEQ_WIDTH = 6;
-// rc（行:列）显示宽度（右对齐，含冒号）
-const RC_WIDTH  = 9;
+//   FORMAT_FLAT  (8) : 平铺流式输出（默认），无缩进，每事件立即输出，不等函数返回
+//   FORMAT_TREE  (1) : Unicode 树形符号（┬ │ └），seq/rc 固定宽度对齐
+//   FORMAT_BLOCK (2) : #region/#endregion 折叠块（VS Code 任意文件可折叠）
+//   FORMAT_PIPE  (4) : ASCII pipe 符号（| 数量 = 深度）
+const OUTPUT_FORMAT = FORMAT_FLAT;
 
 // ── 工具 ─────────────────────────────────────────────────────────────────────
-
-function serialize(v) {
-    const t = typeof v;
-    if (v === null)        return 'null';
-    if (t === 'undefined') return 'undefined';
-    if (t === 'function')  return `[Function ${v.name || '(anonymous)'}]`;
-    if (t === 'symbol')    return v.toString();
-    if (t === 'bigint')    return `${v}n`;
-    if (t === 'boolean')   return v ? 'true' : 'false';
-    if (t === 'number')    return String(v);
-    if (t === 'string') {
-        const q = v.length > MAX_BYTES ? v.slice(0, MAX_BYTES) + '…' : v;
-        return `"${q.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`;
-    }
-    if (t === 'object') {
-        if (v instanceof Error) {
-            const name = v.name || 'Error';
-            const msg  = v.message ? String(v.message) : '';
-            const truncatedMsg = msg.length > MAX_BYTES ? msg.slice(0, MAX_BYTES) + '…' : msg;
-            return `${name}: ${truncatedMsg}`;
-        }
-        if (Array.isArray(v)) {
-            return `Array(${v.length})`;
-        }
-        try {
-            const keys = Object.keys(v);
-            if (keys.length === 0) return '{}';
-            const parts = [];
-            let total = 2;
-            for (const k of keys) {
-                if (total >= MAX_BYTES) { parts.push('…'); break; }
-                let vStr;
-                const vv = v[k];
-                const vt = typeof vv;
-                if (vv === null)             vStr = 'null';
-                else if (vt === 'undefined') vStr = 'undefined';
-                else if (vt === 'function')  vStr = '[Function]';
-                else if (vt === 'object')    vStr = '{…}';
-                else if (vt === 'symbol')    vStr = vv.toString();
-                else if (vt === 'bigint')    vStr = `${vv}n`;
-                else                         vStr = String(vv);
-                const entry = `${k}:${vStr}`;
-                total += entry.length + 1;
-                parts.push(entry);
-            }
-            const s = `{${parts.join(',')}}`;
-            return s.length > MAX_BYTES ? s.slice(0, MAX_BYTES) + '…' : s;
-        } catch {
-            return Object.prototype.toString.call(v);
-        }
-    }
-    return String(v);
-}
 
 function getLocation(sandbox, iid) {
     const smap = sandbox?.smap;
@@ -165,115 +111,6 @@ function extractSource(lines, loc) {
         text = parts.join(' ');
     }
     return text.replace(/\s+/g, ' ').trim();
-}
-
-/** 格式化 seq：右对齐，固定 SEQ_WIDTH 位 */
-function fmtSeq(seq) {
-    return String(seq).padStart(SEQ_WIDTH);
-}
-
-/** 格式化 rc（行:列）：右对齐，固定 RC_WIDTH 位 */
-function fmtRc(rc) {
-    return rc.padStart(RC_WIDTH);
-}
-
-// ── Formatter — 格式化策略（每种格式实现 callLine / retLine / infoLine）────────
-//
-// 公共接口（三个方法）：
-//   callLine(seq, rc, depth, desc, kvStr)   → 调用行
-//   retLine (seq, rc, depth, name, result)  → 返回行
-//   infoLine(seq, rc, depth, srcText, kv)   → 普通 write/return/throw/纯副作用行
-//
-// depth = 调用栈深度（从 1 开始；depth=1 表示顶层调用）
-
-class TreeFormatter {
-    // ┬ 表示进入（call），└ 表示退出（return），│ 是延续线
-    _treePrefix(depth, tip) {
-        if (depth <= 0) return tip;
-        return '│ '.repeat(depth - 1) + tip;
-    }
-
-    callLine(seq, rc, depth, desc, kvStr) {
-        const ind = this._treePrefix(depth, '┬ ');
-        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}${desc}${kvStr ? ' ' + kvStr : ''}`;
-    }
-
-    retLine(seq, rc, depth, name, result) {
-        const ind = this._treePrefix(depth, '└ ');
-        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}return ${name} =${result}`;
-    }
-
-    infoLine(seq, rc, depth, srcText, kv) {
-        const ind = '│ '.repeat(depth);
-        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}${srcText}${kv ? ' ; ' + kv : ''}`;
-    }
-}
-
-class BlockFormatter {
-    // #region / #endregion 风格：VS Code 在任何文件中识别这两个关键字并提供折叠
-    // 每层用 2 空格缩进
-    _indent(depth) {
-        return '  '.repeat(depth);
-    }
-
-    callLine(seq, rc, depth, desc, kvStr) {
-        const ind = this._indent(depth - 1); // depth 从 1 起，depth-1 对应父层缩进
-        return `[${fmtSeq(seq)}] ${ind}// #region [${fmtRc(rc)}] CALL ${desc}${kvStr ? ' ' + kvStr : ''}`;
-    }
-
-    retLine(seq, rc, depth, name, result) {
-        const ind = this._indent(depth - 1);
-        return `[${fmtSeq(seq)}] ${ind}// #endregion ${name} =${result}  [${fmtRc(rc)}]`;
-    }
-
-    infoLine(seq, rc, depth, srcText, kv) {
-        const ind = this._indent(depth > 0 ? depth - 1 : 0);
-        return `[${fmtSeq(seq)}] ${ind}${srcText}${kv ? ' ; ' + kv : ''}  [${fmtRc(rc)}]`;
-    }
-}
-
-class PipeFormatter {
-    // | 数量 = depth，纯 ASCII
-    _pipes(depth) {
-        return '| '.repeat(depth);
-    }
-
-    callLine(seq, rc, depth, desc, kvStr) {
-        return `[${fmtSeq(seq)}] ${this._pipes(depth)}${desc} [${fmtRc(rc)}]${kvStr ? ' ' + kvStr : ''}`;
-    }
-
-    retLine(seq, rc, depth, name, result) {
-        return `[${fmtSeq(seq)}] ${this._pipes(depth)}${name} RETN =${result}  [${fmtRc(rc)}]`;
-    }
-
-    infoLine(seq, rc, depth, srcText, kv) {
-        return `[${fmtSeq(seq)}] ${this._pipes(depth)}${srcText}${kv ? ' ; ' + kv : ''}  [${fmtRc(rc)}]`;
-    }
-}
-
-class FlatFormatter {
-    // 平铺流式格式：无缩进，无调用栈表示，每条事件独立一行，立即输出。
-    // CALL 标记函数进入，RETN 标记函数返回；info 行直接输出源码文本。
-    // depth 参数保留接口兼容但不使用。
-
-    callLine(seq, rc, _depth, desc, kvStr) {
-        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] CALL ${desc}${kvStr ? ' ' + kvStr : ''}`;
-    }
-
-    retLine(seq, rc, _depth, name, result) {
-        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] RETN ${name} =${result}`;
-    }
-
-    infoLine(seq, rc, _depth, srcText, kv) {
-        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${srcText}${kv ? ' ; ' + kv : ''}`;
-    }
-}
-
-function createFormatter(format) {
-    if (format === 1) return new TreeFormatter();
-    if (format === 2) return new BlockFormatter();
-    if (format === 4) return new PipeFormatter();
-    return new FlatFormatter(); // 默认方案8
 }
 
 // ── 帧结构 ────────────────────────────────────────────────────────────────────
@@ -312,7 +149,7 @@ export class ExecutionTraceAnalysis {
         this._callStack = [];
         this._fmt       = createFormatter(OUTPUT_FORMAT);
         // FORMAT_FLAT（8）模式：每个事件立即 emit，不通过 Frame.doneLines 缓冲
-        this._flat = !(OUTPUT_FORMAT === 1 || OUTPUT_FORMAT === 2 || OUTPUT_FORMAT === 4);
+        this._flat = !(OUTPUT_FORMAT === FORMAT_TREE || OUTPUT_FORMAT === FORMAT_BLOCK || OUTPUT_FORMAT === FORMAT_PIPE);
 
         if (options.logger instanceof TraceLogger) {
             this._logger = options.logger;
@@ -356,6 +193,7 @@ export class ExecutionTraceAnalysis {
     _emitKeyLine(text) {
         this._emitRaw(`[${fmtSeq(++this._seq)}] ${text}`);
     }
+
 
     /** 根据 iid 获取位置信息 */
     _loc(iid) {
