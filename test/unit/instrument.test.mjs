@@ -307,6 +307,37 @@ describe('ESM import/export', () => {
         assert.ok(r.code.includes('J$.Fe('), 'export default function 应注入 J$.Fe');
         assert.ok(r.code.includes('J$.Fx('), '函数应注入返回钩子 J$.Fx');
     });
+
+    test('import 语句不被 try-catch 包裹（ES Module 顶层限制）', () => {
+        // 启用 INSTR_TRY_CATCH_ARGUMENTS 时，import/export 必须在模块顶层
+        const r = instr(
+            'import { a } from "./a.js";\nimport { b } from "./b.js";\nconst x = a + b;\nexport { x };',
+            { sourceType: 'module' }
+        );
+        // import 语句必须在 try-catch 之外
+        const importMatch = r.code.match(/^import\s/m);
+        assert.ok(importMatch, 'import 语句应在代码开头（不被包裹）');
+        // try-catch 应该在 import 之后
+        const importIdx = r.code.indexOf('import {');
+        const tryIdx = r.code.indexOf('try {');
+        assert.ok(tryIdx === -1 || importIdx < tryIdx, 'import 语句应在 try 之前');
+    });
+
+    test('多个 import 语句保持顺序并分离于 try-catch', () => {
+        const r = instr(
+            'import "./polyfill.js";\nimport { foo } from "./foo.js";\nfoo();',
+            { sourceType: 'module' }
+        );
+        // 找到所有 import 语句的位置
+        const importMatches = [...r.code.matchAll(/^import\s/gm)];
+        assert.ok(importMatches.length >= 2, `应存在多个 import 语句，实际找到 ${importMatches.length} 个`);
+        // try-catch（如果存在）应在最后一个 import 之后
+        const lastImportEnd = importMatches[importMatches.length - 1].index;
+        const tryIdx = r.code.indexOf('try {');
+        if (tryIdx >= 0) {
+            assert.ok(tryIdx > lastImportEnd, 'try 应在所有 import 之后');
+        }
+    });
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -336,10 +367,10 @@ describe('IID Source Map', () => {
         assert.ok(r.code.includes('J$.'), '插桩代码应包含 J$. 钩子调用');
     });
 
-    test('module 模式：const J$ 局部绑定', () => {
+    test('module 模式：无 IIFE 包裹', () => {
         const r = instr('export const x = 1;', { sourceType: 'module' });
-        assert.ok(r.code.includes('const J$ = globalThis.J$'), 'module 模式应用 const 局部绑定');
-        assert.ok(!r.code.includes('(function(J$)'),            'module 模式不应包 IIFE');
+        assert.ok(!r.code.includes('(function(J$)'), 'module 模式不应包 IIFE');
+        assert.ok(r.code.includes('export const x'), 'module 模式保留 export 语句');
     });
 
     test('smap 多文件互不覆盖：不同文件名写入不同 smap key', () => {

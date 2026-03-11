@@ -1026,6 +1026,33 @@ describe('插桩语义边界（Bug 回归 + 防退化）', () => {
         runInSandbox(instrCode, J$inst, { $out });
         assert.equal($out.v, 7, 'INSTR_BINARY 禁用时 2*3+1 仍应为 7');
     });
+
+    test('const/let 声明：初始化表达式不含对自身的引用（TDZ 修复）', () => {
+        // BUG P0 回归：const/let 在声明语句执行完成前处于 TDZ（Temporal Dead Zone），
+        // 插桩时若在 J$.W() 中传入变量标识符作为 lhs（旧值），会导致 ReferenceError。
+        // 修复：const/let 声明的 lhs 参数传入 undefined，只有 var 才传入变量标识符。
+        // 测试用例源自真实 bug：cl.js 第 8 行 `const e = () => Math.random() + ""`
+        // 插桩后变成 `const e = J$.W(..., e)`，在 TDZ 中访问 e 导致报错。
+        const { out } = instrAndRun(`
+            const e = () => Math.random() + "";
+            const n = (x, y) => x + y;
+            $out.e = typeof e;
+            $out.n = n(1, 2);
+        `);
+        assert.equal(out.e, 'function', 'const e 应成功初始化为函数');
+        assert.equal(out.n, 3, 'const n 箭头函数应正常工作');
+    });
+
+    test('let 声明：复杂初始化表达式正常运行', () => {
+        // 进一步验证 let 声明的初始化表达式可以包含函数调用、对象字面量等
+        const { out } = instrAndRun(`
+            let obj = { x: 1, y: 2 };
+            let sum = (o) => o.x + o.y;
+            let result = sum(obj);
+            $out.result = result;
+        `);
+        assert.equal(out.result, 3, 'let 声明的变量应正确初始化和使用');
+    });
 });
 
 // ════════════════════════════════════════════════════════════════════════════════

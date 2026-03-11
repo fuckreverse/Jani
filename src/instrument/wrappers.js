@@ -362,7 +362,9 @@ function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration,
     if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name.value, node)) {
         IID.printIidToLoc(node);
         const bitsNode = t.numericLiteral(createBitPattern(isGlobal, isScriptLocal, isDeclaration));
-        const args = [IID.getIid(), name, val, lhs, bitsNode];
+        // lhs 为 undefined 时（const/let 声明，避免 TDZ），使用 identifier('undefined')
+        const lhsNode = lhs ?? t.identifier('undefined');
+        const args = [IID.getIid(), name, val, lhsNode, bitsNode];
         if (scopeId !== undefined && scopeId !== null) {
             args.push(t.numericLiteral(scopeId));
         }
@@ -925,9 +927,58 @@ function _buildTryCatchWrapper(node, bodyStmts, isScript) {
     return [labeled];
 }
 
+/**
+ * 判断节点是否为 ES Module 的 import/export 语句。
+ * 这些语句必须在模块顶层，不能被 try-catch 包裹。
+ */
+function _isModuleDeclaration(node) {
+    const type = node?.type;
+    return type === 'ImportDeclaration'
+        || type === 'ExportNamedDeclaration'
+        || type === 'ExportDefaultDeclaration'
+        || type === 'ExportAllDeclaration';
+}
+
+/**
+ * 将脚本/模块体包裹在 try-catch 中。
+ *
+ * 对于 ES Module（sourceType: 'module'），import/export 语句必须保持在顶层，
+ * 不能被 try-catch 包裹。因此需要：
+ *   1. 提取所有 import/export 语句
+ *   2. 将剩余语句包裹在 try-catch 中
+ *   3. 返回 [import/export 语句, try-catch 包裹的剩余语句]
+ *
+ * @param {object} node - Program 节点
+ * @param {Array} body - Program.body 数组
+ * @returns {Array} 处理后的语句数组
+ */
 function wrapScriptBodyWithTryCatch(node, body) {
     if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
         const bodyStmts = Array.isArray(body) ? body : [body];
+
+        // 检查是否有 import/export 语句（ES Module）
+        const moduleDecls = [];
+        const otherStmts = [];
+
+        for (const stmt of bodyStmts) {
+            if (_isModuleDeclaration(stmt)) {
+                moduleDecls.push(stmt);
+            } else {
+                otherStmts.push(stmt);
+            }
+        }
+
+        // 如果有 import/export 语句，需要分离处理
+        if (moduleDecls.length > 0) {
+            // 只对非 import/export 语句应用 try-catch 包裹
+            const wrappedStmts = otherStmts.length > 0
+                ? _buildTryCatchWrapper(node, otherStmts, true)
+                : [];
+            // import/export 语句在前，try-catch 包裹的代码在后
+            return [...moduleDecls, ...wrappedStmts];
+        }
+
+        // 非 ES Module，正常包裹
         return _buildTryCatchWrapper(node, bodyStmts, true);
     }
     return body;

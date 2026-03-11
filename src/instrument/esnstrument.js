@@ -543,7 +543,11 @@ function runInstrumentPass(file) {
                         const scope    = W.getScope();
                         const defScope = W._findDefScope(scope, def.id.name);
                         const scopeId  = defScope?.id;
-                        let init = W.wrapWrite(def.init, W.createLiteralAst(def.id.name), def.init, def.id,
+                        // 对于 const/let 声明，lhs 传入 undefined，避免 TDZ (Temporal Dead Zone) 错误
+                        // const/let 在声明语句执行完成前不可访问，传入变量标识符会导致 ReferenceError
+                        // var 声明有变量提升，可以安全传入变量标识符（值为 undefined）
+                        const lhs = (node.kind === 'var') ? def.id : undefined;
+                        let init = W.wrapWrite(def.init, W.createLiteralAst(def.id.name), def.init, lhs,
                             false, scope.isGlobal(def.id.name), true, scopeId);
                         init = W.wrapWithX1(def.init, init);
                         def.init = init;
@@ -1077,7 +1081,8 @@ function instrumentCode(options) {
             const jv = _jalangiVar;
             if (sourceType === 'module') {
                 // module 模式：1 行 const 绑定头
-                code = `const ${jv} = globalThis.${jv};\n${newCode}\n${NO_INSTR}\n`;
+                // code = `const ${jv} = globalThis.${jv};\n${newCode}\n${NO_INSTR}\n`;
+                code = `${newCode}\n${NO_INSTR}\n`;
             } else {
                 // script 模式：直接输出，var 可正常提升到全局作用域
                 code = `${newCode}\n${NO_INSTR}\n`;
