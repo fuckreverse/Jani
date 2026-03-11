@@ -239,10 +239,30 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
         node.scope = currentScope;
 
         switch (node.type) {
-            case 'FunctionDeclaration':
-                if (node.id) parentScope?.addVar(node.id.name, 'defun', node.loc, node);
+            case 'FunctionDeclaration': {
+                if (node.id) {
+                    // 块级函数声明检测：父节点是 BlockStatement，但祖父节点不是函数体
+                    // （即 FunctionDeclaration 处于 try/if/for 等块内，而非直接在函数体或 Program 内）
+                    // 块内函数声明不会提升到函数作用域，不能在函数入口生成赋值钩子
+                    const parent     = path.parent;
+                    const grandParent = path.parentPath?.parent;
+                    const isInBlock = parent?.type === 'BlockStatement' &&
+                        grandParent?.type !== 'FunctionDeclaration' &&
+                        grandParent?.type !== 'FunctionExpression' &&
+                        grandParent?.type !== 'ArrowFunctionExpression' &&
+                        grandParent?.type !== 'ObjectMethod' &&
+                        grandParent?.type !== 'ClassMethod' &&
+                        grandParent?.type !== 'Program';
+                    if (isInBlock) {
+                        // 注册为 'blockDefun'，_syncVarsCore 会跳过赋值
+                        parentScope?.addVar(node.id.name, 'blockDefun', node.loc, node);
+                    } else {
+                        parentScope?.addVar(node.id.name, 'defun', node.loc, node);
+                    }
+                }
                 node.params.forEach(registerParam);
                 break;
+            }
             case 'FunctionExpression':
                 if (node.id !== null) currentScope.addVar(node.id.name, 'lambda', node.loc);
                 node.params.forEach(registerParam);

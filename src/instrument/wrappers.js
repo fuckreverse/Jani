@@ -997,7 +997,7 @@ function wrapFunBodyWithTryCatch(node, body) {
 
 // ─── syncDefuns / instrumentFunctionEntryExit / instrumentScriptEntryExit ────
 
-const _KNOWN_VAR_TYPES = new Set(['defun', 'lambda', 'arg', 'var']);
+const _KNOWN_VAR_TYPES = new Set(['defun', 'blockDefun', 'lambda', 'arg', 'var']);
 
 /**
  * 内部核心：遍历 scopeArg.vars，为每个变量生成对应的初始化语句数组。
@@ -1014,10 +1014,13 @@ function _syncVarsCore(node, scopeArg) {
         if (!_KNOWN_VAR_TYPES.has(varType)) {
             throw new Error(
                 `[jalangi] syncDefuns: unknown varType "${varType}" for variable "${name}". ` +
-                `Expected one of: defun, lambda, arg, var. ` +
+                `Expected one of: defun, blockDefun, lambda, arg, var. ` +
                 `If scope.js added a new varType, update syncDefuns to handle it.`
             );
         }
+        // blockDefun：块内函数声明（try/if/for 块内），不会提升到函数作用域，
+        // 不能在函数入口生成赋值钉子，直接跳过
+        if (varType === 'blockDefun') continue;
         let ident;
         if (varType === 'defun') {
             ident = createIdentifierAst(name);
@@ -1032,11 +1035,14 @@ function _syncVarsCore(node, scopeArg) {
                     wrapLiteral(ident, ident, N_LOG_FUNCTION_LIT)));
             }
         } else if (varType === 'lambda') {
+            // 命名函数表达式的名称绑定是类似 const 的不可变绑定，
+            // 不能生成 `e = J$.Dc(...)` 赋值语句，否则会报 "Assignment to constant variable"
+            // 因此使用 isAssign=false，只调用 J$.Dc(...) 记录声明，不尝试赋值
             if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
                 ident = createIdentifierAst(name);
                 ident.loc = scopeArg.funLocs[name];
                 ret.push(...createCallInitAsStatement(node,
-                    createLiteralAst(name), ident, false, ident, false, true));
+                    createLiteralAst(name), ident, false, undefined, false, false));
             }
         } else if (varType === 'arg') {
             if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
@@ -1196,6 +1202,7 @@ function instrumentLoad(ast, isTypeof) {
                 !isGlobal &&
                 !defScope.isArrow &&
                 defScope.hasOwnVar(ast.name) !== 'catch' &&
+                defScope.hasOwnVar(ast.name) !== 'blockDefun' &&
                 ast.name !== 'arguments';
 
             if (decision === 'lightweight' && isSafeForLightweight) {
@@ -1210,6 +1217,7 @@ function instrumentLoad(ast, isTypeof) {
                     !_scope.usesEval() &&
                     !_scope.usesWith() &&
                     defScope.hasOwnVar(ast.name) !== 'catch' &&
+                    defScope.hasOwnVar(ast.name) !== 'blockDefun' &&
                     ast.name !== 'arguments';
                 if (canUseLightweight) {
                     return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id);

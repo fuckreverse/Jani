@@ -1053,6 +1053,57 @@ describe('插桩语义边界（Bug 回归 + 防退化）', () => {
         `);
         assert.equal(out.result, 3, 'let 声明的变量应正确初始化和使用');
     });
+
+    test('块内函数声明：不会提升到函数作用域（blockDefun 修复）', () => {
+        // BUG P0 回归：在 try/if/for 等块内部声明的函数（FunctionDeclaration）
+        // 不会提升到函数作用域，其名称在块外是 undefined（严格模式下不可访问）。
+        // 插桩器之前把块内函数也当成 'defun' 类型，在函数入口生成 `c = J$.Dc(...)` 赋值，
+        // 导致 "Assignment to constant variable" 或 "c is not defined" 错误。
+        // 修复：scope.js 中检测块内函数声明，标记为 'blockDefun'，
+        // _syncVarsCore 跳过 blockDefun 的赋值。
+        // 测试用例源自真实 bug：cl.js 中 `try { function c() {} }` 插桩后
+        // 在函数入口生成 `c = J$.Dc(...)`，而 `c` 在该位置不可访问。
+        //
+        // 注意：由于 Node.js vm 模块对块级函数声明的处理与主模块不同（vm 中块内函数会提升），
+        // 这里只验证函数能正常执行，真正的语义验证在单元测试中进行。
+        const { out } = instrAndRun(`
+            function q() {
+                var e = 1;
+                try {
+                    function c() {
+                        return 'block function';
+                    }
+                    $out.cInside = c();
+                } catch(o) {}
+                $out.e = e;
+            }
+            q();
+        `);
+        assert.equal(out.cInside, 'block function', '块内函数应在块内可用');
+        assert.equal(out.e, 1, '函数应正常执行');
+    });
+
+    test('命名函数表达式：内部名称绑定不可变（lambda 修复）', () => {
+        // BUG P0 回归：命名函数表达式的名称（如 `function e()` 中的 `e`）在函数内部
+        // 是一个类似 const 的不可变绑定，不能被重新赋值。
+        // 插桩时若生成 `e = J$.Dc(..., e, ...)` 赋值语句，会报 "Assignment to constant variable"。
+        // 修复：对于 lambda 类型的变量（命名函数表达式名称），使用 isAssign=false，
+        // 只调用 J$.Dc(...) 记录声明，不尝试赋值。
+        // 测试用例源自真实 bug：cl.js 中 `e = function e() { ... }` 插桩后内部
+        // `e = J$.Dc(..., e, ...)` 尝试给命名函数表达式的名称赋值。
+        const { out } = instrAndRun(`
+            var e = function e() {
+                return 'named function expression';
+            };
+            var n = function factorial(n) {
+                return n <= 1 ? 1 : n * factorial(n - 1);
+            };
+            $out.e = e();
+            $out.factorial5 = n(5);
+        `);
+        assert.equal(out.e, 'named function expression', '命名函数表达式应正常工作');
+        assert.equal(out.factorial5, 120, '递归命名函数表达式应正常工作');
+    });
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
