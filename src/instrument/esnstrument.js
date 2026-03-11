@@ -43,7 +43,7 @@ const babelTraverse = /** @type {any} */ (_babelTraverse).default ?? _babelTrave
 import { JALANGI_VAR }     from '../Constants.js';
 import { CONTEXT, transformAst, setJalangiVar as setAstUtilJalangiVar } from './astUtil.js';
 import { addScopes, resetScopeCounter } from './scope.js';
-import { analyzeDefUse }  from './dataflow.js';
+import { analyzeDefUse, analyzeStmtUse }  from './dataflow.js';
 import * as IID            from './iid.js';
 import * as W              from './wrappers.js';
 import { buildConfigFromPlugins } from './pluginAnalyzer.js';
@@ -731,7 +731,13 @@ function runInstrumentPass(file) {
             exit(path) {
                 if (ignoreSubAst(path.node)) return;
                 const node = path.node;
-                node.expression = W.wrapWithX1(node, node.expression);
+                // 方案F：从静态分析结果获取 use-set
+                const useInfo = W.getStmtUse(node);
+                if (useInfo) {
+                    node.expression = W.wrapWithX1(node, node.expression, useInfo.names, useInfo.scopes);
+                } else {
+                    node.expression = W.wrapWithX1(node, node.expression);
+                }
             },
         },
 
@@ -954,9 +960,13 @@ function transformString(code, sourceType, enableSampling) {
 
     addScopes(file, _jalangiVar);
 
-    // Pass 0：静态 def-use 分析，生成插桩决策表（依赖 addScopes 附加的 .scope 字段）
+    // Pass 0a：静态 def-use 分析，生成插桩决策表（依赖 addScopes 附加的 .scope 字段）
     const instrDecisions = analyzeDefUse(newAst);
     W.setInstrDecisions(instrDecisions);
+
+    // Pass 0b：语句级 use-set 分析（方案F）
+    const stmtUseMap = analyzeStmtUse(newAst, _jalangiVar);
+    W.setStmtUseMap(stmtUseMap);
 
     if (enableSampling) {
         transformAst(newAst, visitorCloneBodyPre, undefined, CONTEXT.RHS);
@@ -969,6 +979,7 @@ function transformString(code, sourceType, enableSampling) {
     }
 
     W.setInstrDecisions(null);
+    W.setStmtUseMap(null);
 
     return newAst;
 }

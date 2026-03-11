@@ -1444,9 +1444,49 @@ export class JalangiRuntime {
      */
     L() { return this.#lastComputedValue; }
 
-    /** 表达式语句结束标记 — eXpression End（J$.Xe）*/
-    Xe(iid, val) {
-        this.analysis?.endExpression?.(iid);
+    /**
+     * 表达式语句结束标记 — eXpression End（J$.Xe）。
+     *
+     * 方案F 扩展：当提供 useNames/useScopes 时，从 Shadow Frame 查询变量当前值，
+     * 一并传给 analysis.endExpression，使分析插件无需依赖 readVar hook。
+     *
+     * @param {number} iid          指令 ID
+     * @param {*} val               表达式计算结果
+     * @param {string[]} [useNames]  静态 use-set 变量名列表（插桩器注入）
+     * @param {number[]} [useScopes] 对应 defScopeId 列表（-1 表示全局）
+     */
+    Xe(iid, val, useNames, useScopes) {
+        const analysis = this.analysis;
+
+        // 方案F：若有 use-set 信息，从 Shadow Frame 查询变量值
+        let useValues = null;
+        if (useNames && useNames.length > 0 && analysis?.endExpression) {
+            useValues = [];
+            for (let i = 0; i < useNames.length; i++) {
+                const name  = useNames[i];
+                const scope = useScopes?.[i] ?? -1;
+
+                // defScopeId === -1 表示全局变量，无法从 Shadow Frame 获取
+                if (scope === -1) {
+                    // 尝试从全局对象读取（仅浏览器/Node 环境有效）
+                    try {
+                        // eslint-disable-next-line no-undef
+                        useValues.push(typeof globalThis !== 'undefined' ? globalThis[name] : undefined);
+                    } catch {
+                        useValues.push(undefined);
+                    }
+                } else {
+                    // 从 Shadow Frame 查询
+                    const raw = this.#shadowLookup(scope, this.#resolveCallId(scope), name);
+                    useValues.push(raw === _SHADOW_MISS ? undefined : raw);
+                }
+            }
+            analysis.endExpression(iid, val, useNames, useScopes, useValues);
+            return (this.#lastComputedValue = val);
+        }
+
+        // 兼容旧签名
+        analysis?.endExpression?.(iid);
         return (this.#lastComputedValue = val);
     }
 

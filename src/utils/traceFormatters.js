@@ -63,12 +63,12 @@ export class TreeFormatter {
 
     callLine(seq, rc, depth, desc, kvStr) {
         const ind = this._treePrefix(depth, '┬ ');
-        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}${desc}${kvStr ? ' ' + kvStr : ''}`;
+        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}${desc}${kvStr ? ' ; ' + kvStr : ''}`;
     }
 
     retLine(seq, rc, depth, name, result) {
         const ind = this._treePrefix(depth, '└ ');
-        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}return ${name} =${result}`;
+        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}return ${name} ; =${result}`;
     }
 
     infoLine(seq, rc, depth, srcText, kv) {
@@ -85,13 +85,13 @@ export class BlockFormatter {
     }
 
     callLine(seq, rc, depth, desc, kvStr) {
-        const ind = this._indent(depth - 1); // depth 从 1 起，depth-1 对应父层缩进
-        return `[${fmtSeq(seq)}] ${ind}// #region [${fmtRc(rc)}] CALL ${desc}${kvStr ? ' ' + kvStr : ''}`;
+        const ind = this._indent(depth - 1);
+        return `[${fmtSeq(seq)}] ${ind}// #region [${fmtRc(rc)}] CALL ${desc}${kvStr ? ' ; ' + kvStr : ''}`;
     }
 
     retLine(seq, rc, depth, name, result) {
         const ind = this._indent(depth - 1);
-        return `[${fmtSeq(seq)}] ${ind}// #endregion ${name} =${result}  [${fmtRc(rc)}]`;
+        return `[${fmtSeq(seq)}] ${ind}// #endregion ${name} ; =${result}  [${fmtRc(rc)}]`;
     }
 
     infoLine(seq, rc, depth, srcText, kv) {
@@ -107,11 +107,11 @@ export class PipeFormatter {
     }
 
     callLine(seq, rc, depth, desc, kvStr) {
-        return `[${fmtSeq(seq)}] ${this._pipes(depth)}${desc} [${fmtRc(rc)}]${kvStr ? ' ' + kvStr : ''}`;
+        return `[${fmtSeq(seq)}] ${this._pipes(depth)}${desc} [${fmtRc(rc)}]${kvStr ? ' ; ' + kvStr : ''}`;
     }
 
     retLine(seq, rc, depth, name, result) {
-        return `[${fmtSeq(seq)}] ${this._pipes(depth)}${name} RETN =${result}  [${fmtRc(rc)}]`;
+        return `[${fmtSeq(seq)}] ${this._pipes(depth)}${name} RETN ; =${result}  [${fmtRc(rc)}]`;
     }
 
     infoLine(seq, rc, depth, srcText, kv) {
@@ -121,15 +121,15 @@ export class PipeFormatter {
 
 export class FlatFormatter {
     // 平铺流式格式：无缩进，无调用栈表示，每条事件独立一行，立即输出。
-    // CALL 标记函数进入，RETN 标记函数返回；info 行直接输出源码文本。
+    // 统一格式：[seq] [line:col] 描述 ; kv
     // depth 参数保留接口兼容但不使用。
 
     callLine(seq, rc, _depth, desc, kvStr) {
-        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] CALL ${desc}${kvStr ? ' ' + kvStr : ''}`;
+        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] CALL ${desc}${kvStr ? ' ; ' + kvStr : ''}`;
     }
 
     retLine(seq, rc, _depth, name, result) {
-        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] RETN ${name} =${result}`;
+        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] RETN ${name} ; =${result}`;
     }
 
     infoLine(seq, rc, _depth, srcText, kv) {

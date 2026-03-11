@@ -441,11 +441,30 @@ function wrapThrow(node, expr) {
     return expr;
 }
 
-function wrapWithX1(node, ast) {
+/**
+ * 用 J$.Xe(iid, expr[, useNames, useScopes]) 包裹表达式语句。
+ *
+ * @param {object}   node      - ExpressionStatement 节点（提供位置信息）
+ * @param {object}   ast       - 要包裹的表达式 AST 节点
+ * @param {string[]|null} [useNames]  - 静态 use-set 变量名列表（方案F，可选）
+ * @param {number[]|null} [useScopes] - 对应 defScopeId 列表（-1 表示全局）
+ */
+function wrapWithX1(node, ast, useNames, useScopes) {
     if (!Config.INSTR_END_EXPRESSION || Config.INSTR_END_EXPRESSION(node)) {
         if (!ast || !_EXPRESSION_TYPES.has(ast.type)) return ast;
         IID.printIidToLoc(node);
-        const ret = jalangiCall('Xe', IID.getIid(), ast);
+        const iidNode = IID.getIid();
+        let ret;
+        if (useNames && useNames.length > 0) {
+            // 方案F：将静态 use-set 编码为字符串数组字面量和数字数组字面量
+            const namesLit  = t.arrayExpression(useNames.map(n => t.stringLiteral(n)));
+            const scopesLit = t.arrayExpression(
+                (useScopes ?? useNames.map(() => -1)).map(s => t.numericLiteral(s))
+            );
+            ret = jalangiCall('Xe', iidNode, ast, namesLit, scopesLit);
+        } else {
+            ret = jalangiCall('Xe', iidNode, ast);
+        }
         transferLoc(ret, node);
         return ret;
     }
@@ -1241,10 +1260,28 @@ function setInstrDecisions(decisions) {
     _instrDecisions = decisions;
 }
 
+// ─── 语句级 use-set 映射（方案F，由 dataflow.js analyzeStmtUse 生成）
+
+/** @type {WeakMap<object, {names: string[], scopes: number[]}>|null} */
+let _stmtUseMap = null;
+
+function setStmtUseMap(map) {
+    _stmtUseMap = map;
+}
+
+/**
+ * 获取 ExpressionStatement 节点的静态 use-set。
+ * @param {object} node ExpressionStatement 节点
+ * @returns {{names: string[], scopes: number[]} | null}
+ */
+function getStmtUse(node) {
+    return _stmtUseMap?.get(node) ?? null;
+}
+
 // ─── 导出 ──────────────────────────────────────────────────────────────────────
 
 export {
-    init, resetPerFile, setInstrDecisions,
+    init, resetPerFile, setInstrDecisions, setStmtUseMap, getStmtUse,
     // scope 状态管理
     setScope, popScope, getScope,
     // AST 辅助

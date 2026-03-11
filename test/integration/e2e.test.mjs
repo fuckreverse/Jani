@@ -1027,3 +1027,160 @@ describe('插桩语义边界（Bug 回归 + 防退化）', () => {
         assert.equal($out.v, 7, 'INSTR_BINARY 禁用时 2*3+1 仍应为 7');
     });
 });
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ExecutionTraceAnalysis — trace 行源码片段（Bug 修复回归）
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('ExecutionTraceAnalysis trace 源码片段', () => {
+    /**
+     * 辅助：用 ExecutionTraceAnalysis + MemoryBackend 跑一段代码，
+     * 返回所有 trace 行文本数组。
+     *
+     * 插桩时开 inlineSourceMap + inlineSource，使 smap 携带完整位置映射和原始源码。
+     * ExecutionTraceAnalysis 的 scriptEnter 会自动从 smap 读取源码行，
+     * 无需在构造时手动传 sourceCode。
+     */
+    async function runWithTrace(srcCode) {
+        const { ExecutionTraceAnalysis } = await import('../../src/plugins/ExecutionTrace.js');
+        const { MemoryBackend }          = await import('../../src/logger/backends/MemoryBackend.js');
+        const { TraceLogger }            = await import('../../src/logger/TraceLogger.js');
+
+        // 用 init 的 plugins 参数自动推导按需 Config（无需手动 buildConfigFromPlugins）
+        const probeAnalysis = new ExecutionTraceAnalysis(null, null, {});
+        init(null, undefined, undefined, undefined, [probeAnalysis]);
+
+        const { code: instrCode } = instrumentCode({
+            code:             srcCode,
+            origCodeFileName: 'trace-test.js',
+            instCodeFileName: 'trace-test_inst.js',
+            inlineSourceMap:  true,   // smap 携带 iid→位置映射
+            inlineSource:     true,   // smap 携带原始源码字符串
+        });
+
+        // 构造真正的 J$ sandbox，并把 analysis 注册进去
+        const J$inst = new JalangiSandbox();
+        // 重新创建 analysis，绑定到正确的 sandbox
+        const mem    = new MemoryBackend();
+        const logger = new TraceLogger({ nodeFile: false, nodeConsole: false });
+        // 用 logManagerOptions 注入 MemoryBackend（通过替换内部后端）
+        const analysis2 = new ExecutionTraceAnalysis(J$inst, null, { logger });
+        // 把 MemoryBackend 直接接入 logger 内部的 LogManager
+        // 简单做法：在 logger 的 _doInit 完成前拦截，改用 MemoryBackend
+        // 更简洁：直接用 logManagerOptions.backends 透传
+        const { LogManager } = await import('../../src/logger/LogManager.js');
+        const mgr = new LogManager({ backends: [mem], flushThreshold: 1 });
+        // 覆盖 logger 内部的 _mgr（测试专用 hack，因为 TraceLogger 没有公开注入接口）
+        logger._mgr = mgr;
+        logger._preInitQueue = null;  // 标记初始化完成
+
+        J$inst.analysis.use(analysis2);
+
+        const $out = {};
+        runInSandbox(instrCode, J$inst, { $out });
+
+        // flush 确保 MemoryBackend 拿到所有事件
+        await mgr.flush();
+
+        const traceTexts = mem.getEvents()
+            .filter(e => e.type === 'trace')
+            .map(e => e.text);
+        return traceTexts;
+    }
+
+    test('writeVar trace 行显示真实源码片段，不含 (iid=xxx)', async () => {
+        // 验证 Bug 修复：inlineSource:true 时，ExecutionTraceAnalysis 的 writeVar
+        // 从 smap.code 读取源码行，trace 中显示真实代码而非降级占位符 (iid=xxx)
+        const lines = await runWithTrace('var x = 42; var y = x + 1;');
+
+        // 找到含变量赋值的 trace 行（write 钩子产生的 info 行）
+        const infoLines = lines.filter(l => l.includes(';'));
+
+        // 不应出现 (iid=数字) 格式的占位符
+        const iidFallbackLines = infoLines.filter(l => /\(iid=\d+\)/.test(l));
+        assert.equal(
+            iidFallbackLines.length, 0,
+            `trace 行不应含 (iid=xxx) 占位符，实际出现的行：\n${iidFallbackLines.join('\n')}`
+        );
+
+        // 应含有真实的源码文字（变量名 x 或 y）
+        const hasRealSrc = infoLines.some(l => l.includes('x=') || l.includes('y='));
+        assert.ok(hasRealSrc,
+            `trace info 行应含真实源码片段，实际 info 行：\n${infoLines.join('\n')}`
+        );
+    });
+
+    test('多行源码：trace 行的行:列坐标与源码内容对应', async () => {
+        // 验证 loc 解析正确：trace 行里的 [行:列] 对应的是原始源码的那一行
+        const src = [
+            'var a = 10;',
+            'var b = 20;',
+            'var c = a + b;',
+        ].join('\n');
+
+        const lines = await runWithTrace(src);
+        const infoLines = lines.filter(l => l.includes(';'));
+
+        // 不应有 (iid=xxx) 降级占位符
+        const iidFallbacks = infoLines.filter(l => /\(iid=\d+\)/.test(l));
+        assert.equal(iidFallbacks.length, 0,
+            `多行源码 trace 不应含 (iid=xxx)，实际：\n${iidFallbacks.join('\n')}`
+        );
+
+        // c 的赋值应出现在 trace 中。区分 declareVar (c=undefined) 和 writeVar (c=30)
+        // writeVar 的值不是 undefined，找包含 "c=" 且值不是 undefined 的行
+        const cLine = infoLines.find(l => l.includes('c=') && !l.includes('c=undefined'));
+        assert.ok(cLine, `trace 中应含 c 的赋值行（非声明），实际 info 行：\n${infoLines.join('\n')}`);
+        // 解析 rc（行:列）：格式是 [行:列]，在 seq [数字] 之后
+        // 直接找最后一个 [ 之后、] 之前的内容，因为 rc 总是出现在最后
+        // rc 是右对齐的，需要 trim
+        const rcStart = cLine.lastIndexOf('[');
+        const rcEnd = cLine.indexOf(']', rcStart);
+        const rcPart = cLine.slice(rcStart + 1, rcEnd).trim();
+        const [lineStr] = rcPart.split(':');
+        assert.equal(lineStr, '3', `c 的赋值应来自第 3 行，实际行号：${lineStr}`);
+    });
+
+    test('未传 sourceCode + 未开 inlineSource：降级到 (iid=xxx) 是预期行为', async () => {
+        // 反向验证：inlineSource:false 时 smap 无 code，trace 仍降级为 (iid=xxx)，行为符合预期
+        const { ExecutionTraceAnalysis } = await import('../../src/plugins/ExecutionTrace.js');
+        const { MemoryBackend }          = await import('../../src/logger/backends/MemoryBackend.js');
+        const { TraceLogger }            = await import('../../src/logger/TraceLogger.js');
+        const { LogManager }             = await import('../../src/logger/LogManager.js');
+
+        const probe = new ExecutionTraceAnalysis(null, null, {});
+        init(null, undefined, undefined, undefined, [probe]);
+
+        const { code: instrCode } = instrumentCode({
+            code:             'var x = 7;',
+            origCodeFileName: 'no-src.js',
+            instCodeFileName: 'no-src_inst.js',
+            inlineSourceMap:  true,   // 有位置映射
+            inlineSource:     false,  // 无内联源码
+        });
+
+        const J$inst = new JalangiSandbox();
+        const mem    = new MemoryBackend();
+        const logger = new TraceLogger({ nodeFile: false, nodeConsole: false });
+        const mgr    = new LogManager({ backends: [mem], flushThreshold: 1 });
+        logger._mgr          = mgr;
+        logger._preInitQueue = null;
+
+        const analysis = new ExecutionTraceAnalysis(J$inst, null, { logger });
+        J$inst.analysis.use(analysis);
+
+        runInSandbox(instrCode, J$inst, {});
+        await mgr.flush();
+
+        const infoLines = mem.getEvents()
+            .filter(e => e.type === 'trace')
+            .map(e => e.text)
+            .filter(l => l && l.includes(';'));
+
+        // inlineSource:false 时，smap 无 code，应降级为 (iid=xxx)
+        const hasFallback = infoLines.some(l => /\(iid=\d+\)/.test(l));
+        assert.ok(hasFallback,
+            `inlineSource:false 时 trace 应含 (iid=xxx) 降级占位符，实际行：\n${infoLines.join('\n')}`
+        );
+    });
+});

@@ -421,9 +421,22 @@ export class AnalysisTemplate {
 
     /**
      * 表达式语句执行完毕、值被丢弃时触发。
-     * @param {number} iid - 指令 ID
+     *
+     * 方案F 扩展签名（向后兼容）：
+     *   endExpression(iid, val, useNames, useScopes, useValues)
+     *
+     * 当插桩器为 ExpressionStatement 生成了静态 use-set 时，运行时会：
+     *   1. 从 Shadow Frame 查询 useNames 中各变量的当前值
+     *   2. 将 useNames/useScopes/useValues 作为额外参数传入
+     * 分析插件可据此获取语句涉及的所有变量值，无需依赖 readVar hook。
+     *
+     * @param {number} iid          - 指令 ID
+     * @param {*} [val]             - 表达式结果（可选，当前未使用）
+     * @param {string[]} [useNames] - 静态 use-set 变量名列表（插桩器注入）
+     * @param {number[]} [useScopes] - 对应 defScopeId 列表
+     * @param {*[]} [useValues]     - 变量当前值列表（由运行时从 Shadow Frame 查询）
      */
-    endExpression(iid) {
+    endExpression(iid, val, useNames, useScopes, useValues) {
         // 返回值被忽略
     }
 

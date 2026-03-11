@@ -1,42 +1,44 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @file ExecutionTrace —— 按指令（表达式语句）粒度输出执行 trace，便于 LLM 分析。
+ * @file ExecutionTrace —— 按语句粒度输出执行 trace，便于 LLM 分析。
  *
  * 粒度说明：
- *   - 仅在"指令边界"（变量写入 / 函数调用 / 表达式语句末尾）记录一条 trace 行。
- *   - **不追踪**表达式内部的子操作（变量读取、二元运算、属性读取等），
- *     以避免代码体积膨胀和运行时回调开销。
+ *   - **语句级追踪**：每个表达式语句输出一行，包含语句文本和所有涉及的变量值。
+ *   - 变量值包括：被写入的变量（执行后的值）+ 被读取的变量（当前值）。
+ *   - 对于函数调用语句，CALL/RETN 仍独立输出（便于追踪调用栈）。
  *   - 配合 pluginAnalyzer 自动推导的按需 Config，插桩代码中只存在
- *     J$.W / J$.F / J$.M / J$.X1 等粗粒度钩子。
+ *     J$.W / J$.G / J$.P / J$.F / J$.M / J$.Xe 等钩子
+ *     （方案F+C：不再需要 J$.R 变量读取插桩）。
  *
  * 每条 trace 行输出格式（由 OUTPUT_FORMAT 控制）：
  *
  *   FORMAT_FLAT (8) — 平铺流式输出（默认）：无调用栈缩进，每个事件立即输出，不等函数返回。
  *     适合脚本退出后外部调用被插桩函数的场景（解决异步/延迟调用 trace 丢失问题）。
- *     [  9] [687:22] CALL (anonymous)(0 args)
- *     [ 10] [3943:14] CALL Object(1 args) arg0=Symbol(Symbol.iterator)
- *     [ 11] [3943:14] RETN Object ={}
- *     [ 12] [687:22] RETN (anonymous) =undefined
- *     [ 13] [105:8] x=42
+ *     所有行统一遵循 `[seq] [line:col] 描述 ; kv` 格式：
+ *     [  1] [     1:1] var x = 1 ; x=1
+ *     [  2] [     2:1] x += 1 ; x=2
+ *     [  3] [     3:5] CALL .fromCharCode(1 args) ; this=[Function String], arg0=65
+ *     [  4] [     3:5] RETN fromCharCode ; ="A"
+ *     [  5] [     3:1] o += String.fromCharCode(c) ; o="A", c=65
  *
  *   FORMAT_TREE (1) — Unicode 树形符号（seq/rc 固定宽度对齐）：
  *     [  9] [ 687:22] │ │ │ ┬ (anonymous)(0 args)
- *     [ 10] [3943:14] │ │ │ │ ┬ Object(1 args) arg0=Symbol(Symbol.iterator)
- *     [ 11] [3943:14] │ │ │ │ └ return Object ={}
- *     [ 12] [ 687:22] │ │ │ └ return (anonymous) =undefined
+ *     [ 10] [3943:14] │ │ │ │ ┬ Object(1 args) ; arg0=Symbol(Symbol.iterator)
+ *     [ 11] [3943:14] │ │ │ │ └ return Object ; ={}
+ *     [ 12] [ 687:22] │ │ │ └ return (anonymous) ; =undefined
  *
  *   FORMAT_BLOCK (2) — #region/#endregion 折叠块（VS Code 任意文件可折叠）：
  *     [  9] // #region [ 687:22] CALL (anonymous)(0 args)
- *     [ 10]   // #region [3943:14] CALL Object(1 args) arg0=Symbol(Symbol.iterator)
- *     [ 11]   // #endregion Object ={}
- *     [ 12] // #endregion (anonymous) =undefined
+ *     [ 10]   // #region [3943:14] CALL Object(1 args) ; arg0=Symbol(Symbol.iterator)
+ *     [ 11]   // #endregion Object ; ={}
+ *     [ 12] // #endregion (anonymous) ; =undefined
  *
  *   FORMAT_PIPE (4) — ASCII pipe 符号（| 数量 = 调用深度）：
  *     [  9] | | | (anonymous)(0 args) [ 687:22]
- *     [ 10] | | | | Object(1 args) [3943:14] arg0=Symbol(Symbol.iterator)
- *     [ 11] | | | | Object RETN ={} [3943:14]
- *     [ 12] | | | (anonymous) RETN =undefined [ 687:22]
+ *     [ 10] | | | | Object(1 args) [3943:14] ; arg0=Symbol(Symbol.iterator)
+ *     [ 11] | | | | Object RETN ; ={} [3943:14]
+ *     [ 12] | | | (anonymous) RETN ; =undefined [ 687:22]
  *
  * 用法：
  *   import { ExecutionTraceAnalysis } from './ExecutionTrace.js';
@@ -82,35 +84,64 @@ const OUTPUT_FORMAT = FORMAT_FLAT;
 function getLocation(sandbox, iid) {
     const smap = sandbox?.smap;
     if (!smap) return null;
-    const cur = smap[sandbox.sid];
-    if (cur) {
-        const arr = cur[iid];
+    // smap 结构可能是：
+    // 1. smap["filename"] = { iid: [sl,sc,el,ec], code: "...", ... } （插桩器注入，多文件场景）
+    // 2. smap[iid_string] = [sl,sc,el,ec] （扁平格式，单文件默认）
+    // 3. smap[number] = { iid: [sl,sc,el,ec], ... } （运行时按 sid 存储）
+    
+    // 优先尝试扁平格式：直接用 iid 作为 key
+    const directEntry = smap[iid] ?? smap[String(iid)];
+    if (Array.isArray(directEntry) && directEntry.length >= 4) {
+        return directEntry;
+    }
+    
+    // 尝试按 sid 查找（多文件场景）
+    const sidEntry = smap[sandbox.sid];
+    if (sidEntry && typeof sidEntry === 'object' && !Array.isArray(sidEntry)) {
+        const arr = sidEntry[iid];
         if (Array.isArray(arr) && arr.length >= 4) return arr;
     }
+    
+    // 遍历查找：某些嵌套结构（如 smap["filename"] = { iid: [...] }）
     for (const key of Object.keys(smap)) {
-        const entry = smap[key];
-        if (entry && typeof entry === 'object') {
-            const arr = entry[iid];
-            if (Array.isArray(arr) && arr.length >= 4) return arr;
+        if (key === 'nBranches' || key === 'originalCodeFileName' || key === 'instrumentedCodeFileName') continue;
+        const val = smap[key];
+        if (!val || typeof val !== 'object') continue;
+        if (Array.isArray(val)) {
+            // 扁平格式已在前面处理，这里跳过
+            continue;
         }
+        const arr = val[iid];
+        if (Array.isArray(arr) && arr.length >= 4) return arr;
     }
     return null;
 }
 
 function extractSource(lines, loc) {
     if (!lines || !loc) return '';
-    const [sl, , el, ec] = loc;
-    const s0 = Math.max(sl - 1, 0), e0 = Math.min(el - 1, lines.length - 1);
+    // loc 格式：[startLine, startCol, endLine, endCol]
+    // Babel：行号从 1 开始（1-indexed），列号从 0 开始（0-indexed）
+    const [sl, sc, el, ec] = loc;
+    const startLine = Math.max(sl - 1, 0);
+    if (startLine >= lines.length) return '';
+    const line = lines[startLine];
+    // sc/ec 均为 1-indexed（存储时做了 column+1），转换为 0-indexed
+    const startCol = Math.max(sc - 1, 0);
+    // 若起止在同一行，用 ec 精确截取：ec 是 1-indexed，ec-1 是最后字符的 0-indexed，
+    // JS slice end 是 exclusive，所以用 ec-1（等同于原始 Babel 的 0-indexed end.column）
     let text;
-    if (s0 === e0) {
-        text = lines[s0].slice(0, ec);
+    if (el === sl && ec != null && ec > sc) {
+        text = line.slice(startCol, ec - 1);
     } else {
-        const parts = [lines[s0]];
-        for (let i = s0 + 1; i < e0; i++) parts.push(lines[i]);
-        parts.push(lines[e0].slice(0, ec));
-        text = parts.join(' ');
+        text = line.slice(startCol);
     }
-    return text.replace(/\s+/g, ' ').trim();
+    // 压缩空白并限制最大长度，避免过长输出
+    text = text.replace(/\s+/g, ' ').trim();
+    const MAX_LEN = 48;
+    if (text.length > MAX_LEN) {
+        text = text.substring(0, MAX_LEN - 1) + '…';
+    }
+    return text;
 }
 
 // ── 帧结构 ────────────────────────────────────────────────────────────────────
@@ -150,6 +181,14 @@ export class ExecutionTraceAnalysis {
         this._fmt       = createFormatter(OUTPUT_FORMAT);
         // FORMAT_FLAT（8）模式：每个事件立即 emit，不通过 Frame.doneLines 缓冲
         this._flat = !(OUTPUT_FORMAT === FORMAT_TREE || OUTPUT_FORMAT === FORMAT_BLOCK || OUTPUT_FORMAT === FORMAT_PIPE);
+        // flat 模式下缓冲当前语句的变量 kv（writeVar/returnStmt/throwStmt 暂存于此，
+        // 由 endExpression 统一合并成一行输出，避免每个 writeVar 单独输出一行）
+        this._pendingKvs = [];
+        // flat 模式下缓冲当前语句的变量读取值
+        // 方案F：由 endExpression 从 useNames/useValues 直接填充，不依赖 readVar hook
+        this._pendingReads = [];
+        // 方案C：缓冲当前语句的属性读写（getField/putField 暂存于此）
+        this._pendingFields = [];
 
         if (options.logger instanceof TraceLogger) {
             this._logger = options.logger;
@@ -213,7 +252,10 @@ export class ExecutionTraceAnalysis {
 
         const kvParts = args.map((a, i) => `arg${i}=${serialize(a)}`);
         if (isMethod && base !== undefined) kvParts.unshift(`this=${serialize(base)}`);
-        const kvStr = kvParts.length ? kvParts.join(', ') : '';
+        // 限制 kvStr 总长度，防止大对象导致行过长
+        const MAX_KV = 120;
+        let kvStr = kvParts.join(', ');
+        if (kvStr.length > MAX_KV) kvStr = kvStr.slice(0, MAX_KV - 1) + '…';
 
         const { rc } = this._loc(iid);
 
@@ -312,6 +354,19 @@ export class ExecutionTraceAnalysis {
     // ── 脚本进出 ──────────────────────────────────────────────────────────────
 
     scriptEnter(iid, instrumentedFileName, originalFileName) {
+        // 若构造时未传 sourceCode（this._lines 为 null），
+        // 尝试从 smap 内联的 code 字段补充（inlineSource:true 时有值）。
+        // 每次 scriptEnter 都刷新，天然支持多脚本场景。
+        if (this._sb?.smap) {
+            const sid = this._sb.sid;
+            // 优先按当前 sid 查；回退按 instrumentedFileName 查
+            const entry = this._sb.smap[sid] ?? this._sb.smap[instrumentedFileName];
+            if (entry?.code) {
+                this._lines = entry.code.split(/\r\n|\r|\n/);
+                dbg.debug(`scriptEnter: loaded ${this._lines.length} source lines from smap (sid=${sid})`);
+            }
+        }
+
         // scriptEnter 分配一个 seq，作为 trace 的第一条记录
         this._emitKeyLine(`▶ script: ${originalFileName}`);
         this._key('info', `▶ script: ${originalFileName}`);
@@ -473,15 +528,21 @@ export class ExecutionTraceAnalysis {
     }
 
     // ── 指令级钩子 ────────────────────────────────────────────────────────────
+    //
+    // 注意：readVar 钩子已删除（方案F）。
+    // 变量读取值通过 endExpression 的 useNames/useValues 参数获取（来自 Shadow Frame），
+    // 彻底消除 INSTR_READ 插桩，不再有代码膨胀。
 
     writeVar(iid, name, val) {
-        const { rc, loc } = this._loc(iid);
-        const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
         if (this._flat) {
-            const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, `${name}=${serialize(val)}`);
-            this._emitRaw(line);
+            // flat 模式：暂存到 _pendingKvs，由 endExpression 统一合并输出
+            // 注意：不存 rc/srcText（会用 Xe 的 iid 位置，更准确）
+            this._pendingKvs.push({ name, kv: `${name}=${serialize(val)}` });
             return { result: val };
         }
+        // 非 flat 模式（tree/block/pipe）：需要记录每条写入的位置信息
+        const { rc, loc } = this._loc(iid);
+        const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
         const frame = this._top();
         if (!frame) return { result: val };
         frame.doneLines.push({ type: 'info', rc, depth: frame.depth, srcText, kv: `${name}=${serialize(val)}` });
@@ -496,13 +557,13 @@ export class ExecutionTraceAnalysis {
     }
 
     returnStmt(iid, val) {
-        const { rc, loc } = this._loc(iid);
-        const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
         if (this._flat) {
-            const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, `(return)=${serialize(val)}`);
-            this._emitRaw(line);
+            // flat 模式：暂存到 _pendingKvs，由 endExpression 统一合并输出。位置由 Xe iid 提供
+            this._pendingKvs.push({ kv: `(return)=${serialize(val)}` });
             return { result: val };
         }
+        const { rc, loc } = this._loc(iid);
+        const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
         const frame = this._top();
         if (!frame) return { result: val };
         frame.doneLines.push({ type: 'info', rc, depth: frame.depth, srcText, kv: `(return)=${serialize(val)}` });
@@ -510,29 +571,139 @@ export class ExecutionTraceAnalysis {
     }
 
     throwStmt(iid, val) {
-        const { rc, loc } = this._loc(iid);
-        const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
         if (this._flat) {
-            const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, `(throw)=${serialize(val)}`);
-            this._emitRaw(line);
+            // flat 模式：暂存到 _pendingKvs，由 endExpression 统一合并输出。位置由 Xe iid 提供
+            // （throw 语句也会触发 endExpression，由插桩器保证）
+            this._pendingKvs.push({ kv: `(throw)=${serialize(val)}` });
             return { result: val };
         }
+        const { rc, loc } = this._loc(iid);
+        const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
         const frame = this._top();
         if (!frame) return { result: val };
         frame.doneLines.push({ type: 'info', rc, depth: frame.depth, srcText, kv: `(throw)=${serialize(val)}` });
         return { result: val };
     }
 
+    // ── 属性读写钩子（方案C）────────────────────────────────────────────────────
+
+    /**
+     * 属性读取钩子（方案C）。
+     * 暂存到 _pendingFields，由 endExpression 统一合并输出。
+     *
+     * @param {number} iid         指令 ID
+     * @param {*} base             基对象
+     * @param {string|number|*} offset  属性名/索引
+     * @param {*} val              属性值
+     * @param {boolean} isComputed 是否为计算属性（a[b] vs a.b）
+     * @param {boolean} isOpAssign 是否为复合赋值的读取部分
+     * @param {boolean} isMethodCall 是否为方法调用
+     */
+    getField(iid, base, offset, val, isComputed, isOpAssign, isMethodCall) {
+        if (this._flat) {
+            // 只在 flat 模式下暂存属性读取
+            // 过滤掉方法调用的 this 读取（避免冗余）
+            if (!isMethodCall) {
+                const baseStr = serialize(base, 32); // 限制 base 显示长度
+                const offsetStr = isComputed ? `[${serialize(offset)}]` : `.${String(offset)}`;
+                const key = `${baseStr}${offsetStr}`;
+                this._pendingFields.push({ kv: `${key}=${serialize(val)}` });
+            }
+        }
+        return { result: val };
+    }
+
+    /**
+     * 属性写入钩子（方案C）。
+     * 暂存到 _pendingFields，由 endExpression 统一合并输出。
+     *
+     * @param {number} iid         指令 ID
+     * @param {*} base             基对象
+     * @param {string|number|*} offset  属性名/索引
+     * @param {*} val              写入值
+     * @param {boolean} isComputed 是否为计算属性
+     * @param {boolean} isOpAssign 是否为复合赋值
+     */
+    putField(iid, base, offset, val, isComputed, isOpAssign) {
+        if (this._flat) {
+            const baseStr = serialize(base, 32);
+            const offsetStr = isComputed ? `[${serialize(offset)}]` : `.${String(offset)}`;
+            const key = `${baseStr}${offsetStr}`;
+            this._pendingFields.push({ kv: `${key}=${serialize(val)}` });
+        }
+        return { result: val };
+    }
+
     // ── 表达式语句末尾 ────────────────────────────────────────────────────────
 
-    endExpression(iid) {
+    /**
+     * 表达式语句结束钩子。
+     *
+     * 方案F 扩展签名：
+     *   endExpression(iid, val, useNames, useScopes, useValues)
+     *
+     * @param {number} iid          指令 ID
+     * @param {*} [val]             表达式结果（可选，当前未使用）
+     * @param {string[]} [useNames] 静态 use-set 变量名列表（插桩器注入）
+     * @param {number[]} [useScopes] 对应 defScopeId 列表
+     * @param {*[]} [useValues]     变量当前值列表（由运行时从 Shadow Frame 查询）
+     */
+    endExpression(iid, val, useNames, useScopes, useValues) {
         if (this._flat) {
-            // 平铺模式：endExpression 对应"纯副作用/纯读语句"（没有 writeVar/callPre 等钩子的表达式）。
-            // 此时输出一条源码位置行，作为该语句的存在记录。
+            // flat 模式：聚合当前语句的所有 kv，合并成一行输出
             const { rc, loc } = this._loc(iid);
             const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
-            const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, '');
-            this._emitRaw(line);
+            
+            // 方案F：若提供了 useNames/useValues，直接使用（不再依赖 readVar hook）
+            if (useNames && useValues && useNames.length > 0) {
+                const builtins = new Set(['String', 'Number', 'Boolean', 'Object', 'Array', 
+                    'Function', 'Symbol', 'BigInt', 'Math', 'Date', 'RegExp', 'Error',
+                    'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError',
+                    'JSON', 'Promise', 'Map', 'Set', 'WeakMap', 'WeakSet', 'Proxy', 'Reflect',
+                    'console', 'window', 'global', 'globalThis', 'document', 'navigator',
+                    'undefined', 'NaN', 'Infinity']);
+                
+                for (let i = 0; i < useNames.length; i++) {
+                    const name = useNames[i];
+                    if (builtins.has(name)) continue;
+                    this._pendingReads.push({ name, kv: `${name}=${serialize(useValues[i])}` });
+                }
+            }
+            
+            // 合并 reads、writes 和 fields
+            // 注意：如果某变量既被读取又被写入，只保留写入的值（执行后的值）
+            const writes = this._pendingKvs;
+            const reads  = this._pendingReads;
+            const fields = this._pendingFields;
+            this._pendingKvs    = []; // 清空缓存，为下一条语句准备
+            this._pendingReads  = [];
+            this._pendingFields = [];
+
+            // 找出写入的变量名（用于过滤 reads 中重复的）
+            const writtenNames = new Set();
+            for (const w of writes) {
+                // kv 格式是 "name=value"，提取变量名
+                const match = w.kv.match(/^([^=]+)=/);
+                if (match) writtenNames.add(match[1]);
+            }
+            
+            // 过滤掉已被写入的读取变量（因为写入的值是执行后的，更准确）
+            const filteredReads = reads.filter(r => !writtenNames.has(r.name));
+            
+            // 合并：writes 在前，filteredReads 在后，fields 最后
+            const allKvs = [...writes, ...filteredReads, ...fields];
+            
+            if (allKvs.length > 0) {
+                // 使用 Xe 的 iid 对应的 srcText/rc（ExpressionStatement 整体位置），
+                // 而非 writeVar 记录的 iid（指向赋值右值，位置不准确）
+                const kvStr = allKvs.map(p => p.kv).join(', ');
+                const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, kvStr);
+                this._emitRaw(line);
+            } else {
+                // 无任何 kv：纯副作用语句（无变量读写），只输出源码位置
+                const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, '');
+                this._emitRaw(line);
+            }
             return;
         }
 

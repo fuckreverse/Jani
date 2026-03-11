@@ -40,20 +40,22 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const { values: args } = parseArgs({
     options: {
-        port:      { type: 'string',  default: '9229'           },
-        out:       { type: 'string',  default: 'trace.ndjson'   },
-        format:    { type: 'string',  default: 'binary'         },  // binary | ndjson
-        verbose:   { type: 'boolean', default: false            },
-        'text-only': { type: 'boolean', default: true           },  // trace 事件只存 text
+        port:        { type: 'string',  default: '9229'           },
+        out:         { type: 'string',  default: 'trace.ndjson'   },
+        format:      { type: 'string',  default: 'binary'         },  // binary | ndjson
+        verbose:     { type: 'boolean', default: false            },
+        'text-only': { type: 'boolean', default: true               },  // trace 事件只存 text
+        'max-payload': { type: 'string', default: '0'              },  // 0=无限制，单位：MB
     },
     strict: false,
 });
 
-const PORT      = parseInt(args.port, 10);
-const OUT       = resolve(args.out);
-const FORMAT    = args.format === 'ndjson' ? 'ndjson' : 'binary';
-const VERBOSE   = args.verbose;
-const TEXT_ONLY = args['text-only'];
+const PORT        = parseInt(args.port, 10);
+const OUT         = resolve(args.out);
+const FORMAT      = args.format === 'ndjson' ? 'ndjson' : 'binary';
+const VERBOSE     = args.verbose;
+const TEXT_ONLY   = args['text-only'];
+const MAX_PAYLOAD = args['max-payload'] === '0' ? 0 : parseInt(args['max-payload'], 10) * 1024 * 1024;
 
 // ─── 文件输出流 ────────────────────────────────────────────────────────────────
 
@@ -113,7 +115,11 @@ const httpServer = createServer((req, res) => {
 
 // ─── WebSocket 服务器 ──────────────────────────────────────────────────────────
 
-const wss = new WebSocketServer({ server: httpServer, path: '/trace' });
+const wss = new WebSocketServer({
+    server: httpServer,
+    path: '/trace',
+    maxPayload: MAX_PAYLOAD || undefined,  // 0 表示无限制
+});
 
 wss.on('connection', (ws, req) => {
     const clientAddr = req.socket.remoteAddress;
@@ -205,6 +211,11 @@ httpServer.listen(PORT, () => {
     console.log(`[server]   Output    : ${OUT}`);
     console.log(`[server]   Format    : ${FORMAT}`);
     console.log(`[server]   Text-only : ${TEXT_ONLY}`);
+    if (MAX_PAYLOAD) {
+        console.log(`[server]   MaxPayload: ${args['max-payload']}MB`);
+    } else {
+        console.log(`[server]   MaxPayload: unlimited`);
+    }
 });
 
 // ─── 优雅关闭 ──────────────────────────────────────────────────────────────────

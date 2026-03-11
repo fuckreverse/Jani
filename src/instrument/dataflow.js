@@ -150,6 +150,83 @@ export function analyzeDefUse(ast) {
     return decisions;
 }
 
+// ── 语句级 use-set 分析 ────────────────────────────────────────────────────────
+
+/**
+ * 对 addScopes 之后的 Program 节点做语句级 use-set 分析。
+ *
+ * 遍历所有 ExpressionStatement，收集该语句中读取的变量列表（名称 + defScopeId）。
+ * 结果以语句节点对象本身为 key，存储在返回的 WeakMap 中（避免额外的字符串化开销）。
+ *
+ * 返回格式：
+ *   WeakMap<ExpressionStatementNode, { names: string[], scopes: number[] }>
+ *   - names：变量名数组（去重，按首次出现顺序）
+ *   - scopes：对应 defScopeId 数组（-1 表示全局变量，无 Shadow Frame）
+ *
+ * 过滤规则（与 analyzeDefUse 一致）：
+ *   - 跳过 undefined / NaN / Infinity（特殊字面量）
+ *   - 跳过 J$ 运行时变量自身
+ *
+ * @param {object} ast        Babel Program/File 节点（已经过 addScopes 处理）
+ * @param {string} jalangiVar J$ 运行时变量名（避免收集自身引用）
+ * @returns {WeakMap<object, {names: string[], scopes: number[]}>}
+ */
+export function analyzeStmtUse(ast, jalangiVar) {
+    const result = new WeakMap();
+
+    const fileNode = (ast.type === 'File')
+        ? ast
+        : { type: 'File', program: ast, errors: [] };
+
+    babelTraverse(fileNode, {
+        ExpressionStatement: {
+            enter(stmtPath) {
+                // 在进入 ExpressionStatement 时，扫描该语句子树中所有被引用的 Identifier
+                const names  = [];
+                const scopes = [];
+                const seen   = new Set();
+
+                stmtPath.traverse({
+                    Identifier(idPath) {
+                        // 只处理 RHS（读取）上下文的 Identifier
+                        if (!idPath.isReferencedIdentifier()) return;
+
+                        const node = idPath.node;
+                        const name = node.name;
+
+                        // 跳过特殊标识符
+                        if (name === 'undefined' || name === 'NaN' || name === 'Infinity') return;
+                        if (name === jalangiVar) return;
+
+                        // 去重（同一语句中多次读取同一变量，只记录一次）
+                        if (seen.has(name)) return;
+                        seen.add(name);
+
+                        // 找到定义该变量的 Jalangi Scope
+                        const jalScope = _findJalScope(idPath);
+                        if (!jalScope) return;
+
+                        const binding   = idPath.scope.getBinding(name);
+                        const defScope  = binding ? _findDefJalScope(idPath, name) : null;
+
+                        // 全局变量 defScopeId = -1（不在 Shadow Frame 里）
+                        const defScopeId = defScope ? defScope.id : -1;
+
+                        names.push(name);
+                        scopes.push(defScopeId);
+                    },
+                });
+
+                if (names.length > 0) {
+                    result.set(stmtPath.node, { names, scopes });
+                }
+            },
+        },
+    });
+
+    return result;
+}
+
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
 /**
@@ -165,6 +242,25 @@ function _findJalScope(path) {
         const node = cur.node;
         if (node && node.scope) return node.scope;
         cur = cur.parentPath;
+    }
+    return null;
+}
+
+/**
+ * 沿 Babel 作用域链向上查找定义了变量 `name` 的 Jalangi Scope。
+ *
+ * 与 wrappers.js 中的 `_findDefScope` 逻辑对应：
+ * 先找到最近的 Jalangi Scope，再沿 jalScope.parent 向上查，直到找到 hasOwnVar(name) 非 null 的 Scope。
+ *
+ * @param {import('@babel/traverse').NodePath} path  Identifier 的 path
+ * @param {string} name                              变量名
+ * @returns {import('./scope.js').Scope|null}
+ */
+function _findDefJalScope(path, name) {
+    let scope = _findJalScope(path);
+    while (scope) {
+        if (scope.hasOwnVar(name) !== null) return scope;
+        scope = scope.parent ?? null;
     }
     return null;
 }
