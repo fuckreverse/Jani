@@ -683,12 +683,17 @@ function runInstrumentPass(file) {
 
         SequenceExpression: {
             exit(path) {
-                if (ignoreSubAst(path.node)) return;
-                const node = path.node;
-                const last = node.expressions.length - 1;
-                for (let i = 0; i < last; i++) {
-                    node.expressions[i] = W.wrapWithX1(node.expressions[i], node.expressions[i]);
-                }
+                // 不再对 SequenceExpression 的子表达式单独调用 wrapWithX1。
+                // 原因：JS 函数参数在调用前求值，导致嵌套的 J$.Xe 无法正确区分内外层。
+                // 
+                // 现在的行为：整条逗号表达式作为一个整体被 J$.Xe 包裹，
+                // 所有子表达式的 writeVar/putField 都累积到 pending 队列，
+                // 最后由外层 Xe 统一输出一行 trace。
+                // 
+                // 优点：简单、可靠，不会出现 trace 行之间数据错位的问题。
+                // 缺点：逗号表达式的多条子语句合并成一行输出。
+                // 
+                // 如果需要每条子语句单独输出，需要更复杂的静态分析或运行时 API 修改。
             },
         },
 

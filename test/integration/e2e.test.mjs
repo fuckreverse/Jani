@@ -1261,4 +1261,42 @@ describe('ExecutionTraceAnalysis trace 源码片段', () => {
             `inlineSource:false 时 trace 应含 (iid=xxx) 降级占位符，实际行：\n${infoLines.join('\n')}`
         );
     });
+
+    test('逗号表达式：所有子表达式的 trace 合并成一行输出', async () => {
+        // 验证逗号表达式的行为：整条语句作为整体输出一行 trace
+        const src = `var a = 1, b = 2; a = 3, b = 4;`;
+        const lines = await runWithTrace(src);
+        const infoLines = lines.filter(l => l.includes(';'));
+
+        // 找到包含 "a=3" 或 "b=4" 的行
+        const commaLine = infoLines.find(l => l.includes('a=3') || l.includes('b=4'));
+        assert.ok(commaLine, `应存在逗号表达式的 trace 行，实际：\n${infoLines.join('\n')}`);
+
+        // 该行应同时包含 a 和 b 的最终值
+        assert.ok(commaLine.includes('a=3'), `逗号表达式 trace 应含 a=3，实际：${commaLine}`);
+        assert.ok(commaLine.includes('b=4'), `逗号表达式 trace 应含 b=4，实际：${commaLine}`);
+    });
+
+    test('逗号表达式：属性读写正确追踪', async () => {
+        // 验证复杂逗号表达式中属性读写是否正确追踪
+        const src = `
+var r = {}, I = 'width', s = 10;
+var u = {};
+r[I] = s + 5, (r = u)['key'] = 100;
+`;
+        const lines = await runWithTrace(src);
+        const infoLines = lines.filter(l => l.includes(';'));
+
+        // 找到逗号表达式所在的行（包含 "r[I]" 或最终属性写入）
+        const commaLine = infoLines.find(l => l.includes('width') && l.includes('key'));
+        assert.ok(commaLine, `应存在逗号表达式的 trace 行，实际：\n${infoLines.join('\n')}`);
+
+        // 验证属性写入：第一个子表达式 r[I] = s + 5 写入 {…}["width"]=15
+        assert.ok(commaLine.includes('width') && commaLine.includes('15'),
+            `逗号表达式 trace 应含属性写入 width=15，实际：${commaLine}`);
+
+        // 验证属性写入：第二个子表达式 (r = u)['key'] = 100 写入 {…}["key"]=100
+        assert.ok(commaLine.includes('key') && commaLine.includes('100'),
+            `逗号表达式 trace 应含属性写入 key=100，实际：${commaLine}`);
+    });
 });

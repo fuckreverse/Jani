@@ -144,6 +144,19 @@ function extractSource(lines, loc) {
     return text;
 }
 
+/**
+ * 将属性访问的 base 对象序列化为简短类型标记，避免大数组/对象展开。
+ *   数组  → "[…N]"（N 为长度）
+ *   对象  → "{…}"
+ *   其他  → 直接 serialize（数字/字符串/null 等）
+ */
+function _shortBase(base) {
+    if (base === null || base === undefined) return serialize(base);
+    if (Array.isArray(base)) return `[…${base.length}]`;
+    if (typeof base === 'object') return '{…}';
+    return serialize(base);
+}
+
 // ── 帧结构 ────────────────────────────────────────────────────────────────────
 
 class Frame {
@@ -604,7 +617,7 @@ export class ExecutionTraceAnalysis {
             // 只在 flat 模式下暂存属性读取
             // 过滤掉方法调用的 this 读取（避免冗余）
             if (!isMethodCall) {
-                const baseStr = serialize(base, 32); // 限制 base 显示长度
+                const baseStr = _shortBase(base);
                 const offsetStr = isComputed ? `[${serialize(offset)}]` : `.${String(offset)}`;
                 const key = `${baseStr}${offsetStr}`;
                 this._pendingFields.push({ kv: `${key}=${serialize(val)}` });
@@ -626,7 +639,7 @@ export class ExecutionTraceAnalysis {
      */
     putField(iid, base, offset, val, isComputed, isOpAssign) {
         if (this._flat) {
-            const baseStr = serialize(base, 32);
+            const baseStr = _shortBase(base);
             const offsetStr = isComputed ? `[${serialize(offset)}]` : `.${String(offset)}`;
             const key = `${baseStr}${offsetStr}`;
             this._pendingFields.push({ kv: `${key}=${serialize(val)}` });
@@ -653,25 +666,24 @@ export class ExecutionTraceAnalysis {
             // flat 模式：聚合当前语句的所有 kv，合并成一行输出
             const { rc, loc } = this._loc(iid);
             const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
-            
+
             // 方案F：若提供了 useNames/useValues，直接使用（不再依赖 readVar hook）
             if (useNames && useValues && useNames.length > 0) {
-                const builtins = new Set(['String', 'Number', 'Boolean', 'Object', 'Array', 
+                const builtins = new Set(['String', 'Number', 'Boolean', 'Object', 'Array',
                     'Function', 'Symbol', 'BigInt', 'Math', 'Date', 'RegExp', 'Error',
                     'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError',
                     'JSON', 'Promise', 'Map', 'Set', 'WeakMap', 'WeakSet', 'Proxy', 'Reflect',
                     'console', 'window', 'global', 'globalThis', 'document', 'navigator',
                     'undefined', 'NaN', 'Infinity']);
-                
+
                 for (let i = 0; i < useNames.length; i++) {
                     const name = useNames[i];
                     if (builtins.has(name)) continue;
                     this._pendingReads.push({ name, kv: `${name}=${serialize(useValues[i])}` });
                 }
             }
-            
+
             // 合并 reads、writes 和 fields
-            // 注意：如果某变量既被读取又被写入，只保留写入的值（执行后的值）
             const writes = this._pendingKvs;
             const reads  = this._pendingReads;
             const fields = this._pendingFields;
@@ -682,20 +694,17 @@ export class ExecutionTraceAnalysis {
             // 找出写入的变量名（用于过滤 reads 中重复的）
             const writtenNames = new Set();
             for (const w of writes) {
-                // kv 格式是 "name=value"，提取变量名
                 const match = w.kv.match(/^([^=]+)=/);
                 if (match) writtenNames.add(match[1]);
             }
-            
+
             // 过滤掉已被写入的读取变量（因为写入的值是执行后的，更准确）
             const filteredReads = reads.filter(r => !writtenNames.has(r.name));
-            
+
             // 合并：writes 在前，filteredReads 在后，fields 最后
             const allKvs = [...writes, ...filteredReads, ...fields];
-            
+
             if (allKvs.length > 0) {
-                // 使用 Xe 的 iid 对应的 srcText/rc（ExpressionStatement 整体位置），
-                // 而非 writeVar 记录的 iid（指向赋值右值，位置不准确）
                 const kvStr = allKvs.map(p => p.kv).join(', ');
                 const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, kvStr);
                 this._emitRaw(line);

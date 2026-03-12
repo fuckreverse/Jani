@@ -7,7 +7,7 @@
  * 接收来自浏览器 WsBackend 的事件批次，写入本地文件（NDJSON 格式）。
  *
  * 启动：
- *   node tools/trace-server/server.mjs [--port 9229] [--out trace.ndjson] [--format binary|ndjson] [--no-text-only]
+ *   node tools/trace-server/server.mjs [--port 9229] [--out trace.ndjson] [--format binary|ndjson] [--no-text-only] [--no-clear] [--help]
  *
  * 协议（见 WsBackend.js）：
  *   二进制模式：
@@ -24,7 +24,7 @@
 
 import { createServer }   from 'node:http';
 import { WebSocketServer } from 'ws';
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, truncateSync, existsSync } from 'node:fs';
 import { resolve, dirname }  from 'node:path';
 import { fileURLToPath }     from 'node:url';
 import { parseArgs }         from 'node:util';
@@ -46,9 +46,30 @@ const { values: args } = parseArgs({
         verbose:     { type: 'boolean', default: false            },
         'text-only': { type: 'boolean', default: true               },  // trace 事件只存 text
         'max-payload': { type: 'string', default: '0'              },  // 0=无限制，单位：MB
+        clear:       { type: 'boolean', default: true             },  // 启动时清空输出文件
+        help:        { type: 'boolean', default: false            },  // 显示帮助
     },
     strict: false,
 });
+
+// ─── Help ──────────────────────────────────────────────────────────────────────
+
+if (args.help) {
+    console.log(`
+Usage: node tools/trace-server/server.mjs [options]
+
+Options:
+  --port <number>        WebSocket 监听端口（默认: 9229）
+  --out <file>           输出文件路径（默认: trace.ndjson）
+  --format <mode>        接收格式：binary | ndjson（默认: binary）
+  --text-only            trace 事件只写 text 字段（默认开启，用 --no-text-only 关闭）
+  --clear                启动时清空输出文件（默认开启，用 --no-clear 关闭）
+  --max-payload <MB>     最大消息体积（MB），0 表示无限制（默认: 0）
+  --verbose              打印每个 batch 的接收日志
+  --help                 显示此帮助信息
+`);
+    process.exit(0);
+}
 
 const PORT        = parseInt(args.port, 10);
 const OUT         = resolve(args.out);
@@ -56,8 +77,15 @@ const FORMAT      = args.format === 'ndjson' ? 'ndjson' : 'binary';
 const VERBOSE     = args.verbose;
 const TEXT_ONLY   = args['text-only'];
 const MAX_PAYLOAD = args['max-payload'] === '0' ? 0 : parseInt(args['max-payload'], 10) * 1024 * 1024;
+const CLEAR       = args.clear;
 
 // ─── 文件输出流 ────────────────────────────────────────────────────────────────
+
+// 启动时根据 --clear 选项决定是否清空输出文件
+if (CLEAR && existsSync(OUT)) {
+    truncateSync(OUT, 0);
+    console.log(`[server] Cleared output file: ${OUT}`);
+}
 
 const outStream = createWriteStream(OUT, { flags: 'a', encoding: 'utf8' });
 
@@ -211,6 +239,7 @@ httpServer.listen(PORT, () => {
     console.log(`[server]   Output    : ${OUT}`);
     console.log(`[server]   Format    : ${FORMAT}`);
     console.log(`[server]   Text-only : ${TEXT_ONLY}`);
+    console.log(`[server]   Clear     : ${CLEAR}`);
     if (MAX_PAYLOAD) {
         console.log(`[server]   MaxPayload: ${args['max-payload']}MB`);
     } else {
