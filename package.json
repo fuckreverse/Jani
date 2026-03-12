@@ -4,8 +4,10 @@
   "description": "dynamic analysis framework for JavaScript",
   "type": "module",
   "dependencies": {
+    "@babel/core": "^7.29.0",
     "@babel/generator": "^7.29.1",
     "@babel/parser": "^7.29.0",
+    "@babel/preset-env": "^7.29.0",
     "@babel/traverse": "^7.29.0",
     "@babel/types": "^7.29.0",
     "codemirror": "5.1.0",
@@ -29,7 +31,10 @@
     "instrument:split": "node bin/jalangi.mjs instrument --split-runtime",
     "instrument:browser:split": "node bin/jalangi.mjs instrument --target browser --split-runtime",
     "run": "node bin/jalangi.mjs run",
-    "instrument-and-run": "node bin/jalangi.mjs instrument-and-run"
+    "instrument-and-run": "node bin/jalangi.mjs instrument-and-run",
+    "preprocess": "node bin/preprocess.mjs",
+    "preprocess:full": "node bin/preprocess.mjs --preset full",
+    "preprocess:transpile": "node bin/preprocess.mjs --preset transpile"
   },
   "license": "Apache-2.0",
   "repository": {
@@ -40,5 +45,9 @@
     "@rollup/plugin-terser": "^0.4.4",
     "rollup": "^4.59.0"
   },
-  "main": "src/instrument/esnstrument.js"
+  "main": "src/instrument/esnstrument.js",
+  "bundleDependencies": [
+    "@babel/parser",
+    "@babel/generator"
+  ]
 }

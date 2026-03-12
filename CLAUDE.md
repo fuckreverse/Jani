@@ -93,6 +93,7 @@ node --test test/integration/e2e.test.mjs
 | 文件 | 状态 | 内容 |
 |------|------|------|
 | `test/unit/instrument.test.mjs` | ✅ 当前主单元测试 | 插桩器端到端集成测试，覆盖 ES5～ES2022、source map、Config 禁用等 |
+| `test/unit/preprocess.test.mjs` | ✅ 预处理单元测试 | 每个 Pass 独立测试，覆盖 DeobfuscatePlugin / TranspilePlugin / API / 与插桩器集成 |
 | `test/integration/e2e.test.mjs` | ✅ 当前运行时集成测试 | 插桩后代码运行行为验证（控制流、属性、二元运算、异步等）|
 | `test/integration/hooks.test.mjs` | ✅ 当前钩子集成测试 | 分析回调钩子操作验证 |
 | `test/_legacy_astring.js` | ⚠️ 废弃（保留备查） | 重构前验证 astring 本身的临时脚本，用 CommonJS + 旧式全局加载 |
@@ -200,13 +201,14 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 
 ## 文档维护规范
 
-项目文档统一存放在 `docs/` 目录下，共 8 个 Markdown 文件：
+项目文档统一存放在 `docs/` 目录下，共 9 个 Markdown 文件：
 
 | 文档 | 对应代码范围 |
 |------|------------|
 | `docs/README.md` | 项目入口、快速上手、目录结构 |
 | `docs/Overview.md` | 整体架构、钩子一览、使用方式 |
 | `docs/Instrumentation-Engine.md` | `src/instrument/` 全部模块 |
+| `docs/Preprocessing.md` | `src/preprocess/` 预处理模块（反混淆 + 语法降级）|
 | `docs/Runtime-System.md` | `src/runtime/` 全部模块 + `src/logger/` 日志系统 |
 | `docs/Analysis-Development.md` | 分析插件接口（`analysisCallbackTemplate.js`）|
 | `docs/Configuration.md` | `init(config)` 的 Config 对象 |
@@ -224,6 +226,7 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 5. **`JalangiSandbox` / `HookDispatcher` / `SMemory` API 变化** → 更新 `Runtime-System.md`
 6. **新增 / 删除 `src/plugins/` 示例插件** → 更新 `Sample-Analyses.md`
 7. **架构层面的重大变化**（模块拆分/合并、依赖变更等）→ 更新 `Overview.md`
+8. **预处理插件 / API 变化（`src/preprocess/`）** → 更新 `Preprocessing.md`
 
 ### 更新原则
 

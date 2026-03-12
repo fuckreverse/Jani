@@ -16,12 +16,15 @@ Jalangi2 的整体流程分为三个阶段：
 ```mermaid
 flowchart TD
     SRC["JavaScript 源代码"]
+    PRE["预处理器（可选）\n(src/preprocess/)\n\n反混淆：逗号拆分 / void替换 / 常量折叠 / 死代码删除\n语法降级：@babel/preset-env → 目标版本"]
     INSTR["插桩器\n(src/instrument/)\n\n@babel/parser 解析 → AST 变换\n→ @babel/generator 生成\n\n注入 J$.R / J$.W / J$.G / J$.P / ..."]
     OUT["插桩后的 JavaScript 代码"]
     RT["运行时沙盒\n(src/runtime/)\n\nJ$ = new JalangiSandbox()\nJ$.analysis = HookDispatcher\n\n每次执行触发 → 分发给分析插件"]
     PLUGIN["分析插件\n(src/plugins/)\n\n实现 read / write / getField / ... 等钩子\n收集数据、检测 bug、生成报告"]
 
-    SRC -->|"init(config) + instrumentCode()"| INSTR
+    SRC -->|"preprocessCode()"| PRE
+    PRE -->|"init(config) + instrumentCode()"| INSTR
+    SRC -->|"直接插桩（跳过预处理）"| INSTR
     INSTR --> OUT
     OUT -->|"执行插桩后代码"| RT
     RT -->|"钩子分发"| PLUGIN
@@ -137,6 +140,9 @@ flowchart TD
 |------|------|
 | `@babel/parser ^7.29` | JavaScript 解析器，支持 ES2022+、TS/Flow 及实验性语法 |
 | `@babel/generator ^7.29` | 代码生成器，支持 Babel 原生 AST |
+| `@babel/traverse ^7.29` | AST 遍历器，供预处理模块和插桩器共用 |
+| `@babel/core ^7.29` | Babel 变换核心，供 `TranspilePlugin` 语法降级使用 |
+| `@babel/preset-env ^7.29` | 按 Browserslist 目标自动选择语法降级变换 |
 
 > **注意**：旧版使用 `acorn + astring`，当前已完全迁移到 `@babel/parser + @babel/generator`。
 
@@ -190,17 +196,35 @@ J$.analysis.use(new MyAnalysis(J$));
 // 3. 插桩并执行代码（通常通过 bin/jalangi.mjs）
 ```
 
-### 4. 命令行工具
+### 4. 预处理（可选，插桩前）
+
+适合对混淆/压缩代码进行清理，提升 Trace 可读性；或对旧项目代码降级语法后再插桩：
 
 ```bash
-# 插桩单个文件
-node bin/instrument.mjs input.js
+# 默认反混淆（逗号拆分 + void替换 + 常量折叠 + 死代码删除）
+node bin/preprocess.mjs data/cl.js
+
+# 完整流程：反混淆 + 降级到 "defaults" 浏览器
+node bin/preprocess.mjs --preset full --targets defaults data/cl.js
+
+# 仅语法降级到 IE 11
+node bin/preprocess.mjs --preset transpile --targets '{"ie":"11"}' data/app.js
+
+# 额外开启 IIFE 展开，输出到 stdout 预览
+node bin/preprocess.mjs --flatten-iife --stdout data/cl.js | head -50
+```
+
+### 5. 命令行工具（插桩 + 运行）
+
+```bash
+# 插桩单个文件（Node）
+node bin/jalangi.mjs instrument src/app.js
 
 # 运行分析
-node bin/jalangi.mjs --analysis src/plugins/tutorial/LogAll.js target.js
+node bin/jalangi.mjs instrument-and-run --analysis src/plugins/tutorial/LogAll.js target.js
 
-# 为浏览器端插桩
-node bin/instrument-for-browser.mjs input.js
+# 为浏览器端插桩（单文件，含运行时）
+node bin/jalangi.mjs instrument --target browser src/app.js
 
 # 启动 Trace Server（浏览器端事件收集）
 npm run trace-server

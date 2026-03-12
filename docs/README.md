@@ -9,6 +9,7 @@ Jalangi2 是一个面向 JavaScript 的**动态分析框架**，通过 AST 插�
 |------|---------|
 | [Overview.md](./Overview.md) | 项目概况、系统架构、快速上手 |
 | [Instrumentation-Engine.md](./Instrumentation-Engine.md) | 插桩器核心原理与 API 参考 |
+| [Preprocessing.md](./Preprocessing.md) | 预处理模块（反混淆 + 语法降级）|
 | [Runtime-System.md](./Runtime-System.md) | 运行时沙盒、J$ 对象与钩子函数 |
 | [Analysis-Development.md](./Analysis-Development.md) | 编写自定义分析插件的完整指南 |
 | [Configuration.md](./Configuration.md) | Config 配置字段参考 |
@@ -86,6 +87,12 @@ src/
     dataflow.js        ← 静态 SSA def-use 分析（Pass 0，决策表）
     pluginAnalyzer.js  ← 插件静态分析器（按需 Config 推导）
     instrument.d.ts    ← 插桩器公开 API 类型声明
+  preprocess/          ← 预处理模块（反混淆 + 语法降级）
+    PreprocessPlugin.js← 插件基类
+    index.js           ← 主入口：preprocessCode(code, options)
+    plugins/
+      DeobfuscatePlugin.js ← 反混淆（逗号拆分/void替换/常量折叠/死代码删除等）
+      TranspilePlugin.js   ← 语法降级（@babel/preset-env 包装）
   runtime/             ← 运行时系统（含 Node.js 专有代码）
     JalangiRuntime.js  ← 运行时钩子实现（基类）
     JalangiSandbox.js  ← 完整沙盒对象（推荐使用）
@@ -111,7 +118,12 @@ src/
   plugins/             ← 示例分析插件
   Constants.js         ← 全局常量
 test/
-  instrument.test.mjs  ← 插桩器端到端集成测试（98 个用例）
+  unit/
+    instrument.test.mjs  ← 插桩器端到端集成测试（312 个用例）
+    preprocess.test.mjs  ← 预处理模块单元测试（78 个用例）
+  integration/           ← 运行时集成测试
 docs/                  ← 项目文档
-bin/                   ← 命令行工具
+bin/
+  jalangi.mjs          ← 插桩/运行 CLI 统一入口
+  preprocess.mjs       ← 预处理 CLI 工具
 ```
