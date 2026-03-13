@@ -42,6 +42,23 @@ export function serialize(v, depth = 0) {
         return `"${escaped}"${suffix}`;
     }
     if (t === 'object') {
+        // TypedArray / DataView — must check BEFORE the generic object path.
+        // Object.keys(largeTypedArray) creates an array whose length equals the
+        // TypedArray length; for lengths >= 2^32-1 that throws
+        // "RangeError: Invalid array length" in V8 (Chrome) / SpiderMonkey
+        // because the engine internally calls Array.push while collecting keys.
+        if (ArrayBuffer.isView(v)) {
+            if (v instanceof DataView) {
+                return `DataView(${v.byteLength})`;
+            }
+            // Int8Array, Uint8Array, Float32Array, BigInt64Array, …
+            const ctor = v.constructor?.name ?? 'TypedArray';
+            return `${ctor}[${v.length}]`;
+        }
+        // ArrayBuffer — similarly unsafe to pass through Object.keys
+        if (v instanceof ArrayBuffer) {
+            return `ArrayBuffer(${v.byteLength})`;
+        }
         // Error
         if (v instanceof Error) {
             const name = v.name || 'Error';
