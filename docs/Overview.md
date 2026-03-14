@@ -227,7 +227,7 @@ node bin/jalangi.mjs instrument-and-run --analysis src/plugins/tutorial/LogAll.j
 # 为浏览器端插桩（单文件，含运行时）
 node bin/jalangi.mjs instrument --target browser src/app.js
 
-# 启动 Trace Server（浏览器端事件收集）
+# 启动 Trace Server（浏览器端事件收集，每次连接写入 traces/ 目录下独立文件）
 npm run trace-server
 ```
 

@@ -738,6 +738,90 @@ flowchart TD
 > 若需要高性能零 GC 的环形缓冲区后端，请参考 `MemoryBackend` 的接口自行实现，
 > 或等待后续版本更新。
 
+## Trace Server（`tools/trace-server/server.mjs`）
+
+Trace Server 是一个独立的 Node.js WebSocket 服务器，负责接收来自浏览器端 `WsBackend` 推送的事件批次，并将其持久化到本地文件。
+
+### 启动
+
+```bash
+# 默认启动（端口 9229，输出目录 traces/，启动时清空目录中的旧 .ndjson 文件）
+npm run trace-server
+
+# 自定义端口和输出目录
+node tools/trace-server/server.mjs --port 9230 --out my-traces
+
+# 保留历史文件（不清空）
+node tools/trace-server/server.mjs --no-clear
+
+# 输出完整 NDJSON（默认只保存 trace 事件的 text 字段）
+node tools/trace-server/server.mjs --no-text-only
+
+# 查看所有选项
+node tools/trace-server/server.mjs --help
+```
+
+### 命令行参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--port <number>` | `9229` | WebSocket 监听端口 |
+| `--out <dir>` | `traces` | 输出**目录**路径（每个连接写入独立文件） |
+| `--format <mode>` | `binary` | 接收格式：`binary`（高吞吐）或 `ndjson` |
+| `--text-only` | 开启 | trace 类型事件只写 `text` 字段；`--no-text-only` 输出完整 JSON |
+| `--clear` | 开启 | 启动时删除输出目录中的所有 `.ndjson` 文件；`--no-clear` 跳过清空 |
+| `--max-payload <MB>` | `0`（无限制）| 最大单条消息体积（MB） |
+| `--verbose` | 关闭 | 打印每个 batch 的接收日志（含目标文件名） |
+| `--help` | — | 显示帮助信息 |
+
+### 每连接独立文件（会话隔离）
+
+每个 WebSocket 连接对应一个独立的输出文件，不同会话（页面刷新、多个 Tab、多次分析）的数据**不会混写**到同一文件中。
+
+**文件命名格式**：
+
+```
+traces/trace_<YYYYMMDD>_<HHmmss>_<ms>_<seq>.ndjson
+```
+
+示例：
+
+```
+traces/trace_20260314_153042_123_001.ndjson   ← 第 1 个连接
+traces/trace_20260314_153043_456_002.ndjson   ← 第 2 个连接（页面刷新后）
+```
+
+**连接生命周期与文件对应关系**：
+
+```
+客户端连接  → 创建新文件，打印文件路径
+           →   [server] Client connected: ::1 (total: 1)
+           →   [server]   → Writing to: /path/to/traces/trace_20260314_153042_123_001.ndjson
+数据传输中  → 事件写入对应文件
+客户端断开  → 关闭文件流，打印事件总数
+           →   [server] Client disconnected: ::1 (code=1001, active: 0)
+           →   [server]   → Trace saved: /path/.../trace_20260314_153042_123_001.ndjson (1234 events)
+```
+
+### HTTP 端点
+
+| 端点 | 说明 |
+|------|------|
+| `GET /health` | 健康检查，返回 `{ status: 'ok', ...stats }` |
+| `GET /stats` | 统计信息（连接数、批次数、事件数、字节数、错误数）|
+
+### 输出格式
+
+**默认（`--text-only`，推荐）**：`trace` 类型事件只写入 `text` 字段的纯文本，
+其他类型事件（如 `key`）仍写为 JSON 行。可直接用 `grep` / `cat` 阅读。
+
+**`--no-text-only`**：所有事件统一输出为 NDJSON（一行一个 JSON 对象），可用 `jq` 直接分析：
+
+```bash
+# 过滤 read 事件
+cat traces/trace_*.ndjson | jq 'select(.type == "read")'
+```
+
 ## DataFlowAnalyzer — 运行时 SSA 数据流分析
 
 `DataFlowAnalyzer`（`src/runtime/DataFlowAnalyzer.js`）是一个**后处理分析器**，

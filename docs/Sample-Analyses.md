@@ -502,14 +502,21 @@ endExpression(iid, result, useNames, useScopes) {
 
 配合 `npm run trace-server` 启动的 WebSocket 服务器，
 将运行时事件实时推送到浏览器端或持久化到文件。
+每个 WebSocket 连接（即每次页面加载/刷新）对应 `traces/` 目录下一个独立的 `.ndjson` 文件，
+不同会话的数据不会混写。
 
 ```bash
-# 1. 启动 Trace Server
+# 1. 启动 Trace Server（输出到 traces/ 目录，每次连接生成独立文件）
 npm run trace-server
+
+# 自定义输出目录
+node tools/trace-server/server.mjs --out my-traces
 
 # 2. 在分析中使用 WsBackend
 # （通过 JalangiSandbox 配置，详见 Runtime-System.md）
 ```
+
+> 详细参数说明参见 [Runtime-System.md — Trace Server](./Runtime-System.md#trace-servertools-trace-serverservermjs)。
 
 ---
 
