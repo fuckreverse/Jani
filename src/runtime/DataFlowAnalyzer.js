@@ -42,13 +42,18 @@
  * @module DataFlowAnalyzer
  */
 
+import {
+    $push, $shift, $sort, $map, $from, $freeze, $filter,
+    $strSplit, $join, $slice,
+} from './NativeProxy.js';
+
 // ── 模块级常量 ────────────────────────────────────────────────────────────────
 
 /**
  * 寄存器类型枚举
  * @type {Readonly<{ WRITE: 'W', ARG: 'A', RETURN: 'R', PUTFIELD: 'P', UNKNOWN: 'U' }>}
  */
-export const REG_TYPE = Object.freeze({
+export const REG_TYPE = $freeze({
     WRITE:     'W',   // 变量赋值
     ARG:       'A',   // 函数参数传入
     RETURN:    'R',   // 函数调用返回值
@@ -237,10 +242,10 @@ export class DataFlowAnalyzer {
 
             const regId  = ++this.#regIdCounter;
             // 防御性处理：变量名理论上不含 ':'，但用 slice(2).join(':') 避免将来引入时静默截断。
-            const _parts  = key.split(':');
+            const _parts  = $strSplit(key, ':');
             const kScopeId = _parts[0];
             const kCallId  = _parts[1];
-            const kName    = _parts.slice(2).join(':');
+            const kName    = $join($slice(_parts, 2), ':');
 
             /** @type {import('../types.js').RegisterEntry} */
             const reg = {
@@ -256,7 +261,7 @@ export class DataFlowAnalyzer {
                 oidVersion: newVersion,
                 offset,
                 fieldValue: value,
-                sources:  new Set([this.#lastWrite.get(key) ?? -1].filter(x => x !== -1)),
+                sources:  new Set($filter([this.#lastWrite.get(key) ?? -1], x => x !== -1)),
             };
 
             this.#registers.set(regId, reg);
@@ -340,18 +345,18 @@ export class DataFlowAnalyzer {
         const queue   = [targetRegId];
 
         while (queue.length > 0) {
-            const regId = queue.shift();
+            const regId = $shift(queue);
             if (visited.has(regId)) continue;
             visited.add(regId);
 
             const reg = this.#registers.get(regId);
             if (!reg) continue;
 
-            result.push(reg);
+            $push(result, reg);
 
             for (const srcRegId of reg.sources) {
                 if (!visited.has(srcRegId)) {
-                    queue.push(srcRegId);
+                    $push(queue, srcRegId);
                 }
             }
         }
@@ -359,7 +364,7 @@ export class DataFlowAnalyzer {
         // 按 regId 升序排列（而非 iid）以正确反映运行时执行顺序。
         // iid 是编译时静态分配的，同一指令在循环中多次执行时 iid 相同，无法区分执行顺序；
         // regId 是单调递增的运行时序号，才能正确还原执行时间顺序。
-        return result.sort((a, b) => a.regId - b.regId);
+        return $sort(result, (a, b) => a.regId - b.regId);
     }
 
     /**
@@ -425,11 +430,11 @@ export class DataFlowAnalyzer {
         const aliases = [];
         for (const [key, oid] of this.#aliasTable) {
             if (oid !== targetOid) continue;
-            const parts = key.split(':');
-            aliases.push({
+            const parts = $strSplit(key, ':');
+            $push(aliases, {
                 scopeId: Number(parts[0]),
                 callId:  Number(parts[1]),
-                name:    parts.slice(2).join(':'), // 变量名本身不含 ':'，但防御性处理
+                name:    $join($slice(parts, 2), ':'), // 变量名本身不含 ':'，但防御性处理
             });
         }
         return aliases;
@@ -454,9 +459,9 @@ export class DataFlowAnalyzer {
      * @returns {object[]}
      */
     exportRegisters() {
-        return Array.from(this.#registers.values()).map(reg => ({
+        return $map($from(this.#registers.values()), reg => ({
             ...reg,
-            sources: Array.from(reg.sources),
+            sources: $from(reg.sources),
         }));
     }
 }

@@ -149,6 +149,22 @@ export class WsBackend {
         });
     }
 
+    /**
+     * 同步写入：序列化 + ws.send()，不等 ack，不追踪 in-flight。
+     * 【验证用】在主线程同步路径（forceSyncFlushThreshold）中调用，
+     * 保证数据在插桩回调返回前已提交给 TCP 缓冲区。
+     * @param {Array} batch
+     */
+    writeSync(batch) {
+        if (this._state !== State.CONNECTED || !this._ws) return;
+        const batchId = ++this._batchIdCounter;
+        const data    = this._serialize(batchId, batch);
+        this._sendRaw(data);
+        this.stats.batchCount++;
+        this.stats.totalEvents += batch.length;
+        // 注意：无 ack 追踪，不支持重发；仅用于验证阶段
+    }
+
     /** 等待所有 in-flight 批次被服务端 ack */
     async flush() {
         if (this._inFlight.size === 0) return;

@@ -18,6 +18,15 @@ export const MAX_DEPTH       = 2;      // 对象递归深度
 export const MAX_ARRAY_ITEMS = 200;    // Array 最多显示元素数
 export const MAX_MAP_ITEMS   = 100;    // Map/Set 最多显示条目数
 
+// ── 防御性：从 NativeProxy 导入原生方法快照 ───────────────────────────────────
+// 被分析代码可能对 Array.prototype.push / join / sort 及 Object.keys 等方法做 monkey-patch，
+// 导致 serialize 内部的操作递归触发钩子，最终栈溢出。
+// 所有内部操作均通过 NativeProxy 中预先捕获的原生引用进行。
+import {
+    $push as _push, $join as _join, $sort as _sort, $keys as _keys,
+    $strSlice as _strSlice, $strReplace as _strReplace,
+} from '../runtime/NativeProxy.js';
+
 /**
  * 将任意 JS 值序列化为人可读的单行字符串。
  *
@@ -36,8 +45,8 @@ export function serialize(v, depth = 0) {
     if (t === 'number')    return String(v);
     if (t === 'string') {
         const isTruncated = v.length > MAX_BYTES;
-        const q = isTruncated ? v.slice(0, MAX_BYTES) : v;
-        const escaped = q.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+        const q = isTruncated ? _strSlice(v, 0, MAX_BYTES) : v;
+        const escaped = _strReplace(_strReplace(_strReplace(_strReplace(q, /\\/g, '\\\\'), /"/g, '\\"'), /\n/g, '\\n'), /\r/g, '\\r');
         const suffix = isTruncated ? ` (+${v.length - MAX_BYTES})` : '';
         return `"${escaped}"${suffix}`;
     }
@@ -63,7 +72,7 @@ export function serialize(v, depth = 0) {
         if (v instanceof Error) {
             const name = v.name || 'Error';
             const msg  = v.message ? String(v.message) : '';
-            const truncatedMsg = msg.length > MAX_BYTES ? msg.slice(0, MAX_BYTES) + '…' : msg;
+            const truncatedMsg = msg.length > MAX_BYTES ? _strSlice(msg, 0, MAX_BYTES) + '…' : msg;
             return `${name}: ${truncatedMsg}`;
         }
         // Date
@@ -84,7 +93,7 @@ export function serialize(v, depth = 0) {
             let total = 5; // "Map(" length
             for (const [key, val] of v) {
                 if (i >= MAX_MAP_ITEMS) {
-                    entries.push(`…(+${v.size - MAX_MAP_ITEMS})`);
+                    _push(entries, `…(+${v.size - MAX_MAP_ITEMS})`);
                     break;
                 }
                 const kStr = serialize(key, depth + 1);
@@ -92,13 +101,13 @@ export function serialize(v, depth = 0) {
                 const entry = `${kStr}=>${vStr}`;
                 total += entry.length + 1;
                 if (total > MAX_BYTES) {
-                    entries.push(`…(+${v.size - i})`);
+                    _push(entries, `…(+${v.size - i})`);
                     break;
                 }
-                entries.push(entry);
+                _push(entries, entry);
                 i++;
             }
-            return `Map(${entries.join(',')})`;
+            return `Map(${_join(entries, ',')})`;
         }
         // Set
         if (v instanceof Set) {
@@ -108,19 +117,19 @@ export function serialize(v, depth = 0) {
             let total = 4; // "Set(" length
             for (const item of v) {
                 if (i >= MAX_MAP_ITEMS) {
-                    items.push(`…(+${v.size - MAX_MAP_ITEMS})`);
+                    _push(items, `…(+${v.size - MAX_MAP_ITEMS})`);
                     break;
                 }
                 const itemStr = serialize(item, depth + 1);
                 total += itemStr.length + 1;
                 if (total > MAX_BYTES) {
-                    items.push(`…(+${v.size - i})`);
+                    _push(items, `…(+${v.size - i})`);
                     break;
                 }
-                items.push(itemStr);
+                _push(items, itemStr);
                 i++;
             }
-            return `Set(${items.join(',')})`;
+            return `Set(${_join(items, ',')})`;
         }
         // Promise
         if (v instanceof Promise) {
@@ -133,30 +142,30 @@ export function serialize(v, depth = 0) {
             let total = 2; // "[]" length
             for (let i = 0; i < v.length; i++) {
                 if (i >= MAX_ARRAY_ITEMS) {
-                    items.push(`…(+${v.length - MAX_ARRAY_ITEMS})`);
+                    _push(items, `…(+${v.length - MAX_ARRAY_ITEMS})`);
                     break;
                 }
                 const itemStr = depth >= MAX_DEPTH ? '…' : serialize(v[i], depth + 1);
                 total += itemStr.length + 1;
                 if (total > MAX_BYTES) {
-                    items.push(`…(+${v.length - i})`);
+                    _push(items, `…(+${v.length - i})`);
                     break;
                 }
-                items.push(itemStr);
+                _push(items, itemStr);
             }
-            return `[${items.join(',')}]`;
+            return `[${_join(items, ',')}]`;
         }
         // Plain Object
         try {
-            const keys = Object.keys(v);
+            const keys = _keys(v);
             if (keys.length === 0) return '{}';
             // 排序 keys 保证输出一致性
-            keys.sort();
+            _sort(keys);
             const parts = [];
             let total = 2; // "{}" length
             for (let i = 0; i < keys.length; i++) {
                 const k = keys[i];
-                if (total >= MAX_BYTES) { parts.push('…'); break; }
+                if (total >= MAX_BYTES) { _push(parts, '…'); break; }
                 let vStr;
                 const vv = v[k];
                 const vt = typeof vv;
@@ -170,10 +179,10 @@ export function serialize(v, depth = 0) {
                 else                         vStr = String(vv);
                 const entry = `${k}:${vStr}`;
                 total += entry.length + 1;
-                parts.push(entry);
+                _push(parts, entry);
             }
-            const s = `{${parts.join(',')}}`;
-            if (s.length > MAX_BYTES) return s.slice(0, MAX_BYTES) + '…';
+            const s = `{${_join(parts, ',')}}`;
+            if (s.length > MAX_BYTES) return _strSlice(s, 0, MAX_BYTES) + '…';
             return s;
         } catch {
             return Object.prototype.toString.call(v);

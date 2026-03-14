@@ -101,6 +101,7 @@ src/
     analysisCallbackTemplate.js ← 分析插件接口模板
     DataFlowAnalyzer.js         ← 运行时 SSA 数据流分析器
     AntiDetection.js            ← 反插桩对抗工具
+    NativeProxy.js              ← 原生方法快照（防 monkey-patch 递归栈溢出）
     runtime.d.ts       ← 运行时公开 API 类型声明
   logger/              ← 统一日志系统（instrument + runtime 共用）
     logger.js          ← createLogger(domain) 工厂 + DOMAIN 常量 + debug 开关

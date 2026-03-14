@@ -61,6 +61,10 @@ export class LogManager {
      * @param {number} [options.flushIntervalMs=0]  定时 flush 间隔（ms），0 = 不启用
      * @param {number} [options.drainBatchSize=1024] 每次 drain 最多取多少条
      * @param {boolean} [options.autoClose=true]    是否自动监听 unload/SIGTERM 关闭
+     * @param {number} [options.forceSyncFlushThreshold=0]
+     *   【验证用】累计写入达到此数量时，在 log() 调用中同步触发 _doFlush()，
+     *   绕过 queueMicrotask 调度，验证主线程繁忙时数据是否能被及时发送。
+     *   0 = 禁用（默认）。注意：同步 flush 会在每次插桩回调中增加毫秒级延迟。
      */
     constructor(options = {}) {
         const {
@@ -70,6 +74,7 @@ export class LogManager {
             flushIntervalMs = 0,
             drainBatchSize  = 1024,
             autoClose       = true,
+            forceSyncFlushThreshold = 0,
         } = options;
 
         this._backends       = [...backends];
@@ -80,11 +85,16 @@ export class LogManager {
         this._closed         = false;
         this._flushTimer     = null;
 
+        // 【验证用】强制同步 flush 计数器
+        this._forceSyncFlushThreshold = forceSyncFlushThreshold > 0 ? forceSyncFlushThreshold : 0;
+        this._forceSyncCounter        = 0;
+
         // 统计
         this.stats = {
             totalLogged:  0,
             totalFlushed: 0,
             flushErrors:  0,
+            forceSyncFlushCount: 0,  // 【验证用】同步 flush 触发次数
         };
 
         log.debug('constructed', {
@@ -120,6 +130,18 @@ export class LogManager {
         if (this._closed) return;
         this._ring.push(event);
         this.stats.totalLogged++;
+
+        // 【验证用】强制同步 flush：主线程繁忙时绕过 queueMicrotask 直接发送
+        if (this._forceSyncFlushThreshold > 0) {
+            this._forceSyncCounter++;
+            if (this._forceSyncCounter >= this._forceSyncFlushThreshold) {
+                this._forceSyncCounter = 0;
+                this.stats.forceSyncFlushCount++;
+                log.debug(`[forceSyncFlush] #${this.stats.forceSyncFlushCount} triggered at totalLogged=${this.stats.totalLogged}`);
+                this._doFlushSync(); // 完全同步：无任何 await，ws.send() 在本调用栈中完成
+                return; // 已 flush，跳过下方的 scheduleAsync
+            }
+        }
 
         if (!this._flushPending && this._ring.shouldFlush) {
             this._flushPending = true;
@@ -204,6 +226,37 @@ export class LogManager {
     }
 
     // ── 内部方法 ──────────────────────────────────────────────────────────────
+
+    /**
+     * 【验证用】完全同步 flush：drain RingBuffer → 调用各后端的 writeSync()（若有）。
+     * 无任何 await，整条调用链在当前执行栈中同步完成。
+     * 对于不支持 writeSync 的后端，降级为 write()（fire-and-forget）。
+     */
+    _doFlushSync() {
+        if (this._ring.size === 0) return;
+        if (this._backends.length === 0) {
+            this._ring.drain();
+            return;
+        }
+        const batch = this._ring.drain(this._drainBatchSize);
+        if (batch.length === 0) return;
+        this.stats.totalFlushed += batch.length;
+        for (const backend of this._backends) {
+            try {
+                if (typeof backend.writeSync === 'function') {
+                    backend.writeSync(batch);  // 真同步路径
+                } else {
+                    // 降级：fire-and-forget，数据仍会发送，只是无法保证同步完成
+                    backend.write(batch).catch(err => {
+                        log.error('_doFlushSync fallback write error:', err.message);
+                    });
+                }
+            } catch (err) {
+                this.stats.flushErrors++;
+                log.error('_doFlushSync error:', err.message, err.stack ?? '');
+            }
+        }
+    }
 
     /**
      * 从 RingBuffer 取出一批事件，分发给所有后端。

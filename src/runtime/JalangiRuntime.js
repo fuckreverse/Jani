@@ -20,6 +20,13 @@
  *   class JalangiSandbox extends JalangiRuntime { ... }
  */
 
+// ── 原生方法快照（防止用户代码 monkey-patch 后递归触发钩子）──────────────────
+import {
+    $apply, $push, $pop, $slice, $map, $join, $from, $freeze, $reduce,
+    $hasOwn, $getOwnPropertyNames, $getOwnPropertySymbols, $getOwnPropertyDescriptor,
+    $strSplit,
+} from './NativeProxy.js';
+
 // ── 模块级常量 ───────────────────────────────────────────────────────────────
 
 // 在模块加载时捕获原生 eval，防止被插桩代码污染
@@ -35,7 +42,7 @@ const EVAL_ORG = eval; // eslint-disable-line no-eval
  *
  * 使用模块级私有对象而非 Symbol，确保外部代码无法伪造。
  */
-const _SHADOW_MISS = Object.freeze({ __jalangiShadowMiss: true });
+const _SHADOW_MISS = $freeze({ __jalangiShadowMiss: true });
 
 // ── 模块级无状态工具函数 ─────────────────────────────────────────────────────
 
@@ -224,7 +231,7 @@ export class JalangiRuntime {
             if (count <= 1) {
                 this.#closureFrameRefCount.delete(key);
                 this.#closureFrameSet.delete(key);
-                const parts = key.split(':');
+                const parts = $strSplit(key, ':');
                 this.#shadowClear(parts[0], parts[1]);
             } else {
                 this.#closureFrameRefCount.set(key, count - 1);
@@ -391,8 +398,8 @@ export class JalangiRuntime {
 
     // ── 私有工具方法 ─────────────────────────────────────────────────────────
 
-    #pushSwitchKey() { this.#switchKeyStack.push(this.#switchLeft); }
-    #popSwitchKey()  { this.#switchLeft = this.#switchKeyStack.pop(); }
+    #pushSwitchKey() { $push(this.#switchKeyStack, this.#switchLeft); }
+    #popSwitchKey()  { this.#switchLeft = $pop(this.#switchKeyStack); }
 
     // ── Shadow Frame 工具方法 ──────────────────────────────────────────────────
 
@@ -543,7 +550,7 @@ export class JalangiRuntime {
         this.#shadowMissCount++;
         if (this.#debugShadow) {
             const entry = { iid, defScopeId, name, callId: this.#currentCallId };
-            this.#shadowMissLog.push(entry);
+            $push(this.#shadowMissLog, entry);
             console.warn(
                 `[Jalangi] Shadow Frame MISS: name="${name}" iid=${iid} ` +
                 `defScopeId=${defScopeId} callId=${this.#currentCallId} — ` +
@@ -598,14 +605,14 @@ export class JalangiRuntime {
     }
 
     #createAndAssignNewSid() {
-        this.#sidStack.push(this.sid);
+        $push(this.#sidStack, this.sid);
         this.sid = ++this.#sidCounter;
         if (!this.smap) this.smap = {};
         this.smap[this.sid] = /** @type {import('../types.js').IidSourceMap} */ (this.iids);
     }
 
     #rollBackSid() {
-        this.sid = this.#sidStack.pop();
+        this.sid = $pop(this.#sidStack);
     }
 
     #associateSidWithFunction(f, iid) {
@@ -615,7 +622,7 @@ export class JalangiRuntime {
     }
 
     #updateSid(f) {
-        this.#sidStack.push(this.sid);
+        $push(this.#sidStack, this.sid);
         // 从 WeakMap 读取，兼容旧式 SPECIAL_PROP_SID 属性（外部代码可能直接写）
         const entry = (typeof f === 'function') ? this.#funcSidIidMap.get(f) : undefined;
         this.sid = entry ? entry.sid : getPropSafe(f, this.Constants.SPECIAL_PROP_SID);
@@ -648,10 +655,10 @@ export class JalangiRuntime {
     }
 
     #invokeFunctionDecl(base, f, args, iid) {
-        const newArgs = Array.from(args).map(v => String(new String(v)));
+        const newArgs = $map($from(args), v => String(new String(v)));
         // 注意：不调用原始 f（Function 构造函数），而是先插桩再用 eval 执行，
         // 以便对 new Function(...) 动态创建的代码也进行分析。
-        const rawCode = `(function(${newArgs.slice(0, newArgs.length - 1).join(', ')}) { ${newArgs[newArgs.length - 1]} })`;
+        const rawCode = `(function(${$join($slice(newArgs, 0, newArgs.length - 1), ', ')}) { ${newArgs[newArgs.length - 1]} })`;
         const code    = this.instrumentEvalCode(rawCode, iid, false);
         return EVAL_ORG(code);
     }
@@ -668,7 +675,7 @@ export class JalangiRuntime {
             } else if (isConstructor) {
                 return this.#callAsConstructor(f, args);
             } else {
-                return Function.prototype.apply.call(f, base, args);
+                return $apply(f, base, args);
             }
         } finally {
             this.#popSwitchKey();
@@ -799,8 +806,8 @@ export class JalangiRuntime {
 
         if (hasGetterSetter) {
             for (const offset in val) {
-                if (Object.prototype.hasOwnProperty.call(val, offset)) {
-                    const desc = Object.getOwnPropertyDescriptor(val, offset);
+                if ($hasOwn(val, offset)) {
+                    const desc = $getOwnPropertyDescriptor(val, offset);
                     if (desc !== undefined) {
                         if (typeof desc.get === 'function') this.T(iid, desc.get, 12, false, internalIid);
                         if (typeof desc.set === 'function') this.T(iid, desc.set, 12, false, internalIid);
@@ -838,14 +845,14 @@ export class JalangiRuntime {
             const capturedCallId = this.#currentCallId;
             const capturedScopeId = this.#currentFunDefScopeId;
             // 遍历所有可枚举的字符串 key 属性
-            for (const k of Object.getOwnPropertyNames(val)) {
+            for (const k of $getOwnPropertyNames(val)) {
                 const v = val[k];
                 if (typeof v === 'function' && !this.#funcClosureCallId.has(v)) {
                     this.#funcClosureCallId.set(v, capturedCallId);
                 }
             }
             // 遍历 Symbol 属性（如 [Symbol.iterator]）
-            for (const s of Object.getOwnPropertySymbols(val)) {
+            for (const s of $getOwnPropertySymbols(val)) {
                 const v = val[s];
                 if (typeof v === 'function' && !this.#funcClosureCallId.has(v)) {
                     this.#funcClosureCallId.set(v, capturedCallId);
@@ -1082,8 +1089,8 @@ export class JalangiRuntime {
             const aret = analysis.returnStmt(iid, val);
             if (aret) val = aret.result;
         }
-        this.#retStack.pop();
-        this.#retStack.push(val);
+        $pop(this.#retStack);
+        $push(this.#retStack, val);
         return (this.#lastComputedValue = val);
     }
 
@@ -1092,7 +1099,7 @@ export class JalangiRuntime {
      * @internal 内部流程协同件，不对应任何 JS 语义操作，无分析回调。
      */
     Rv() {
-        const returnVal           = this.#retStack.pop();
+        const returnVal           = $pop(this.#retStack);
         this.#wrappedExceptionVal = undefined;
         return returnVal;
     }
@@ -1100,7 +1107,7 @@ export class JalangiRuntime {
     /** 函数进入 — Function Enter（J$.Fe）。第五个参数 defScopeId 由插桩器注入。 */
     Fe(iid, f, dis, args, defScopeId) {
         this.#argIndex = 0;
-        this.#retStack.push(undefined);
+        $push(this.#retStack, undefined);
         this.#wrappedExceptionVal = undefined;
         this.#updateSid(f);
 
@@ -1143,7 +1150,7 @@ export class JalangiRuntime {
         // 分配新 callId，压栈保存旧值
         // 同时保存父帧的 defScopeId，供 Fx() 恢复
         // capturedOuterCallId：此函数在创建时外层帧的 callId（闭包绑定）
-        this.#callIdStack.push({
+        $push(this.#callIdStack, {
             callId: this.#currentCallId,
             defScopeId: this.#currentFunDefScopeId,
             capturedOuterCallId,
@@ -1162,7 +1169,7 @@ export class JalangiRuntime {
     /** 函数退出 — Function eXit（J$.Fx）。弹出调用帧，执行 finally 清理。 */
     Fx(iid) {
         let isBacktrack = false;
-        let returnVal   = this.#retStack.pop();
+        let returnVal   = $pop(this.#retStack);
         const analysis  = this.analysis;
 
         if (analysis?.functionExit) {
@@ -1179,7 +1186,7 @@ export class JalangiRuntime {
         this.#rollBackSid();
 
         // 弹出 callId 栈，恢复调用方的 callId
-        const frame = this.#callIdStack.pop();
+        const frame = $pop(this.#callIdStack);
         if (frame) {
             const leavingCallId    = this.#currentCallId;
             const leavingScopeId   = this.#currentFunDefScopeId;
@@ -1214,7 +1221,7 @@ export class JalangiRuntime {
             }
         }
 
-        if (!isBacktrack) this.#retStack.push(returnVal);
+        if (!isBacktrack) $push(this.#retStack, returnVal);
 
         // 重新抛出未捕获异常，保持异常控制流
         if (this.#wrappedExceptionVal !== undefined) {
@@ -1471,14 +1478,14 @@ export class JalangiRuntime {
                     // 尝试从全局对象读取（仅浏览器/Node 环境有效）
                     try {
                         // eslint-disable-next-line no-undef
-                        useValues.push(typeof globalThis !== 'undefined' ? globalThis[name] : undefined);
+                        $push(useValues, typeof globalThis !== 'undefined' ? globalThis[name] : undefined);
                     } catch {
-                        useValues.push(undefined);
+                        $push(useValues, undefined);
                     }
                 } else {
                     // 从 Shadow Frame 查询
                     const raw = this.#shadowLookup(scope, this.#resolveCallId(scope), name);
-                    useValues.push(raw === _SHADOW_MISS ? undefined : raw);
+                    $push(useValues, raw === _SHADOW_MISS ? undefined : raw);
                 }
             }
             analysis.endExpression(iid, val, useNames, useScopes, useValues);
@@ -1616,8 +1623,8 @@ export class JalangiRuntime {
     getShadowStats() {
         return {
             missCount:   this.#shadowMissCount,
-            missLog:     this.#shadowMissLog.slice(),   // 返回副本，防止外部修改
-            frameCount:  Array.from(this.#shadowFrameMap.values()).reduce((acc, map) => acc + map.size, 0),
+            missLog:     $slice(this.#shadowMissLog, 0),   // 返回副本，防止外部修改
+            frameCount:  $reduce($from(this.#shadowFrameMap.values()), (acc, map) => acc + map.size, 0),
             debugShadow: this.#debugShadow,
         };
     }

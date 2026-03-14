@@ -27,6 +27,8 @@
  * @module AntiDetection
  */
 
+import { $push, $defineProperty, $apply } from './NativeProxy.js';
+
 // ── Function.toString Hook ────────────────────────────────────────────────────
 
 /**
@@ -68,7 +70,7 @@ export function installToStringHook() {
     if (_toStringHookInstalled) return false;
     _toStringHookInstalled = true;
 
-    Object.defineProperty(Function.prototype, 'toString', {
+    $defineProperty(Function.prototype, 'toString', {
         value: function toStringHook() {
             const orig = _originalCodeMap.get(this);
             if (orig !== undefined) return orig;
@@ -92,7 +94,7 @@ export function uninstallToStringHook() {
     if (!_toStringHookInstalled) return false;
     _toStringHookInstalled = false;
 
-    Object.defineProperty(Function.prototype, 'toString', {
+    $defineProperty(Function.prototype, 'toString', {
         value:        _origToString,
         writable:     true,
         configurable: true,
@@ -140,7 +142,7 @@ export function detectGlobalLeaks() {
     for (const name of knownLeakNames) {
         try {
             if (typeof globalThis[name] !== 'undefined') {
-                leaks.push(name);
+                $push(leaks, name);
             }
         } catch (_) {
             // 部分环境不允许访问某些全局属性
@@ -182,7 +184,7 @@ export function createContextWrapper(callback, runtime) {
     return function wrappedCallback(...args) {
         runtime.activateContext(contextId);
         try {
-            return callback.apply(this, args);
+            return $apply(callback, this, args);
         } finally {
             // 回调执行完后重置到顶层上下文（0 = 同步）
             runtime.activateContext(0);

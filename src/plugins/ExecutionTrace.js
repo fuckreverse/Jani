@@ -69,6 +69,11 @@ import {
     fmtSeq,
     createFormatter,
 } from '../utils/traceFormatters.js';
+import {
+    $push as _push, $join as _join, $map as _map, $filter as _filter,
+    $splice as _splice, $unshift as _unshift, $pop as _pop,
+    $slice, $isArray, $keys, $strSplit, $strReplace, $strSlice, $strTrim,
+} from '../runtime/NativeProxy.js';
 
 const dbg = createLogger(DOMAIN.ANALYSIS);
 
@@ -91,28 +96,28 @@ function getLocation(sandbox, iid) {
     
     // 优先尝试扁平格式：直接用 iid 作为 key
     const directEntry = smap[iid] ?? smap[String(iid)];
-    if (Array.isArray(directEntry) && directEntry.length >= 4) {
+    if ($isArray(directEntry) && directEntry.length >= 4) {
         return directEntry;
     }
     
     // 尝试按 sid 查找（多文件场景）
     const sidEntry = smap[sandbox.sid];
-    if (sidEntry && typeof sidEntry === 'object' && !Array.isArray(sidEntry)) {
+    if (sidEntry && typeof sidEntry === 'object' && !$isArray(sidEntry)) {
         const arr = sidEntry[iid];
-        if (Array.isArray(arr) && arr.length >= 4) return arr;
+        if ($isArray(arr) && arr.length >= 4) return arr;
     }
     
     // 遍历查找：某些嵌套结构（如 smap["filename"] = { iid: [...] }）
-    for (const key of Object.keys(smap)) {
+    for (const key of $keys(smap)) {
         if (key === 'nBranches' || key === 'originalCodeFileName' || key === 'instrumentedCodeFileName') continue;
         const val = smap[key];
         if (!val || typeof val !== 'object') continue;
-        if (Array.isArray(val)) {
+        if ($isArray(val)) {
             // 扁平格式已在前面处理，这里跳过
             continue;
         }
         const arr = val[iid];
-        if (Array.isArray(arr) && arr.length >= 4) return arr;
+        if ($isArray(arr) && arr.length >= 4) return arr;
     }
     return null;
 }
@@ -131,12 +136,12 @@ function extractSource(lines, loc) {
     // JS slice end 是 exclusive，所以用 ec-1（等同于原始 Babel 的 0-indexed end.column）
     let text;
     if (el === sl && ec != null && ec > sc) {
-        text = line.slice(startCol, ec - 1);
+        text = $strSlice(line, startCol, ec - 1);
     } else {
-        text = line.slice(startCol);
+        text = $strSlice(line, startCol);
     }
     // 压缩空白并限制最大长度，避免过长输出
-    text = text.replace(/\s+/g, ' ').trim();
+    text = $strTrim($strReplace(text, /\s+/g, ' '));
     const MAX_LEN = 48;
     if (text.length > MAX_LEN) {
         text = text.substring(0, MAX_LEN - 1) + '…';
@@ -152,7 +157,7 @@ function extractSource(lines, loc) {
  */
 function _shortBase(base) {
     if (base === null || base === undefined) return serialize(base);
-    if (Array.isArray(base)) return `[…${base.length}]`;
+    if ($isArray(base)) return `[…${base.length}]`;
     if (typeof base === 'object') return '{…}';
     return serialize(base);
 }
@@ -182,13 +187,16 @@ export class ExecutionTraceAnalysis {
      * @param {string}  [options.dbName='jalangi-traces']
      * @param {string}  [options.storeName='execution-trace']
      * @param {string}  [options.wsUrl]
+     * @param {boolean} [options.wsSab=false]     使用 SharedArrayBuffer 模式（需 COOP/COEP header）
+     * @param {boolean} [options.wsWorker=true]   将 WebSocket 移到 Worker 线程
+     * @param {string}  [options.wsFormat]        消息格式 'binary'|'ndjson'
      * @param {string|false} [options.nodeFile='jalangi-trace.ndjson']
      * @param {boolean} [options.nodeConsole=false]
      */
     constructor(sandbox, sourceCode, options = {}) {
         this._sb    = sandbox;
         this._seq   = 0;
-        this._lines = sourceCode ? sourceCode.split(/\r\n|\r|\n/) : null;
+        this._lines = sourceCode ? $strSplit(sourceCode, /\r\n|\r|\n/) : null;
         this._stack     = [];
         this._callStack = [];
         this._fmt       = createFormatter(OUTPUT_FORMAT);
@@ -206,15 +214,25 @@ export class ExecutionTraceAnalysis {
         if (options.logger instanceof TraceLogger) {
             this._logger = options.logger;
         } else {
-            const { useIdb = false, dbName, storeName, wsUrl, nodeFile, nodeConsole } = options;
+            const {
+                useIdb = false, dbName, storeName, wsUrl,
+                wsSab, wsWorker, wsFormat,
+                nodeFile, nodeConsole,
+                logManagerOptions,
+            } = options;
             this._logger = new TraceLogger({
                 useIdb,
                 ...(dbName      != null && { dbName }),
                 ...(storeName   != null && { storeName }),
                 ...(wsUrl       != null && { wsUrl }),
+                ...(wsSab       !== undefined && { wsSab }),
+                ...(wsWorker    !== undefined && { wsWorker }),
+                ...(wsFormat    !== undefined && { wsFormat }),
                 ...(nodeFile    !== undefined && { nodeFile }),
                 ...(nodeConsole !== undefined && { nodeConsole }),
                 keyToConsole: true,
+                // 透传 LogManager 选项（如验证用的 forceSyncFlushThreshold）
+                ...(logManagerOptions != null && { logManagerOptions }),
             });
         }
 
@@ -263,19 +281,19 @@ export class ExecutionTraceAnalysis {
             ? `.${name}(${args.length} args)`
             : `${prefix}${name}(${args.length} args)`;
 
-        const kvParts = args.map((a, i) => `arg${i}=${serialize(a)}`);
-        if (isMethod && base !== undefined) kvParts.unshift(`this=${serialize(base)}`);
+        const kvParts = _map(args, (a, i) => `arg${i}=${serialize(a)}`);
+        if (isMethod && base !== undefined) _unshift(kvParts, `this=${serialize(base)}`);
         // 限制 kvStr 总长度，防止大对象导致行过长
         const MAX_KV = 120;
-        let kvStr = kvParts.join(', ');
-        if (kvStr.length > MAX_KV) kvStr = kvStr.slice(0, MAX_KV - 1) + '…';
+        let kvStr = _join(kvParts, ', ');
+        if (kvStr.length > MAX_KV) kvStr = $strSlice(kvStr, 0, MAX_KV - 1) + '…';
 
         const { rc } = this._loc(iid);
 
         if (this._flat) {
             // 平铺模式：立即输出 CALL 行，只用轻量元数据栈（不缓冲 doneLines）
             const callMeta = { rc, depth: 1, desc, kvStr, name };
-            this._callStack.push({ callMeta });
+            _push(this._callStack, { callMeta });
             const line = this._fmt.callLine(++this._seq, rc, 1, desc, kvStr);
             this._emitRaw(line);
             return { f, base, args, skip: false };
@@ -290,8 +308,8 @@ export class ExecutionTraceAnalysis {
         }
 
         const callMeta = { rc, depth: parentDepth + 1, desc, kvStr, name };
-        this._stack.push(new Frame(parentDepth + 1));
-        this._callStack.push({ callMeta });
+        _push(this._stack, new Frame(parentDepth + 1));
+        _push(this._callStack, { callMeta });
 
         return { f, base, args, skip: false };
     }
@@ -304,7 +322,7 @@ export class ExecutionTraceAnalysis {
                 dbg.error(`call(flat): callStack underflow — fn=${name} iid=${iid}`);
                 return { result };
             }
-            const callInfo = this._callStack.pop();
+            const callInfo = _pop(this._callStack);
             const name   = callInfo.callMeta?.name ?? (f?.name || '(anonymous)');
             const { rc } = this._loc(iid);
             const line   = this._fmt.retLine(++this._seq, rc, 1, name, serialize(result));
@@ -322,8 +340,8 @@ export class ExecutionTraceAnalysis {
             return { result };
         }
 
-        const frame    = this._stack.pop();
-        const callInfo = this._callStack.pop();
+        const frame    = _pop(this._stack);
+        const callInfo = _pop(this._callStack);
         const { callMeta } = callInfo;
 
         const name    = f?.name || '(anonymous)';
@@ -341,7 +359,7 @@ export class ExecutionTraceAnalysis {
                 // 异步调用完成，少量 trace 可能达不到 RingBuffer 自动 flush 阈值，主动调度
                 this._logger.scheduleFlush?.();
             } else {
-                parent.doneLines.push({ type: 'call', callMeta, innerLines, retMeta });
+                _push(parent.doneLines, { type: 'call', callMeta, innerLines, retMeta });
             }
         } else {
             this._emitFormattedCall(callMeta, innerLines, retMeta);
@@ -375,7 +393,7 @@ export class ExecutionTraceAnalysis {
             // 优先按当前 sid 查；回退按 instrumentedFileName 查
             const entry = this._sb.smap[sid] ?? this._sb.smap[instrumentedFileName];
             if (entry?.code) {
-                this._lines = entry.code.split(/\r\n|\r|\n/);
+                this._lines = $strSplit(entry.code, /\r\n|\r|\n/);
                 dbg.debug(`scriptEnter: loaded ${this._lines.length} source lines from smap (sid=${sid})`);
             }
         }
@@ -384,8 +402,8 @@ export class ExecutionTraceAnalysis {
         this._emitKeyLine(`▶ script: ${originalFileName}`);
         this._key('info', `▶ script: ${originalFileName}`);
         if (!this._flat) {
-            this._stack.push(new Frame(0));
-            this._callStack.push({ callMeta: null });
+            _push(this._stack, new Frame(0));
+            _push(this._callStack, { callMeta: null });
         }
     }
 
@@ -396,8 +414,8 @@ export class ExecutionTraceAnalysis {
             } else {
                 const frame = this._top();
                 this._emitItems(frame.doneLines);
-                this._stack.pop();
-                this._callStack.pop();
+                _pop(this._stack);
+                _pop(this._callStack);
             }
         }
         const exitText = wrappedExceptionVal
@@ -425,14 +443,14 @@ export class ExecutionTraceAnalysis {
             if (topCall && !topCall._feCovered) {
                 // 已有 callPre 对应的记录，标记为已覆盖，不再重复 emit CALL
                 topCall._feCovered = true;
-                this._flatFnStack.push({ _coveredByCallPre: true });
+                _push(this._flatFnStack, { _coveredByCallPre: true });
             } else {
                 // 无 callPre：native 直接调用（脚本退出后），emit CALL 行
                 const name = f?.name || '(anonymous)';
                 const { rc } = this._loc(iid);
                 const callMeta = { rc, depth: 1, desc: `${name}(${args?.length ?? 0} args)`, kvStr: '', name };
-                this._callStack.push({ callMeta, _directFe: true });
-                this._flatFnStack.push({ _coveredByCallPre: false });
+                _push(this._callStack, { callMeta, _directFe: true });
+                _push(this._flatFnStack, { _coveredByCallPre: false });
                 const line = this._fmt.callLine(++this._seq, rc, 1, callMeta.desc, '');
                 this._emitRaw(line);
             }
@@ -452,8 +470,8 @@ export class ExecutionTraceAnalysis {
             const frame = new Frame(1);
             frame._isSyntheticEntry = true;
             frame._feFrDepth = 0;
-            this._stack.push(frame);
-            this._callStack.push({ callMeta });
+            _push(this._stack, frame);
+            _push(this._callStack, { callMeta });
         } else {
             // 栈不为空：只有 _stack 顶层就是合成帧时，才增加其嵌套深度计数。
             // 如果合成帧之上还有 callPre 推的帧，则这次 Fe 属于那些帧内部，
@@ -476,11 +494,11 @@ export class ExecutionTraceAnalysis {
             }
 
             if (!this._flatFnStack) this._flatFnStack = [];
-            const fnEntry = this._flatFnStack.pop();
+            const fnEntry = _pop(this._flatFnStack);
             if (fnEntry && !fnEntry._coveredByCallPre) {
                 // 对应 _directFe 路径（无 callPre），需要输出 RETN 行
                 if (this._callStack.length > 0) {
-                    const callInfo = this._callStack.pop();
+                    const callInfo = _pop(this._callStack);
                     const name   = callInfo.callMeta?.name ?? '(anonymous)';
                     const { rc } = this._loc(iid);
                     const line   = this._fmt.retLine(++this._seq, rc, 1, name, serialize(returnVal));
@@ -498,7 +516,7 @@ export class ExecutionTraceAnalysis {
             const { rc } = this._loc(iid);
             const frame  = this._top();
             const depth = frame?.depth ?? 0;
-            frame?.doneLines.push({ type: 'info', rc, depth, srcText: '✗ throw', kv: `exception=${exStr}` });
+            if (frame) _push(frame.doneLines, { type: 'info', rc, depth, srcText: '✗ throw', kv: `exception=${exStr}` });
             this._key('warn', `[${rc}] ✗ throw ; exception=${exStr}`);
         }
 
@@ -510,8 +528,8 @@ export class ExecutionTraceAnalysis {
                 top._feFrDepth--;
             } else {
                 // _feFrDepth === 0：合成帧对应函数本身退出了
-                const frame    = this._stack.pop();
-                const callInfo = this._callStack.pop();
+                const frame    = _pop(this._stack);
+                const callInfo = _pop(this._callStack);
                 const { callMeta } = callInfo;
                 const { rc }  = this._loc(iid);
                 const retMeta = {
@@ -528,7 +546,7 @@ export class ExecutionTraceAnalysis {
                     // 主动调度一次 flush 确保数据及时写入 IDB / 文件后端
                     this._logger.scheduleFlush?.();
                 } else if (parent) {
-                    parent.doneLines.push({ type: 'call', callMeta, innerLines: frame.doneLines, retMeta });
+                    _push(parent.doneLines, { type: 'call', callMeta, innerLines: frame.doneLines, retMeta });
                 } else {
                     this._emitFormattedCall(callMeta, frame.doneLines, retMeta);
                     // 同上，栈外直接 emit 时也调度 flush
@@ -550,7 +568,7 @@ export class ExecutionTraceAnalysis {
         if (this._flat) {
             // flat 模式：暂存到 _pendingKvs，由 endExpression 统一合并输出
             // 注意：不存 rc/srcText（会用 Xe 的 iid 位置，更准确）
-            this._pendingKvs.push({ name, kv: `${name}=${serialize(val)}` });
+            _push(this._pendingKvs, { name, kv: `${name}=${serialize(val)}` });
             return { result: val };
         }
         // 非 flat 模式（tree/block/pipe）：需要记录每条写入的位置信息
@@ -558,7 +576,7 @@ export class ExecutionTraceAnalysis {
         const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
         const frame = this._top();
         if (!frame) return { result: val };
-        frame.doneLines.push({ type: 'info', rc, depth: frame.depth, srcText, kv: `${name}=${serialize(val)}` });
+        _push(frame.doneLines, { type: 'info', rc, depth: frame.depth, srcText, kv: `${name}=${serialize(val)}` });
         return { result: val };
     }
 
@@ -572,14 +590,14 @@ export class ExecutionTraceAnalysis {
     returnStmt(iid, val) {
         if (this._flat) {
             // flat 模式：暂存到 _pendingKvs，由 endExpression 统一合并输出。位置由 Xe iid 提供
-            this._pendingKvs.push({ kv: `(return)=${serialize(val)}` });
+            _push(this._pendingKvs, { kv: `(return)=${serialize(val)}` });
             return { result: val };
         }
         const { rc, loc } = this._loc(iid);
         const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
         const frame = this._top();
         if (!frame) return { result: val };
-        frame.doneLines.push({ type: 'info', rc, depth: frame.depth, srcText, kv: `(return)=${serialize(val)}` });
+        _push(frame.doneLines, { type: 'info', rc, depth: frame.depth, srcText, kv: `(return)=${serialize(val)}` });
         return { result: val };
     }
 
@@ -587,14 +605,14 @@ export class ExecutionTraceAnalysis {
         if (this._flat) {
             // flat 模式：暂存到 _pendingKvs，由 endExpression 统一合并输出。位置由 Xe iid 提供
             // （throw 语句也会触发 endExpression，由插桩器保证）
-            this._pendingKvs.push({ kv: `(throw)=${serialize(val)}` });
+            _push(this._pendingKvs, { kv: `(throw)=${serialize(val)}` });
             return { result: val };
         }
         const { rc, loc } = this._loc(iid);
         const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
         const frame = this._top();
         if (!frame) return { result: val };
-        frame.doneLines.push({ type: 'info', rc, depth: frame.depth, srcText, kv: `(throw)=${serialize(val)}` });
+        _push(frame.doneLines, { type: 'info', rc, depth: frame.depth, srcText, kv: `(throw)=${serialize(val)}` });
         return { result: val };
     }
 
@@ -620,7 +638,7 @@ export class ExecutionTraceAnalysis {
                 const baseStr = _shortBase(base);
                 const offsetStr = isComputed ? `[${serialize(offset)}]` : `.${String(offset)}`;
                 const key = `${baseStr}${offsetStr}`;
-                this._pendingFields.push({ kv: `${key}=${serialize(val)}` });
+                _push(this._pendingFields, { kv: `${key}=${serialize(val)}` });
             }
         }
         return { result: val };
@@ -642,7 +660,7 @@ export class ExecutionTraceAnalysis {
             const baseStr = _shortBase(base);
             const offsetStr = isComputed ? `[${serialize(offset)}]` : `.${String(offset)}`;
             const key = `${baseStr}${offsetStr}`;
-            this._pendingFields.push({ kv: `${key}=${serialize(val)}` });
+            _push(this._pendingFields, { kv: `${key}=${serialize(val)}` });
         }
         return { result: val };
     }
@@ -679,7 +697,7 @@ export class ExecutionTraceAnalysis {
                 for (let i = 0; i < useNames.length; i++) {
                     const name = useNames[i];
                     if (builtins.has(name)) continue;
-                    this._pendingReads.push({ name, kv: `${name}=${serialize(useValues[i])}` });
+                    _push(this._pendingReads, { name, kv: `${name}=${serialize(useValues[i])}` });
                 }
             }
 
@@ -699,13 +717,13 @@ export class ExecutionTraceAnalysis {
             }
 
             // 过滤掉已被写入的读取变量（因为写入的值是执行后的，更准确）
-            const filteredReads = reads.filter(r => !writtenNames.has(r.name));
+            const filteredReads = _filter(reads, r => !writtenNames.has(r.name));
 
             // 合并：writes 在前，filteredReads 在后，fields 最后
             const allKvs = [...writes, ...filteredReads, ...fields];
 
             if (allKvs.length > 0) {
-                const kvStr = allKvs.map(p => p.kv).join(', ');
+                const kvStr = _join(_map(allKvs, p => p.kv), ', ');
                 const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, kvStr);
                 this._emitRaw(line);
             } else {
@@ -719,7 +737,7 @@ export class ExecutionTraceAnalysis {
         const frame = this._top();
         if (!frame) return;
 
-        const items = frame.doneLines.splice(0);
+        const items = _splice(frame.doneLines, 0, frame.doneLines.length);
 
         if (items.length === 0) {
             // 纯副作用/纯读语句：只记录源码位置行
@@ -730,7 +748,7 @@ export class ExecutionTraceAnalysis {
                 const line = this._fmt.infoLine(++this._seq, rc, frame.depth, srcText, '');
                 this._emitRaw(line);
             } else {
-                this._stack[this._stack.length - 1].doneLines.push(meta);
+                _push(this._stack[this._stack.length - 1].doneLines, meta);
             }
             return;
         }
@@ -739,7 +757,7 @@ export class ExecutionTraceAnalysis {
             this._emitItems(items);
         } else {
             for (const item of items) {
-                this._stack[this._stack.length - 1].doneLines.push(item);
+                _push(this._stack[this._stack.length - 1].doneLines, item);
             }
         }
     }
@@ -767,8 +785,8 @@ export class ExecutionTraceAnalysis {
         const frame = new Frame(0);
         frame._isAsyncRoot     = true;
         frame._asyncPendingCalls = 0;
-        this._stack.push(frame);
-        this._callStack.push({ callMeta: null, _isAsyncRoot: true });
+        _push(this._stack, frame);
+        _push(this._callStack, { callMeta: null, _isAsyncRoot: true });
         dbg.debug(`[async] pushed async root frame at ${rc}`);
     }
 
@@ -781,8 +799,8 @@ export class ExecutionTraceAnalysis {
         if (!top?._isAsyncRoot) return;
         // 如果栈顶就是异步根帧（即其上方已无其他帧），弹出
         if (this._stack.length === 1) {
-            this._stack.pop();
-            this._callStack.pop();
+            _pop(this._stack);
+            _pop(this._callStack);
             dbg.debug('[async] async root frame flushed');
         }
     }
@@ -797,8 +815,8 @@ export class ExecutionTraceAnalysis {
                 // 异步根帧：脚本主体结束时可能仍有异步调用未回来，不强制弹出
                 break;
             }
-            const frame = this._stack.pop();
-            this._callStack.pop();
+            const frame = _pop(this._stack);
+            _pop(this._callStack);
             this._emitItems(frame.doneLines);
         }
 
@@ -819,7 +837,7 @@ export class ExecutionTraceAnalysis {
         // 将栈上所有异步根帧中已积累的 doneLines emit 出去
         for (const frame of this._stack) {
             if (frame._isAsyncRoot && frame.doneLines.length > 0) {
-                const items = frame.doneLines.splice(0);
+                const items = _splice(frame.doneLines, 0, frame.doneLines.length);
                 this._emitItems(items);
             }
         }
@@ -835,8 +853,8 @@ export class ExecutionTraceAnalysis {
     async close() {
         // 把还在栈上的所有帧的内容 emit 出去
         while (this._stack.length > 0) {
-            const frame = this._stack.pop();
-            this._callStack.pop();
+            const frame = _pop(this._stack);
+            _pop(this._callStack);
             this._emitItems(frame.doneLines);
         }
 
@@ -850,5 +868,10 @@ export class ExecutionTraceAnalysis {
         }
     }
 
-    onReady(cb) { cb(); }
+    onReady(cb) {
+        // 等待日志后端（IDB Worker / WebSocket）就绪后再回调，
+        // 避免 Node.js 侧在后端 ready 前就开始执行插桩代码产生大量 pre-init 积压。
+        // 无论成功还是失败都回调，避免死锁。
+        this._loggerReady.then(() => cb(), () => cb());
+    }
 }

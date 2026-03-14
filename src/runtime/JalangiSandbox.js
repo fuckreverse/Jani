@@ -34,6 +34,7 @@ import {
 } from '../Constants.js';
 import { JalangiRuntime } from './JalangiRuntime.js';
 import { HookDispatcher } from './HookDispatcher.js';
+import { $strIncludes, $strSplit } from './NativeProxy.js';
 
 /**
  * Jalangi2 完整沙盒。
@@ -152,8 +153,8 @@ export class JalangiSandbox extends JalangiRuntime {
 
         let gid = sid;
 
-        if (typeof sid === 'string' && sid.includes(':')) {
-            const parts = sid.split(':');
+        if (typeof sid === 'string' && $strIncludes(sid, ':')) {
+            const parts = $strSplit(sid, ':');
             iid = parseInt(parts[1]);
             sid = parseInt(parts[0]);
         } else {

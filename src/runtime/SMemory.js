@@ -18,6 +18,11 @@
  *   // 或者直接加载本文件（末尾已自动执行上述操作）
  */
 
+import {
+    $push, $pop,
+    $create, $defineProperty, $getOwnPropertyDescriptor, $getPrototypeOf,
+} from './NativeProxy.js';
+
 // ─── SMemory：影子内存服务 ────────────────────────────────────────────────────
 
 /**
@@ -47,12 +52,12 @@ export class SMemory {
         let scriptCount = 0;
         const HOP       = Constants.HOP;
 
-        let frame      = Object.create(null);
+        let frame      = $create(null);
         const frameStack = [frame];
 
         // Node.js 环境：为 process.env 建立影子对象
         const processEnv  = !Constants.isBrowser && typeof process !== 'undefined' && process?.env;
-        const shadowEnv   = Object.create(null);
+        const shadowEnv   = $create(null);
         if (processEnv) {
             shadowEnv[SPECIAL_PROP_SOBJECT] = objectId;
             shadowEnv[SPECIAL_PROP_ACTUAL]  = process.env;
@@ -65,13 +70,13 @@ export class SMemory {
             const oldObj = obj;
             while (obj !== null) {
                 if (typeof obj !== 'object' && typeof obj !== 'function') return false;
-                const desc = Object.getOwnPropertyDescriptor(obj, prop);
+                const desc = $getOwnPropertyDescriptor(obj, prop);
                 if (desc !== undefined) {
                     if (isGetField && typeof desc.get === 'function')  return { owner: obj, isProperty: false };
                     if (!isGetField && typeof desc.set === 'function') return { owner: obj, isProperty: false };
                 }
                 if (isGetField && HOP(obj, prop)) return { owner: obj, isProperty: true };
-                obj = Object.getPrototypeOf(obj);
+                obj = $getPrototypeOf(obj);
             }
             return isGetField
                 ? { owner: undefined, isProperty: true }
@@ -81,10 +86,10 @@ export class SMemory {
         function createShadowObject(val) {
             const type = typeof val;
             if ((type === 'object' || type === 'function') && val !== null && !HOP(val, SPECIAL_PROP_SOBJECT)) {
-                Object.defineProperty(val, SPECIAL_PROP_SOBJECT, { enumerable: false, writable: true, configurable: true });
-                Object.defineProperty(val, SPECIAL_PROP_ACTUAL,  { enumerable: false, writable: true, configurable: true });
+                $defineProperty(val, SPECIAL_PROP_SOBJECT, { enumerable: false, writable: true, configurable: true });
+                $defineProperty(val, SPECIAL_PROP_ACTUAL,  { enumerable: false, writable: true, configurable: true });
                 try {
-                    val[SPECIAL_PROP_SOBJECT] = Object.create(null);
+                    val[SPECIAL_PROP_SOBJECT] = $create(null);
                     val[SPECIAL_PROP_SOBJECT][SPECIAL_PROP_SOBJECT] = objectId;
                     val[SPECIAL_PROP_SOBJECT][SPECIAL_PROP_ACTUAL]  = val;
                     objectId += 2;
@@ -119,7 +124,7 @@ export class SMemory {
         this.getShadowFrame = (name) => {
             const f   = this.getFrame(name);
             const ret = this.getShadowObjectOfObject(f);
-            Object.defineProperty(ret, SPECIAL_PROP_ACTUAL, { enumerable: false, writable: true, configurable: true });
+            $defineProperty(ret, SPECIAL_PROP_ACTUAL, { enumerable: false, writable: true, configurable: true });
             ret[SPECIAL_PROP_ACTUAL] = f[SPECIAL_PROP_ACTUAL];
             return ret;
         };
@@ -176,7 +181,7 @@ export class SMemory {
         /** 将函数 f 与当前活动帧关联（用于跨帧追踪闭包）。 */
         this.defineFunction = (f) => {
             if (typeof f !== 'function') return;
-            Object.defineProperty(f, SPECIAL_PROP_FRAME, { enumerable: false, writable: true, configurable: true });
+            $defineProperty(f, SPECIAL_PROP_FRAME, { enumerable: false, writable: true, configurable: true });
             f[SPECIAL_PROP_FRAME] = frame;
         };
 
@@ -187,16 +192,16 @@ export class SMemory {
 
         /** 函数调用时压入新帧。 */
         this.functionEnter = (f) => {
-            frameStack.push(frame = Object.create(null));
-            Object.defineProperty(frame, SPECIAL_PROP_FRAME,  { enumerable: false, writable: true, configurable: true });
-            Object.defineProperty(frame, SPECIAL_PROP_ACTUAL, { enumerable: false, writable: true, configurable: true });
+            $push(frameStack, frame = $create(null));
+            $defineProperty(frame, SPECIAL_PROP_FRAME,  { enumerable: false, writable: true, configurable: true });
+            $defineProperty(frame, SPECIAL_PROP_ACTUAL, { enumerable: false, writable: true, configurable: true });
             frame[SPECIAL_PROP_FRAME]  = f[SPECIAL_PROP_FRAME];
             frame[SPECIAL_PROP_ACTUAL] = f;
         };
 
         /** 函数返回时弹出帧。 */
         this.functionReturn = () => {
-            frameStack.pop();
+            $pop(frameStack);
             frame = frameStack[frameStack.length - 1];
         };
 
@@ -210,21 +215,21 @@ export class SMemory {
                     if (Constants.isBrowser) {
                         frame = frameStack[0];
                     } else {
-                        frameStack.push(frame = Object.create(null));
+                        $push(frameStack, frame = $create(null));
                         frame[SPECIAL_PROP_FRAME] = frameStack[0];
                     }
-                    isEvalScript.push(false);
+                    $push(isEvalScript, false);
                 } else {
-                    isEvalScript.push(true);
+                    $push(isEvalScript, true);
                 }
             }
         };
 
         /** 脚本退出时恢复帧栈。 */
         this.scriptReturn = () => {
-            if (scriptCount > 0 && !isEvalScript.pop()) {
+            if (scriptCount > 0 && !$pop(isEvalScript)) {
                 if (!Constants.isBrowser) {
-                    frameStack.pop();
+                    $pop(frameStack);
                 }
                 frame = frameStack[frameStack.length - 1];
             }

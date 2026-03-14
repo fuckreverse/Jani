@@ -42,6 +42,14 @@
  *   --store-name <n>     ObjectStore 名（默认 execution-trace）
  *   --no-idb             不启用 IndexedDB（仅 console 输出 trace）
  *   --minify             压缩运行时 bundle（rollup + terser）
+ *   --deferred-load      延迟加载模式（需配合 --split-runtime）：
+ *                          运行时 IIFE 等待后端（IDB/WS）ready 后再动态加载插桩代码，
+ *                          消除 pre-init 缓冲队列内存积压。
+ *                          script 模式：注入动态 <script> 节点
+ *                          ESM 模式   ：注入 import() 调用
+ *                          文件名翻转：运行时输出到原始文件名（替换原始文件），
+ *                                      插桩代码输出到 _jalangi_.js 后缀（由运行时自动加载）
+ *                          HTML 无需修改，直接用运行时文件覆盖原始文件即可
  *
  * ──────────────────────────────────────────────────────────────────────────────
  * run 子命令选项：
@@ -168,7 +176,14 @@ function printHelp(sub = null) {
   --no-idb             不启用 IndexedDB（仅 console 输出 trace）
   --ws-url <url>       WebSocket 服务地址（如 ws://127.0.0.1:9229/trace）
                          不传则禁用 WS；可与 --no-idb 同时使用（纯 WS 模式）
+  --ws-sab             开启 SharedArrayBuffer 环形缓冲区模式（需 COOP/COEP header）
+                         主线程通过 Atomics.store 写入共享内存，Worker 端 Atomics.waitAsync 处理，
+                         彻底解耦主线程与网络发送，适合超高频 trace 场景。
+                         不满足时自动降级为 Worker postMessage 模式。
   --minify             压缩运行时 bundle（rollup + terser）
+  --sync-flush-threshold <N>
+                       每累计 N 条 trace 事件，在插桩回调中同步调用 ws.send()，
+                         绕过 queueMicrotask 调度（验证用）。0 = 禁用（默认）
 
 示例：
   node bin/jalangi.mjs instrument src/app.js
@@ -274,6 +289,7 @@ function parseInstrumentOpts(argv) {
         noSourceMap:   false,
         vlcqSourceMap: false,
         splitRuntime:  false,
+        deferredLoad:  false,
         dryRun:        false,
         analyses:      [],      // --analysis 插件路径（用于按需插桩 Config 推导）
         // 浏览器专属
@@ -281,7 +297,9 @@ function parseInstrumentOpts(argv) {
         storeName:     'execution-trace',
         useIdb:        true,
         wsUrl:         null,
+        wsSab:         false,    // --ws-sab：使用 SharedArrayBuffer 环形缓冲区模式（需 COOP/COEP header）
         minify:        false,
+        syncFlushThreshold: 0,   // --sync-flush-threshold <N>：每 N 条同步发送一次（验证用）
         // 输入文件
         file:          null,
     };
@@ -295,13 +313,16 @@ function parseInstrumentOpts(argv) {
             case '--no-source-map':     opts.noSourceMap   = true;      break;
             case '--vlcq-source-map':   opts.vlcqSourceMap = true;      break;
             case '--split-runtime':     opts.splitRuntime  = true;      break;
+            case '--deferred-load':     opts.deferredLoad  = true;      break;
             case '--dry-run':           opts.dryRun        = true;      break;
             case '--analysis':          opts.analyses.push(resolve(argv[++i])); break;
             case '--db-name':           opts.dbName        = argv[++i]; break;
             case '--store-name':        opts.storeName     = argv[++i]; break;
             case '--no-idb':            opts.useIdb        = false;     break;
             case '--ws-url':            opts.wsUrl         = argv[++i]; break;
+            case '--ws-sab':            opts.wsSab         = true;      break;
             case '--minify':            opts.minify        = true;      break;
+            case '--sync-flush-threshold': opts.syncFlushThreshold = parseInt(argv[++i], 10) || 0; break;
             default:
                 if (a.startsWith('--')) { log.error(`未知选项: ${a}`); process.exit(1); }
                 if (opts.file)          { log.error('只支持单个输入文件。'); process.exit(1); }
@@ -465,14 +486,66 @@ async function buildBrowserRuntimeBundle(opts) {
     const { rollup }              = await import('rollup');
     const { default: terser }     = await import('@rollup/plugin-terser');
 
-    const doneReadWorker = log.phase('读取 idb-worker.js');
+    const doneReadWorker = log.phase('读取 idb-worker.js + ws-worker.js + ws-worker-sab.js');
     const idbWorkerSrc = readFileSync(
         SRC('logger', 'workers', 'idb-worker.js'), 'utf8'
     ).replace(/^\/\/ JALANGI DO NOT INSTRUMENT\s*\n?/m, '').trim();
-    doneReadWorker(`(${(idbWorkerSrc.length / 1024).toFixed(1)} KB)`);
+    const wsWorkerSrc = readFileSync(
+        SRC('logger', 'workers', 'ws-worker.js'), 'utf8'
+    ).replace(/^\/\/ JALANGI DO NOT INSTRUMENT\s*\n?/m, '').trim();
+    const wsSabWorkerSrc = readFileSync(
+        SRC('logger', 'workers', 'ws-worker-sab.js'), 'utf8'
+    ).replace(/^\/\/ JALANGI DO NOT INSTRUMENT\s*\n?/m, '').trim();
+    doneReadWorker(`idb=${(idbWorkerSrc.length / 1024).toFixed(1)}KB ws=${(wsWorkerSrc.length / 1024).toFixed(1)}KB wsSab=${(wsSabWorkerSrc.length / 1024).toFixed(1)}KB`);
 
     const ENTRY_ID   = '\0jalangi-entry';
     const sandboxVar = opts.sandboxVar;
+
+    // 延迟加载模式：需要持有 analysis 实例引用以访问 _loggerReady Promise
+    const useDeferred = opts.deferredLoad === true;
+    const sourceType  = opts.sourceType ?? 'script';  // 'script' | 'module'
+
+    // 根据 sourceType 生成不同的加载函数体
+    // script 模式：动态插入 <script> 节点（同步执行语义）
+    // module 模式：import() 动态导入（模块作用域，自动 defer）
+    const loadFnBody = sourceType === 'module'
+        ? `__jalangiLoggerReady
+        /* eslint-disable-next-line */
+        .then(function() { return import(/* @vite-ignore */ /* webpackIgnore: true */ src); })
+        .catch(function(err) { console.error('[jalangi] 插桩代码加载失败:', src, err); });`
+        : `__jalangiLoggerReady.then(function() {
+        var s = document.createElement('script');
+        s.src = src;
+        s.onerror = function(e) { console.error('[jalangi] 插桩代码加载失败:', src, e); };
+        document.head.appendChild(s);
+    }, function(err) {
+        console.warn('[jalangi] 后端初始化失败，仍尝试加载插桩代码:', err);
+        var s = document.createElement('script');
+        s.src = src;
+        document.head.appendChild(s);
+    });`;
+
+    // instrRelPath 非空时：将插桩文件名硬编码进运行时，IIFE 加载完毕后自动触发，无需 onload
+    const autoLoad = (useDeferred && opts.instrRelPath)
+        ? `\n// 自动触发延迟加载（文件名已在构建时硬编码）\n__jalangiLoadInstrumented(${JSON.stringify(opts.instrRelPath)});\n`
+        : '';
+
+    const deferredSnippet = useDeferred ? `
+
+// ── 延迟加载（--deferred-load）────────────────────────────────────────────────
+// 持有后端 ready Promise，供 __jalangiLoadInstrumented 使用。
+// __jalangiAnalysis 是局部变量，在 IIFE 作用域内可见；
+// _loggerReady 是 TraceLogger.init() 返回的 Promise。
+var __jalangiLoggerReady = __jalangiAnalysis._loggerReady ?? Promise.resolve();
+
+/**
+ * 等待日志后端（IDB Worker / WebSocket）就绪后，再动态加载插桩代码。
+ * @param {string} src  插桩代码的 URL（相对或绝对路径均可）
+ */
+globalThis.__jalangiLoadInstrumented = function(src) {
+    ${loadFnBody}
+};
+${autoLoad}` : '';
 
     const entryCode = `
 import { JalangiSandbox } from '${SRC('runtime', 'JalangiSandbox.js')}';
@@ -480,21 +553,37 @@ import { ExecutionTraceAnalysis } from '${SRC('plugins', 'ExecutionTrace.js')}';
 
 var ${sandboxVar} = globalThis.${sandboxVar} = new JalangiSandbox();
 
-${sandboxVar}.analysis.use(new ExecutionTraceAnalysis(${sandboxVar}, null, {
+${(() => {
+    const syncOpt = opts.syncFlushThreshold > 0
+        ? `logManagerOptions: { forceSyncFlushThreshold: ${opts.syncFlushThreshold} },`
+        : '// syncFlushThreshold not configured';
+    const analysisOpts = `{
     useIdb:    ${opts.useIdb},
     dbName:    ${JSON.stringify(opts.dbName)},
     storeName: ${JSON.stringify(opts.storeName)},
     ${opts.wsUrl ? `wsUrl: ${JSON.stringify(opts.wsUrl)},` : '// wsUrl not configured'}
-}));
+    ${opts.wsUrl ? "wsFormat: 'ndjson'," : '// wsFormat not configured'}
+    ${opts.wsSab ? 'wsSab: true,' : '// wsSab not configured'}
+    ${syncOpt}
+}`;
+    return useDeferred
+        ? `var __jalangiAnalysis = new ExecutionTraceAnalysis(${sandboxVar}, null, ${analysisOpts});
+${sandboxVar}.analysis.use(__jalangiAnalysis);`
+        : `${sandboxVar}.analysis.use(new ExecutionTraceAnalysis(${sandboxVar}, null, ${analysisOpts}));`;
+})()}
+${deferredSnippet}
 `;
 
     const DYNAMIC_IMPORT_MAP = {
-        './backends/IdbWorkerBackend.js':  SRC('logger', 'backends', 'IdbWorkerBackend.js'),
-        './LogManager.js':                 SRC('logger', 'LogManager.js'),
-        '../plugins/ExecutionTrace.js':    '\0stub:ExecutionTrace',
-        './backends/WsBackend.js':         opts.wsUrl ? SRC('logger', 'backends', 'WsBackend.js') : '\0stub:WsBackend',
-        './backends/NodeStreamBackend.js': '\0stub:NodeStreamBackend',
-        './backends/MemoryBackend.js':     '\0stub:MemoryBackend',
+        './backends/IdbWorkerBackend.js':   SRC('logger', 'backends', 'IdbWorkerBackend.js'),
+        './LogManager.js':                  SRC('logger', 'LogManager.js'),
+        '../plugins/ExecutionTrace.js':     '\0stub:ExecutionTrace',
+        // WsSabBackend（SharedArrayBuffer 模式）+ WsWorkerBackend（默认）+ WsBackend（降级）
+        './backends/WsSabBackend.js':       opts.wsUrl ? SRC('logger', 'backends', 'WsSabBackend.js')    : '\0stub:WsSabBackend',
+        './backends/WsWorkerBackend.js':    opts.wsUrl ? SRC('logger', 'backends', 'WsWorkerBackend.js') : '\0stub:WsWorkerBackend',
+        './backends/WsBackend.js':          opts.wsUrl ? SRC('logger', 'backends', 'WsBackend.js')       : '\0stub:WsBackend',
+        './backends/NodeStreamBackend.js':  '\0stub:NodeStreamBackend',
+        './backends/MemoryBackend.js':      '\0stub:MemoryBackend',
     };
 
     const rollupWarnings = [];
@@ -505,21 +594,47 @@ ${sandboxVar}.analysis.use(new ExecutionTraceAnalysis(${sandboxVar}, null, {
             load(id)      { if (id === ENTRY_ID) return entryCode; },
         },
         {
-            name: 'jalangi-patch-idb-worker-url',
+            name: 'jalangi-patch-worker-urls',
             transform(code, id) {
-                if (!id.includes('IdbWorkerBackend')) return null;
-                // 1. 替换 new Worker(new URL(..., import.meta.url), { type: 'module' })
-                //    → new Worker(__idbWorkerUrl)
-                //    blob: URL 不支持 Module Worker，必须去掉 { type: 'module' }
-                let patched = code.replace(
-                    /new\s+Worker\s*\(\s*new URL\s*\(\s*['"][^'"]+['"]\s*,\s*import\.meta\.url\s*\)\s*,\s*\{\s*type\s*:\s*['"]module['"]\s*\}\s*\)/g,
-                    'new Worker(__idbWorkerUrl)'
-                );
-                // 2. 同时处理没有 { type: 'module' } 的形式（向后兼容）
-                patched = patched.replace(
-                    /new URL\s*\(\s*['"][^'"]+['"]\s*,\s*import\.meta\.url\s*\)/g,
-                    '__idbWorkerUrl'
-                );
+                let patched = code;
+                if (id.includes('IdbWorkerBackend')) {
+                    // 替换 new Worker(new URL('../workers/idb-worker.js', import.meta.url))
+                    // → new Worker(__idbWorkerUrl)
+                    patched = patched.replace(
+                        /new\s+Worker\s*\(\s*new URL\s*\(\s*['"][^'"]*idb-worker[^'"]*['"]\s*,\s*import\.meta\.url\s*\)(?:\s*,\s*\{[^}]*\})?\s*\)/g,
+                        'new Worker(__idbWorkerUrl)'
+                    );
+                    // 同时处理变量 workerUrl 赋值后传入 new Worker 的形式
+                    patched = patched.replace(
+                        /new URL\s*\(\s*['"][^'"]*idb-worker[^'"]*['"]\s*,\s*import\.meta\.url\s*\)/g,
+                        '__idbWorkerUrl'
+                    );
+                }
+                if (id.includes('WsWorkerBackend') && !id.includes('WsSabBackend')) {
+                    // 替换 new Worker(new URL('../workers/ws-worker.js', import.meta.url))
+                    // → new Worker(__wsWorkerUrl)
+                    // 注意：使用负向前瞻 (?!.*-sab) 避免误匹配 ws-worker-sab.js
+                    patched = patched.replace(
+                        /new\s+Worker\s*\(\s*new URL\s*\(\s*['"][^'"]*ws-worker(?!-sab)[^'"]*['"]\s*,\s*import\.meta\.url\s*\)(?:\s*,\s*\{[^}]*\})?\s*\)/g,
+                        'new Worker(__wsWorkerUrl)'
+                    );
+                    patched = patched.replace(
+                        /new URL\s*\(\s*['"][^'"]*ws-worker(?!-sab)[^'"]*['"]\s*,\s*import\.meta\.url\s*\)/g,
+                        '__wsWorkerUrl'
+                    );
+                }
+                if (id.includes('WsSabBackend')) {
+                    // 替换 new Worker(new URL('../workers/ws-worker-sab.js', import.meta.url))
+                    // → new Worker(__wsSabWorkerUrl)
+                    patched = patched.replace(
+                        /new\s+Worker\s*\(\s*new URL\s*\(\s*['"][^'"]*ws-worker-sab[^'"]*['"]\s*,\s*import\.meta\.url\s*\)(?:\s*,\s*\{[^}]*\})?\s*\)/g,
+                        'new Worker(__wsSabWorkerUrl)'
+                    );
+                    patched = patched.replace(
+                        /new URL\s*\(\s*['"][^'"]*ws-worker-sab[^'"]*['"]\s*,\s*import\.meta\.url\s*\)/g,
+                        '__wsSabWorkerUrl'
+                    );
+                }
                 return patched !== code ? { code: patched, map: null } : null;
             },
         },
@@ -533,7 +648,9 @@ ${sandboxVar}.analysis.use(new ExecutionTraceAnalysis(${sandboxVar}, null, {
             },
             load(id) {
                 const stubs = {
-                    '\0stub:WsBackend':         'export class WsBackend {}',  // stub（未配置 wsUrl 时）
+                    '\0stub:WsSabBackend':      'export class WsSabBackend { static isSupported() { return false; } }', // stub（未配置 wsUrl 时）
+                    '\0stub:WsWorkerBackend':   'export class WsWorkerBackend {}', // stub（未配置 wsUrl 时）
+                    '\0stub:WsBackend':         'export class WsBackend {}',        // stub（未配置 wsUrl 时）
                     '\0stub:NodeStreamBackend': 'export const NodeStreamBackend = undefined;',
                     '\0stub:MemoryBackend':     'export const MemoryBackend = undefined;',
                     '\0stub:ExecutionTrace':    'export const ExecutionTraceAnalysis = undefined;',
@@ -570,6 +687,18 @@ ${sandboxVar}.analysis.use(new ExecutionTraceAnalysis(${sandboxVar}, null, {
             `    ? new Blob([__idbWorkerSrc], { type: 'application/javascript' })`,
             `    : null;`,
             `var __idbWorkerUrl  = __idbWorkerBlob ? URL.createObjectURL(__idbWorkerBlob) : null;`,
+            '// ─── WS Worker: 内联为 Blob URL（classic worker，WebSocket 在独立线程发送）',
+            `var __wsWorkerSrc   = ${JSON.stringify(wsWorkerSrc)};`,
+            `var __wsWorkerBlob  = (typeof Blob !== 'undefined')`,
+            `    ? new Blob([__wsWorkerSrc], { type: 'application/javascript' })`,
+            `    : null;`,
+            `var __wsWorkerUrl   = __wsWorkerBlob ? URL.createObjectURL(__wsWorkerBlob) : null;`,
+            '// ─── WS SAB Worker: 内联为 Blob URL（SharedArrayBuffer 模式，零拷贝环形缓冲区）',
+            `var __wsSabWorkerSrc  = ${JSON.stringify(wsSabWorkerSrc)};`,
+            `var __wsSabWorkerBlob = (typeof Blob !== 'undefined')`,
+            `    ? new Blob([__wsSabWorkerSrc], { type: 'application/javascript' })`,
+            `    : null;`,
+            `var __wsSabWorkerUrl  = __wsSabWorkerBlob ? URL.createObjectURL(__wsSabWorkerBlob) : null;`,
         ].join('\n'),
     });
     await bundle.close();
@@ -655,11 +784,13 @@ async function cmdInstrument(common, instrArgs) {
             code:             originalCode,
             origCodeFileName: inputPath,
             instCodeFileName: outPath,
-            // 浏览器内联模式（非 split）默认把 iid map 也内联进输出文件
-            inlineSourceMap: (target === 'browser' && !instrOpts.splitRuntime)
+            // 浏览器内联模式（非 split）或 deferred-load 模式：
+            //   iid map 必须内联进插桩代码——插桩代码是动态加载的，
+            //   运行时无法自动读取外部 .map.json，必须随代码一起携带位置信息。
+            inlineSourceMap: (target === 'browser' && (!instrOpts.splitRuntime || instrOpts.deferredLoad))
                 ? true
                 : instrOpts.inlineIid,
-            inlineSource: (target === 'browser' && !instrOpts.splitRuntime)
+            inlineSource: (target === 'browser' && (!instrOpts.splitRuntime || instrOpts.deferredLoad))
                 ? true
                 : instrOpts.inlineSource,
             sourceType: common.sourceType,
@@ -677,7 +808,12 @@ async function cmdInstrument(common, instrArgs) {
     if (target === 'node') {
         await _writeNodeOutput({ instrOpts, inputPath, outPath, mapPath, vlcqMapPath, result, iidCount, sandboxVar });
     } else {
-        await _writeBrowserOutput({ instrOpts, inputPath, outPath, result, iidCount, sandboxVar });
+        // --deferred-load 仅在 --split-runtime 下有效
+        if (instrOpts.deferredLoad && !instrOpts.splitRuntime) {
+            log.warn('--deferred-load 仅在 --split-runtime 模式下有效，已忽略。');
+            instrOpts.deferredLoad = false;
+        }
+        await _writeBrowserOutput({ instrOpts, inputPath, outPath, result, iidCount, sandboxVar, sourceType: common.sourceType });
     }
 }
 
@@ -724,52 +860,88 @@ async function _writeNodeOutput({ instrOpts, inputPath, outPath, mapPath, vlcqMa
     console.log(`  沙盒变量  : ${sandboxVar}`);
 }
 
-async function _writeBrowserOutput({ instrOpts, inputPath, outPath, result, iidCount, sandboxVar }) {
+async function _writeBrowserOutput({ instrOpts, inputPath, outPath, result, iidCount, sandboxVar, sourceType = 'script' }) {
     if (instrOpts.splitRuntime) {
-        // 运行时 IIFE 单独输出，插桩代码引用它
-        const runtimePath    = outPath.replace(/\.js$/, '.runtime.js');
+        // 运行时 IIFE 单独输出，插桩代码单独文件
+        //
+        // --deferred-load 模式（文件名翻转）：
+        //   运行时   → outPath（原始文件名，直接替换网页 <script src="..."> 引用）
+        //   插桩代码 → makeInstFilename(outPath)（_jalangi_.js 后缀，由运行时自动加载）
+        //
+        // 普通 split 模式：
+        //   运行时   → outPath.replace('.js', '.runtime.js')
+        //   插桩代码 → outPath
+        const runtimePath    = instrOpts.deferredLoad
+            ? outPath
+            : outPath.replace(/\.js$/, '.runtime.js');
+        const instrPath      = instrOpts.deferredLoad
+            ? makeInstFilename(outPath)
+            : outPath;
         const runtimeRelPath = basename(runtimePath);
-        const mapPath        = outPath.replace(/\.js$/, '.map.json');
-        const vlcqMapPath    = outPath + '.map';
+        const instrRelPath   = basename(instrPath);
+        const mapPath        = instrPath.replace(/\.js$/, '.map.json');
+        const vlcqMapPath    = instrPath + '.map';
 
         log.info('正在用 rollup 打包浏览器运行时（split 模式）...');
         let runtimeBundle;
         try {
-            runtimeBundle = await buildBrowserRuntimeBundle({ ...instrOpts, sandboxVar, debug: _debug });
+            runtimeBundle = await buildBrowserRuntimeBundle({
+                ...instrOpts, sandboxVar, sourceType, debug: _debug,
+                // 延迟加载模式：将插桩文件的相对路径硬编码进运行时，自动触发加载
+                instrRelPath: instrOpts.deferredLoad ? instrRelPath : null,
+            });
         } catch (err) {
             log.error('rollup 打包失败:', err.message);
             if (err.stack) log.error(err.stack);
             process.exit(1);
         }
 
-        const instrCode = `// 请先加载运行时: <script src="${runtimeRelPath}"></script>\n` + result.code;
+        // 插桩代码头部注释（普通 split 模式提示依赖关系；延迟加载模式由运行时自动加载，加注释说明）
+        const instrCode = instrOpts.deferredLoad
+            ? `// 由运行时自动加载，请勿直接引入此文件。运行时: ${runtimeRelPath}\n` + result.code
+            : `// 请先加载运行时: <script src="${runtimeRelPath}"></script>\n` + result.code;
 
         if (instrOpts.dryRun) {
+            const loadMode = sourceType === 'module' ? 'ESM（import()）' : 'Script（<script> 节点）';
             console.log(`\n=== [dry-run] 运行时: ${runtimePath} (${(runtimeBundle.length / 1024).toFixed(1)} KB) ===`);
             console.log(runtimeBundle.slice(0, 400) + '\n...(截断)');
-            console.log(`\n=== [dry-run] 插桩代码: ${outPath} ===`);
+            console.log(`\n=== [dry-run] 插桩代码: ${instrPath} ===`);
             console.log(instrCode.slice(0, 400) + '\n...(截断)');
             return;
         }
 
         ensureDir(runtimePath);
         writeFileSync(runtimePath, runtimeBundle, 'utf8');
-        ensureDir(outPath);
-        writeFileSync(outPath, instrCode, 'utf8');
+        ensureDir(instrPath);
+        writeFileSync(instrPath, instrCode, 'utf8');
         if (!instrOpts.noSourceMap && result.sourceMapString) writeFileSync(mapPath, result.sourceMapString, 'utf8');
         if (instrOpts.vlcqSourceMap && result.vlcqSourceMap)  writeFileSync(vlcqMapPath, JSON.stringify(result.vlcqSourceMap), 'utf8');
 
-        console.log(`✓ 插桩完成（Browser，split 模式）`);
-        console.log(`  输入      : ${inputPath}`);
-        console.log(`  插桩代码  : ${outPath}`);
-        console.log(`  运行时    : ${runtimePath}`);
+        if (instrOpts.deferredLoad) {
+            const loadMode = sourceType === 'module' ? 'ESM（import()）' : 'Script（<script> 节点）';
+            console.log(`✓ 插桩完成（Browser，split + deferred-load 模式，${loadMode}）`);
+            console.log(`  输入      : ${inputPath}`);
+            console.log(`  运行时    : ${runtimePath}  ← 替换原始文件`);
+            console.log(`  插桩代码  : ${instrPath}  ← 由运行时自动加载`);
+        } else {
+            console.log(`✓ 插桩完成（Browser，split 模式）`);
+            console.log(`  输入      : ${inputPath}`);
+            console.log(`  插桩代码  : ${instrPath}`);
+            console.log(`  运行时    : ${runtimePath}`);
+        }
         if (!instrOpts.noSourceMap && result.sourceMapString) console.log(`  IID map   : ${mapPath}`);
         if (instrOpts.vlcqSourceMap && result.vlcqSourceMap)  console.log(`  Source map: ${vlcqMapPath}`);
         console.log(`  IID 数量  : ${iidCount}`);
         console.log(`  沙盒变量  : ${sandboxVar}`);
-        console.log(`\n  HTML 使用方式（注意顺序）：`);
-        console.log(`    <script src="${runtimeRelPath}"></script>`);
-        console.log(`    <script src="${basename(outPath)}"></script>`);
+        if (instrOpts.deferredLoad) {
+            console.log(`\n  使用方式（HTML 无需修改）：`);
+            console.log(`    将 ${runtimePath} 覆盖到原始 ${inputPath} 所在位置即可。`);
+            console.log(`    运行时会在后端（IDB/WebSocket）就绪后自动加载 ${instrRelPath}。`);
+        } else {
+            console.log(`\n  HTML 使用方式（注意顺序）：`);
+            console.log(`    <script src="${runtimeRelPath}"></script>`);
+            console.log(`    <script src="${instrRelPath}"></script>`);
+        }
     } else {
         // 默认：运行时 IIFE + 插桩代码合并为单一文件
         const mapPath     = outPath.replace(/\.js$/, '.map.json');

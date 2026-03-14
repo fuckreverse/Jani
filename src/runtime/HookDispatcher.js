@@ -32,11 +32,12 @@
  */
 
 import { createLogger, DOMAIN } from '../logger/logger.js';
+import { $push, $slice, $isArray, $apply, $freeze } from './NativeProxy.js';
 
 const log = createLogger(DOMAIN.FRAMEWORK);
 
 /** 所有可能的钩子名称（与 JalangiRuntime.js 运行时保持一致）。 */
-const HOOKS = Object.freeze([
+const HOOKS = $freeze([
     'returnStmt', 'throwStmt', 'withStmt',
     'binaryPre', 'binary', 'evalCond',
     'declareVar', 'endExecution', 'endExpression',
@@ -60,7 +61,7 @@ const HOOKS = Object.freeze([
  * 未列出的钩子（如 `declareVar`、`scriptEnter` 等）返回值语义不是 `result`，
  * 不进行此传递。
  */
-const RESULT_ARG_INDEX = Object.freeze({
+const RESULT_ARG_INDEX = $freeze({
     binary:       4,   // binary(iid, op, left, right, result, ...)
     unary:        2,   // unary(iid, op, val, ...)
     writeVar:     2,   // writeVar(iid, name, val, ...)
@@ -135,8 +136,8 @@ class HookDispatcher {
     use(plugin) {
         for (const name of HOOKS) {
             if (typeof plugin[name] === 'function') {
-                this._chains[name].fns.push(plugin[name]);
-                this._chains[name].thisArgs.push(plugin);
+                $push(this._chains[name].fns, plugin[name]);
+                $push(this._chains[name].thisArgs, plugin);
             }
         }
         return this;
@@ -154,15 +155,15 @@ class HookDispatcher {
             const observeOnly = host.observeOnly;
             for (let i = 0; i < chain.fns.length; i++) {
                 try {
-                    const r = chain.fns[i].apply(chain.thisArgs[i], args);
+                    const r = $apply(chain.fns[i], chain.thisArgs[i], args);
                     // observeOnly 模式：钩子仍正常调用，但返回值被完全忽略。
                     // 插件只能观察事件，无法通过任何返回字段修改原始执行结果。
                     if (!observeOnly && r !== undefined && r !== null && typeof r === 'object') {
-                        if (Array.isArray(r.args)) {
+                        if ($isArray(r.args)) {
                             args = r.args;
                         } else if ('result' in r && resultArgIdx >= 0) {
                             // 将 result 更新到对应参数位置，使后续插件可见修改后的值
-                            args = args.slice();
+                            args = $slice(args, 0);
                             args[resultArgIdx] = r.result;
                         }
                         ret = r;

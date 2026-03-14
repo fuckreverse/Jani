@@ -16,6 +16,7 @@
 | `AnalysisTemplate` | `analysisCallbackTemplate.js` | 分析插件接口基类模板 |
 | `DataFlowAnalyzer` | `DataFlowAnalyzer.js` | 运行时 SSA 数据流分析器，支持 backward slicing |
 | `AntiDetection` | `AntiDetection.js` | 反插桩对抗工具 |
+| `NativeProxy` | `NativeProxy.js` | 原生方法快照，防止 monkey-patch 导致的递归栈溢出 |
 
 **运行时组件层次**：
 
@@ -770,6 +771,81 @@ const slice = dfa.backwardSlice(targetReg);
 | `getAliasesForOid(oid)` | 查询持有指定 OID 的所有变量（别名集合） |
 | `reset()` | 重置分析器状态，开始处理新一轮 log 序列 |
 | `exportRegisters()` | 导出所有寄存器为可序列化数组（`sources` 字段从 Set 转为数组） |
+
+## NativeProxy — 原生方法快照
+
+`NativeProxy`（`src/runtime/NativeProxy.js`）在模块加载时捕获所有 JS 内置方法的原始引用，
+运行时内部**所有**的内置方法调用都通过此文件导出的快照进行，
+彻底绕过被分析代码对原型链的任意修改（monkey-patch / anti-analysis）。
+
+### 背景与动机
+
+被分析的代码可能将 `Array.prototype.push` 等方法替换为插桩后的版本
+（或利用 anti-analysis 技术进行对抗），导致运行时内部调用这些方法时触发分析钩子，
+形成无限递归，最终栈溢出。
+
+**解决方案**：在 `NativeProxy.js` 模块加载时（用户代码执行之前）一次性捕获所有原生引用，
+此后运行时内部所有内置调用都通过这些快照进行，与用户代码完全隔离。
+
+### 已覆盖的内置方法
+
+| 分类 | 代表性导出 |
+|------|----------|
+| `Function.prototype` | `$apply`, `$call`, `$bind` |
+| `Array.prototype` | `$push`, `$pop`, `$shift`, `$unshift`, `$slice`, `$splice`, `$map`, `$filter`, `$join`, `$forEach`, `$indexOf`, `$includes`, `$find`, `$findIndex`, `$some`, `$every`, `$reduce`, `$sort`, `$concat`, `$flat`, `$reverse`, `$fill` |
+| `Array` 静态方法 | `$from`, `$isArray` |
+| `Object` | `$keys`, `$values`, `$entries`, `$assign`, `$create`, `$freeze`, `$defineProperty`, `$getOwnPropertyDescriptor`, `$getOwnPropertyNames`, `$getOwnPropertySymbols`, `$getPrototypeOf`, `$setPrototypeOf`, `$hasOwn`, `$toString` |
+| `WeakMap` | `$wmHas`, `$wmGet`, `$wmSet`, `$wmDel` |
+| `Map` | `$mapHas`, `$mapGet`, `$mapSet`, `$mapDel`, `$mapKeys`, `$mapValues`, `$mapEntries`, `$mapForEach`, `$mapSize` |
+| `Set` | `$setHas`, `$setAdd`, `$setDel`, `$setKeys`, `$setForEach`, `$setSize` |
+| `WeakSet` | `$wsHas`, `$wsAdd`, `$wsDel` |
+| `WeakRef` | `$wrDeref` |
+| `String.prototype` | `$strSlice`, `$strIncludes`, `$strIndexOf`, `$strSplit`, `$strTrim`, `$strMatch`, `$strReplace`, `$strStartsWith`, `$strEndsWith` |
+| `Number` / `Math` | `$numberIsFinite`, `$numberIsNaN`, `$mathMax`, `$mathMin`, `$mathFloor`, `$mathCeil`, `$mathAbs` |
+| `JSON` | `$jsonStringify`, `$jsonParse` |
+| `Symbol` | `$symbolIterator`, `$symbolFor` |
+| `Reflect` | `$reflectApply`, `$reflectConstruct`, `$reflectOwnKeys`, `$reflectHas`, `$reflectGet`, `$reflectSet`, `$reflectDefineProperty` |
+| `Promise` | `$promiseResolve`, `$promiseReject`, `$promiseAll` |
+
+### 使用方式
+
+```js
+import {
+    $push, $apply, $keys, $freeze,
+    $strSplit, $strSlice,
+} from './NativeProxy.js';
+
+// 替代 arr.push(x)
+$push(arr, x);
+
+// 替代 fn.apply(thisArg, args)
+$apply(fn, thisArg, args);
+
+// 替代 Object.keys(obj)
+$keys(obj);
+
+// 替代 str.slice(0, 100)
+$strSlice(str, 0, 100);
+```
+
+### 已保护的运行时模块
+
+以下所有运行时模块的内部操作均已迁移到 `NativeProxy.js` 快照：
+
+- `JalangiRuntime.js`
+- `HookDispatcher.js`
+- `SMemory.js`
+- `DataFlowAnalyzer.js`
+- `JalangiSandbox.js`
+- `AntiDetection.js`
+- `src/plugins/ExecutionTrace.js`
+- `src/utils/serialize.js`
+
+> **注意**：`NativeProxy.js` 本身文件头标注了 `// JALANGI DO NOT INSTRUMENT`，
+> 确保插桩器不会对其进行二次插桩。模块加载时机在用户代码执行之前，
+> 因此快照捕获的一定是未被污染的原生方法。
+
+---
 
 ## AntiDetection — 反插桩对抗
 

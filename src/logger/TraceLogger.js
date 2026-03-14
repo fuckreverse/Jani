@@ -73,9 +73,22 @@ export class TraceLogger {
      * @param {string}  [options.dbName='jalangi-traces']
      * @param {string}  [options.storeName='execution-trace']
      * @param {string}  [options.wsUrl]              可选：同时推送到 WebSocket 服务
-     * @param {'ndjson'|'binary'} [options.wsFormat='ndjson']
-     *   WsBackend 消息格式。ExecutionTrace 事件（{type,seq,text}）无法用 binary 编码，
-     *   必须用 ndjson；仅当后端接收的是低层钩子事件（含 iid/sid/value）时才用 binary。
+     * @param {boolean} [options.wsSab=false]
+     *   浏览器中是否使用 SharedArrayBuffer 模式（WsSabBackend）。
+     *   SAB 模式通过环形缓冲区 + Atomics 实现零拷贝写入，Worker 侧 Atomics.waitAsync
+     *   等待新数据，消费后立即 ws.send()，彻底解耦主线程与网络发送。
+     *   要求：页面需开启 COOP/COEP header（Cross-Origin-Opener-Policy: same-origin
+     *         + Cross-Origin-Embedder-Policy: require-corp）。
+     *   不满足或环境不支持时，自动降级为 wsWorker 模式（WsWorkerBackend）。
+     * @param {boolean} [options.wsWorker=true]
+     *   浏览器中是否将 WebSocket 移到 Web Worker 线程（默认 true）。
+     *   Worker 线程发送不受主线程阻塞，适合高频 trace 场景。
+     *   设为 false 则退化为主线程 WsBackend（调试用）。
+     *   当 wsSab=true 且支持 SAB 时，wsWorker 被忽略（已使用更高效的 SAB 模式）。
+     * @param {'ndjson'|'binary'} [options.wsFormat='binary']
+     *   WsBackend/WsWorkerBackend/WsSabBackend 消息格式。ExecutionTrace 事件（{type,seq,text}）
+     *   无法用 binary 编码，必须用 ndjson；仅当后端接收的是低层钩子事件（含 iid/sid/value）
+     *   时才用 binary。wsWorker=true / wsSab=true 时默认 binary（高吞吐），否则默认 ndjson。
      *
      * === Node.js 选项 ===
      * @param {string|false} [options.nodeFile='jalangi-trace.ndjson']
@@ -93,7 +106,9 @@ export class TraceLogger {
             dbName       = 'jalangi-traces',
             storeName    = 'execution-trace',
             wsUrl        = undefined,
-            wsFormat     = 'ndjson',
+            wsSab        = false,   // 是否使用 SharedArrayBuffer 模式（需 COOP/COEP header）
+            wsWorker     = true,    // 默认使用 Worker 线程发送 WebSocket
+            wsFormat     = 'binary',
             // Node.js
             nodeFile     = 'jalangi-trace.ndjson',
             nodeConsole  = false,
@@ -103,7 +118,7 @@ export class TraceLogger {
         } = options;
 
         this._opts = {
-            useIdb, dbName, storeName, wsUrl, wsFormat,
+            useIdb, dbName, storeName, wsUrl, wsSab, wsWorker, wsFormat,
             nodeFile, nodeConsole, keyToConsole,
             logManagerOptions,
         };
@@ -173,22 +188,80 @@ export class TraceLogger {
             }
 
             // ── 浏览器：WebSocket 后端（可选）───────────────────────────────
+            // 优先级：wsSab（SharedArrayBuffer）> wsWorker（Worker postMessage）> 主线程
             if (opts.wsUrl) {
-                log.debug('connecting WsBackend', { url: opts.wsUrl });
-                try {
-                    const { WsBackend } = await import('./backends/WsBackend.js');
-                    const ws = new WsBackend({
-                        url:         opts.wsUrl,
-                        format:      opts.wsFormat ?? 'ndjson',
-                        autoConnect: true,
-                    });
+                // 尝试 SAB 模式（需 COOP/COEP header）
+                const trySab = opts.wsSab === true;
+                const useWorker = opts.wsWorker !== false;
+
+                let ws = null;
+                let backendName = '';
+
+                if (trySab) {
+                    try {
+                        const { WsSabBackend } = await import('./backends/WsSabBackend.js');
+                        if (WsSabBackend.isSupported()) {
+                            const sabFormat = opts.wsFormat ?? 'binary';
+                            // ndjson 格式的 trace 事件比 binary 大很多，需要更大的槽
+                            // binary: ~16B/事件 × 256条 ≈ 4KB；ndjson: ~200B/事件 × 32条 ≈ 6KB
+                            const sabSlotDataBytes = sabFormat === 'ndjson' ? 2 * 1024 * 1024 : 65536;
+                            log.debug('connecting WsSabBackend (SharedArrayBuffer mode)', { url: opts.wsUrl, format: sabFormat, slotDataBytes: sabSlotDataBytes });
+                            ws = new WsSabBackend({
+                                url:          opts.wsUrl,
+                                format:       sabFormat,
+                                slotDataBytes: sabSlotDataBytes,
+                                autoConnect:  true,
+                            });
+                            backendName = 'WsSabBackend';
+                        } else {
+                            // 始终输出到 console.warn，确保用户能看到
+                            console.warn(
+                                '[Jalangi] WsSabBackend: SharedArrayBuffer not available, falling back to WsWorkerBackend.\n' +
+                                '  原因: 浏览器需要 COOP/COEP 响应头才能启用 SharedArrayBuffer。\n' +
+                                '  解决: 在 HTTP 响应中添加以下头：\n' +
+                                '    Cross-Origin-Opener-Policy: same-origin\n' +
+                                '    Cross-Origin-Embedder-Policy: require-corp\n' +
+                                '  如果使用 webpack-dev-server，在 devServer.headers 中配置。'
+                            );
+                        }
+                    } catch (err) {
+                        console.warn('[Jalangi] WsSabBackend init failed, falling back to WsWorkerBackend:', err.message);
+                    }
+                }
+
+                if (!ws) {
+                    // 降级到 WsWorkerBackend 或 WsBackend
+                    try {
+                        if (useWorker) {
+                            const { WsWorkerBackend } = await import('./backends/WsWorkerBackend.js');
+                            log.debug('connecting WsWorkerBackend', { url: opts.wsUrl });
+                            ws = new WsWorkerBackend({
+                                url:         opts.wsUrl,
+                                format:      opts.wsFormat ?? 'binary',
+                                autoConnect: true,
+                            });
+                            backendName = 'WsWorkerBackend';
+                        } else {
+                            const { WsBackend } = await import('./backends/WsBackend.js');
+                            log.debug('connecting WsBackend (main thread)', { url: opts.wsUrl });
+                            ws = new WsBackend({
+                                url:         opts.wsUrl,
+                                format:      opts.wsFormat ?? 'ndjson',
+                                autoConnect: true,
+                            });
+                            backendName = 'WsBackend';
+                        }
+                    } catch (err) {
+                        log.error('WsBackend setup failed:', err.message, err.stack ?? '');
+                    }
+                }
+
+                if (ws) {
                     await ws.connect().catch(err => {
-                        log.warn('WsBackend connect failed (non-fatal):', err.message);
+                        log.warn(`${backendName} connect failed (non-fatal):`, err.message);
                     });
                     backends.push(ws);
-                    log.debug('WsBackend connected');
-                } catch (err) {
-                    log.error('WsBackend setup failed:', err.message, err.stack ?? '');
+                    log.debug(`${backendName} connected`);
                 }
             }
         } else {
@@ -218,10 +291,19 @@ export class TraceLogger {
         }
 
         const { LogManager } = await import('./LogManager.js');
+
+        // ndjson 格式下，每条事件约 100~300 字节，1024 条 = ~200KB，
+        // 而 WsSabBackend 的 slotDataBytes=2MB 足够，但也要控制 batch 大小避免单次序列化过大。
+        // 这里设置一个合理的默认：ndjson 用 64 条/batch，binary 用 512 条/batch。
+        // 用户通过 logManagerOptions.drainBatchSize 可覆盖。
+        const wsFormat = this._opts.wsFormat;
+        const defaultDrainBatchSize = wsFormat === 'ndjson' ? 64 : 512;
+
         this._mgr = new LogManager({
             backends,
             autoClose: true,
-            ...this._opts.logManagerOptions,
+            drainBatchSize: defaultDrainBatchSize,
+            ...this._opts.logManagerOptions,  // 透传 forceSyncFlushThreshold / drainBatchSize 等选项
         });
 
         const elapsed = Date.now() - t0;

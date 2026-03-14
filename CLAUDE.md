@@ -53,6 +53,7 @@ esnstrument.js        ← 所有上述模块 + @babel/parser + @babel/generator
 | `analysisCallbackTemplate.js` | 分析插件接口基类模板 `AnalysisTemplate` |
 | `DataFlowAnalyzer.js` | 运行时 SSA 数据流分析器，支持 backward slicing |
 | `AntiDetection.js` | 反插桩对抗工具（toString Hook / 全局泄露检测 / 异步上下文包装）|
+| `NativeProxy.js` | 原生方法快照（防 monkey-patch 导致的递归栈溢出）|
 
 日志系统已独立为 `src/logger/`，不再属于 `src/runtime/`，参见下方「日志系统」表格。
 
