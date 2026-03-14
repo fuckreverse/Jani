@@ -8,10 +8,10 @@
  *   2. 级别（level）：error / warn / info / debug
  *
  * 级别语义：
- *   error  — 不可恢复错误，始终同步输出到 console.error
- *   warn   — 非预期但可继续，始终同步输出到 console.warn
- *   info   — 关键里程碑（脚本开始/结束、backend 就绪），始终同步输出到 console.log
- *   debug  — 运行细节（flush 计数、RingBuffer 状态），默认关闭，按域开关控制
+ *   error  — 不可恢复错误，始终同步输出到 console.error，完全不受速率限制
+ *   warn   — 非预期但可继续，输出到 console.warn，宽松速率限制
+ *   info   — 关键里程碑（脚本开始/结束、backend 就绪），输出到 console.log，严格速率限制
+ *   debug  — 运行细节（flush 计数、RingBuffer 状态），默认关闭，按域开关控制，严格速率限制
  *
  * Trace 数据（高频插桩事件）不走本模块——应通过 LogManager 缓冲后端输出。
  *
@@ -32,10 +32,21 @@
  *   import { createLogger } from '../../logger/logger.js';
  *   const log = createLogger('backend:ws');
  *
- *   log.error('connection failed:', err.message);  // 始终输出
- *   log.warn('retrying in 500ms');                 // 始终输出
- *   log.info('backend ready');                     // 始终输出
+ *   log.error('connection failed:', err.message);  // 始终输出，不受限制
+ *   log.warn('retrying in 500ms');                 // 宽松速率限制
+ *   log.info('backend ready');                     // 严格速率限制
  *   log.debug('batch sent, size=', batch.length);  // 仅 debug 开关开启时输出
+ *
+ * ─── 速率限制配置 ──────────────────────────────────────────────────────────────
+ *
+ *   import { setRateLimit, resetRateLimiters } from '../../logger/logger.js';
+ *
+ *   // 调整速率参数（全局生效，0 = 不限制）
+ *   setRateLimit({ warnPerWindow: 50, infoPerWindow: 20, windowMs: 5000 });
+ *
+ *   // 重置指定域或所有域的速率状态（如单测场景）
+ *   resetRateLimiters('analysis');   // 只重置 analysis 域
+ *   resetRateLimiters();             // 重置所有域
  *
  * ─── 内置域名约定 ──────────────────────────────────────────────────────────────
  *
@@ -52,66 +63,219 @@
 // ── 运行环境检测 ────────────────────────────────────────────────────────────────
 const IS_BROWSER = typeof window !== 'undefined' || typeof globalThis.self !== 'undefined';
 
-// ── 全局控制台输出限流 ──────────────────────────────────────────────────────────
+// ── 控制台速率限制 ──────────────────────────────────────────────────────────────
 //
-// 目的：防止大规模分析场景（如 JD 安全脚本）中海量错误/警告日志把浏览器卡死。
+// 设计目标：防止大规模分析场景（如 JD 安全脚本）中海量日志把浏览器卡死，
+// 同时保证关键信息不被完全淹没。
 //
-// 行为：
-//   - 所有通过 createLogger() 产生的控制台输出（error/warn/info/debug）共享一个
-//     全局计数器，超出上限后静默丢弃，并仅打印一次"已静默"提示。
-//   - 上限默认为 100 条，可通过 setConsoleLimit(n) 调整（0 = 不限制）。
-//   - resetConsoleLimit() 重置计数器（如用于多轮测试场景）。
+// 四项策略：
+//   1. 按域独立限速：每个 domain 各自维护独立状态，互不影响
+//   2. 按级别差异处理：
+//        error  — 完全不限速（始终输出）
+//        warn   — 宽松：默认 20 条/10s
+//        info   — 严格：默认 10 条/10s
+//        debug  — 严格：默认 10 条/10s
+//   3. 滑动窗口速率限制：以时间窗口（windowMs）内最大输出条数衡量，
+//      窗口结束后自动重置，避免"一次爆发永久封禁"的问题
+//   4. 采样输出：超限后不完全静默，每跳过 sampleEvery 条输出一次，
+//      附带"已跳过 N 条"提示，信息不完全丢失
 //
-let _consoleCount  = 0;      // 已输出条数
-let _consoleSilent = false;  // 是否已进入静默状态
-let _consoleLimit  = 100;    // 上限（0 = 不限制）
 
 /**
- * 设置控制台输出上限。
- * @param {number} n  最大允许输出条数；0 表示不限制。
+ * 全局速率限制配置。
+ * 可通过 setRateLimit(options) 调整。
+ *
+ * @typedef {object} RateConfig
+ * @property {number} warnPerWindow   - warn 级别每窗口最多输出条数（0 = 不限制）
+ * @property {number} infoPerWindow   - info 级别每窗口最多输出条数（0 = 不限制）
+ * @property {number} debugPerWindow  - debug 级别每窗口最多输出条数（0 = 不限制）
+ * @property {number} windowMs        - 滑动窗口大小（毫秒）
+ * @property {number} sampleEvery     - 超限后每跳过 N 条才输出一次（0 = 完全静默）
  */
-export function setConsoleLimit(n) {
-    _consoleLimit = (typeof n === 'number' && n >= 0) ? n : 100;
-    _consoleCount  = 0;
-    _consoleSilent = false;
+
+/** @type {RateConfig} */
+let _rateConfig = {
+    warnPerWindow:  20,
+    infoPerWindow:  10,
+    debugPerWindow: 10,
+    windowMs:       10_000,
+    sampleEvery:    10,
+};
+
+/**
+ * 每个 (domain, level) 组合对应的速率状态。
+ * key 格式：`${domain}\0${level}`（用 \0 分隔，避免与域名中的 ':' 冲突）
+ *
+ * @typedef {object} RateState
+ * @property {number} windowStart  - 当前窗口开始时间（ms）
+ * @property {number} windowCount  - 当前窗口内已输出条数
+ * @property {number} skipped      - 当前被跳过但尚未在采样行中汇报的条数
+ */
+
+/** @type {Map<string, RateState>} */
+const _rateStates = new Map();
+
+/**
+ * 获取指定 (domain, level) 的速率状态，不存在则创建。
+ *
+ * @param {string} domain
+ * @param {string} level
+ * @returns {RateState}
+ */
+function _getState(domain, level) {
+    const key = `${domain}\0${level}`;
+    let state = _rateStates.get(key);
+    if (!state) {
+        state = { windowStart: 0, windowCount: 0, skipped: 0 };
+        _rateStates.set(key, state);
+    }
+    return state;
 }
 
 /**
- * 重置计数器（不改变上限）。用于多轮执行场景。
+ * 返回指定级别对应的每窗口上限（Infinity 表示不限制）。
+ *
+ * @param {string} level
+ * @returns {number}
  */
-export function resetConsoleLimit() {
-    _consoleCount  = 0;
-    _consoleSilent = false;
+function _limitForLevel(level) {
+    switch (level) {
+        case 'error': return Infinity;
+        case 'warn':  return _rateConfig.warnPerWindow  === 0 ? Infinity : _rateConfig.warnPerWindow;
+        case 'info':  return _rateConfig.infoPerWindow  === 0 ? Infinity : _rateConfig.infoPerWindow;
+        case 'debug': return _rateConfig.debugPerWindow === 0 ? Infinity : _rateConfig.debugPerWindow;
+        default:      return Infinity;
+    }
 }
 
 /**
- * 统一的控制台输出门控。
- * 返回 true 表示本条允许输出，返回 false 表示应丢弃。
- * 副作用：在刚超限时打印一次静默提示。
+ * 统一的控制台输出门控（含速率限制 + 采样）。
+ *
+ * 算法：
+ *   1. error 级别直接输出，跳过所有速率逻辑
+ *   2. 检查是否到了新窗口，若是则重置计数器（并在有积压跳过时补打一条汇总）
+ *   3. 窗口内未超限：正常输出，windowCount++
+ *   4. 窗口内超限：skipped++；若 skipped 达到 sampleEvery 的整数倍则输出一条采样行
  *
  * @param {Function} consoleFn  console.error / console.warn / console.log / console.debug
- * @param {string}   prefix     域名前缀字符串
+ * @param {string}   level      'error' | 'warn' | 'info' | 'debug'
+ * @param {string}   domain     域名
+ * @param {string}   prefix     输出前缀字符串
  * @param {Array}    args       原始参数
  */
-function _gatedConsole(consoleFn, prefix, args) {
-    if (_consoleLimit === 0) {
-        // 不限制
+function _gatedConsole(consoleFn, level, domain, prefix, args) {
+    // error 完全不受限制
+    if (level === 'error') {
         consoleFn(prefix, ...args);
         return;
     }
-    if (_consoleSilent) return;
 
-    _consoleCount++;
-    if (_consoleCount <= _consoleLimit) {
+    const limit = _limitForLevel(level);
+
+    // 速率限制已关闭（limit === Infinity 且 windowMs 不重要）
+    if (limit === Infinity) {
         consoleFn(prefix, ...args);
-    } else {
-        _consoleSilent = true;
-        console.warn(
-            `[Jalangi] 控制台输出已达上限 ${_consoleLimit} 条，后续日志静默丢弃。` +
-            `如需调整限制请调用 setConsoleLimit(n)。`
+        return;
+    }
+
+    const state = _getState(domain, level);
+    const now   = Date.now();
+
+    // 检查是否进入新窗口
+    if (now - state.windowStart >= _rateConfig.windowMs) {
+        // 若上一个窗口有未汇报的跳过条数，在新窗口第一条输出前补打汇总
+        if (state.skipped > 0) {
+            consoleFn(
+                prefix,
+                `（速率限制：上一窗口已跳过 ${state.skipped} 条日志）`
+            );
+        }
+        // 重置窗口
+        state.windowStart = now;
+        state.windowCount = 0;
+        state.skipped     = 0;
+    }
+
+    // 窗口内未超限：正常输出
+    if (state.windowCount < limit) {
+        consoleFn(prefix, ...args);
+        state.windowCount++;
+        return;
+    }
+
+    // 超限：累积跳过计数
+    state.skipped++;
+
+    // 采样：每跳过 sampleEvery 条输出一次（sampleEvery=0 则完全静默）
+    const sampleEvery = _rateConfig.sampleEvery;
+    if (sampleEvery > 0 && state.skipped % sampleEvery === 0) {
+        consoleFn(
+            prefix,
+            `（速率限制：已跳过 ${state.skipped} 条）`,
+            ...args
         );
     }
 }
+
+// ── 公共 API：速率限制控制 ──────────────────────────────────────────────────────
+
+/**
+ * 调整全局速率限制参数。传入的字段会合并到当前配置中（未传字段保持原值）。
+ *
+ * @param {Partial<RateConfig>} options
+ * @param {number} [options.warnPerWindow]   warn 每窗口最多输出条数（0 = 不限制）
+ * @param {number} [options.infoPerWindow]   info 每窗口最多输出条数（0 = 不限制）
+ * @param {number} [options.debugPerWindow]  debug 每窗口最多输出条数（0 = 不限制）
+ * @param {number} [options.windowMs]        窗口大小（毫秒）
+ * @param {number} [options.sampleEvery]     超限后每隔 N 条输出一次（0 = 完全静默）
+ *
+ * @example
+ * // 开发调试时放开限制
+ * setRateLimit({ warnPerWindow: 0, infoPerWindow: 0, debugPerWindow: 0 });
+ *
+ * @example
+ * // 高频分析场景收紧限制
+ * setRateLimit({ warnPerWindow: 5, infoPerWindow: 3, windowMs: 5000, sampleEvery: 50 });
+ */
+export function setRateLimit(options) {
+    if (options && typeof options === 'object') {
+        if (typeof options.warnPerWindow  === 'number') _rateConfig.warnPerWindow  = options.warnPerWindow;
+        if (typeof options.infoPerWindow  === 'number') _rateConfig.infoPerWindow  = options.infoPerWindow;
+        if (typeof options.debugPerWindow === 'number') _rateConfig.debugPerWindow = options.debugPerWindow;
+        if (typeof options.windowMs       === 'number') _rateConfig.windowMs       = options.windowMs;
+        if (typeof options.sampleEvery    === 'number') _rateConfig.sampleEvery    = options.sampleEvery;
+    }
+}
+
+/**
+ * 重置速率状态（不改变速率参数）。
+ *
+ * 用途：单测场景中每个用例开始前调用，避免上一用例的计数污染当前用例。
+ *
+ * @param {string} [domain]  指定域名时只重置该域（所有级别）；不传则重置全部。
+ *
+ * @example
+ * // 单测 teardown
+ * resetRateLimiters();
+ *
+ * @example
+ * // 只重置 analysis 域
+ * resetRateLimiters('analysis');
+ */
+export function resetRateLimiters(domain) {
+    if (domain !== undefined) {
+        // 只删除该 domain 的所有 level 条目
+        for (const key of _rateStates.keys()) {
+            if (key.startsWith(`${domain}\0`)) {
+                _rateStates.delete(key);
+            }
+        }
+    } else {
+        _rateStates.clear();
+    }
+}
+
+// ── Debug 开关 ──────────────────────────────────────────────────────────────────
 
 /**
  * 返回当前 debug 配置字符串（原始值）。
@@ -192,8 +356,13 @@ export const DOMAIN = Object.freeze({
  * 创建一个绑定了域名前缀的日志对象。
  *
  * 返回的对象包含四个方法：error / warn / info / debug。
- *   error / warn / info 始终同步输出（不受 debug 开关控制）。
- *   debug 仅在对应域开启时输出。
+ *   error  — 始终输出，完全不受速率限制
+ *   warn   — 始终尝试输出，受宽松速率限制（默认 20 条/10s per domain）
+ *   info   — 始终尝试输出，受严格速率限制（默认 10 条/10s per domain）
+ *   debug  — 仅在对应域开启时尝试输出，受严格速率限制
+ *
+ * 速率限制均按域独立计算，互不影响。
+ * 超出速率限制后以采样方式输出（而非完全静默），每跳过 sampleEvery 条输出一次。
  *
  * @param {string} domain  域名，如 'backend:ws'、'framework'
  * @returns {{ error: Function, warn: Function, info: Function, debug: Function }}
@@ -201,11 +370,19 @@ export const DOMAIN = Object.freeze({
 export function createLogger(domain) {
     const prefix = `[Jalangi:${domain}]`;
     return {
-        error(...args) { _gatedConsole(console.error.bind(console), prefix, args); },
-        warn(...args)  { _gatedConsole(console.warn.bind(console),  prefix, args); },
-        info(...args)  { _gatedConsole(console.log.bind(console),   prefix, args); },
+        error(...args) {
+            _gatedConsole(console.error, 'error', domain, prefix, args);
+        },
+        warn(...args) {
+            _gatedConsole(console.warn, 'warn', domain, prefix, args);
+        },
+        info(...args) {
+            _gatedConsole(console.log, 'info', domain, prefix, args);
+        },
         debug(...args) {
-            if (isDebugEnabled(domain)) _gatedConsole(console.debug.bind(console), prefix, args);
+            if (isDebugEnabled(domain)) {
+                _gatedConsole(console.debug, 'debug', domain, prefix, args);
+            }
         },
     };
 }

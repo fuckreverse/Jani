@@ -589,31 +589,56 @@ log.info('沙盒已就绪');           // 始终输出到 console.log
 log.debug('flush 完成, size=', n); // 仅 debug 开关开启时输出
 ```
 
-### 控制台输出限流
+### 控制台速率限制
 
-浏览器中分析大型脚本（如电商安全脚本）时，大量 error/warn 日志可能导致控制台卡死。
-`logger.js` 提供全局限流机制，所有 `createLogger()` 产生的输出（含 `TraceLogger.key()`）
-共享一个计数器，超出上限后静默丢弃并仅打印一次提示。
+浏览器中分析大型脚本（如电商安全脚本）时，大量日志可能导致控制台卡死。
+`logger.js` 提供基于**滑动时间窗口**的速率限制，同时兼顾以下四项策略：
+
+1. **按域独立限速**：每个 `domain` 各自维护独立状态，`'analysis'` 刷满不影响 `'framework'`
+2. **按级别差异处理**：`error` 完全不受限，`warn` 宽松，`info` / `debug` 严格
+3. **滑动窗口**：按每个时间窗口（默认 10s）内最多输出 N 条衡量，窗口结束后自动重置
+4. **采样输出**：超限后不完全静默，每跳过 `sampleEvery` 条输出一次，附带"已跳过 N 条"提示
+
+#### 默认参数
+
+| 级别 | 每 10s 上限 | 超限后行为 |
+|------|------------|-----------|
+| `error` | **不限制** | 始终输出 |
+| `warn` | 20 条 | 每跳过 10 条采样一次 |
+| `info` | 10 条 | 每跳过 10 条采样一次 |
+| `debug` | 10 条 | 每跳过 10 条采样一次 |
+
+#### API
 
 ```js
-import { setConsoleLimit, resetConsoleLimit } from './src/logger/logger.js';
+import { setRateLimit, resetRateLimiters } from './src/logger/logger.js';
 
-// 设置上限为 200 条（默认 100，0 = 不限制）
-setConsoleLimit(200);
+// 调整速率参数（按字段合并，未传字段保持原值）
+setRateLimit({
+    warnPerWindow:  20,    // warn 每窗口最多条数（0 = 不限制）
+    infoPerWindow:  10,    // info 每窗口最多条数（0 = 不限制）
+    debugPerWindow: 10,    // debug 每窗口最多条数（0 = 不限制）
+    windowMs:    10_000,   // 窗口大小（ms）
+    sampleEvery:    10,    // 超限后每隔 N 条输出一次（0 = 完全静默）
+});
 
-// 关闭限流（如 CI 环境需要完整日志）
-setConsoleLimit(0);
+// CI 环境：完全关闭限速
+setRateLimit({ warnPerWindow: 0, infoPerWindow: 0, debugPerWindow: 0 });
 
-// 多轮执行时重置计数器（不改变上限）
-resetConsoleLimit();
+// 单测 teardown：重置所有域的速率状态（不改变参数）
+resetRateLimiters();
+
+// 只重置 analysis 域（其他域保持原状）
+resetRateLimiters('analysis');
 ```
 
 | 函数 | 说明 |
 |------|------|
-| `setConsoleLimit(n)` | 设置上限；`n=0` 关闭限流；调用同时重置计数器 |
-| `resetConsoleLimit()` | 仅重置计数器，不改变上限；用于多轮测试场景 |
+| `setRateLimit(options)` | 按字段合并更新速率参数；`xPerWindow=0` 表示该级别不限制 |
+| `resetRateLimiters(domain?)` | 重置速率状态；传 `domain` 只重置该域，不传则重置全部域 |
 
-> **默认值**：上限为 **100** 条，适合浏览器调试场景。Node.js CI 环境建议调用 `setConsoleLimit(0)` 关闭限流。
+> **注意**：`setRateLimit` 只修改参数，**不**重置已积累的计数状态。
+> 若需要同时清空状态，请在调用 `setRateLimit` 后再调用 `resetRateLimiters()`。
 
 ### DOMAIN 常量
 
