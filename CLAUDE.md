@@ -68,9 +68,13 @@ esnstrument.js        ← 所有上述模块 + @babel/parser + @babel/generator
 | `EventSerializer.js` | 事件序列化器 |
 | `backends/MemoryBackend.js` | 纯内存后端（测试用）|
 | `backends/NodeStreamBackend.js` | Node.js 流（写文件、stdout）|
-| `backends/WsBackend.js` | WebSocket 后端（传输到 trace server）|
+| `backends/WsBackend.js` | WebSocket 后端（主线程，含窗口背压 + ACK）|
+| `backends/WsWorkerBackend.js` | WebSocket 后端（发送放入 Web Worker，零拷贝 Transferable）|
+| `backends/WsSabBackend.js` | WebSocket 后端（SharedArrayBuffer 零拷贝，需 COOP/COEP）|
 | `backends/IdbWorkerBackend.js` | IndexedDB Worker 后端（浏览器持久化）|
-| `workers/idb-worker.js` | IndexedDB Worker 脚本（Blob URL 内联）|
+| `workers/idb-worker.js` | IndexedDB Worker 脚本（Classic Worker）|
+| `workers/ws-worker.js` | WsWorkerBackend 的 Worker 脚本|
+| `workers/ws-worker-sab.js` | WsSabBackend 的 Worker 脚本（读 SAB 环形缓冲区）|
 
 ---
 
@@ -202,7 +206,7 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 
 ## 文档维护规范
 
-项目文档统一存放在 `docs/` 目录下，共 9 个 Markdown 文件：
+项目文档统一存放在 `docs/` 目录下，共 10 个 Markdown 文件：
 
 | 文档 | 对应代码范围 |
 |------|------------|
@@ -210,7 +214,8 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 | `docs/Overview.md` | 整体架构、钩子一览、使用方式 |
 | `docs/Instrumentation-Engine.md` | `src/instrument/` 全部模块 |
 | `docs/Preprocessing.md` | `src/preprocess/` 预处理模块（反混淆 + 语法降级）|
-| `docs/Runtime-System.md` | `src/runtime/` 全部模块 + `src/logger/` 日志系统 |
+| `docs/Runtime-System.md` | `src/runtime/` 全部模块（不含日志系统）|
+| `docs/Logger-System.md` | `src/logger/` 日志系统 + Trace Server 工具 |
 | `docs/Analysis-Development.md` | 分析插件接口（`analysisCallbackTemplate.js`）|
 | `docs/Configuration.md` | `init(config)` 的 Config 对象 |
 | `docs/Sample-Analyses.md` | `src/plugins/` 全部示例插件 |
@@ -228,6 +233,7 @@ Config 对象控制哪些操作被插桩。字段为 `null` / `undefined` 表示
 6. **新增 / 删除 `src/plugins/` 示例插件** → 更新 `Sample-Analyses.md`
 7. **架构层面的重大变化**（模块拆分/合并、依赖变更等）→ 更新 `Overview.md`
 8. **预处理插件 / API 变化（`src/preprocess/`）** → 更新 `Preprocessing.md`
+9. **日志系统变化（`src/logger/` 模块、后端、Worker、Trace Server）** → 更新 `Logger-System.md`
 
 ### 更新原则
 

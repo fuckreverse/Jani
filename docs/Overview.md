@@ -81,7 +81,7 @@ flowchart TD
 | `AntiDetection.js` | 反插桩对抗工具，`toString` Hook / 全局变量检测 / 异步上下文包装 |
 | `NativeProxy.js` | 原生方法快照，在模块加载时捕获全部内置方法引用，防止 monkey-patch 导致递归栈溢出 |
 
-> 日志系统已独立为 `src/logger/`，供 `src/runtime/` 与 `src/instrument/` 共同使用，详见 [Runtime-System.md — 日志系统](./Runtime-System.md#日志系统--srclogger)。
+> 日志系统已独立为 `src/logger/`，供 `src/runtime/` 与 `src/instrument/` 共同使用，详见 [Logger-System.md](./Logger-System.md)。
 
 **运行时组件关系**：
 
