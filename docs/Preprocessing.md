@@ -4,6 +4,7 @@
 
 1. **反混淆**：将压缩/混淆代码恢复为可读结构，提升插桩后 Trace 的行列信息质量
 2. **语法降级**：将 ESNext / ES2022+ 语法降级为目标环境支持的版本，扩大插桩器的适用范围
+3. **插桩覆盖率提升**：将箭头函数等插桩器有已知盲区的语法形式转换为等价的标准形式
 
 ## 为什么需要预处理
 
@@ -35,11 +36,12 @@ var y = 6;
 
 ```
 src/preprocess/
-  PreprocessPlugin.js   ← 插件基类（所有插件继承此类）
-  index.js              ← 主入口：preprocessCode(code, options) → { code, stats, warnings }
+  PreprocessPlugin.js      ← 插件基类（所有插件继承此类）
+  index.js                 ← 主入口：preprocessCode(code, options) → { code, stats, warnings }
   plugins/
-    DeobfuscatePlugin.js ← 反混淆插件（7 个可独立开关的 Pass）
-    TranspilePlugin.js   ← 语法降级插件（@babel/preset-env 包装）
+    DeobfuscatePlugin.js   ← 反混淆插件（7 个可独立开关的 Pass）
+    TranspilePlugin.js     ← 语法降级插件（@babel/preset-env 包装）
+    NormalizeArrowPlugin.js ← 箭头函数标准化插件（补全 functionEnter/Exit 覆盖）
 ```
 
 ## 快速上手
@@ -47,7 +49,7 @@ src/preprocess/
 ### 编程方式
 
 ```js
-import { preprocessCode, DeobfuscatePlugin, TranspilePlugin }
+import { preprocessCode, DeobfuscatePlugin, TranspilePlugin, NormalizeArrowPlugin }
     from './src/preprocess/index.js';
 
 // 方式一：默认反混淆（快捷）
@@ -56,9 +58,13 @@ const { code, stats } = await preprocessCode(rawCode);
 // 方式二：使用预设
 const { code } = await preprocessCode(rawCode, { preset: 'full' });
 
-// 方式三：手动组合插件
+// 方式三：补全箭头函数插桩覆盖率
+const { code } = await preprocessCode(rawCode, { preset: 'normalize-arrow' });
+
+// 方式四：手动组合插件
 const { code } = await preprocessCode(rawCode, {
     plugins: [
+        new NormalizeArrowPlugin(),
         new DeobfuscatePlugin({ splitSequence: true, foldConstants: true }),
         new TranspilePlugin({ targets: { ie: '11' } }),
     ],
@@ -93,7 +99,7 @@ node bin/preprocess.mjs --help
 ```ts
 preprocessCode(code: string, options?: {
     // 预设（与 plugins 互斥，plugins 优先）
-    preset?: 'deobfuscate' | 'transpile' | 'full';
+    preset?: 'deobfuscate' | 'transpile' | 'normalize-arrow' | 'full';
 
     // 手动插件列表
     plugins?: PreprocessPlugin[];
@@ -101,6 +107,7 @@ preprocessCode(code: string, options?: {
     // 各插件选项（配合 preset 使用）
     deobfuscate?: DeobfuscateOptions;
     transpile?: TranspileOptions;
+    normalizeArrow?: NormalizeArrowOptions;
 
     sourceType?: 'script' | 'module';  // 默认 'script'
     comments?: boolean;                // 是否保留注释，默认 true
@@ -175,6 +182,71 @@ new DeobfuscatePlugin({
     expandConditional:false,  // 三元展开 if-else（默认关闭）
     flattenIIFE:      false,  // IIFE 展开（默认关闭）
 })
+```
+
+## `NormalizeArrowPlugin` — 箭头函数标准化
+
+将**满足安全条件的**箭头函数转换为等价的普通 `function` 表达式，使插桩器能为其注入 `J$.Fe` / `J$.Fx`（`functionEnter` / `functionExit`）钩子。
+
+### 动机
+
+Jani 插桩器对 `ArrowFunctionExpression` 有已知限制：不注入 `J$.Fe`/`J$.Fx`，不添加 try-catch 包裹。这导致箭头函数内的异常无法被 `J$.Ex` 捕获，分析插件也收不到 `functionEnter`/`functionExit` 回调，在跨函数数据流追踪时出现盲区。
+
+预处理将满足条件的箭头函数转为普通函数，可完全消除这一盲区。
+
+### 安全条件
+
+插件会**严格跳过**以下任意一种情况（有任意一项即保留为箭头函数）：
+
+| 条件 | 原因 |
+|------|------|
+| 函数体内引用 `this` | 箭头函数的 `this` 词法绑定，转换后指向会变 |
+| 函数体内引用 `arguments` | 箭头函数透传外层 `arguments`，转换后变为自身的 |
+| 函数体内引用 `super` | 箭头函数的 `super` 词法绑定，普通函数无词法 `super` |
+| 函数体内引用 `new.target` | 箭头函数的 `new.target` 透传外层，普通函数独立 |
+| 位于类体内（ClassMethod / ClassProperty 等） | 类体上下文复杂，保守拒绝 |
+| `async` 箭头函数（默认） | 默认不处理，可通过 `includeAsync: true` 开启 |
+
+检查只在**当前箭头函数的直接作用域**内进行，不穿透嵌套函数边界（嵌套的 `FunctionExpression` / `ArrowFunctionExpression` / `ObjectMethod` / `ClassMethod` 内部的引用不会影响外层箭头的判断）。
+
+### 转换规则
+
+| 箭头形式 | 转换为 |
+|---------|--------|
+| `x => expr`（表达式体）| `function(x) { return expr; }` |
+| `(x, y) => { stmts }` | `function(x, y) { stmts }` |
+| 带默认参数 / 解构 / rest 参数 | 参数原样保留，仅改变函数类型 |
+
+### 选项
+
+```js
+new NormalizeArrowPlugin({
+    includeAsync: false,  // 是否转换 async 箭头函数（默认关闭）
+})
+```
+
+### 示例
+
+```js
+// 输入
+var double = x => x * 2;
+arr.map(item => item.name);
+const sum = (a, b) => { return a + b; };
+
+// 输出（全部满足安全条件，均转换）
+var double = function(x) { return x * 2; };
+arr.map(function(item) { return item.name; });
+const sum = function(a, b) { return a + b; };
+```
+
+```js
+// 含 this 的箭头函数保留（不转换）
+var obj = {
+    method: function() {
+        var fn = () => this.value;  // ← 保留，含 this
+        return fn();
+    }
+};
 ```
 
 ## `TranspilePlugin` — 语法降级
@@ -272,6 +344,34 @@ const { code } = await preprocessCode(src, {
 
 ## 与插桩器集成
 
+### 补全 functionEnter/Exit 覆盖率
+
+```js
+import { preprocessCode, NormalizeArrowPlugin } from './src/preprocess/index.js';
+import { init, instrumentCode }                  from './src/instrument/esnstrument.js';
+import { fullConfig }                            from './src/instrument/pluginAnalyzer.js';
+
+const rawCode = readFileSync('app.js', 'utf8');
+
+// 第一步：将箭头函数转为普通函数
+const { code: normalizedCode, stats } = await preprocessCode(rawCode, {
+    plugins: [new NormalizeArrowPlugin()],
+    sourceType: 'module',
+});
+console.log(`箭头函数转换: ${stats.NormalizeArrowPlugin.arrowNormalized} 个`);
+
+// 第二步：插桩（转换后的 function 会收到 J$.Fe/J$.Fx 回调）
+init(fullConfig());
+const { code: instrCode } = instrumentCode({
+    code:             normalizedCode,
+    origCodeFileName: 'app.js',
+    instCodeFileName: 'app_inst.js',
+    sourceType:       'module',
+});
+```
+
+### 反混淆后插桩
+
 ```js
 import { preprocessCode, DeobfuscatePlugin } from './src/preprocess/index.js';
 import { init, instrumentCode }               from './src/instrument/esnstrument.js';
@@ -302,9 +402,10 @@ const { code: instrCode, sourceMapObject } = instrumentCode({
 node bin/preprocess.mjs [选项] <输入文件>
 
 预设：
-  --preset deobfuscate   仅反混淆（默认）
-  --preset transpile     仅语法降级
-  --preset full          反混淆 + 语法降级
+  --preset deobfuscate      仅反混淆（默认）
+  --preset transpile        仅语法降级
+  --preset normalize-arrow  仅箭头函数标准化
+  --preset full             箭头标准化 + 反混淆 + 语法降级
 
 反混淆开关（默认均开启，--no-<name> 关闭）：
   --split-sequence       逗号表达式拆分
@@ -316,6 +417,9 @@ node bin/preprocess.mjs [选项] <输入文件>
 反混淆扩展（默认关闭）：
   --expand-conditional   条件表达式 ? : 展开为 if-else
   --flatten-iife         无参 IIFE 展开
+
+箭头函数标准化选项（默认关闭）：
+  --include-async        同时转换 async 箭头函数
 
 语法降级选项：
   --targets <t>          Browserslist 目标（默认 "defaults"）

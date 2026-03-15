@@ -15,7 +15,7 @@
 import { describe, test, before } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { preprocessCode, PreprocessPlugin, DeobfuscatePlugin, TranspilePlugin }
+import { preprocessCode, PreprocessPlugin, DeobfuscatePlugin, TranspilePlugin, NormalizeArrowPlugin }
     from '../../src/preprocess/index.js';
 import { init, instrumentCode } from '../../src/instrument/esnstrument.js';
 import { ALL_CONFIG } from '../helpers/shared-helpers.mjs';
@@ -859,5 +859,352 @@ describe('DeobfuscatePlugin / 复杂混淆模式', () => {
         // IIFE 展开后 void 0 替换 + 逗号拆分
         assert.ok(!code.includes('void 0'), 'void 0 应替换');
         assert.ok(!code.includes('function('), 'IIFE 应展开');
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// NormalizeArrowPlugin — 箭头函数标准化
+// ════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 快捷调用：只使用 NormalizeArrowPlugin（script 模式）。
+ */
+async function normalizeArrow(code, opts = {}) {
+    return preprocessCode(code, {
+        plugins: [new NormalizeArrowPlugin(opts)],
+        sourceType: 'script',
+    });
+}
+
+describe('NormalizeArrowPlugin / 基本转换', () => {
+    test('表达式体箭头函数 → function + return', async () => {
+        const { code, stats } = await normalizeArrow('var f = x => x * 2;');
+        assert.ok(!code.includes('=>'), '箭头函数应被转换');
+        assert.ok(code.includes('function'), '应含 function 关键字');
+        assert.ok(code.includes('return x * 2'), '表达式体应包裹为 return');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 1);
+    });
+
+    test('块体箭头函数 → function（块体原样保留）', async () => {
+        const { code, stats } = await normalizeArrow('var f = (x, y) => { var r = x + y; return r; };');
+        assert.ok(!code.includes('=>'), '箭头函数应被转换');
+        assert.ok(code.includes('function'), '应含 function 关键字');
+        assert.ok(code.includes('var r = x + y'), '块体内容应保留');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 1);
+    });
+
+    test('无参箭头函数 → function()', async () => {
+        const { code } = await normalizeArrow('var f = () => 42;');
+        assert.ok(!code.includes('=>'), '箭头函数应被转换');
+        // 应生成 function() { return 42; }
+        assert.ok(/function\s*\(\s*\)/.test(code), '无参 function 应正确生成');
+        assert.ok(code.includes('return 42'), '表达式体应包裹为 return');
+    });
+
+    test('多参数箭头函数参数保留', async () => {
+        const { code } = await normalizeArrow('var f = (a, b, c) => a + b + c;');
+        assert.ok(!code.includes('=>'), '应转换');
+        assert.ok(/function\s*\(a,\s*b,\s*c\)/.test(code), '三个参数应保留');
+    });
+
+    test('带默认参数的箭头函数', async () => {
+        const { code } = await normalizeArrow('var f = (x = 0, y = 1) => x + y;');
+        assert.ok(!code.includes('=>'), '应转换');
+        assert.ok(code.includes('x = 0'), '默认参数应保留');
+        assert.ok(code.includes('y = 1'), '默认参数应保留');
+    });
+
+    test('带解构参数的箭头函数', async () => {
+        const { code } = await normalizeArrow('var f = ({a, b}) => a + b;');
+        assert.ok(!code.includes('=>'), '应转换');
+        assert.ok(code.includes('a'), '解构参数应保留');
+    });
+
+    test('带 rest 参数的箭头函数', async () => {
+        const { code } = await normalizeArrow('var f = (...args) => args.length;');
+        assert.ok(!code.includes('=>'), '应转换');
+        assert.ok(code.includes('...args') || code.includes('args'), 'rest 参数应保留');
+    });
+
+    test('多个箭头函数全部转换，统计正确', async () => {
+        const { code, stats } = await normalizeArrow(
+            'var a = x => x; var b = y => y + 1; var c = z => z * 2;'
+        );
+        assert.ok(!code.includes('=>'), '所有箭头函数应被转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 3, '应转换 3 个');
+    });
+
+    test('嵌套箭头函数（均无 this/arguments）全部转换', async () => {
+        const { code, stats } = await normalizeArrow(
+            'var f = x => y => x + y;'
+        );
+        assert.ok(!code.includes('=>'), '嵌套箭头函数均应转换');
+        // 外层 x => (内层 y => x + y) 都应转换
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 2, '嵌套两层均应转换');
+    });
+
+    test('回调中的箭头函数转换', async () => {
+        const { code, stats } = await normalizeArrow(
+            'arr.map(x => x * 2).filter(x => x > 0);'
+        );
+        assert.ok(!code.includes('=>'), '回调箭头函数应转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 2);
+    });
+});
+
+// ── 安全：不应转换的场景 ──────────────────────────────────────────────────────
+
+describe('NormalizeArrowPlugin / [安全] 保守拒绝场景', () => {
+    test('[安全] 含 this 的箭头函数不转换', async () => {
+        const { code, stats } = await normalizeArrow(
+            'var f = () => this.name;'
+        );
+        // 含 this，不应转换
+        assert.ok(code.includes('=>'), '含 this 的箭头函数不应转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 0);
+    });
+
+    test('[安全] 含 this 的方法内箭头函数不转换', async () => {
+        const { code, stats } = await normalizeArrow(`
+            var obj = {
+                method: function() {
+                    var fn = () => this.value;
+                    return fn();
+                }
+            };
+        `);
+        // fn 箭头函数引用了 this（属于 method 的 this），不能转换
+        assert.ok(code.includes('=>'), '引用 this 的箭头函数不应转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 0);
+    });
+
+    test('[安全] 含 arguments 的箭头函数不转换', async () => {
+        const { code, stats } = await normalizeArrow(`
+            function outer() {
+                var f = () => arguments[0];
+                return f();
+            }
+        `);
+        // 箭头函数访问外层 outer 的 arguments，不能转换
+        assert.ok(code.includes('=>'), '含 arguments 的箭头函数不应转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 0);
+    });
+
+    test('[安全] 含 super 的箭头函数不转换', async () => {
+        const { code, stats } = await normalizeArrow(`
+            class B extends A {
+                foo() {
+                    var fn = () => super.bar();
+                    return fn();
+                }
+            }
+        `);
+        // 含 super，不能转换
+        assert.ok(code.includes('=>'), '含 super 的箭头函数不应转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 0);
+    });
+
+    test('[安全] 含 new.target 的箭头函数不转换', async () => {
+        const { code, stats } = await normalizeArrow(`
+            function outer() {
+                var fn = () => new.target;
+                return fn();
+            }
+        `);
+        assert.ok(code.includes('=>'), '含 new.target 的箭头函数不应转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 0);
+    });
+
+    test('[安全] async 箭头函数默认不转换', async () => {
+        const { code, stats } = await normalizeArrow(
+            'var f = async x => await fetch(x);'
+        );
+        // 默认 includeAsync=false，async 箭头不转换
+        assert.ok(code.includes('=>'), 'async 箭头默认不转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 0);
+    });
+
+    test('[安全] 类方法内的箭头函数不转换（即使无 this）', async () => {
+        // 类体内的箭头函数即使不含 this，也保守跳过
+        // 因为类体的上下文复杂（super/new.target 可能通过嵌套传递）
+        const { code, stats } = await normalizeArrow(`
+            class Foo {
+                bar() {
+                    return [1, 2, 3].map(x => x * 2);
+                }
+            }
+        `);
+        // x => x * 2 位于 ClassMethod bar() 内，应跳过
+        assert.ok(code.includes('=>'), '类方法内的箭头不应转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 0);
+    });
+
+    test('[安全] 类字段初始化器中的箭头函数不转换', async () => {
+        const { code, stats } = await normalizeArrow(`
+            class Foo {
+                double = x => x * 2;
+            }
+        `);
+        assert.ok(code.includes('=>'), '类字段中的箭头不应转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 0);
+    });
+});
+
+// ── 精确的边界场景 ────────────────────────────────────────────────────────────
+
+describe('NormalizeArrowPlugin / 边界场景', () => {
+    test('嵌套箭头：外层无 this、内层有 this → 仅内层跳过', async () => {
+        // 外层 outer 不含 this（_containsThis 不进入嵌套函数，不会看到内层的 this）
+        // 但内层 inner 含 this，所以内层跳过
+        const { code, stats } = await normalizeArrow(`
+            var outer = x => {
+                var inner = () => this.value;
+                return inner();
+            };
+        `);
+        // inner 含 this → 不转换
+        // outer 检查时：_containsThis 进入 outer 的 body，
+        //   遇到 ArrowFunctionExpression(inner) 是 FUNCTION_BOUNDARY → 停止深入
+        //   因此 outer 的体内"没有"this → outer 可以转换
+        // 预期：outer 转换（=>, 变为 function），inner 保留（=>）
+        const arrowCount = (code.match(/=>/g) ?? []).length;
+        assert.equal(arrowCount, 1, '应只剩一个箭头函数（内层 inner）');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 1, '应转换外层 1 个');
+    });
+
+    test('普通函数内的箭头函数（无 this）可以转换', async () => {
+        // 箭头函数在普通函数内，但不引用任何危险绑定
+        const { code, stats } = await normalizeArrow(`
+            function process(arr) {
+                return arr.map(x => x * 2);
+            }
+        `);
+        assert.ok(!code.includes('=>'), '箭头函数应被转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 1);
+    });
+
+    test('arguments 在形参中（不是引用）不阻止转换', async () => {
+        // 形参叫 arguments 的情况由 scope.js 重命名处理，
+        // 这里测试体内没有 arguments 引用的箭头函数可以正常转换
+        // （注意：形参名 arguments 比较特殊，Babel 解析后形参 Identifier.name='arguments'，
+        //   但它在 params 里，不在 body 里，_containsArguments 只扫描 body，所以安全）
+        const { code, stats } = await normalizeArrow(
+            'var f = (x, y) => x + y;'
+        );
+        assert.ok(!code.includes('=>'), '没有 arguments 引用的箭头函数应转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 1);
+    });
+
+    test('this 在嵌套普通函数内不阻止外层箭头函数转换', async () => {
+        // 嵌套的 FunctionExpression 是函数边界，其内的 this 不属于箭头函数
+        const { code, stats } = await normalizeArrow(`
+            var f = x => {
+                var obj = { method: function() { return this.val; } };
+                return obj;
+            };
+        `);
+        // f 的 body 内有一个 FunctionExpression，_containsThis 遇到函数边界停止，
+        // 不会看到 function() 内部的 this，所以 f 被转换
+        assert.ok(!code.includes('=>'), 'this 在嵌套 function 内，不阻止外层箭头转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 1);
+    });
+
+    test('super 在嵌套普通函数内不阻止外层箭头函数转换', async () => {
+        // 注意：super 在非类方法里本来就是语法错误，Babel errorRecovery 模式会解析
+        // 这里用 ObjectMethod 形式包裹，确保语法合法
+        // 测试：嵌套函数内的 super 不影响外层箭头
+        const { code, stats } = await normalizeArrow(`
+            var f = x => {
+                var o = { m() { return super.toString(); } };
+                return o;
+            };
+        `);
+        // super 在 ObjectMethod 内（函数边界），不影响 f 的判断
+        assert.ok(!code.includes('=>'), 'super 在嵌套方法内，不阻止外层箭头转换');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 1);
+    });
+
+    test('preset=normalize-arrow 可通过预设名使用', async () => {
+        const { code, stats } = await preprocessCode('var f = x => x + 1;', {
+            preset: 'normalize-arrow',
+            sourceType: 'script',
+        });
+        assert.ok(!code.includes('=>'), 'preset normalize-arrow 应转换箭头函数');
+        assert.ok(stats.NormalizeArrowPlugin, 'stats 中应有 NormalizeArrowPlugin');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 1);
+    });
+
+    test('与 DeobfuscatePlugin 组合使用', async () => {
+        const { code, stats } = await preprocessCode(
+            'var f = x => x + 0; var g = y => void 0;',
+            {
+                plugins: [
+                    new NormalizeArrowPlugin(),
+                    new DeobfuscatePlugin(),
+                ],
+                sourceType: 'script',
+            }
+        );
+        // 箭头函数应被转换，void 0 应被替换
+        assert.ok(!code.includes('=>'), '箭头函数应被转换');
+        assert.ok(!code.includes('void 0'), 'void 0 应被替换');
+        assert.ok(code.includes('undefined'), 'void 0 → undefined');
+        assert.equal(stats.NormalizeArrowPlugin.arrowNormalized, 2);
+    });
+});
+
+// ── 与插桩器集成：转换后箭头函数可收到 functionEnter/Exit 钩子 ────────────────
+
+describe('NormalizeArrowPlugin → 插桩集成', () => {
+    before(() => init({ ...ALL_CONFIG }));
+
+    test('转换后代码可正常插桩', async () => {
+        const raw = 'var double = x => x * 2; double(21);';
+        const { code: normalized } = await normalizeArrow(raw);
+        assert.ok(!normalized.includes('=>'), '预处理应消除箭头函数');
+
+        let result;
+        assert.doesNotThrow(() => {
+            result = instrumentCode({
+                code:             normalized,
+                origCodeFileName: 'arrow.js',
+                instCodeFileName: 'arrow_inst.js',
+                sourceType:       'script',
+            });
+        }, '转换后的代码应可正常插桩');
+        assert.ok(result.code.includes('J$.'), '插桩后代码应含钩子');
+    });
+
+    test('转换后函数插桩代码中含 J$.Fe（functionEnter 钩子）', async () => {
+        // 原始代码是箭头函数，插桩器对箭头函数不注入 Fe
+        // 预处理转换后，插桩器应为 function 注入 J$.Fe
+        const raw = 'var f = x => x + 1;';
+        const { code: normalized } = await normalizeArrow(raw);
+
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code:             normalized,
+            origCodeFileName: 'arrow_fe.js',
+            instCodeFileName: 'arrow_fe_inst.js',
+            sourceType:       'script',
+        });
+        // 普通 function 会注入 J$.Fe（functionEnter）
+        assert.ok(instrCode.includes('J$.Fe'), '转换后的 function 应有 J$.Fe 钩子');
+    });
+
+    test('未经转换的箭头函数插桩后无 J$.Fe', async () => {
+        // 对照组：不经过 NormalizeArrowPlugin，直接插桩
+        // 插桩器对箭头函数不注入 J$.Fe
+        const raw = 'var f = x => x + 1;';
+
+        init({ ...ALL_CONFIG });
+        const { code: instrCode } = instrumentCode({
+            code:             raw,
+            origCodeFileName: 'arrow_no_fe.js',
+            instCodeFileName: 'arrow_no_fe_inst.js',
+            sourceType:       'script',
+        });
+        // 箭头函数不注入 J$.Fe（插桩器设计决定）
+        assert.ok(!instrCode.includes('J$.Fe'), '未转换的箭头函数不应有 J$.Fe 钩子');
     });
 });

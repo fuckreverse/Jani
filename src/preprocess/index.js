@@ -36,9 +36,10 @@ import _babelTraverse   from '@babel/traverse';
 const babelGenerate = /** @type {any} */ (_babelGenerate).default ?? _babelGenerate;
 const babelTraverse = /** @type {any} */ (_babelTraverse).default ?? _babelTraverse;
 
-import { PreprocessPlugin }  from './PreprocessPlugin.js';
-import { DeobfuscatePlugin } from './plugins/DeobfuscatePlugin.js';
-import { TranspilePlugin }   from './plugins/TranspilePlugin.js';
+import { PreprocessPlugin }    from './PreprocessPlugin.js';
+import { DeobfuscatePlugin }   from './plugins/DeobfuscatePlugin.js';
+import { TranspilePlugin }     from './plugins/TranspilePlugin.js';
+import { NormalizeArrowPlugin } from './plugins/NormalizeArrowPlugin.js';
 
 // ── 共享 babelApi 对象（传入所有插件）────────────────────────────────────────
 const babelApi = { traverse: babelTraverse, types: null, generator: babelGenerate };
@@ -65,14 +66,18 @@ function buildPreset(preset, options = {}) {
         case 'transpile':
             return [new TranspilePlugin(options.transpile ?? {})];
 
+        case 'normalize-arrow':
+            return [new NormalizeArrowPlugin(options.normalizeArrow ?? {})];
+
         case 'full':
             return [
+                new NormalizeArrowPlugin(options.normalizeArrow ?? {}),
                 new DeobfuscatePlugin(options.deobfuscate ?? {}),
                 new TranspilePlugin(options.transpile ?? {}),
             ];
 
         default:
-            throw new Error(`未知 preset: "${preset}"，可用值: deobfuscate | transpile | full`);
+            throw new Error(`未知 preset: "${preset}"，可用值: deobfuscate | transpile | normalize-arrow | full`);
     }
 }
 
@@ -83,7 +88,7 @@ function buildPreset(preset, options = {}) {
  *
  * @param {string} code     原始 JS 代码
  * @param {object} options
- * @param {string}              [options.preset]       预设名称（deobfuscate | transpile | full）
+ * @param {string} [options.preset]       预设名称（deobfuscate | transpile | full | normalize-arrow）
  * @param {PreprocessPlugin[]}  [options.plugins]      手动指定插件列表（与 preset 互斥，plugins 优先）
  * @param {object}              [options.deobfuscate]  DeobfuscatePlugin 选项（配合 preset 使用）
  * @param {object}              [options.transpile]    TranspilePlugin 选项（配合 preset 使用）
@@ -188,6 +193,7 @@ export async function preprocessCode(code, options = {}) {
 }
 
 // ── 导出 ──────────────────────────────────────────────────────────────────────
-export { PreprocessPlugin }  from './PreprocessPlugin.js';
-export { DeobfuscatePlugin } from './plugins/DeobfuscatePlugin.js';
-export { TranspilePlugin }   from './plugins/TranspilePlugin.js';
+export { PreprocessPlugin }    from './PreprocessPlugin.js';
+export { DeobfuscatePlugin }   from './plugins/DeobfuscatePlugin.js';
+export { TranspilePlugin }     from './plugins/TranspilePlugin.js';
+export { NormalizeArrowPlugin } from './plugins/NormalizeArrowPlugin.js';
