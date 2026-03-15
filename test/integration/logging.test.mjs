@@ -21,7 +21,7 @@ import { WebSocketServer } from 'ws';
 
 // 被测模块
 import { LogManager }        from '../../src/logger/LogManager.js';
-import { NodeStreamBackend } from '../../src/logger/backends/NodeStreamBackend.js';
+import { NodeStreamBackend } from '../../src/logger/transport/NodeStreamBackend.js';
 
 // ════════════════════════════════════════════════════════════════════════════════
 // 1. NodeStreamBackend
@@ -84,7 +84,7 @@ describe('NodeStreamBackend', () => {
         try {
             const backend = new NodeStreamBackend({ path: outPath, append: false });
             const mgr     = new LogManager({ backends: [backend], autoClose: false, flushThreshold: 2 });
-            for (let i = 0; i < 10; i++) mgr.log({ type: 'READ', iid: i * 8, value: i });
+            for (let i = 0; i < 10; i++) mgr.push({ type: 'READ', iid: i * 8, value: i });
             await mgr.close();
 
             const lines = readFileSync(outPath, 'utf8').trim().split('\n').filter(Boolean);
@@ -152,10 +152,11 @@ describe('WsBackend + trace-server 端到端回路', () => {
     test('WsBackend 成功连接并发送批次，收到 ack', async () => {
         const server = await startMockServer(WS_PORT);
         try {
-            const { WsBackend } = await import('../../src/logger/backends/WsBackend.js');
+            const { WsBackend } = await import('../../src/logger/transport/WsBackend.js');
             const backend = new WsBackend({
                 url:         `ws://127.0.0.1:${WS_PORT}`,
                 format:      'binary',
+                mode:        'main',   // Node.js 环境无 Worker，使用主线程模式
                 autoConnect: true,
                 windowSize:  4,
             });
@@ -177,10 +178,11 @@ describe('WsBackend + trace-server 端到端回路', () => {
     test('WsBackend + LogManager 端到端：9 条事件分 3 批到达', async () => {
         const server = await startMockServer(WS_PORT + 1);
         try {
-            const { WsBackend } = await import('../../src/logger/backends/WsBackend.js');
+            const { WsBackend } = await import('../../src/logger/transport/WsBackend.js');
             const backend = new WsBackend({
                 url:         `ws://127.0.0.1:${WS_PORT + 1}`,
                 format:      'binary',
+                mode:        'main',   // Node.js 环境无 Worker，使用主线程模式
                 autoConnect: true,
                 windowSize:  2,   // 故意小，测试背压
             });
@@ -193,7 +195,7 @@ describe('WsBackend + trace-server 端到端回路', () => {
                 drainBatchSize: 3,
                 autoClose:      false,
             });
-            for (let i = 0; i < 9; i++) mgr.log({ type: 'READ', iid: i * 8, value: i });
+            for (let i = 0; i < 9; i++) mgr.push({ type: 'READ', iid: i * 8, value: i });
             await mgr.close();
 
             // 9 条事件，每批 3 条 → 3 批
@@ -207,10 +209,11 @@ describe('WsBackend + trace-server 端到端回路', () => {
     test('WsBackend ndjson 格式：文本帧正确发送和 ack，字段完整保留', async () => {
         const server = await startMockServer(WS_PORT + 2);
         try {
-            const { WsBackend } = await import('../../src/logger/backends/WsBackend.js');
+            const { WsBackend } = await import('../../src/logger/transport/WsBackend.js');
             const backend = new WsBackend({
                 url:         `ws://127.0.0.1:${WS_PORT + 2}`,
                 format:      'ndjson',   // ExecutionTrace 实际使用的格式
+                mode:        'main',     // Node.js 环境无 Worker，使用主线程模式
                 autoConnect: true,
                 windowSize:  4,
             });

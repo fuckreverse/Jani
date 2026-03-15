@@ -13,7 +13,7 @@
  *
  * 使用方式（Node.js analysis 中）：
  *
- *   import { NodeStreamBackend } from '.../logger/backends/NodeStreamBackend.js';
+ *   import { NodeStreamBackend } from '.../logger/transport/NodeStreamBackend.js';
  *   const backend = new NodeStreamBackend({ path: 'my-trace.ndjson' });
  *   // 与 LogManager 配合：
  *   const mgr = new LogManager({ backends: [backend] });
@@ -24,10 +24,10 @@
  */
 
 import { createWriteStream } from 'node:fs';
-import { serializeBatchToNDJSON } from '../EventSerializer.js';
-import { createLogger, DOMAIN } from '../logger.js';
+import { serializeBatchToNDJSON } from '../../encoding/EventSerializer.js';
+import { createDiagLogger, DOMAIN } from '../diagnostics.js';
 
-const log = createLogger(DOMAIN.BACKEND_NODE);
+const log = createDiagLogger(DOMAIN.BACKEND_NODE);
 
 export class NodeStreamBackend {
     /**

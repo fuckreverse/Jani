@@ -31,10 +31,10 @@
  *   J$.analysis.use(new MyTraceAnalysis());
  */
 
-import { createLogger, DOMAIN } from '../logger/logger.js';
+import { createDiagLogger, DOMAIN } from '../logger/diagnostics.js';
 import { $push, $slice, $isArray, $apply, $freeze } from './NativeProxy.js';
 
-const log = createLogger(DOMAIN.FRAMEWORK);
+const log = createDiagLogger(DOMAIN.FRAMEWORK);
 
 /** 所有可能的钩子名称（与 JalangiRuntime.js 运行时保持一致）。 */
 const HOOKS = $freeze([

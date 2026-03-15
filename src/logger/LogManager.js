@@ -19,12 +19,12 @@
  * 使用方式：
  *
  *   import { LogManager } from '.../logger/LogManager.js';
- *   import { IdbWorkerBackend } from '.../logger/backends/IdbWorkerBackend.js';
+ *   import { IdbBackend } from '.../logger/transport/IdbBackend.js';
  *
  *   const mgr = new LogManager({ backends: [new IdbWorkerBackend()] });
  *
  *   // 在 analysis 钩子里：
- *   mgr.log({ type: 'READ', iid, sid: J$.sid, name, value: val });
+ *   mgr.push({ type: 'READ', iid, sid: J$.sid, name, value: val });
  *
  *   // 页面卸载时：
  *   window.addEventListener('beforeunload', () => mgr.close());
@@ -34,9 +34,9 @@
  */
 
 import { RingBuffer } from './RingBuffer.js';
-import { createLogger, DOMAIN } from './logger.js';
+import { createDiagLogger, DOMAIN } from './diagnostics.js';
 
-const log = createLogger(DOMAIN.LOGGING);
+const log = createDiagLogger(DOMAIN.TRACE_INFRA);
 
 // 判断运行环境
 const IS_BROWSER = typeof window !== 'undefined' || typeof self !== 'undefined';
@@ -121,12 +121,12 @@ export class LogManager {
     // ── 公共 API ──────────────────────────────────────────────────────────────
 
     /**
-     * 记录一条事件（同步，极低开销）。
+     * 推入一条事件到缓冲区（同步，极低开销）。
      *
      * @param {object} event  任意可序列化对象，建议字段：
      *   { type: string, iid: number, sid: number, ...其他钩子特有字段 }
      */
-    log(event) {
+    push(event) {
         if (this._closed) return;
         this._ring.push(event);
         this.stats.totalLogged++;
@@ -376,7 +376,7 @@ export class LogManager {
  * 创建一个使用 MemoryBackend 的 LogManager（用于测试）。
  */
 export async function createMemoryLogManager(options = {}) {
-    const { MemoryBackend } = await import('./backends/MemoryBackend.js');
+    const { MemoryBackend } = await import('./transport/MemoryBackend.js');
     const backend = new MemoryBackend();
     const mgr = new LogManager({ ...options, backends: [backend], autoClose: false });
     return { mgr, backend };
@@ -394,25 +394,25 @@ export async function createLogManager(backendType, backendOptions = {}, manager
     switch (backendType) {
         case 'idb':
         case 'indexeddb': {
-            const mod = await import('./backends/IdbWorkerBackend.js');
-            BackendClass = mod.IdbWorkerBackend;
+            const mod = await import('./transport/IdbBackend.js');
+            BackendClass = mod.IdbBackend;
             break;
         }
         case 'ws':
         case 'websocket': {
-            const mod = await import('./backends/WsBackend.js');
+            const mod = await import('./transport/WsBackend.js');
             BackendClass = mod.WsBackend;
             break;
         }
         case 'node-stream':
         case 'file': {
-            const mod = await import('./backends/NodeStreamBackend.js');
+            const mod = await import('./transport/NodeStreamBackend.js');
             BackendClass = mod.NodeStreamBackend;
             break;
         }
         case 'memory':
         default: {
-            const mod = await import('./backends/MemoryBackend.js');
+            const mod = await import('./transport/MemoryBackend.js');
             BackendClass = mod.MemoryBackend;
             break;
         }

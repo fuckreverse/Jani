@@ -23,8 +23,8 @@ import {
     serializeEventToJSON, serializeBatchToNDJSON,
     serializeEventToBinary, serializeBatchToBinary,
     deserializeEventFromBinary, deserializeBatchFromBinary,
-} from '../../src/logger/EventSerializer.js';
-import { MemoryBackend }        from '../../src/logger/backends/MemoryBackend.js';
+} from '../../src/encoding/EventSerializer.js';
+import { MemoryBackend }        from '../../src/logger/transport/MemoryBackend.js';
 import { LogManager, createMemoryLogManager } from '../../src/logger/LogManager.js';
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -223,25 +223,25 @@ describe('MemoryBackend', () => {
 // ════════════════════════════════════════════════════════════════════════════════
 
 describe('LogManager', () => {
-    test('log 事件被路由到后端', async () => {
+    test('push 事件被路由到后端', async () => {
         const { mgr, backend } = await createMemoryLogManager({ flushThreshold: 2 });
-        mgr.log({ type: 'READ',  iid: 8  });
-        mgr.log({ type: 'WRITE', iid: 16 });
+        mgr.push({ type: 'READ',  iid: 8  });
+        mgr.push({ type: 'WRITE', iid: 16 });
         await mgr.flush();
         assert.equal(backend.getEvents().length,   2);
         assert.equal(backend.getEvents()[0].type, 'READ');
         await mgr.close();
     });
 
-    test('close 后 log 静默丢弃（不抛出）', async () => {
+    test('close 后 push 静默丢弃（不抛出）', async () => {
         const { mgr } = await createMemoryLogManager();
         await mgr.close();
-        mgr.log({ type: 'READ', iid: 8 }); // 不应抛出
+        mgr.push({ type: 'READ', iid: 8 }); // 不应抛出
     });
 
     test('flush 前 RingBuffer 中的事件不丢失', async () => {
         const { mgr, backend } = await createMemoryLogManager({ flushThreshold: 10000 });
-        for (let i = 0; i < 50; i++) mgr.log({ type: 'READ', iid: i * 8 });
+        for (let i = 0; i < 50; i++) mgr.push({ type: 'READ', iid: i * 8 });
         assert.equal(backend.getEvents().length, 0);  // 尚未 flush
         await mgr.flush();
         assert.equal(backend.getEvents().length, 50);
@@ -252,8 +252,8 @@ describe('LogManager', () => {
         const b1 = new MemoryBackend();
         const b2 = new MemoryBackend();
         const mgr = new LogManager({ backends: [b1, b2], autoClose: false });
-        mgr.log({ type: 'READ',  iid: 8  });
-        mgr.log({ type: 'WRITE', iid: 16 });
+        mgr.push({ type: 'READ',  iid: 8  });
+        mgr.push({ type: 'WRITE', iid: 16 });
         await mgr.flush();
         assert.equal(b1.getEvents().length, 2);
         assert.equal(b2.getEvents().length, 2);
@@ -265,13 +265,13 @@ describe('LogManager', () => {
         const b2  = new MemoryBackend();
         const mgr = new LogManager({ backends: [b1], autoClose: false });
         mgr.addBackend(b2);
-        mgr.log({ type: 'READ', iid: 8 });
+        mgr.push({ type: 'READ', iid: 8 });
         await mgr.flush();
         assert.equal(b1.getEvents().length, 1);
         assert.equal(b2.getEvents().length, 1);
 
         mgr.removeBackend(b2);
-        mgr.log({ type: 'WRITE', iid: 16 });
+        mgr.push({ type: 'WRITE', iid: 16 });
         await mgr.flush();
         assert.equal(b1.getEvents().length, 2);
         assert.equal(b2.getEvents().length, 1); // 移除后不再接收
@@ -280,15 +280,15 @@ describe('LogManager', () => {
 
     test('close 时 flush 剩余 RingBuffer', async () => {
         const { mgr, backend } = await createMemoryLogManager({ flushThreshold: 99999 });
-        for (let i = 0; i < 20; i++) mgr.log({ type: 'READ', iid: i });
+        for (let i = 0; i < 20; i++) mgr.push({ type: 'READ', iid: i });
         await mgr.close();
         assert.equal(backend.getEvents().length, 20);
     });
 
     test('getStats 返回合理数据', async () => {
         const { mgr } = await createMemoryLogManager();
-        mgr.log({ type: 'READ',  iid: 8  });
-        mgr.log({ type: 'WRITE', iid: 16 });
+        mgr.push({ type: 'READ',  iid: 8  });
+        mgr.push({ type: 'WRITE', iid: 16 });
         await mgr.flush();
         const s = mgr.getStats();
         assert.equal(s.logManager.totalLogged, 2);
@@ -308,7 +308,7 @@ describe('LogManager', () => {
             drainBatchSize: 3,
             autoClose:      false,
         });
-        for (let i = 0; i < 9; i++) mgr.log({ type: 'READ', iid: i * 8 });
+        for (let i = 0; i < 9; i++) mgr.push({ type: 'READ', iid: i * 8 });
         await mgr.flush();
         await new Promise(r => setTimeout(r, 50));
 

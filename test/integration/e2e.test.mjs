@@ -1121,7 +1121,7 @@ describe('ExecutionTraceAnalysis trace 源码片段', () => {
      */
     async function runWithTrace(srcCode) {
         const { ExecutionTraceAnalysis } = await import('../../src/plugins/ExecutionTrace.js');
-        const { MemoryBackend }          = await import('../../src/logger/backends/MemoryBackend.js');
+        const { MemoryBackend }          = await import('../../src/logger/transport/MemoryBackend.js');
         const { TraceLogger }            = await import('../../src/logger/TraceLogger.js');
 
         // 用 init 的 plugins 参数自动推导按需 Config（无需手动 buildConfigFromPlugins）
@@ -1222,7 +1222,7 @@ describe('ExecutionTraceAnalysis trace 源码片段', () => {
     test('未传 sourceCode + 未开 inlineSource：降级到 (iid=xxx) 是预期行为', async () => {
         // 反向验证：inlineSource:false 时 smap 无 code，trace 仍降级为 (iid=xxx)，行为符合预期
         const { ExecutionTraceAnalysis } = await import('../../src/plugins/ExecutionTrace.js');
-        const { MemoryBackend }          = await import('../../src/logger/backends/MemoryBackend.js');
+        const { MemoryBackend }          = await import('../../src/logger/transport/MemoryBackend.js');
         const { TraceLogger }            = await import('../../src/logger/TraceLogger.js');
         const { LogManager }             = await import('../../src/logger/LogManager.js');
 

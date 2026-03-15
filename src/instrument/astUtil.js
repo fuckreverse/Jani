@@ -17,9 +17,9 @@
 // JALANGI DO NOT INSTRUMENT
 
 import { HOP, JALANGI_VAR } from '../Constants.js';
-import { createLogger, DOMAIN } from '../logger/logger.js';
+import { createDiagLogger, DOMAIN } from '../logger/diagnostics.js';
 
-const log = createLogger(DOMAIN.INSTRUMENT);
+const log = createDiagLogger(DOMAIN.INSTRUMENT);
 
 // 当前沙盒变量名，由 esnstrument.js 的 init() 通过 setJalangiVar() 同步
 let _jalangiVar = JALANGI_VAR;

@@ -1,10 +1,10 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @module idb-worker
+ * @module idb.worker
  *
  * IndexedDB 写入 Worker（Classic Worker，完全自包含，无 import）。
- * 由 IdbWorkerBackend 通过 postMessage 驱动，在独立线程中执行 IDB 操作。
+ * 由 IdbBackend 通过 postMessage 驱动，在独立线程中执行 IDB 操作。
  *
  * 消息协议（主线程 → Worker）：
  *   { cmd: 'init', dbName, storeName, version, debugDomain? }

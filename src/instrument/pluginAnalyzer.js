@@ -22,9 +22,9 @@
 import * as babelParser from '@babel/parser';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { createLogger, DOMAIN } from '../logger/logger.js';
+import { createDiagLogger, DOMAIN } from '../logger/diagnostics.js';
 
-const log = createLogger(DOMAIN.INSTRUMENT);
+const log = createDiagLogger(DOMAIN.INSTRUMENT);
 
 // ─── 所有已知 Hook 名称 ────────────────────────────────────────────────────────
 

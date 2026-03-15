@@ -62,7 +62,7 @@
  */
 
 import { TraceLogger } from '../logger/TraceLogger.js';
-import { createLogger, DOMAIN } from '../logger/logger.js';
+import { createDiagLogger, DOMAIN } from '../logger/diagnostics.js';
 import { serialize } from '../utils/serialize.js';
 import {
     FORMAT_FLAT, FORMAT_TREE, FORMAT_BLOCK, FORMAT_PIPE,
@@ -75,7 +75,7 @@ import {
     $slice, $isArray, $keys, $strSplit, $strReplace, $strSlice, $strTrim,
 } from '../runtime/NativeProxy.js';
 
-const dbg = createLogger(DOMAIN.ANALYSIS);
+const dbg = createDiagLogger(DOMAIN.ANALYSIS);
 
 // ── 输出格式选择（硬编码，改这里切换）────────────────────────────────────────
 //   FORMAT_FLAT  (8) : 平铺流式输出（默认），无缩进，每事件立即输出，不等函数返回

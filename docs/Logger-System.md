@@ -1,6 +1,6 @@
 # Logger 日志系统
 
-> 源码路径：`src/logger/`
+> 源码路径：`src/logger/`、`src/encoding/`
 
 ---
 
@@ -10,7 +10,7 @@ Jalangi2 的日志系统服务于两类截然不同的需求：
 
 | 需求 | 特征 | 处理方式 |
 |------|------|----------|
-| **诊断日志** | 低频、可读性优先（模块启停、错误告警） | `logger.js` → `console.*` 直接输出，含速率限制 |
+| **诊断日志** | 低频、可读性优先（模块启停、错误告警） | `diagnostics.js` → `console.*` 直接输出，含速率限制 |
 | **Trace 数据** | 高频（每个插桩钩子都可能产生）、需持久化 | `LogManager` 缓冲 → 后端异步批量写入 |
 
 两类数据**完全隔离**：Trace 数据不走 `console`，诊断日志不写 IDB / 文件。
@@ -18,22 +18,32 @@ Jalangi2 的日志系统服务于两类截然不同的需求：
 ### 模块一览
 
 ```
-src/logger/
-├── logger.js               诊断日志工厂（createLogger、速率限制、Debug 开关）
-├── LogManager.js           事件缓冲与后端分发（RingBuffer → backends）
-├── TraceLogger.js          Trace 数据的高层门面（按环境自动选后端）
-├── RingBuffer.js           单线程环形缓冲区（极低开销的同步 push）
-├── EventSerializer.js      事件序列化（NDJSON 和自定义二进制格式）
-├── backends/
-│   ├── MemoryBackend.js    内存后端（测试用）
-│   ├── NodeStreamBackend.js Node.js 文件流后端（NDJSON 写文件）
-│   ├── WsBackend.js        WebSocket 后端（主线程，含窗口背压+ACK）
-│   ├── WsWorkerBackend.js  WebSocket 后端（发送放入 Web Worker）
-│   └── WsSabBackend.js     WebSocket 后端（SharedArrayBuffer 零拷贝）
-└── workers/
-    ├── idb-worker.js       IDB Worker 脚本（Classic Worker，无 import）
-    ├── ws-worker.js        WsWorkerBackend 的 Worker 脚本
-    └── ws-worker-sab.js    WsSabBackend 的 Worker 脚本（读 SAB 环形缓冲区）
+src/
+├── encoding/
+│   └── EventSerializer.js      事件序列化协议层（NDJSON 和自定义二进制格式）
+└── logger/
+    ├── diagnostics.js          诊断日志工厂（createDiagLogger、速率限制、Debug 开关）
+    ├── LogManager.js           事件缓冲与后端分发（RingBuffer → 后端）
+    ├── TraceLogger.js          Trace 数据的高层门面（按环境自动选后端）
+    ├── RingBuffer.js           单线程环形缓冲区（极低开销的同步 push）
+    └── transport/              所有传输后端（原 backends/ + workers/ 合并重组）
+        ├── MemoryBackend.js    内存后端（测试用）
+        ├── NodeStreamBackend.js Node.js 文件流后端（NDJSON 写文件）
+        ├── IdbBackend.js       IndexedDB 后端（原 IdbWorkerBackend，Worker 是内部实现细节）
+        ├── idb.worker.js       IDB Worker 脚本（Classic Worker，internal，勿直接 import）
+        ├── WsBackend.js        WebSocket 后端（三种模式合一：main / worker / sab）
+        └── ws.worker.js        WS Worker 脚本（Classic Worker，internal，勿直接 import）
+```
+
+### 概念层次
+
+```
+概念层                  实现文件                 说明
+─────────────────────────────────────────────────────────────────
+诊断（Diagnostics）     diagnostics.js           低频系统日志，直接输出 console.*
+协议（Protocol）        encoding/EventSerializer.js  事件 wire format，多方共享
+传输（Transport）       logger/transport/         后端实现，负责序列化和 IO
+Trace 门面（Facade）    logger/TraceLogger.js     高层 API，按环境选后端
 ```
 
 ### 层次结构与数据流
@@ -45,7 +55,7 @@ src/logger/
   TraceLogger.trace()   ← 初始化前 → _preInitQueue 暂存
         │ 就绪后
         ▼
-   LogManager.log()
+   LogManager.push()
         │  push（同步，极低开销）
         ▼
     RingBuffer
@@ -54,14 +64,14 @@ src/logger/
   backend.write(batch)  ─── 可同时分发给多个后端 ───►
         ├── MemoryBackend        (测试)
         ├── NodeStreamBackend    (Node.js 文件)
-        ├── WsBackend            (主线程 WebSocket)
-        ├── WsWorkerBackend      (Worker 线程 WebSocket)
-        └── WsSabBackend         (SharedArrayBuffer + Worker)
+        └── WsBackend            (主线程 / Worker 线程 / SAB 三种模式)
 ```
 
 ---
 
-## 2. `logger.js` — 诊断日志工厂
+## 2. `diagnostics.js` — 诊断日志工厂
+
+> 原 `logger.js`，已重命名。职责不变。
 
 ### 职责
 
@@ -72,9 +82,9 @@ src/logger/
 ### 使用方式
 
 ```js
-import { createLogger, DOMAIN } from '../../logger/logger.js';
+import { createDiagLogger, DOMAIN } from '../../logger/diagnostics.js';
 
-const log = createLogger(DOMAIN.BACKEND_WS);   // 或直接传字符串 'backend:ws'
+const log = createDiagLogger(DOMAIN.BACKEND_WS);   // 或直接传字符串 'backend:ws'
 
 log.error('连接断开:', err.message);   // 始终输出，不受速率限制
 log.warn('重连中...');                 // 受宽松速率限制（默认 20 条/10s）
@@ -96,22 +106,24 @@ log.debug('批次已发送, size=', n);    // 仅在对应域开启 debug 时输
 ### 内置域名常量 `DOMAIN`
 
 ```js
-import { DOMAIN } from '../../logger/logger.js';
+import { DOMAIN } from '../../logger/diagnostics.js';
 
-DOMAIN.FRAMEWORK    // 'framework'   — JalangiRuntime, HookDispatcher
-DOMAIN.INSTRUMENT   // 'instrument'  — esnstrument, astUtil
-DOMAIN.LOGGING      // 'logging'     — LogManager, TraceLogger
-DOMAIN.BACKEND_IDB  // 'backend:idb' — IdbWorkerBackend
-DOMAIN.BACKEND_WS   // 'backend:ws'  — WsBackend / WsWorkerBackend / WsSabBackend
-DOMAIN.BACKEND_NODE // 'backend:node'— NodeStreamBackend
-DOMAIN.BACKEND_MEM  // 'backend:mem' — MemoryBackend
-DOMAIN.ANALYSIS     // 'analysis'    — 分析插件业务日志
+DOMAIN.FRAMEWORK    // 'framework'     — JalangiRuntime, HookDispatcher
+DOMAIN.INSTRUMENT   // 'instrument'    — esnstrument, astUtil
+DOMAIN.TRACE_INFRA  // 'trace-infra'   — LogManager, TraceLogger（Trace 基础设施诊断域）
+DOMAIN.BACKEND_IDB  // 'backend:idb'   — IdbBackend
+DOMAIN.BACKEND_WS   // 'backend:ws'    — WsBackend
+DOMAIN.BACKEND_NODE // 'backend:node'  — NodeStreamBackend
+DOMAIN.BACKEND_MEM  // 'backend:mem'   — MemoryBackend（测试用，通常无需 debug）
+DOMAIN.ANALYSIS     // 'analysis'      — 分析插件业务日志
 ```
+
+> **注意**：原 `DOMAIN.LOGGING` 已重命名为 `DOMAIN.TRACE_INFRA`，语义更准确（表示"Trace 基础设施自身的诊断域"）。
 
 ### 速率限制配置
 
 ```js
-import { setRateLimit, resetRateLimiters } from '../../logger/logger.js';
+import { setRateLimit, resetRateLimiters } from '../../logger/diagnostics.js';
 
 // 默认值
 // { warnPerWindow: 20, infoPerWindow: 10, debugPerWindow: 10,
@@ -192,15 +204,15 @@ const mgr = new LogManager({
     flushIntervalMs:           0,       // 定时 flush 间隔（0 = 禁用）
     drainBatchSize:            1024,    // 每次 drain 最多取多少条
     autoClose:                 true,    // 是否自动绑定关闭钩子
-    forceSyncFlushThreshold:   0,       // 【验证用】累计 N 条后在 log() 中同步 flush（0 = 禁用）
+    forceSyncFlushThreshold:   0,       // 【验证用】累计 N 条后在 push() 中同步 flush（0 = 禁用）
 });
 ```
 
 ### 主要 API
 
 ```js
-// 写入一条事件（同步，分析钩子里调用）
-mgr.log({ type: 'READ', iid, sid, name, value });
+// 推入一条事件（同步，分析钩子里调用）
+mgr.push({ type: 'READ', iid, sid, name, value });
 
 // 主动 flush（await 可确保写入完成）
 await mgr.flush();
@@ -218,6 +230,8 @@ const stats = mgr.getStats();
 //   ringBuffer:  { totalPushed, totalDrained, totalDropped, totalResizes, flushCount,
 //                  currentSize, capacity, initialCapacity } }
 ```
+
+> **注意**：原 `mgr.log()` 方法已重命名为 `mgr.push()`，语义更准确（往 RingBuffer 里推事件）。
 
 ### 便捷工厂函数
 
@@ -263,6 +277,7 @@ mgr.close()
   - **普通 trace**（高频）：走 `LogManager` 缓冲后端
   - **重点事件**（低频）：直接同步输出到 `console`，同时写入后端便于搜索边界
 - **pre-init 缓冲**：`init()` 完成前产生的事件暂存，就绪后自动 replay，脚本加载阶段事件不丢失
+- KEY 事件直接使用 `console.*` 输出（不走诊断日志速率限制，KEY 事件本身就是低频的）
 
 ### 构造参数
 
@@ -296,11 +311,11 @@ await logger.init();  // 异步初始化（可不 await，事件自动缓冲）
 
 ```
 wsUrl 已设置？
-  ├─ wsSab=true 且 WsSabBackend.isSupported() → WsSabBackend（零拷贝）
-  ├─ wsWorker=true（默认）                    → WsWorkerBackend（Worker 发送）
-  └─ wsWorker=false                           → WsBackend（主线程，调试用）
+  ├─ wsSab=true → WsBackend(mode='sab')     零拷贝（需 COOP/COEP）
+  ├─ wsWorker=true（默认）→ WsBackend(mode='worker')   Worker 线程发送
+  └─ wsWorker=false     → WsBackend(mode='main')     主线程，调试用
 
-不满足 SAB 条件时自动降级（控制台 warn 提示）
+SAB 条件不满足时自动降级到 worker 模式（控制台 warn 提示）
 ```
 
 ### 主要 API
@@ -333,13 +348,19 @@ logger.trace(ev)  [init 尚未完成]  →  _preInitQueue.push({ kind:'trace', e
 logger.key(...)   [init 尚未完成]  →  _preInitQueue.push({ kind:'key', ... })
 
 _doInit() 完成  →  _flushPreInitQueue()
-                      ├─ 遍历队列，将所有事件 replay 到 _mgr
+                      ├─ 遍历队列，将所有事件 replay 到 _mgr.push()
                       └─ _preInitQueue = null  （标记已完成）
 ```
 
 ---
 
-## 6. `EventSerializer.js` — 事件序列化
+## 6. `encoding/EventSerializer.js` — 事件序列化协议层
+
+> **重要**：`EventSerializer.js` 已从 `src/logger/` 移至 `src/encoding/`，作为独立的**协议层**。
+> 它不属于任何单一传输方式，而是 Jalangi 事件的标准 wire format，供以下模块共同依赖：
+> - `src/logger/transport/WsBackend.js`（发送端序列化）
+> - `tools/trace-server/server.mjs`（接收端反序列化）
+> - 未来：IDB 存储、离线分析模块、跨语言消费工具等
 
 支持两种序列化格式，后端根据 `format` 选项选择：
 
@@ -352,7 +373,7 @@ _doInit() 完成  →  _flushPreInitQueue()
 适合：`NodeStreamBackend`（文件分析）、`WsBackend`（调试，可读性优先）
 
 ```js
-import { serializeBatchToNDJSON, serializeEventToJSON } from '../../logger/EventSerializer.js';
+import { serializeBatchToNDJSON, serializeEventToJSON } from '../../encoding/EventSerializer.js';
 
 const text = serializeBatchToNDJSON(events);  // 返回多行 NDJSON 字符串
 ```
@@ -380,11 +401,11 @@ jq 'select(.type=="READ")' jalangi-trace.ndjson
 
 批次格式（多条合并）：`[u32 count][u32 size0][event0][u32 size1][event1]...`
 
-适合：`WsWorkerBackend` / `WsSabBackend`（高吞吐，约 16 字节/条 vs NDJSON 的 100~300 字节/条）
+适合：`WsBackend(mode='worker')` / `WsBackend(mode='sab')`（高吞吐，约 16 字节/条 vs NDJSON 的 100~300 字节/条）
 
 ```js
-import { serializeBatchToBinary, deserializeBatchFromBinary } from '../../logger/EventSerializer.js';
-import { EVENT_TYPE } from '../../logger/EventSerializer.js';
+import { serializeBatchToBinary, deserializeBatchFromBinary } from '../../encoding/EventSerializer.js';
+import { EVENT_TYPE } from '../../encoding/EventSerializer.js';
 
 const buf    = serializeBatchToBinary(events);   // → ArrayBuffer
 const events = deserializeBatchFromBinary(buf);  // 反序列化（服务端/测试用）
@@ -417,12 +438,12 @@ interface LogBackend {
 
 ## 8. 各后端详解
 
-### 8.1 `MemoryBackend`
+### 8.1 `MemoryBackend`（`transport/MemoryBackend.js`）
 
 最简单的后端，所有事件保存在内存数组中，**仅用于测试**。
 
 ```js
-import { MemoryBackend } from '../../logger/backends/MemoryBackend.js';
+import { MemoryBackend } from '../../logger/transport/MemoryBackend.js';
 
 const backend = new MemoryBackend();
 // 写入后查询
@@ -431,12 +452,12 @@ const reads    = backend.getEventsOfType('READ');
 backend.clear();  // 清空
 ```
 
-### 8.2 `NodeStreamBackend`
+### 8.2 `NodeStreamBackend`（`transport/NodeStreamBackend.js`）
 
 Node.js 专用，通过 `fs.WriteStream` 将事件序列化为 NDJSON 写入文件。
 
 ```js
-import { NodeStreamBackend } from '../../logger/backends/NodeStreamBackend.js';
+import { NodeStreamBackend } from '../../logger/transport/NodeStreamBackend.js';
 
 const backend = new NodeStreamBackend({
     path:          'jalangi-trace.ndjson',  // 或传入 stream: existingWritable
@@ -448,86 +469,35 @@ const backend = new NodeStreamBackend({
 
 背压处理：`write()` 检测 `stream.writableNeedDrain`，背压时等待 `drain` 事件。
 
-### 8.3 `WsBackend`（主线程 WebSocket）
+### 8.3 `WsBackend`（`transport/WsBackend.js`）
 
-在**主线程**中持有 WebSocket 连接，适合低频场景或调试用途。
+统一的 WebSocket 后端，通过 `mode` 参数切换三种内部实现。
 
 ```js
-import { WsBackend } from '../../logger/backends/WsBackend.js';
+import { WsBackend } from '../../logger/transport/WsBackend.js';
 
-const backend = new WsBackend({
-    url:              'ws://127.0.0.1:9229/trace',
-    format:           'binary',   // 'binary' | 'ndjson'
-    windowSize:       4,          // 未确认批次数上限（背压窗口）
-    maxRetries:       10,         // 最大重连次数（-1 = 永远重连）
-    retryBaseMs:      500,        // 初始重连等待（ms），指数退避
-    retryMaxMs:       30000,
-    connectTimeoutMs: 10000,
-    autoConnect:      true,
-    replayOnReconnect: true,      // 重连后重发未确认批次
-});
+// 主线程模式（调试用）
+const backend = new WsBackend({ url, mode: 'main',   format: 'binary' });
+
+// Worker 模式（默认，推荐高频 trace）
+const backend = new WsBackend({ url, mode: 'worker', format: 'binary' });
+
+// SAB 模式（零拷贝，需 COOP/COEP；不满足时自动降级 worker）
+const backend = new WsBackend({ url, mode: 'sab',    format: 'binary', slotDataBytes: 65536 });
 ```
+
+**三种模式对比**：
+
+| 模式 | 原实现 | 主线程开销 | 依赖 | 适用场景 |
+|------|--------|-----------|------|----------|
+| `main` | `WsBackend` | 高（`ws.send` 在主线程） | 无 | 调试、低频 |
+| `worker` | `WsWorkerBackend` | 极低（`postMessage` 微秒级） | Web Worker | 高频 trace（推荐） |
+| `sab` | `WsSabBackend` | 最低（`Atomics.store` 纳秒级） | COOP/COEP + SAB | 极高频，主线程繁忙 |
 
 **背压控制（滑动窗口 ACK）**：
 - 服务端每收到一批次返回 ACK（二进制：4 字节 batchId；或 JSON：`{ type:'ack', batchId }`）
-- 主线程维护 `_inFlight` Map，未收 ACK 的批次数达到 `windowSize` 时暂停发送
-
-**自动重连（指数退避）**：
-- 连接断开后按 `retryBaseMs × 2^n` 等待重连，最大等待 `retryMaxMs`
-- 重连成功后可自动重发所有未确认的批次
-
-### 8.4 `WsWorkerBackend`（Worker 线程 WebSocket）
-
-将 WebSocket 的 `send()` 操作迁移到 **Web Worker 独立线程**，主线程只需 `postMessage`。
-
-```
-主线程                               ws-worker.js (Worker)
-  │  postMessage({cmd:'write', data})        │
-  │ ─────────────────────────────────────►  │
-  │  [立即返回，微秒级]                      │  ws.send(data)
-  │                                          │ ──────────────► 服务端
-  │  ◄─────────────────────────────────────  │
-  │  onmessage({type:'ack', batchId})        │  服务端 ack → Worker → postMessage
-```
-
-**与 WsBackend 的核心差异**：
-- 主线程高负载时，`postMessage` 几乎不阻塞（写入 Worker 消息队列，微秒级）
-- `ws.send()` 在 Worker 的事件循环中执行，不受主线程阻塞影响
-
-```js
-import { WsWorkerBackend } from '../../logger/backends/WsWorkerBackend.js';
-
-const backend = new WsWorkerBackend({
-    url:         'ws://127.0.0.1:9229/trace',
-    format:      'binary',
-    windowSize:  16,   // Worker 侧的 in-flight 窗口
-    autoConnect: true,
-});
-await backend.connect();
-```
-
-**数据传输零拷贝**：`ArrayBuffer` 通过 `Transferable` 传入 Worker，不做结构化克隆拷贝。
-
-### 8.5 `WsSabBackend`（SharedArrayBuffer 零拷贝）
-
-最高性能的 WebSocket 后端，主线程通过 **Atomics 原子操作**直接写入共享环形缓冲区，
-Worker 通过 `Atomics.waitAsync` 等待新数据并调用 `ws.send()`。
-
-**要求**：页面需开启 COOP + COEP 响应头：
-```
-Cross-Origin-Opener-Policy: same-origin
-Cross-Origin-Embedder-Policy: require-corp
-```
-不满足时 `WsSabBackend.isSupported()` 返回 `false`，`TraceLogger` 会自动降级到 `WsWorkerBackend`。
-
-**与 WsWorkerBackend 的差异**：
-
-| 维度 | WsWorkerBackend | WsSabBackend |
-|------|----------------|--------------|
-| 主→Worker 通信 | `postMessage`（结构化克隆，微秒级但有拷贝） | `Atomics.store` + `Atomics.notify`（真原子写，纳秒级） |
-| 依赖 JS 事件循环 | 是（Worker 的 `onmessage`） | 否（Worker 用 `Atomics.waitAsync` 解耦） |
-| 适用场景 | 高频 trace，通用 | 极高频 trace，主线程极度繁忙 |
-| 背压保证 | 无（队列积压） | 有（缓冲区满时 write() 等待或丢弃） |
+- `main` / `worker` 模式维护 `_inFlight` Map，未收 ACK 的批次数达到 `windowSize` 时暂停发送
+- `sab` 模式通过 SAB 环形缓冲区槽位计数实现背压（满时 `write()` 等待或超时丢弃）
 
 **SAB 内存布局**：
 ```
@@ -541,41 +511,47 @@ Cross-Origin-Embedder-Policy: require-corp
   每槽: [u32 byteLength][...数据（最多 slotDataBytes 字节）]
 ```
 
+**SAB 支持检测**：
+
 ```js
-import { WsSabBackend } from '../../logger/backends/WsSabBackend.js';
+WsBackend.isSabSupported()  // → boolean
+```
 
-if (!WsSabBackend.isSupported()) {
-    console.warn('SAB not available, use WsWorkerBackend instead');
-}
+### 8.4 `IdbBackend`（`transport/IdbBackend.js`）
 
-const backend = new WsSabBackend({
-    url:                  'ws://127.0.0.1:9229/trace',
-    format:               'binary',
-    slotCount:            64,      // 环形缓冲区槽数
-    slotDataBytes:        65536,   // 每槽最大字节数（64KB ≈ 256 条二进制事件）
-    backpressureTimeoutMs: 200,    // write() 等待空槽超时（超时则丢弃并记录 warn）
+> 原 `IdbWorkerBackend`，已去掉"Worker"后缀（Worker 是内部实现细节）。
+
+浏览器专用，通过 Web Worker 持有 IndexedDB 连接，主线程通过 `postMessage` 批量写入事件。
+
+```js
+import { IdbBackend } from '../../logger/transport/IdbBackend.js';
+
+const backend = new IdbBackend({
+    dbName:    'jalangi-traces',
+    storeName: 'execution-trace',
 });
+await backend.init();  // 等待 Worker 启动 + IDB 连接就绪
 ```
 
 ---
 
 ## 9. Worker 脚本
 
-三个 Worker 脚本均为 **Classic Worker**（无 `import`，自包含），原因是 Blob URL 不支持 Module Worker。
+两个 Worker 脚本均为 **Classic Worker**（无 `import`，自包含），原因是 Blob URL 不支持 Module Worker。
+它们是对应后端类的**内部实现细节**，不应直接 import，也不应被外部模块依赖。
 
 | 文件 | 对应后端 | 功能 |
 |------|----------|------|
-| `idb-worker.js` | `IdbWorkerBackend` | 持有 IDB 连接，接收 `writeVar` 批次写入 IndexedDB；支持 `flush`/`query`/`clear`/`close` |
-| `ws-worker.js` | `WsWorkerBackend` | 持有 WebSocket 连接，接收已序列化的数据帧直接 `ws.send()`；转发服务端 ACK 回主线程 |
-| `ws-worker-sab.js` | `WsSabBackend` | 轮询读取 SAB 环形缓冲区，调用 `ws.send()` 发送，消费后递增 `readSeq` 并 `Atomics.notify` 唤醒等待的主线程 |
+| `transport/idb.worker.js` | `IdbBackend` | 持有 IDB 连接，接收 `writeVar` 批次写入 IndexedDB；支持 `flush`/`query`/`clear`/`close` |
+| `transport/ws.worker.js` | `WsBackend(worker/sab)` | 合并了原 `ws-worker.js` 和 `ws-worker-sab.js`，通过初始化消息的 `mode` 字段区分行为 |
 
 ### Worker 加载策略
 
-源码中通过 `new URL('../workers/xxx.js', import.meta.url)` 引用 Worker 脚本。
-在浏览器 bundle 场景下，`bin/jalangi.mjs` 的 Rollup 插件会将此表达式替换为预创建的 Blob URL，
-避免 Module Worker 不支持 `blob:` URL 导致的 15 秒超时问题。
+源码中通过 `new URL('./idb.worker.js', import.meta.url)` 等引用 Worker 脚本。
+在浏览器 bundle 场景下，Rollup 插件会将此表达式替换为预创建的 Blob URL，
+避免 Module Worker 不支持 `blob:` URL 导致的问题。
 
-### `idb-worker.js` 消息协议
+### `idb.worker.js` 消息协议
 
 ```
 主线程 → Worker                              Worker → 主线程
@@ -605,9 +581,9 @@ const backend = new WsSabBackend({
 ### 最简使用（只需诊断日志）
 
 ```js
-import { createLogger, DOMAIN } from '../../logger/logger.js';
+import { createDiagLogger, DOMAIN } from '../../logger/diagnostics.js';
 
-const log = createLogger(DOMAIN.ANALYSIS);
+const log = createDiagLogger(DOMAIN.ANALYSIS);
 
 export function read(iid, name, val, isGlobal, isScriptLocal) {
     log.debug('read', name, '=', val);
@@ -688,8 +664,8 @@ tracer.init();
 ```js
 const tracer = new TraceLogger({
     wsUrl:   'ws://localhost:9229/trace',
-    wsSab:   true,   // 使用 SAB 零拷贝
-    // 若环境不支持 SAB，自动降级到 WsWorkerBackend
+    wsSab:   true,   // 使用 SAB 零拷贝（WsBackend 内部 mode='sab'）
+    // 若环境不支持 SAB，自动降级到 worker 模式
 });
 tracer.init();
 ```
@@ -704,10 +680,6 @@ const tracer = new TraceLogger({
     // 无 wsUrl，不建立 WebSocket 连接
 });
 await tracer.init();
-
-// 后续查询（通过 IdbWorkerBackend）
-const idbBackend = /* 从 tracer 内部获取或单独创建 */;
-const reads = await idbBackend.query({ type: 'READ' }, 1000);
 ```
 
 ### 场景五：测试（内存后端）
@@ -717,7 +689,7 @@ import { createMemoryLogManager } from '../../logger/LogManager.js';
 
 const { mgr, backend } = await createMemoryLogManager();
 
-mgr.log({ type: 'READ', iid: 8, sid: 1, name: 'x', value: 42 });
+mgr.push({ type: 'READ', iid: 8, sid: 1, name: 'x', value: 42 });
 await mgr.flush();
 
 const events = backend.getEvents();
@@ -734,7 +706,7 @@ LogManager 的 `forceSyncFlushThreshold` 选项是**验证工具**，不是生�
 它让每 N 条事件在插桩回调内同步 flush，用于验证"主线程繁忙时数据是否能及时发送"。
 生产环境中，异步 flush（`queueMicrotask`）才是正确选择，同步 flush 会增加毫秒级延迟。
 
-### WsSabBackend 的 `slotDataBytes` 选择
+### WsBackend SAB 模式的 `slotDataBytes` 选择
 
 每个槽的大小决定单个 batch 序列化后的最大字节数：
 - `binary` 格式：约 16 字节/条，256 条 ≈ 4KB，64KB 默认值足够
@@ -754,6 +726,20 @@ LogManager 的 `forceSyncFlushThreshold` 选项是**验证工具**，不是生�
 
 单测中多个用例共享速率状态，可能导致"第一个用例消耗完配额，后续用例日志被抑制"。
 解决：在每个用例的 `afterEach` / `teardown` 中调用 `resetRateLimiters()`。
+
+### 迁移指南（从旧版本）
+
+| 旧 API | 新 API | 说明 |
+|--------|--------|------|
+| `import ... from 'logger/logger.js'` | `import ... from 'logger/diagnostics.js'` | 文件重命名 |
+| `createLogger(domain)` | `createDiagLogger(domain)` | 函数重命名 |
+| `DOMAIN.LOGGING` | `DOMAIN.TRACE_INFRA` | 常量重命名 |
+| `mgr.log(event)` | `mgr.push(event)` | 方法重命名 |
+| `import ... from 'logger/backends/MemoryBackend.js'` | `import ... from 'logger/transport/MemoryBackend.js'` | 目录重组 |
+| `import ... from 'logger/backends/WsBackend.js'` | `import ... from 'logger/transport/WsBackend.js'` | 目录重组，三变一 |
+| `new WsWorkerBackend(opts)` | `new WsBackend({ ...opts, mode: 'worker' })` | 合并入 WsBackend |
+| `new WsSabBackend(opts)` | `new WsBackend({ ...opts, mode: 'sab' })` | 合并入 WsBackend |
+| `import ... from 'logger/EventSerializer.js'` | `import ... from 'encoding/EventSerializer.js'` | 移至独立模块 |
 
 ---
 
@@ -802,6 +788,8 @@ const mgr = new LogManager({ backends: [new MyCustomBackend({ ... })] });
 
 Trace Server 是一个独立的 Node.js WebSocket 服务器，负责接收来自浏览器端 `WsBackend` 推送的事件批次，并将其持久化到本地文件。
 
+> 依赖 `src/encoding/EventSerializer.js` 进行二进制帧反序列化。
+
 ### 启动
 
 ```bash
@@ -849,18 +837,6 @@ traces/trace_<YYYYMMDD>_<HHmmss>_<ms>_<seq>.ndjson
 ```
 traces/trace_20260314_153042_123_001.ndjson   ← 第 1 个连接
 traces/trace_20260314_153043_456_002.ndjson   ← 第 2 个连接（页面刷新后）
-```
-
-**连接生命周期与文件对应关系**：
-
-```
-客户端连接  → 创建新文件，打印文件路径
-           →   [server] Client connected: ::1 (total: 1)
-           →   [server]   → Writing to: /path/to/traces/trace_20260314_153042_123_001.ndjson
-数据传输中  → 事件写入对应文件
-客户端断开  → 关闭文件流，打印事件总数
-           →   [server] Client disconnected: ::1 (code=1001, active: 0)
-           →   [server]   → Trace saved: /path/.../trace_20260314_153042_123_001.ndjson (1234 events)
 ```
 
 ### HTTP 端点

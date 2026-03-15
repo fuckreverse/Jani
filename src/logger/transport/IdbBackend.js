@@ -1,7 +1,7 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * IdbWorkerBackend — 浏览器默认日志后端。
+ * IdbBackend — 浏览器默认日志后端。
  *
  * 通过 Web Worker 在独立线程中将事件写入 IndexedDB，
  * 主线程完全不阻塞。
@@ -15,7 +15,7 @@
  *    避免并发调用时覆盖 onmessage 导致响应丢失
  *
  * Worker 加载策略：
- *  - 源码中使用 `new URL('../workers/idb-worker.js', import.meta.url)` 引用 Worker 脚本。
+ *  - 源码中使用 `new URL('./idb.worker.js', import.meta.url)` 引用 Worker 脚本。
  *  - 在浏览器 bundle 场景下，jalangi.mjs 的 rollup 插件
  *    `jalangi-patch-idb-worker-url` 会将此表达式替换为预先创建好的 `__idbWorkerUrl`
  *    Blob URL（Classic Worker，无 { type: 'module' }），从而避免 Module Worker 不支持
@@ -26,17 +26,17 @@
  *  - error/warn 级别始终输出
  *
  * 使用方式：
- *   const backend = new IdbWorkerBackend({
+ *   const backend = new IdbBackend({
  *     dbName:    'jalangi-traces',
  *   });
  *   await backend.init();  // 等待 Worker + DB 就绪
  */
 
-import { createLogger, isDebugEnabled, DOMAIN } from '../logger.js';
+import { createDiagLogger, isDebugEnabled, DOMAIN } from '../diagnostics.js';
 
-const log = createLogger(DOMAIN.BACKEND_IDB);
+const log = createDiagLogger(DOMAIN.BACKEND_IDB);
 
-export class IdbWorkerBackend {
+export class IdbBackend {
     /**
      * @param {object} [options]
      * @param {URL|string} [options.workerUrl]  Worker 脚本 URL，默认自动推导
@@ -49,7 +49,7 @@ export class IdbWorkerBackend {
      */
     constructor(options = {}) {
         const {
-            workerUrl         = new URL('../workers/idb-worker.js', import.meta.url),
+            workerUrl         = new URL('./idb.worker.js', import.meta.url),
             dbName            = 'jalangi-traces',
             storeName         = 'events',
             dbVersion         = 1,
@@ -116,7 +116,7 @@ export class IdbWorkerBackend {
             const timeout = setTimeout(() => {
                 const msg = `Worker init timeout after 15s (workerUrl=${workerUrlStr})`;
                 log.error(msg);
-                reject(new Error('IdbWorkerBackend: Worker init timeout'));
+                reject(new Error('IdbBackend: Worker init timeout'));
             }, 15000);
 
             this._readyResolve = () => { clearTimeout(timeout); resolve(); };
@@ -154,7 +154,7 @@ export class IdbWorkerBackend {
     async write(batch) {
         if (this._closed) {
             log.error(`write() called after close — dropping ${batch.length} events`);
-            throw new Error('IdbWorkerBackend: already closed');
+            throw new Error('IdbBackend: already closed');
         }
         if (!this._ready) {
             await this.init();
@@ -173,7 +173,7 @@ export class IdbWorkerBackend {
                 this.stats.errors++;
                 const msg = `write timeout after ${this._writeTimeoutMs}ms (batchId=${batchId}, totalErrors=${this.stats.errors})`;
                 log.error(msg);
-                reject(new Error(`IdbWorkerBackend: write timeout (batchId=${batchId})`));
+                reject(new Error(`IdbBackend: write timeout (batchId=${batchId})`));
             }, this._writeTimeoutMs);
 
             this._pending.set(batchId, { resolve, reject, timer });
@@ -264,7 +264,7 @@ export class IdbWorkerBackend {
                 this._requests.delete(reqId);
                 const msg = `${cmd} timeout after ${timeoutMs}ms (reqId=${reqId})`;
                 log.error(msg);
-                reject(new Error(`IdbWorkerBackend: ${cmd} timeout`));
+                reject(new Error(`IdbBackend: ${cmd} timeout`));
             }, timeoutMs);
 
             this._requests.set(reqId, { resolve, reject, timer });

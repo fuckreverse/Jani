@@ -1,10 +1,10 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @file logger.js — Jalangi2 统一日志工厂
+ * @file diagnostics.js — Jalangi2 诊断日志工厂
  *
  * 提供两级日志分类：
- *   1. 域（domain）：代码所属模块，如 'framework'、'backend:ws'、'logging' 等
+ *   1. 域（domain）：代码所属模块，如 'framework'、'backend:ws'、'trace-infra' 等
  *   2. 级别（level）：error / warn / info / debug
  *
  * 级别语义：
@@ -29,8 +29,8 @@
  *
  * ─── 使用方式 ─────────────────────────────────────────────────────────────────
  *
- *   import { createLogger } from '../../logger/logger.js';
- *   const log = createLogger('backend:ws');
+ *   import { createDiagLogger } from '../../logger/diagnostics.js';
+ *   const log = createDiagLogger('backend:ws');
  *
  *   log.error('connection failed:', err.message);  // 始终输出，不受限制
  *   log.warn('retrying in 500ms');                 // 宽松速率限制
@@ -39,7 +39,7 @@
  *
  * ─── 速率限制配置 ──────────────────────────────────────────────────────────────
  *
- *   import { setRateLimit, resetRateLimiters } from '../../logger/logger.js';
+ *   import { setRateLimit, resetRateLimiters } from '../../logger/diagnostics.js';
  *
  *   // 调整速率参数（全局生效，0 = 不限制）
  *   setRateLimit({ warnPerWindow: 50, infoPerWindow: 20, windowMs: 5000 });
@@ -52,8 +52,8 @@
  *
  *   'framework'    JalangiRuntime, JalangiSandbox, HookDispatcher
  *   'instrument'   astUtil, pluginAnalyzer, esnstrument
- *   'logging'      LogManager, TraceLogger
- *   'backend:idb'  IdbWorkerBackend, idb-worker
+ *   'trace-infra'  LogManager, TraceLogger（Trace 基础设施自身的诊断域）
+ *   'backend:idb'  IdbBackend, idb.worker
  *   'backend:ws'   WsBackend
  *   'backend:node' NodeStreamBackend
  *   'backend:mem'  MemoryBackend（通常无需 debug）
@@ -325,8 +325,8 @@ function isDebugEnabled(domain) {
  * 内置域名常量，避免各模块硬编码字符串。
  *
  * 用法：
- *   import { createLogger, DOMAIN } from '../../logger/logger.js';
- *   const log = createLogger(DOMAIN.FRAMEWORK);
+ *   import { createDiagLogger, DOMAIN } from '../../logger/diagnostics.js';
+ *   const log = createDiagLogger(DOMAIN.FRAMEWORK);
  *
  * JALANGI_DEBUG 开关同样使用这些字符串：
  *   JALANGI_DEBUG=backend:ws,backend:node
@@ -336,9 +336,9 @@ export const DOMAIN = Object.freeze({
     FRAMEWORK:    'framework',
     /** astUtil, pluginAnalyzer, esnstrument */
     INSTRUMENT:   'instrument',
-    /** LogManager, TraceLogger */
-    LOGGING:      'logging',
-    /** IdbWorkerBackend, idb-worker */
+    /** LogManager, TraceLogger（Trace 基础设施自身的诊断域） */
+    TRACE_INFRA:  'trace-infra',
+    /** IdbBackend, idb.worker */
     BACKEND_IDB:  'backend:idb',
     /** WsBackend */
     BACKEND_WS:   'backend:ws',
@@ -350,10 +350,10 @@ export const DOMAIN = Object.freeze({
     ANALYSIS:     'analysis',
 });
 
-// ── Logger 对象 ─────────────────────────────────────────────────────────────────
+// ── DiagLogger 对象 ─────────────────────────────────────────────────────────────
 
 /**
- * 创建一个绑定了域名前缀的日志对象。
+ * 创建一个绑定了域名前缀的诊断日志对象。
  *
  * 返回的对象包含四个方法：error / warn / info / debug。
  *   error  — 始终输出，完全不受速率限制
@@ -367,7 +367,7 @@ export const DOMAIN = Object.freeze({
  * @param {string} domain  域名，如 'backend:ws'、'framework'
  * @returns {{ error: Function, warn: Function, info: Function, debug: Function }}
  */
-export function createLogger(domain) {
+export function createDiagLogger(domain) {
     const prefix = `[Jalangi:${domain}]`;
     return {
         error(...args) {
@@ -388,7 +388,7 @@ export function createLogger(domain) {
 }
 
 /**
- * 获取指定域的 debug 开关状态（供 idb-worker 等无法 import 模块的环境手动判断）。
+ * 获取指定域的 debug 开关状态（供 idb.worker 等无法 import 模块的环境手动判断）。
  *
  * @param {string} domain
  * @returns {boolean}
