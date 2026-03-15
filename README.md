@@ -401,7 +401,7 @@ npm run test:logging
 | [`docs/Runtime-System.md`](docs/Runtime-System.md) | 运行时框架（JalangiSandbox / HookDispatcher / SMemory） |
 | [`docs/Logger-System.md`](docs/Logger-System.md) | 日志系统 + Trace Server |
 | [`docs/Analysis-Development.md`](docs/Analysis-Development.md) | 分析插件接口（`AnalysisTemplate`） |
-| [`docs/Sample-Analyses.md`](docs/Sample-Analyses.md) | 示例插件详解 |
+| [`docs/Analysis-Plugins.md`](docs/Analysis-Plugins.md) | 示例插件详解 |
 | [`docs/Scope-Aware-Instrumentation.md`](docs/Scope-Aware-Instrumentation.md) | 作用域感知插桩技术设计 |
 | [`docs/Testing-System.md`](docs/Testing-System.md) | 测试体系结构与方法 |
 

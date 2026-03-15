@@ -83,12 +83,12 @@
  *
  *   # 只运行已插桩文件
  *   node bin/jalangi.mjs run tests/app_jalangi_.js
- *   node bin/jalangi.mjs run --analysis src/plugins/TraceAll.js tests/app_jalangi_.js
+ *   node bin/jalangi.mjs run --analysis src/plugins/tutorial/LogAll.js tests/app_jalangi_.js
  *   node bin/jalangi.mjs run --runtime tests/app_jalangi_.runtime.mjs tests/app_jalangi_.js
  *
  *   # 插桩 + 立即运行（一步）
  *   node bin/jalangi.mjs instrument-and-run tests/app.js
- *   node bin/jalangi.mjs instrument-and-run --analysis src/plugins/TraceAll.js tests/app.js
+ *   node bin/jalangi.mjs instrument-and-run --analysis src/plugins/tutorial/LogAll.js tests/app.js
  *   node bin/jalangi.mjs instrument-and-run --no-write tests/app.js arg1 arg2
  */
 
@@ -214,7 +214,7 @@ function printHelp(sub = null) {
 
 示例：
   node bin/jalangi.mjs run tests/app_jalangi_.js
-  node bin/jalangi.mjs run --analysis src/plugins/TraceAll.js tests/app_jalangi_.js
+  node bin/jalangi.mjs run --analysis src/plugins/tutorial/LogAll.js tests/app_jalangi_.js
   node bin/jalangi.mjs run --runtime tests/app.runtime.mjs tests/app_jalangi_.js
   node bin/jalangi.mjs run tests/app_jalangi_.js -- arg1 arg2
         `.trim());
@@ -244,7 +244,7 @@ function printHelp(sub = null) {
 
 示例：
   node bin/jalangi.mjs instrument-and-run tests/app.js
-  node bin/jalangi.mjs instrument-and-run --analysis src/plugins/TraceAll.js tests/app.js
+  node bin/jalangi.mjs instrument-and-run --analysis src/plugins/tutorial/LogAll.js tests/app.js
   node bin/jalangi.mjs instrument-and-run --no-write tests/app.js arg1 arg2
   node bin/jalangi.mjs instrument-and-run --init-param level:verbose tests/app.js
         `.trim());

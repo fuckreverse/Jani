@@ -18,7 +18,7 @@ src/instrument/   插桩器核心（解析 → 变换 → 生成）→ 详见 do
 src/runtime/      运行时钩子框架（JalangiSandbox / HookDispatcher / SMemory 等）→ 详见 docs/Runtime-System.md
 src/logger/       日志系统（RingBuffer / LogManager / 多后端）→ 详见 docs/Logger-System.md
 src/preprocess/   预处理（反混淆 / 语法降级）→ 详见 docs/Preprocessing.md
-src/plugins/      示例分析插件（dlint / datatraces 等）→ 详见 docs/Sample-Analyses.md
+src/plugins/      示例分析插件（ExecutionTrace / dlint / tutorial / coverage 等）→ 详见 docs/Analysis-Plugins.md
 test/             测试套件（unit / integration）→ 详见 docs/Testing-System.md
 docs/             全量文档索引，见下方「文档索引」
 ```
@@ -102,7 +102,7 @@ npm run test:unit / test:integration / test:logging  # 分组
 | [`docs/Runtime-System.md`](docs/Runtime-System.md) | `src/runtime/` 运行时框架 |
 | [`docs/Logger-System.md`](docs/Logger-System.md) | `src/logger/` 日志系统 + Trace Server |
 | [`docs/Analysis-Development.md`](docs/Analysis-Development.md) | 分析插件接口（`AnalysisTemplate`）|
-| [`docs/Sample-Analyses.md`](docs/Sample-Analyses.md) | `src/plugins/` 示例插件 |
+| [`docs/Analysis-Plugins.md`](docs/Analysis-Plugins.md) | `src/plugins/` 示例插件 |
 | [`docs/Scope-Aware-Instrumentation.md`](docs/Scope-Aware-Instrumentation.md) | 作用域感知插桩技术设计 |
 | [`docs/Testing-System.md`](docs/Testing-System.md) | `test/` 测试体系结构、方法、TODO |
 

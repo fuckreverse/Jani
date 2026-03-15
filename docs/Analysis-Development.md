@@ -538,7 +538,7 @@ export class CheckNaNAnalysis {
 | `CheckNaN` | `src/plugins/dlint/CheckNaN.js` | NaN 检测 |
 | `UndefinedOffset` | `src/plugins/dlint/UndefinedOffset.js` | undefined 属性访问检测 |
 
-详见 [Sample-Analyses.md](./Sample-Analyses.md)。
+详见 [Analysis-Plugins.md](./Analysis-Plugins.md)。
 
 ## 注意事项
 
