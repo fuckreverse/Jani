@@ -293,7 +293,19 @@ export class ExecutionTraceAnalysis {
         if (this._flat) {
             // 平铺模式：立即输出 CALL 行，只用轻量元数据栈（不缓冲 doneLines）
             const callMeta = { rc, depth: 1, desc, kvStr, name };
-            _push(this._callStack, { callMeta });
+            // 在调用前保存当前语句积累的 pending 上下文（防止被调函数内部的钩子污染）。
+            // 例如：外层语句 `x = foo(y)` 调用 foo，foo 内部的 writeVar/putField 钩子
+            // 会向 _pendingKvs/_pendingFields 推入数据，如不隔离会混入外层语句的 trace。
+            _push(this._callStack, {
+                callMeta,
+                savedKvs:    this._pendingKvs,
+                savedReads:  this._pendingReads,
+                savedFields: this._pendingFields,
+            });
+            // 清空，确保被调函数内部积累的 pending 不会污染外层语句
+            this._pendingKvs    = [];
+            this._pendingReads  = [];
+            this._pendingFields = [];
             const line = this._fmt.callLine(++this._seq, rc, 1, desc, kvStr);
             this._emitRaw(line);
             return { f, base, args, skip: false };
@@ -324,6 +336,13 @@ export class ExecutionTraceAnalysis {
             }
             const callInfo = _pop(this._callStack);
             const name   = callInfo.callMeta?.name ?? (f?.name || '(anonymous)');
+            // 恢复外层语句的 pending 上下文（callPre 时保存的），并丢弃被调函数内部积累的 pending。
+            // 这样被调函数内部的变量读写不会出现在外层语句的 trace 行中。
+            if (callInfo.savedKvs !== undefined) {
+                this._pendingKvs    = callInfo.savedKvs;
+                this._pendingReads  = callInfo.savedReads;
+                this._pendingFields = callInfo.savedFields;
+            }
             const { rc } = this._loc(iid);
             const line   = this._fmt.retLine(++this._seq, rc, 1, name, serialize(result));
             this._emitRaw(line);
