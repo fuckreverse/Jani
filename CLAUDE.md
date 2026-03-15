@@ -1,8 +1,8 @@
-# Jalangi2 — 项目说明（面向 AI 辅助开发）
+# Jani — 项目说明（面向 AI 辅助开发）
 
 ## 项目概况
 
-Jalangi2 是一个 **JavaScript 动态分析框架**，核心功能是对 JS 源代码进行 AST 插桩（instrumentation），
+Jani 是一个 **JavaScript 动态分析框架**，核心功能是对 JS 源代码进行 AST 插桩（instrumentation），
 在每个关键操作（读写变量、属性访问、函数调用、运算符、字面量等）前后注入分析钩子（`J$.R`、`J$.W`、`J$.G` 等），
 从而在运行时收集程序行为数据（用于 bug 检测、覆盖率、污点分析等）。
 

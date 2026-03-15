@@ -1,7 +1,7 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @file Jalangi2 默认配置。
+ * @file Jani 默认配置。
  *
  * 所有字段的默认值在此定义：
  *  - 布尔型字段（DEBUG / WARN 等）：false

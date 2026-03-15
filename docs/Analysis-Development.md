@@ -2,7 +2,7 @@
 
 ## 概述
 
-Jalangi2 允许开发者通过编写**分析插件（Analysis Plugin）**来监测和修改 JavaScript 程序的运行时行为。
+Jani 允许开发者通过编写**分析插件（Analysis Plugin）**来监测和修改 JavaScript 程序的运行时行为。
 每个分析插件是一个普通的 JavaScript 类，实现一组钩子（hook）方法。
 当插桩代码执行到相应操作时，运行时会调用对应的钩子。
 

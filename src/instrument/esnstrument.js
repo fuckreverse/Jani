@@ -19,7 +19,7 @@
 /// <reference types="../types.d.ts" />
 
 /**
- * Jalangi2 插桩入口模块（浏览器 ESM 版）。
+ * Jani 插桩入口模块（浏览器 ESM 版）。
  *
  * 职责：
  *  1. 定义 AST visitor（visitorRRPre / visitorRRPost / visitorOps / sampling visitor）

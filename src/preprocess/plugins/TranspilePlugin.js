@@ -5,7 +5,7 @@
  * @file TranspilePlugin.js — Babel 语法降级预处理插件
  *
  * 使用 @babel/core + @babel/preset-env 将 ESNext / ES2022 代码
- * 降级为目标浏览器/Node.js 版本支持的语法，提升 Jalangi2 插桩的适用范围。
+ * 降级为目标浏览器/Node.js 版本支持的语法，提升 Jani 插桩的适用范围。
  *
  * 与普通 Babel 用法的不同：
  *   - 接受已解析的 Babel AST（不重复解析）
@@ -82,7 +82,7 @@ export class TranspilePlugin extends PreprocessPlugin {
      * @param {boolean} [options.modules=false]
      *   是否将 ESM 模块语法转换（import/export → CommonJS/AMD/UMD 等）。
      *   false 保留 ESM，'commonjs' 转为 CJS。
-     *   注：Jalangi2 已是 ESM 项目，一般保持 false。
+     *   注：Jani 已是 ESM 项目，一般保持 false。
      *
      * @param {boolean} [options.debug=false]
      *   输出 preset-env 选择了哪些 transform（方便调试）

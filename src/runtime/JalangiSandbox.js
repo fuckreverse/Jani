@@ -3,7 +3,7 @@
 /// <reference types="../types.d.ts" />
 
 /**
- * @file JalangiSandbox — Jalangi2 完整沙盒对象。
+ * @file JalangiSandbox — Jani 完整沙盒对象。
  *
  * `new JalangiSandbox(options)` 返回一个自包含的沙盒实例，
  * 已具备所有运行时钩子（R/W/G/P/…）、位置查询（iidToLocation）
@@ -37,7 +37,7 @@ import { HookDispatcher } from './HookDispatcher.js';
 import { $strIncludes, $strSplit } from './NativeProxy.js';
 
 /**
- * Jalangi2 完整沙盒。
+ * Jani 完整沙盒。
  *
  * 继承 JalangiRuntime（所有运行时钩子 R/W/G/P/…），
  * 并直接提供 iidToLocation / getGlobalIID 位置查询方法。

@@ -1,7 +1,7 @@
 {
-  "name": "jalangi2",
+  "name": "jani",
   "version": "0.2.6",
-  "description": "dynamic analysis framework for JavaScript",
+  "description": "Jani - a dynamic analysis framework for JavaScript",
   "type": "module",
   "dependencies": {
     "@babel/core": "^7.29.0",

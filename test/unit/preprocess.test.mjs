@@ -9,7 +9,7 @@
  *   - DeobfuscatePlugin：边界条件与不应触碰的情况
  *   - TranspilePlugin：语法降级基本功能
  *   - preprocessCode()：API 接口（preset / plugins / warnings / stats）
- *   - 与插桩器集成：预处理后的代码可被 Jalangi2 正常插桩
+ *   - 与插桩器集成：预处理后的代码可被 Jani 正常插桩
  */
 
 import { describe, test, before } from 'node:test';

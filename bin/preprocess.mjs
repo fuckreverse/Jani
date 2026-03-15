@@ -2,7 +2,7 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @file bin/preprocess.mjs — Jalangi2 JS 预处理工具
+ * @file bin/preprocess.mjs — Jani JS 预处理工具
  *
  * 在插桩前对 JS 源代码进行 AST 级预处理，目标是在不改变逻辑的前提下：
  *   1. 将混淆/压缩代码恢复为更可读的结构，提升插桩 Trace 的可读性

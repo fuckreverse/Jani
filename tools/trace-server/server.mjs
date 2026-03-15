@@ -2,7 +2,7 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * trace-server — Jalangi2 WebSocket 日志收集服务。
+ * trace-server — Jani WebSocket 日志收集服务。
  *
  * 接收来自浏览器 WsBackend 的事件批次，写入本地文件（NDJSON 格式）。
  * 每个 WebSocket 连接对应一个独立文件，文件名包含时间戳和序号。
@@ -268,7 +268,7 @@ wss.on('connection', (ws, req) => {
 // ─── 启动 ──────────────────────────────────────────────────────────────────────
 
 httpServer.listen(PORT, () => {
-    console.log(`[server] Jalangi2 trace server started`);
+    console.log(`[server] Jani trace server started`);
     console.log(`[server]   WebSocket : ws://0.0.0.0:${PORT}/trace`);
     console.log(`[server]   Health    : http://0.0.0.0:${PORT}/health`);
     console.log(`[server]   Stats     : http://0.0.0.0:${PORT}/stats`);

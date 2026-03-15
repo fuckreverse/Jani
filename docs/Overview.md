@@ -1,8 +1,8 @@
-# Jalangi2 概览
+# Jani 概览
 
 ## 项目简介
 
-Jalangi2 是一个面向 JavaScript 的**动态分析框架**，核心功能是对 JS 源代码进行 AST 插桩（Instrumentation），
+Jani 是一个面向 JavaScript 的**动态分析框架**，核心功能是对 JS 源代码进行 AST 插桩（Instrumentation），
 在关键操作（读写变量、属性访问、函数调用、运算符、字面量等）前后注入分析钩子，
 从而在运行时收集程序行为数据，用于 bug 检测、覆盖率统计、污点分析等场景。
 
@@ -11,7 +11,7 @@ Jalangi2 是一个面向 JavaScript 的**动态分析框架**，核心功能是�
 
 ## 系统架构
 
-Jalangi2 的整体流程分为三个阶段：
+Jani 的整体流程分为三个阶段：
 
 ```mermaid
 flowchart TD

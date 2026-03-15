@@ -1,7 +1,7 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @file diagnostics.js — Jalangi2 诊断日志工厂
+ * @file diagnostics.js — Jani 诊断日志工厂
  *
  * 提供两级日志分类：
  *   1. 域（domain）：代码所属模块，如 'framework'、'backend:ws'、'trace-infra' 等

@@ -5,7 +5,7 @@
 /**
  * @file DataFlowAnalyzer — 运行时 SSA 数据流分析器。
  *
- * 消费 Jalangi2 运行时（JalangiRuntime）产生的 log 条目，在 log 上执行：
+ * 消费 Jani 运行时（JalangiRuntime）产生的 log 条目，在 log 上执行：
  *   1. **SSA 化**：为每次赋值创建唯一寄存器 ID（registerID），维护 LastWrite 表；
  *   2. **别名追踪**：通过 OID 关联所有持有同一对象引用的变量；
  *   3. **Backward Slicing**：从目标寄存器出发，回溯所有影响其值的赋值链，

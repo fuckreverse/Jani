@@ -524,7 +524,7 @@ node tools/trace-server/server.mjs --out my-traces
 
 | 场景 | 推荐插件 |
 |------|---------|
-| 学习 Jalangi2 基础 | `tutorial/LogAll.js` |
+| 学习 Jani 基础 | `tutorial/LogAll.js` |
 | 统计分支覆盖率 | `tutorial/BranchCoverage.js` |
 | 完整执行跟踪（指令级）| `pldi16/TraceAll.js` |
 | 逆向分析（语句级）| `ExecutionTrace.js` |

@@ -1,7 +1,7 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * LogManager — Jalangi2 日志系统的统一入口。
+ * LogManager — Jani 日志系统的统一入口。
  *
  * 职责：
  *  1. 维护一个 RingBuffer，供 analysis 钩子同步写入事件（极低开销）

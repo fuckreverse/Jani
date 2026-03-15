@@ -3,7 +3,7 @@
 /// <reference types="../types.d.ts" />
 
 /**
- * HookDispatcher —— Jalangi2 运行时钩子分发器。
+ * HookDispatcher —— Jani 运行时钩子分发器。
  *
  * 职责：
  *  1. 维护一个有序的分析插件列表

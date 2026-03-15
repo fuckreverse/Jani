@@ -645,7 +645,7 @@ function _createAsyncCtxCaptureStatement() {
 
 **文件**：`src/runtime/DataFlowAnalyzer.js`
 
-后处理分析器，消费 Jalangi2 运行时产生的 log，在 log 上做 SSA 化 + 数据流分析，用于逆向还原算法逻辑。
+后处理分析器，消费 Jani 运行时产生的 log，在 log 上做 SSA 化 + 数据流分析，用于逆向还原算法逻辑。
 
 **核心数据结构**：
 

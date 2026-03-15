@@ -3,7 +3,7 @@
 /// <reference types="../types.d.ts" />
 
 /**
- * @file Jalangi2 运行时后端 —— 核心钩子实现。
+ * @file Jani 运行时后端 —— 核心钩子实现。
  *
  * 本模块实现了插桩代码在运行时调用的所有 J$.xxx 函数：
  *   R（read）、W（write）、G（getField）、P（putField）、
@@ -71,7 +71,7 @@ function createBitPattern(...bits) {
 // ── JalangiRuntime ───────────────────────────────────────────────────────────
 
 /**
- * Jalangi2 运行时核心钩子，封装为可继承的类。
+ * Jani 运行时核心钩子，封装为可继承的类。
  *
  * 所有插桩代码直接调用的函数（R/W/G/P/B/U/F/M/T/N/Fe/Fr/Se/Sr/…）
  * 均定义为本类的方法，内部执行状态封装为私有字段（`#`）。
