@@ -486,17 +486,16 @@ async function buildBrowserRuntimeBundle(opts) {
     const { rollup }              = await import('rollup');
     const { default: terser }     = await import('@rollup/plugin-terser');
 
-    const doneReadWorker = log.phase('读取 idb-worker.js + ws-worker.js + ws-worker-sab.js');
+    const doneReadWorker = log.phase('读取 idb.worker.js + ws.worker.js');
     const idbWorkerSrc = readFileSync(
-        SRC('logger', 'workers', 'idb-worker.js'), 'utf8'
+        SRC('logger', 'transport', 'idb.worker.js'), 'utf8'
     ).replace(/^\/\/ JALANGI DO NOT INSTRUMENT\s*\n?/m, '').trim();
     const wsWorkerSrc = readFileSync(
-        SRC('logger', 'workers', 'ws-worker.js'), 'utf8'
+        SRC('logger', 'transport', 'ws.worker.js'), 'utf8'
     ).replace(/^\/\/ JALANGI DO NOT INSTRUMENT\s*\n?/m, '').trim();
-    const wsSabWorkerSrc = readFileSync(
-        SRC('logger', 'workers', 'ws-worker-sab.js'), 'utf8'
-    ).replace(/^\/\/ JALANGI DO NOT INSTRUMENT\s*\n?/m, '').trim();
-    doneReadWorker(`idb=${(idbWorkerSrc.length / 1024).toFixed(1)}KB ws=${(wsWorkerSrc.length / 1024).toFixed(1)}KB wsSab=${(wsSabWorkerSrc.length / 1024).toFixed(1)}KB`);
+    // ws.worker.js 已同时支持 worker 和 sab 两种模式，无需单独的 ws-worker-sab.js
+    const wsSabWorkerSrc = wsWorkerSrc;
+    doneReadWorker(`idb=${(idbWorkerSrc.length / 1024).toFixed(1)}KB ws=${(wsWorkerSrc.length / 1024).toFixed(1)}KB`);
 
     const ENTRY_ID   = '\0jalangi-entry';
     const sandboxVar = opts.sandboxVar;
@@ -575,13 +574,13 @@ ${deferredSnippet}
 `;
 
     const DYNAMIC_IMPORT_MAP = {
-        './backends/IdbWorkerBackend.js':   SRC('logger', 'backends', 'IdbWorkerBackend.js'),
+        './backends/IdbWorkerBackend.js':   SRC('logger', 'transport', 'IdbBackend.js'),
         './LogManager.js':                  SRC('logger', 'LogManager.js'),
         '../plugins/ExecutionTrace.js':     '\0stub:ExecutionTrace',
-        // WsSabBackend（SharedArrayBuffer 模式）+ WsWorkerBackend（默认）+ WsBackend（降级）
-        './backends/WsSabBackend.js':       opts.wsUrl ? SRC('logger', 'backends', 'WsSabBackend.js')    : '\0stub:WsSabBackend',
-        './backends/WsWorkerBackend.js':    opts.wsUrl ? SRC('logger', 'backends', 'WsWorkerBackend.js') : '\0stub:WsWorkerBackend',
-        './backends/WsBackend.js':          opts.wsUrl ? SRC('logger', 'backends', 'WsBackend.js')       : '\0stub:WsBackend',
+        // WsBackend 已统一支持 main / worker / sab 三种模式，旧名称作为别名保留
+        './backends/WsSabBackend.js':       opts.wsUrl ? SRC('logger', 'transport', 'WsBackend.js') : '\0stub:WsSabBackend',
+        './backends/WsWorkerBackend.js':    opts.wsUrl ? SRC('logger', 'transport', 'WsBackend.js') : '\0stub:WsWorkerBackend',
+        './backends/WsBackend.js':          opts.wsUrl ? SRC('logger', 'transport', 'WsBackend.js') : '\0stub:WsBackend',
         './backends/NodeStreamBackend.js':  '\0stub:NodeStreamBackend',
         './backends/MemoryBackend.js':      '\0stub:MemoryBackend',
     };
@@ -597,42 +596,30 @@ ${deferredSnippet}
             name: 'jalangi-patch-worker-urls',
             transform(code, id) {
                 let patched = code;
-                if (id.includes('IdbWorkerBackend')) {
-                    // 替换 new Worker(new URL('../workers/idb-worker.js', import.meta.url))
+                if (id.includes('IdbBackend')) {
+                    // 替换 new Worker(new URL('./idb.worker.js', import.meta.url))
                     // → new Worker(__idbWorkerUrl)
                     patched = patched.replace(
-                        /new\s+Worker\s*\(\s*new URL\s*\(\s*['"][^'"]*idb-worker[^'"]*['"]\s*,\s*import\.meta\.url\s*\)(?:\s*,\s*\{[^}]*\})?\s*\)/g,
+                        /new\s+Worker\s*\(\s*new URL\s*\(\s*['"][^'"]*idb[^'"]*['"]\s*,\s*import\.meta\.url\s*\)(?:\s*,\s*\{[^}]*\})?\s*\)/g,
                         'new Worker(__idbWorkerUrl)'
                     );
                     // 同时处理变量 workerUrl 赋值后传入 new Worker 的形式
                     patched = patched.replace(
-                        /new URL\s*\(\s*['"][^'"]*idb-worker[^'"]*['"]\s*,\s*import\.meta\.url\s*\)/g,
+                        /new URL\s*\(\s*['"][^'"]*idb[^'"]*['"]\s*,\s*import\.meta\.url\s*\)/g,
                         '__idbWorkerUrl'
                     );
                 }
-                if (id.includes('WsWorkerBackend') && !id.includes('WsSabBackend')) {
-                    // 替换 new Worker(new URL('../workers/ws-worker.js', import.meta.url))
+                if (id.includes('WsBackend')) {
+                    // 替换 new Worker(new URL('./ws.worker.js', import.meta.url))
                     // → new Worker(__wsWorkerUrl)
-                    // 注意：使用负向前瞻 (?!.*-sab) 避免误匹配 ws-worker-sab.js
+                    // ws.worker.js 已同时支持 worker 和 sab 两种模式，统一用 __wsWorkerUrl
                     patched = patched.replace(
-                        /new\s+Worker\s*\(\s*new URL\s*\(\s*['"][^'"]*ws-worker(?!-sab)[^'"]*['"]\s*,\s*import\.meta\.url\s*\)(?:\s*,\s*\{[^}]*\})?\s*\)/g,
+                        /new\s+Worker\s*\(\s*new URL\s*\(\s*['"][^'"]*ws\.worker[^'"]*['"]\s*,\s*import\.meta\.url\s*\)(?:\s*,\s*\{[^}]*\})?\s*\)/g,
                         'new Worker(__wsWorkerUrl)'
                     );
                     patched = patched.replace(
-                        /new URL\s*\(\s*['"][^'"]*ws-worker(?!-sab)[^'"]*['"]\s*,\s*import\.meta\.url\s*\)/g,
+                        /new URL\s*\(\s*['"][^'"]*ws\.worker[^'"]*['"]\s*,\s*import\.meta\.url\s*\)/g,
                         '__wsWorkerUrl'
-                    );
-                }
-                if (id.includes('WsSabBackend')) {
-                    // 替换 new Worker(new URL('../workers/ws-worker-sab.js', import.meta.url))
-                    // → new Worker(__wsSabWorkerUrl)
-                    patched = patched.replace(
-                        /new\s+Worker\s*\(\s*new URL\s*\(\s*['"][^'"]*ws-worker-sab[^'"]*['"]\s*,\s*import\.meta\.url\s*\)(?:\s*,\s*\{[^}]*\})?\s*\)/g,
-                        'new Worker(__wsSabWorkerUrl)'
-                    );
-                    patched = patched.replace(
-                        /new URL\s*\(\s*['"][^'"]*ws-worker-sab[^'"]*['"]\s*,\s*import\.meta\.url\s*\)/g,
-                        '__wsSabWorkerUrl'
                     );
                 }
                 return patched !== code ? { code: patched, map: null } : null;
