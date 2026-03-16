@@ -20,9 +20,9 @@
     "@babel/generator"
   ],
   "scripts": {
-    "test": "node --test test/unit/instrument.test.mjs test/unit/logging.test.mjs test/integration/runtime.test.mjs test/integration/e2e.test.mjs test/integration/hooks.test.mjs test/integration/logging.test.mjs",
-    "test:unit": "node --test test/unit/instrument.test.mjs test/unit/logging.test.mjs",
-    "test:integration": "node --test test/integration/runtime.test.mjs test/integration/e2e.test.mjs test/integration/hooks.test.mjs test/integration/logging.test.mjs",
+    "test": "node --test test/unit/instrument.test.mjs test/unit/logging.test.mjs test/unit/native-proxy.test.mjs test/integration/runtime.test.mjs test/integration/e2e.test.mjs test/integration/hooks.test.mjs test/integration/logging.test.mjs test/integration/execution-trace.test.mjs test/integration/dlint.test.mjs",
+    "test:unit": "node --test test/unit/instrument.test.mjs test/unit/logging.test.mjs test/unit/native-proxy.test.mjs",
+    "test:integration": "node --test test/integration/runtime.test.mjs test/integration/e2e.test.mjs test/integration/hooks.test.mjs test/integration/logging.test.mjs test/integration/execution-trace.test.mjs test/integration/dlint.test.mjs",
     "test:logging": "node --test test/unit/logging.test.mjs test/integration/logging.test.mjs",
     "trace-server": "node tools/trace-server/server.mjs",
     "jalangi": "node bin/jalangi.mjs",

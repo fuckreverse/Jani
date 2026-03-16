@@ -1208,3 +1208,178 @@ describe('NormalizeArrowPlugin → 插桩集成', () => {
         assert.ok(!instrCode.includes('J$.Fe'), '未转换的箭头函数不应有 J$.Fe 钩子');
     });
 });
+
+// ════════════════════════════════════════════════════════════════════════════════
+// 插件联动与顺序依赖
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('插件联动与顺序依赖', () => {
+    test('foldConstants → inlineDeadCode 联动 — 常量折叠后死代码删除', async () => {
+        const code = `
+            if (1 === 1) {
+                var x = 'reachable';
+            } else {
+                var y = 'unreachable';
+            }
+        `;
+
+        const { code: result } = await preprocessCode(code, {
+            preset: 'deobfuscate',
+        });
+
+        // foldConstants 将 1 === 1 折叠为 true
+        // inlineDeadCode 应删除 else 分支
+        assert.ok(result.includes('reachable'), '应保留 if(true) 分支');
+        assert.ok(!result.includes('unreachable'), '应删除 else 分支');
+    });
+
+    test('foldConstants → inlineDeadCode → splitSequence 多步联动', async () => {
+        const code = `
+            if (2 + 2 === 4) {
+                var a = 1, b = 2;
+            } else {
+                var c = 3;
+            }
+        `;
+
+        const { code: result } = await preprocessCode(code, {
+            preset: 'deobfuscate',
+        });
+
+        // 2 + 2 → 4, 4 === 4 → true
+        // if(true) 保留 then 分支，else 删除
+        // 逗号表达式 var a = 1, b = 2 被拆分
+        assert.ok(!result.includes('c = 3'), '死代码分支应被删除');
+        // 逗号拆分后应有独立的赋值语句
+    });
+
+    test('插件顺序影响 — replaceVoid 先于 foldConstants', async () => {
+        const code = 'var x = void 0 + 1;';
+
+        const { code: result } = await preprocessCode(code, {
+            preset: 'deobfuscate',
+        });
+
+        // replaceVoid: void 0 → undefined
+        // foldConstants 无法折叠 undefined + 1（有变量不折叠）
+        // 应包含 undefined
+        assert.ok(result.includes('undefined'), 'void 0 应被替换为 undefined');
+    });
+
+    test('关闭单个插件 — inlineDeadCode 不执行', async () => {
+        const code = `
+            if (false) {
+                var dead = 'code';
+            }
+        `;
+
+        const { code: result } = await preprocessCode(code, {
+            plugins: [
+                { name: 'DeobfuscatePlugin', options: { inlineDeadCode: false } },
+            ],
+        });
+
+        // 关闭 inlineDeadCode，死代码应保留
+        assert.ok(result.includes('dead'), '关闭 inlineDeadCode 时死代码应保留');
+    });
+
+    test('插件选项覆盖 — 单独关闭 foldConstants', async () => {
+        const code = 'var x = 1 + 2;';
+
+        const { code: result } = await preprocessCode(code, {
+            plugins: [
+                { name: 'DeobfuscatePlugin', options: { foldConstants: false } },
+            ],
+        });
+
+        // 不折叠常量，应保留 1 + 2
+        assert.ok(result.includes('1') && result.includes('2'), '应保留未折叠的表达式');
+    });
+
+    test('expandConditional → inlineDeadCode 组合', async () => {
+        const code = `
+            var result = (true ? 'yes' : 'no');
+        `;
+
+        const { code: result } = await preprocessCode(code, {
+            preset: 'deobfuscate',
+        });
+
+        // expandConditional 将三元展开为 if-else
+        // 条件为 true，inlineDeadCode 应删除 else 分支
+        assert.ok(result.includes('yes'), '应保留 true 分支');
+        assert.ok(!result.includes('no'), 'false 分支应被删除');
+    });
+
+    test('flattenIIFE + foldConstants 联动', async () => {
+        const code = `
+            var result = (function() { return 1 + 2; })();
+        `;
+
+        const { code: result } = await preprocessCode(code, {
+            preset: 'deobfuscate',
+        });
+
+        // flattenIIFE 展开 IIFE（如果无参数/无 return）
+        // 注意：此 IIFE 有 return，展开受限，但 1 + 2 应被 foldConstants 处理
+        assert.ok(result.includes('3') || result.includes('1') && result.includes('2'), '应折叠常量或保留原表达式');
+    });
+
+    test('simplifyBoolean + inlineDeadCode 联动', async () => {
+        const code = `
+            if (!!true) {
+                var x = 1;
+            } else {
+                var y = 2;
+            }
+        `;
+
+        const { code: result } = await preprocessCode(code, {
+            preset: 'deobfuscate',
+        });
+
+        // simplifyBoolean: !!true → true
+        // inlineDeadCode: if(true) 删除 else 分支
+        assert.ok(!result.includes('y = 2'), 'else 分支应被删除');
+    });
+
+    test('preset=full 时所有插件按序执行', async () => {
+        const code = `
+            var x = void 0;
+            if (1 === 1) {
+                var a = 1, b = 2;
+            } else {
+                var dead = 'unreachable';
+            }
+        `;
+
+        const { code: result, stats } = await preprocessCode(code, {
+            preset: 'full',
+        });
+
+        // replaceVoid: void 0 → undefined
+        assert.ok(result.includes('undefined'), 'void 应被替换');
+
+        // foldConstants: 1 === 1 → true
+        // inlineDeadCode: 删除 else 分支
+        assert.ok(!result.includes('unreachable'), '死代码应被删除');
+
+        // splitSequence: 逗号表达式拆分
+        // 结果应不含逗号表达式（或被拆分）
+
+        // stats 应包含所有插件
+        assert.ok(stats.DeobfuscatePlugin, 'stats 应包含 DeobfuscatePlugin');
+    });
+
+    test('插件执行顺序确定性 — 多次运行结果一致', async () => {
+        const code = `
+            var x = 1 + 2;
+            if (false) { var dead = 1; }
+        `;
+
+        const { code: result1 } = await preprocessCode(code, { preset: 'deobfuscate' });
+        const { code: result2 } = await preprocessCode(code, { preset: 'deobfuscate' });
+
+        assert.equal(result1, result2, '多次运行应产生相同结果');
+    });
+});

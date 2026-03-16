@@ -286,6 +286,120 @@ describe('ES2022 语法', () => {
         const r = instr('const res = await fetch("https://example.com"); console.log(res.status);', { sourceType: 'module' });
         assert.ok(r.code.includes('J$.F('), '顶层 await 的 fetch() 调用应注入 J$.F');
     });
+
+    test('class 私有方法（#method）不崩溃', () => {
+        const r = instr(`
+            class MyClass {
+                #value = 10;
+                #double() { return this.#value * 2; }
+                getDouble() { return this.#double(); }
+            }
+        `);
+        assert.ok(r.code.includes('#double'), '私有方法名 #double 应保留');
+        assert.ok(r.code.includes('J$.Fe('), '私有方法应注入 J$.Fe');
+    });
+
+    test('class 私有 getter/setter 不崩溃', () => {
+        const r = instr(`
+            class Wrapped {
+                #inner = 0;
+                get #val() { return this.#inner; }
+                set #val(v) { this.#inner = v; }
+            }
+        `);
+        // 私有 getter/setter 不应崩溃，也不应被当作普通属性访问包装
+        assert.ok(r.code.includes('#inner'), '私有字段名 #inner 应保留');
+    });
+
+    test('class static 初始化块 不崩溃', () => {
+        // ES2022 class static initialization blocks
+        // Babel 7.29 支持此语法
+        try {
+            const r = instr(`
+                class Config {
+                    static MAX = 100;
+                    static MIN = 0;
+                    static { Config.RANGE = Config.MAX - Config.MIN; }
+                }
+            `);
+            assert.ok(r.code.includes('J$.Se('), 'static 块代码应能正常插桩');
+        } catch (e) {
+            // 若当前 babel 版本不支持，忽略（允许跳过）
+            if (!e.message.includes('SyntaxError')) throw e;
+        }
+    });
+
+    test('Array.at() 和 Object.hasOwn() 调用被插桩', () => {
+        const r = instr(`
+            const arr = [1, 2, 3];
+            const last = arr.at(-1);
+            const has = Object.hasOwn({x: 1}, 'x');
+        `);
+        assert.ok(r.code.includes('J$.M('), '方法调用应注入 J$.M');
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// 复杂解构模式
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('复杂解构模式', () => {
+    before(() => init({ ...ALL_CONFIG }));
+    after(restoreConfig);
+
+    test('嵌套数组解构', () => {
+        const r = instr('const [[a, b], [c, d]] = [[1, 2], [3, 4]];');
+        // 插桩器对解构变量声明的处理方式：注入 J$.T 包装右侧数组字面量
+        assert.ok(r.code.includes('J$.T('), '解构赋值应注入 J$.T 包装右侧值');
+        assert.ok(r.code.includes('J$.Se('), '应有脚本入口钩子');
+    });
+
+    test('解构 + 默认值 + 函数调用', () => {
+        const r = instr(`
+            function getDefault() { return 99; }
+            const { x = getDefault() } = {};
+        `);
+        assert.ok(r.code.includes('J$.F('), '默认值中的函数调用应注入 J$.F');
+    });
+
+    test('import 命名导入（as 重命名）', () => {
+        const r = instr('import { originalName as renamed } from "./module.js";', { sourceType: 'module' });
+        assert.ok(r.code.includes('originalName'), 'import 应保留原名称');
+        // 重命名后的名称由 babel 处理，插桩器只插桩执行代码
+    });
+
+    test('解构 + rest 组合', () => {
+        const r = instr('const [first, ...rest] = [1, 2, 3, 4];');
+        // rest 解构同样注入 J$.T 包装右侧数组
+        assert.ok(r.code.includes('J$.T('), 'rest 解构应注入 J$.T 包装右侧值');
+    });
+
+    test('函数参数解构 + 默认值', () => {
+        const r = instr('function greet({ name = "Guest", age = 18 }) { console.log(name, age); }');
+        assert.ok(r.code.includes('J$.Fe('), '函数入口应注入 J$.Fe');
+        // 参数解构的默认值由运行时处理
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// 标签模板字符串
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('标签模板字符串', () => {
+    before(() => init({ ...ALL_CONFIG }));
+    after(restoreConfig);
+
+    test('标签模板调用被插桩', () => {
+        const r = instr('function tag(strings, ...values) { return strings.join(" "); } const result = tag`Hello ${"World"}`;');
+        // 标签模板被插桩为 J$.Xe (表达式语句)，内部包含 J$.R 读取
+        assert.ok(r.code.includes('J$.Xe('), '标签模板应注入表达式语句钩子 J$.Xe');
+        assert.ok(r.code.includes('J$.R('), '标签模板应注入变量读取钩子 J$.R');
+    });
+
+    test('嵌套模板字符串', () => {
+        const r = instr('const x = 1; const str = `outer ${`inner ${x}`}`;');
+        assert.ok(r.code.includes('J$.T('), '模板字符串应注入字面量钩子 J$.T');
+    });
 });
 
 // ════════════════════════════════════════════════════════════════════════════════

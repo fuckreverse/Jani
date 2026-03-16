@@ -26,6 +26,7 @@ import {
 } from '../../src/encoding/EventSerializer.js';
 import { MemoryBackend }        from '../../src/logger/transport/MemoryBackend.js';
 import { LogManager, createMemoryLogManager } from '../../src/logger/LogManager.js';
+import { TraceLogger }          from '../../src/logger/TraceLogger.js';
 
 // ════════════════════════════════════════════════════════════════════════════════
 // 1. RingBuffer
@@ -317,5 +318,190 @@ describe('LogManager', () => {
         }
         assert.equal(backend.getEvents().length, 9);
         await mgr.close();
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// 5. TraceLogger — 统一日志门面
+// ════════════════════════════════════════════════════════════════════════════════
+
+describe('TraceLogger', () => {
+    /**
+     * 辅助函数：创建带 MemoryBackend 的 TraceLogger
+     */
+    async function createTestLogger(extraOptions = {}) {
+        const backend = new MemoryBackend();
+        const logger = new TraceLogger({
+            nodeConsole: false,
+            nodeFile: false,
+            keyToConsole: false,
+            logManagerOptions: {
+                backends: [backend],
+                forceSyncFlushThreshold: 1, // 每次 push 立即 flush（测试用）
+            },
+            ...extraOptions,
+        });
+        await logger.init();
+        return { logger, backend };
+    }
+
+    test('trace() — 写入普通 trace 行', async () => {
+        const { logger, backend } = await createTestLogger();
+
+        logger.trace({ type: 'trace', seq: 1, text: 'test trace line' });
+        await logger._mgr.flush(); // TraceLogger 通过 _mgr.flush() 刷新
+
+        const events = backend.getEvents();
+        assert.ok(events.length >= 1, '应有至少 1 条事件');
+        const traceEvent = events.find(e => e.text === 'test trace line');
+        assert.ok(traceEvent, '应找到写入的 trace 事件');
+        assert.equal(traceEvent.seq, 1);
+    });
+
+    test('key() — 写入重要事件到后端', async () => {
+        const { logger, backend } = await createTestLogger();
+
+        logger.key('info', '▶ script: test.js');
+        await logger._mgr.flush();
+
+        const events = backend.getEvents();
+        const keyEvent = events.find(e => e.type === 'key');
+        assert.ok(keyEvent, '应找到 key 事件');
+        assert.equal(keyEvent.level, 'info');
+        assert.ok(keyEvent.text.includes('test.js'));
+    });
+
+    test('key() — 不同级别（info/warn/error）', async () => {
+        const { logger, backend } = await createTestLogger();
+
+        logger.key('info', 'info message');
+        logger.key('warn', 'warn message');
+        logger.key('error', 'error message');
+        await logger._mgr.flush();
+
+        const events = backend.getEvents();
+        const levels = events.filter(e => e.type === 'key').map(e => e.level);
+        assert.ok(levels.includes('info'), '应有 info 级别');
+        assert.ok(levels.includes('warn'), '应有 warn 级别');
+        assert.ok(levels.includes('error'), '应有 error 级别');
+    });
+
+    test('pre-init 缓冲 — init 前写入不丢失', async () => {
+        const backend = new MemoryBackend();
+        const logger = new TraceLogger({
+            nodeConsole: false,
+            nodeFile: false,
+            keyToConsole: false,
+            logManagerOptions: {
+                backends: [backend],
+            },
+        });
+
+        // 不 await init，先写入
+        logger.trace({ type: 'trace', seq: 1, text: 'pre-init trace 1' });
+        logger.trace({ type: 'trace', seq: 2, text: 'pre-init trace 2' });
+        logger.key('info', 'pre-init key event');
+
+        // 再初始化
+        await logger.init();
+        await logger._mgr.flush();
+
+        const events = backend.getEvents();
+        const texts = events.map(e => e.text);
+        assert.ok(texts.includes('pre-init trace 1'), '初始化前写入不应丢失');
+        assert.ok(texts.includes('pre-init trace 2'), '初始化前写入不应丢失');
+    });
+
+    test('flush() — 将缓冲事件写入后端', async () => {
+        const { logger, backend } = await createTestLogger();
+
+        for (let i = 0; i < 5; i++) {
+            logger.trace({ type: 'trace', seq: i, text: `line ${i}` });
+        }
+
+        await logger._mgr.flush();
+
+        const events = backend.getEvents();
+        assert.ok(events.length >= 5, 'flush 后应写入所有事件');
+    });
+
+    test('close() — 关闭后 trace 静默丢弃', async () => {
+        const { logger, backend } = await createTestLogger();
+
+        logger.trace({ type: 'trace', seq: 1, text: 'before close' });
+        await logger._mgr.flush();
+
+        const beforeCount = backend.getEvents().length;
+
+        await logger.close();
+
+        // 关闭后写入
+        logger.trace({ type: 'trace', seq: 2, text: 'after close' });
+        await new Promise(r => setTimeout(r, 50)); // 等待一小段时间
+
+        const afterCount = backend.getEvents().length;
+        assert.equal(afterCount, beforeCount, '关闭后事件应被丢弃');
+    });
+
+    test('scheduleFlush() — 异步调度 flush', async () => {
+        const { logger, backend } = await createTestLogger();
+
+        logger.trace({ type: 'trace', seq: 1, text: 'async flush test' });
+
+        if (typeof logger.scheduleFlush === 'function') {
+            logger.scheduleFlush();
+            // 等待微任务执行
+            await new Promise(r => setTimeout(r, 50));
+
+            const events = backend.getEvents();
+            assert.ok(events.length > 0, 'scheduleFlush 后应有事件');
+        } else {
+            // 如果不支持 scheduleFlush，手动 flush 验证
+            await logger._mgr.flush();
+            const events = backend.getEvents();
+            assert.ok(events.length > 0, '应有 trace 事件');
+        }
+    });
+
+    test('多次调用 init() 幂等', async () => {
+        const { logger, backend } = await createTestLogger();
+
+        // 重复 init 不应出错
+        const ready1 = logger.init();
+        const ready2 = logger.init();
+        assert.equal(ready1, ready2, '多次 init() 应返回相同 Promise');
+
+        await ready1;
+        // 已初始化后继续 trace 应正常
+        logger.trace({ type: 'trace', seq: 1, text: 'after dup init' });
+        await logger._mgr.flush();
+        assert.ok(backend.getEvents().length > 0, '重复 init 后应能正常工作');
+    });
+
+    test('nodeFile=false 时不创建文件后端', async () => {
+        // 应降级到 MemoryBackend（通过 logManagerOptions.backends）
+        const { logger, backend } = await createTestLogger({ nodeFile: false });
+
+        logger.trace({ type: 'trace', seq: 1, text: 'no file mode' });
+        await logger._mgr.flush();
+
+        const events = backend.getEvents();
+        assert.ok(events.length > 0, 'nodeFile=false 时 MemoryBackend 应仍可用');
+    });
+
+    test('trace/key 路由差异 — trace 走后端 key 带级别', async () => {
+        const { logger, backend } = await createTestLogger();
+
+        logger.trace({ type: 'trace', seq: 1, text: 'regular trace' });
+        logger.key('warn', 'important warning');
+        await logger._mgr.flush();
+
+        const events = backend.getEvents();
+        const traceEvents = events.filter(e => e.type === 'trace');
+        const keyEvents   = events.filter(e => e.type === 'key');
+
+        assert.ok(traceEvents.length > 0, '应有 trace 类型事件');
+        assert.ok(keyEvents.length > 0, '应有 key 类型事件');
+        assert.equal(keyEvents[0].level, 'warn', 'key 事件应保留级别');
     });
 });
