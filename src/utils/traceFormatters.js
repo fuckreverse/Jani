@@ -35,6 +35,11 @@ export const FORMAT_BLOCK = 2;
 export const FORMAT_PIPE  = 4;
 export const FORMAT_FLAT  = 8;
 
+// ── 输出模式开关 ────────────────────────────────────────────────────────────────
+// OUTPUT_JSON_KV=true  时，kv 部分输出结构化 JSON 子串，便于离线工具解析
+// OUTPUT_JSON_KV=false 时，kv 部分输出传统文本格式（逗号分隔），便于人眼阅读
+export const OUTPUT_JSON_KV = true;
+
 // seq 显示宽度（右对齐）：超过此宽度会自动溢出，不截断
 export const SEQ_WIDTH = 6;
 // rc（行:列）显示宽度（右对齐，含冒号）
@@ -121,19 +126,31 @@ export class PipeFormatter {
 
 export class FlatFormatter {
     // 平铺流式格式：无缩进，无调用栈表示，每条事件独立一行，立即输出。
-    // 统一格式：[seq] [line:col] 描述 ; kv
+    // 统一格式：[seq] [line:col] 描述 ; kv  或  [seq] [line:col] 描述 {json}
     // depth 参数保留接口兼容但不使用。
 
     callLine(seq, rc, _depth, desc, kvStr) {
         return `[${fmtSeq(seq)}] [${fmtRc(rc)}] CALL ${desc}${kvStr ? ' ; ' + kvStr : ''}`;
     }
 
+    callLineJson(seq, rc, _depth, desc, kvJson) {
+        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] CALL ${desc} ${kvJson}`;
+    }
+
     retLine(seq, rc, _depth, name, result) {
         return `[${fmtSeq(seq)}] [${fmtRc(rc)}] RETN ${name} ; =${result}`;
     }
 
+    retLineJson(seq, rc, _depth, name, kvJson) {
+        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] RETN ${name} ${kvJson}`;
+    }
+
     infoLine(seq, rc, _depth, srcText, kv) {
         return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${srcText}${kv ? ' ; ' + kv : ''}`;
+    }
+
+    infoLineJson(seq, rc, _depth, srcText, kvJson) {
+        return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${srcText} ${kvJson}`;
     }
 }
 

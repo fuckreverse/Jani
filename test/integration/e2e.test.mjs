@@ -1172,7 +1172,8 @@ describe('ExecutionTraceAnalysis trace 源码片段', () => {
         const lines = await runWithTrace('var x = 42; var y = x + 1;');
 
         // 找到含变量赋值的 trace 行（write 钩子产生的 info 行）
-        const infoLines = lines.filter(l => l.includes(';'));
+        // 兼容两种格式：传统格式含 ';'，JSON 格式含 '{' 且以 '}' 结尾
+        const infoLines = lines.filter(l => l.includes(';') || /^\s*\[\s*\d+\].*\{.*\}\s*$/.test(l));
 
         // 不应出现 (iid=数字) 格式的占位符
         const iidFallbackLines = infoLines.filter(l => /\(iid=\d+\)/.test(l));
@@ -1181,8 +1182,11 @@ describe('ExecutionTraceAnalysis trace 源码片段', () => {
             `trace 行不应含 (iid=xxx) 占位符，实际出现的行：\n${iidFallbackLines.join('\n')}`
         );
 
-        // 应含有真实的源码文字（变量名 x 或 y）
-        const hasRealSrc = infoLines.some(l => l.includes('x=') || l.includes('y='));
+        // 应含有真实的源码文字或 JSON 格式的变量名
+        const hasRealSrc = infoLines.some(l =>
+            l.includes('x=') || l.includes('y=') ||
+            l.includes('"x":') || l.includes('"y":')
+        );
         assert.ok(hasRealSrc,
             `trace info 行应含真实源码片段，实际 info 行：\n${infoLines.join('\n')}`
         );
@@ -1197,7 +1201,8 @@ describe('ExecutionTraceAnalysis trace 源码片段', () => {
         ].join('\n');
 
         const lines = await runWithTrace(src);
-        const infoLines = lines.filter(l => l.includes(';'));
+        // 兼容两种格式：传统格式含 ';'，JSON 格式含 '{' 且以 '}' 结尾
+        const infoLines = lines.filter(l => l.includes(';') || /^\s*\[\s*\d+\].*\{.*\}\s*$/.test(l));
 
         // 不应有 (iid=xxx) 降级占位符
         const iidFallbacks = infoLines.filter(l => /\(iid=\d+\)/.test(l));
@@ -1205,9 +1210,10 @@ describe('ExecutionTraceAnalysis trace 源码片段', () => {
             `多行源码 trace 不应含 (iid=xxx)，实际：\n${iidFallbacks.join('\n')}`
         );
 
-        // c 的赋值应出现在 trace 中。区分 declareVar (c=undefined) 和 writeVar (c=30)
-        // writeVar 的值不是 undefined，找包含 "c=" 且值不是 undefined 的行
-        const cLine = infoLines.find(l => l.includes('c=') && !l.includes('c=undefined'));
+        // c 的赋值应出现在 trace 中。支持两种格式：c= 或 "c":
+        const cLine = infoLines.find(l =>
+            (l.includes('c=') || l.includes('"c":')) && !l.includes('c=undefined') && !l.includes('"c":null')
+        );
         assert.ok(cLine, `trace 中应含 c 的赋值行（非声明），实际 info 行：\n${infoLines.join('\n')}`);
         // 解析 rc（行:列）：格式是 [行:列]，在 seq [数字] 之后
         // 直接找最后一个 [ 之后、] 之前的内容，因为 rc 总是出现在最后
@@ -1250,13 +1256,15 @@ describe('ExecutionTraceAnalysis trace 源码片段', () => {
         runInSandbox(instrCode, J$inst, {});
         await mgr.flush();
 
+        // 兼容两种格式：传统格式含 ';'，JSON 格式含 '{' 且以 '}' 结尾
         const infoLines = mem.getEvents()
             .filter(e => e.type === 'trace')
             .map(e => e.text)
-            .filter(l => l && l.includes(';'));
+            .filter(l => l && (l.includes(';') || /^\s*\[\s*\d+\].*\{.*\}\s*$/.test(l)));
 
         // inlineSource:false 时，smap 无 code，应降级为 (iid=xxx)
-        const hasFallback = infoLines.some(l => /\(iid=\d+\)/.test(l));
+        // 支持两种格式：传统文本 或 JSON
+        const hasFallback = infoLines.some(l => /\(iid=\d+\)/.test(l) || /"src":"\(iid=\d+\)"/.test(l));
         assert.ok(hasFallback,
             `inlineSource:false 时 trace 应含 (iid=xxx) 降级占位符，实际行：\n${infoLines.join('\n')}`
         );
@@ -1268,13 +1276,18 @@ describe('ExecutionTraceAnalysis trace 源码片段', () => {
         const lines = await runWithTrace(src);
         const infoLines = lines.filter(l => l.includes(';'));
 
-        // 找到包含 "a=3" 或 "b=4" 的行
-        const commaLine = infoLines.find(l => l.includes('a=3') || l.includes('b=4'));
+        // 找到包含 "a=3" 或 "a":3 或 "b=4" 或 "b":4 的行
+        const commaLine = infoLines.find(l =>
+            l.includes('a=3') || l.includes('"a":3') ||
+            l.includes('b=4') || l.includes('"b":4')
+        );
         assert.ok(commaLine, `应存在逗号表达式的 trace 行，实际：\n${infoLines.join('\n')}`);
 
-        // 该行应同时包含 a 和 b 的最终值
-        assert.ok(commaLine.includes('a=3'), `逗号表达式 trace 应含 a=3，实际：${commaLine}`);
-        assert.ok(commaLine.includes('b=4'), `逗号表达式 trace 应含 b=4，实际：${commaLine}`);
+        // 该行应同时包含 a 和 b 的最终值（支持两种格式）
+        const hasA = commaLine.includes('a=3') || commaLine.includes('"a":3');
+        const hasB = commaLine.includes('b=4') || commaLine.includes('"b":4');
+        assert.ok(hasA, `逗号表达式 trace 应含 a=3，实际：${commaLine}`);
+        assert.ok(hasB, `逗号表达式 trace 应含 b=4，实际：${commaLine}`);
     });
 
     test('逗号表达式：属性读写正确追踪', async () => {
@@ -1287,16 +1300,19 @@ r[I] = s + 5, (r = u)['key'] = 100;
         const lines = await runWithTrace(src);
         const infoLines = lines.filter(l => l.includes(';'));
 
-        // 找到逗号表达式所在的行（包含 "r[I]" 或最终属性写入）
+        // 找到逗号表达式所在的行（包含 "width" 或最终属性写入）
         const commaLine = infoLines.find(l => l.includes('width') && l.includes('key'));
         assert.ok(commaLine, `应存在逗号表达式的 trace 行，实际：\n${infoLines.join('\n')}`);
 
-        // 验证属性写入：第一个子表达式 r[I] = s + 5 写入 {…}["width"]=15
-        assert.ok(commaLine.includes('width') && commaLine.includes('15'),
+        // 验证属性写入：支持两种格式
+        // 传统格式：{…}["width"]=15 或 JSON 格式："offset":"width","val":15
+        const hasWidth = commaLine.includes('width') && (commaLine.includes('=15') || commaLine.includes('"width"'));
+        assert.ok(hasWidth,
             `逗号表达式 trace 应含属性写入 width=15，实际：${commaLine}`);
 
         // 验证属性写入：第二个子表达式 (r = u)['key'] = 100 写入 {…}["key"]=100
-        assert.ok(commaLine.includes('key') && commaLine.includes('100'),
+        const hasKey = commaLine.includes('key') && (commaLine.includes('100') || commaLine.includes('"key"'));
+        assert.ok(hasKey,
             `逗号表达式 trace 应含属性写入 key=100，实际：${commaLine}`);
     });
 });

@@ -364,15 +364,34 @@ node bin/jalangi.mjs instrument-and-run \
 
 ### 输出格式（FORMAT_FLAT 默认）
 
-每行格式：`[seq] [line:col] 描述 ; kv`
+kv 部分的输出模式由 `src/utils/traceFormatters.js` 中的 `OUTPUT_JSON_KV` 常量控制：
+
+#### OUTPUT_JSON_KV=true（默认，离线分析推荐）
+
+kv 部分输出为结构化 JSON 子串，`w`（writes）/ `r`（reads）/ `f`（fields）分别独立，便于程序解析：
 
 ```text
-[  1] [     1:1] var x = 1 ; x=1
-[  2] [     2:1] x += 1 ; x=2
-[  3] [     3:5] CALL .fromCharCode(1 args) ; this=[Function String], arg0=65
-[  4] [     3:5] RETN fromCharCode ; ="A"
-[  5] [     3:1] o += String.fromCharCode(c) ; o="A", c=65
+[     1] [      1:1] var x = 1 {"w":{"x":1}}
+[     2] [      2:1] x += 1 {"w":{"x":2},"r":{"x":1}}
+[     3] [      3:5] CALL .fromCharCode(1 args) {"a":[65],"this":"[Function String]"}
+[     4] [      3:5] RETN fromCharCode {"v":"A"}
+[     5] [      3:1] o += String.fromCharCode(c) {"w":{"o":"A"},"r":{"c":65}}
 ```
+
+#### OUTPUT_JSON_KV=false（传统格式，人眼阅读友好）
+
+kv 部分输出为逗号分隔的 `key=value` 文本，适合直接阅读：
+
+```text
+[     1] [      1:1] var x = 1 ; x=1
+[     2] [      2:1] x += 1 ; x=2
+[     3] [      3:5] CALL .fromCharCode(1 args) ; this=[Function String], arg0=65
+[     4] [      3:5] RETN fromCharCode ; ="A"
+[     5] [      3:1] o += String.fromCharCode(c) ; o="A", c=65
+```
+
+> 离线分析工具链（`tools/trace-parse.mjs` 等）自动兼容两种格式的混合输入。
+> 详见 [Offline-Analysis-Tools.md](./Offline-Analysis-Tools.md)。
 
 ### 用法
 

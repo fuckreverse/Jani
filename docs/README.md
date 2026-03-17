@@ -15,6 +15,7 @@ Jani 是一个面向 JavaScript 的**动态分析框架**，通过 AST 插桩在
 | [Configuration.md](./Configuration.md) | Config 配置字段参考 |
 | [Analysis-Plugins.md](./Analysis-Plugins.md) | 分析插件介绍（tutorial / dlint / coverage / dsjs 等）|
 | [Scope-Aware-Instrumentation.md](./Scope-Aware-Instrumentation.md) | 作用域感知插桩技术设计文档 |
+| [Offline-Analysis-Tools.md](./Offline-Analysis-Tools.md) | `tools/` 离线分析工具集（trace-parse / filter / hot-lines / call-tree 等）|
 
 ## 快速开始
 

@@ -66,8 +66,10 @@ import { createDiagLogger, DOMAIN } from '../logger/diagnostics.js';
 import { serialize } from '../utils/serialize.js';
 import {
     FORMAT_FLAT, FORMAT_TREE, FORMAT_BLOCK, FORMAT_PIPE,
+    OUTPUT_JSON_KV,
     fmtSeq,
     createFormatter,
+    FlatFormatter,
 } from '../utils/traceFormatters.js';
 import {
     $push as _push, $join as _join, $map as _map, $filter as _filter,
@@ -272,6 +274,42 @@ export class ExecutionTraceAnalysis {
         return { loc, rc };
     }
 
+    /** 将 kv 对象序列化为 JSON 字符串（用于 OUTPUT_JSON_KV 模式）*/
+    _serializeKvObj(kvObj) {
+        return JSON.stringify(kvObj, (key, val) => {
+            // 对大数组/对象做截断处理，避免 JSON 过长
+            if ($isArray(val) && val.length > 10) {
+                return `[...${val.length} items]`;
+            }
+            if (typeof val === 'function') {
+                return `[Function${val.name ? ' ' + val.name : ''}]`;
+            }
+            return val;
+        });
+    }
+
+    /** 将 kv 对象转换为传统文本格式（用于 OUTPUT_JSON_KV=false 模式）*/
+    _kvObjToStr(kvObj) {
+        const parts = [];
+        for (const key of $keys(kvObj)) {
+            const val = kvObj[key];
+            if (key === 'a' && $isArray(val)) {
+                // 参数数组
+                for (let i = 0; i < val.length && i < 5; i++) {
+                    parts.push(`arg${i}=${serialize(val[i])}`);
+                }
+                if (val.length > 5) parts.push('...');
+            } else if (key === 'v') {
+                parts.push(`=${serialize(val)}`);
+            } else {
+                parts.push(`${key}=${serialize(val)}`);
+            }
+        }
+        let str = _join(parts, ', ');
+        if (str.length > 120) str = $strSlice(str, 0, 119) + '…';
+        return str;
+    }
+
     // ── 函数调用边界 ──────────────────────────────────────────────────────────
 
     callPre(iid, f, base, args, isConstructor, isMethod) {
@@ -281,18 +319,16 @@ export class ExecutionTraceAnalysis {
             ? `.${name}(${args.length} args)`
             : `${prefix}${name}(${args.length} args)`;
 
-        const kvParts = _map(args, (a, i) => `arg${i}=${serialize(a)}`);
-        if (isMethod && base !== undefined) _unshift(kvParts, `this=${serialize(base)}`);
-        // 限制 kvStr 总长度，防止大对象导致行过长
-        const MAX_KV = 120;
-        let kvStr = _join(kvParts, ', ');
-        if (kvStr.length > MAX_KV) kvStr = $strSlice(kvStr, 0, MAX_KV - 1) + '…';
-
         const { rc } = this._loc(iid);
+
+        // 构建 kv 对象（结构化）
+        const kvObj = {};
+        if (isMethod && base !== undefined) kvObj.this = base;
+        if (args && args.length > 0) kvObj.a = args;
 
         if (this._flat) {
             // 平铺模式：立即输出 CALL 行，只用轻量元数据栈（不缓冲 doneLines）
-            const callMeta = { rc, depth: 1, desc, kvStr, name };
+            const callMeta = { rc, depth: 1, desc, name, kvObj };
             // 在调用前保存当前语句积累的 pending 上下文（防止被调函数内部的钩子污染）。
             // 例如：外层语句 `x = foo(y)` 调用 foo，foo 内部的 writeVar/putField 钩子
             // 会向 _pendingKvs/_pendingFields 推入数据，如不隔离会混入外层语句的 trace。
@@ -306,7 +342,11 @@ export class ExecutionTraceAnalysis {
             this._pendingKvs    = [];
             this._pendingReads  = [];
             this._pendingFields = [];
-            const line = this._fmt.callLine(++this._seq, rc, 1, desc, kvStr);
+
+            // 根据 OUTPUT_JSON_KV 选择输出格式
+            const line = OUTPUT_JSON_KV
+                ? this._fmt.callLineJson(++this._seq, rc, 1, desc, this._serializeKvObj(kvObj))
+                : this._fmt.callLine(++this._seq, rc, 1, desc, this._kvObjToStr(kvObj));
             this._emitRaw(line);
             return { f, base, args, skip: false };
         }
@@ -319,7 +359,7 @@ export class ExecutionTraceAnalysis {
             this._pushAsyncRootFrame(iid);
         }
 
-        const callMeta = { rc, depth: parentDepth + 1, desc, kvStr, name };
+        const callMeta = { rc, depth: parentDepth + 1, desc, name, kvObj };
         _push(this._stack, new Frame(parentDepth + 1));
         _push(this._callStack, { callMeta });
 
@@ -344,7 +384,11 @@ export class ExecutionTraceAnalysis {
                 this._pendingFields = callInfo.savedFields;
             }
             const { rc } = this._loc(iid);
-            const line   = this._fmt.retLine(++this._seq, rc, 1, name, serialize(result));
+            // 根据 OUTPUT_JSON_KV 选择输出格式
+            const kvObj = { v: result };
+            const line = OUTPUT_JSON_KV
+                ? this._fmt.retLineJson(++this._seq, rc, 1, name, this._serializeKvObj(kvObj))
+                : this._fmt.retLine(++this._seq, rc, 1, name, serialize(result));
             this._emitRaw(line);
             this._logger.scheduleFlush?.();
             return { result };
@@ -388,16 +432,30 @@ export class ExecutionTraceAnalysis {
     }
 
     _emitFormattedCall(callMeta, innerLines, retMeta) {
-        const callLine = this._fmt.callLine(
-            ++this._seq, callMeta.rc, callMeta.depth, callMeta.desc, callMeta.kvStr
-        );
+        // 只有 FlatFormatter 支持 JSON 输出；其他格式（tree/block/pipe）强制用传统格式
+        const useJson = OUTPUT_JSON_KV && (this._fmt instanceof FlatFormatter);
+        const kvStr = callMeta.kvStr || this._kvObjToStr(callMeta.kvObj || {});
+        const callLine = useJson
+            ? this._fmt.callLineJson(
+                ++this._seq, callMeta.rc, callMeta.depth, callMeta.desc,
+                this._serializeKvObj(callMeta.kvObj || {})
+              )
+            : this._fmt.callLine(
+                ++this._seq, callMeta.rc, callMeta.depth, callMeta.desc,
+                kvStr
+              );
         this._emitRaw(callLine);
 
         this._emitItems(innerLines);
 
-        const retLine = this._fmt.retLine(
-            ++this._seq, retMeta.rc, retMeta.depth, retMeta.name, retMeta.result
-        );
+        const retLine = useJson
+            ? this._fmt.retLineJson(
+                ++this._seq, retMeta.rc, retMeta.depth, retMeta.name,
+                this._serializeKvObj({ v: retMeta.result })
+              )
+            : this._fmt.retLine(
+                ++this._seq, retMeta.rc, retMeta.depth, retMeta.name, retMeta.result
+              );
         this._emitRaw(retLine);
     }
 
@@ -586,8 +644,8 @@ export class ExecutionTraceAnalysis {
     writeVar(iid, name, val) {
         if (this._flat) {
             // flat 模式：暂存到 _pendingKvs，由 endExpression 统一合并输出
-            // 注意：不存 rc/srcText（会用 Xe 的 iid 位置，更准确）
-            _push(this._pendingKvs, { name, kv: `${name}=${serialize(val)}` });
+            // 存储 {name, val, kv} 三元组，支持 JSON 和文本两种输出格式
+            _push(this._pendingKvs, { name, val, kv: `${name}=${serialize(val)}` });
             return { result: val };
         }
         // 非 flat 模式（tree/block/pipe）：需要记录每条写入的位置信息
@@ -609,7 +667,8 @@ export class ExecutionTraceAnalysis {
     returnStmt(iid, val) {
         if (this._flat) {
             // flat 模式：暂存到 _pendingKvs，由 endExpression 统一合并输出。位置由 Xe iid 提供
-            _push(this._pendingKvs, { kv: `(return)=${serialize(val)}` });
+            // 存储 val 支持 JSON 输出
+            _push(this._pendingKvs, { name: '(return)', val, kv: `(return)=${serialize(val)}` });
             return { result: val };
         }
         const { rc, loc } = this._loc(iid);
@@ -624,7 +683,8 @@ export class ExecutionTraceAnalysis {
         if (this._flat) {
             // flat 模式：暂存到 _pendingKvs，由 endExpression 统一合并输出。位置由 Xe iid 提供
             // （throw 语句也会触发 endExpression，由插桩器保证）
-            _push(this._pendingKvs, { kv: `(throw)=${serialize(val)}` });
+            // 存储 val 支持 JSON 输出
+            _push(this._pendingKvs, { name: '(throw)', val, kv: `(throw)=${serialize(val)}` });
             return { result: val };
         }
         const { rc, loc } = this._loc(iid);
@@ -657,7 +717,11 @@ export class ExecutionTraceAnalysis {
                 const baseStr = _shortBase(base);
                 const offsetStr = isComputed ? `[${serialize(offset)}]` : `.${String(offset)}`;
                 const key = `${baseStr}${offsetStr}`;
-                _push(this._pendingFields, { kv: `${key}=${serialize(val)}` });
+                // 存储 fieldInfo 支持 JSON 输出
+                _push(this._pendingFields, {
+                    kv: `${key}=${serialize(val)}`,
+                    fieldInfo: { base: baseStr, offset: String(offset), val, isComputed }
+                });
             }
         }
         return { result: val };
@@ -679,7 +743,11 @@ export class ExecutionTraceAnalysis {
             const baseStr = _shortBase(base);
             const offsetStr = isComputed ? `[${serialize(offset)}]` : `.${String(offset)}`;
             const key = `${baseStr}${offsetStr}`;
-            _push(this._pendingFields, { kv: `${key}=${serialize(val)}` });
+            // 存储 fieldInfo 支持 JSON 输出
+            _push(this._pendingFields, {
+                kv: `${key}=${serialize(val)}`,
+                fieldInfo: { base: baseStr, offset: String(offset), val, isComputed, isWrite: true }
+            });
         }
         return { result: val };
     }
@@ -716,7 +784,7 @@ export class ExecutionTraceAnalysis {
                 for (let i = 0; i < useNames.length; i++) {
                     const name = useNames[i];
                     if (builtins.has(name)) continue;
-                    _push(this._pendingReads, { name, kv: `${name}=${serialize(useValues[i])}` });
+                    _push(this._pendingReads, { name, val: useValues[i] });
                 }
             }
 
@@ -728,26 +796,57 @@ export class ExecutionTraceAnalysis {
             this._pendingReads  = [];
             this._pendingFields = [];
 
-            // 找出写入的变量名（用于过滤 reads 中重复的）
-            const writtenNames = new Set();
-            for (const w of writes) {
-                const match = w.kv.match(/^([^=]+)=/);
-                if (match) writtenNames.add(match[1]);
-            }
+            // 根据 OUTPUT_JSON_KV 选择输出格式
+            // 只有 FlatFormatter 支持 JSON 输出
+            const useJson = OUTPUT_JSON_KV && (this._fmt instanceof FlatFormatter);
+            if (useJson) {
+                // 结构化 JSON 输出
+                const kvObj = { w: {}, r: {}, f: [] };
+                const writtenNames = new Set();
 
-            // 过滤掉已被写入的读取变量（因为写入的值是执行后的，更准确）
-            const filteredReads = _filter(reads, r => !writtenNames.has(r.name));
+                // 写入变量
+                for (const w of writes) {
+                    if (w.name) {
+                        kvObj.w[w.name] = w.val;
+                        writtenNames.add(w.name);
+                    }
+                }
 
-            // 合并：writes 在前，filteredReads 在后，fields 最后
-            const allKvs = [...writes, ...filteredReads, ...fields];
+                // 读取变量（过滤已写入的）
+                for (const r of reads) {
+                    if (!writtenNames.has(r.name)) {
+                        kvObj.r[r.name] = r.val;
+                    }
+                }
 
-            if (allKvs.length > 0) {
-                const kvStr = _join(_map(allKvs, p => p.kv), ', ');
-                const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, kvStr);
+                // 属性访问
+                for (const f of fields) {
+                    if (f.fieldInfo) kvObj.f.push(f.fieldInfo);
+                }
+
+                // 清理空对象
+                if ($keys(kvObj.w).length === 0) delete kvObj.w;
+                if ($keys(kvObj.r).length === 0) delete kvObj.r;
+                if (kvObj.f.length === 0) delete kvObj.f;
+
+                const line = this._fmt.infoLineJson(
+                    ++this._seq, rc, 0, srcText,
+                    $keys(kvObj).length > 0 ? this._serializeKvObj(kvObj) : '{}'
+                );
                 this._emitRaw(line);
             } else {
-                // 无任何 kv：纯副作用语句（无变量读写），只输出源码位置
-                const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, '');
+                // 传统文本格式输出
+                const writtenNames = new Set();
+                for (const w of writes) {
+                    const match = w.kv?.match(/^([^=]+)=/);
+                    if (match) writtenNames.add(match[1]);
+                }
+
+                const filteredReads = _filter(reads, r => !writtenNames.has(r.name));
+                const allKvs = [...writes, ...filteredReads, ...fields];
+
+                const kvStr = _join(_map(allKvs, p => p.kv || ''), ', ');
+                const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, kvStr);
                 this._emitRaw(line);
             }
             return;

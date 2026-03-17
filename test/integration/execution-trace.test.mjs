@@ -102,8 +102,11 @@ describe('ExecutionTrace — 基本功能', () => {
         const { events } = await instrAndTrace('var x = 10; var y = 20;');
 
         const texts = events.map(e => e.text).join('\n');
-        assert.ok(texts.includes('x=10'), '应追踪 x 的写入');
-        assert.ok(texts.includes('y=20'), '应追踪 y 的写入');
+        // 支持两种格式：传统文本(x=10) 或 JSON({"w":{"x":10}})
+        const hasX = texts.includes('x=10') || texts.includes('"x":10');
+        const hasY = texts.includes('y=20') || texts.includes('"y":20');
+        assert.ok(hasX, '应追踪 x 的写入');
+        assert.ok(hasY, '应追踪 y 的写入');
     });
 
     test('函数调用追踪 — CALL/RETN', async () => {
@@ -321,7 +324,8 @@ describe('ExecutionTrace — endExpression 聚合', () => {
         const texts = events.map(e => e.text);
 
         // 第二条语句应聚合 write(b) 和 read(a)
-        const bLine = texts.find(t => t && t.includes('b=3'));
+        // 支持两种格式：传统文本(b=3) 或 JSON({"w":{"b":3}})
+        const bLine = texts.find(t => t && (t.includes('b=3') || t.includes('"b":3')));
         assert.ok(bLine, '应包含 b=3');
         // 同一行可能也包含 a 的读取值
     });
