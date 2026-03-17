@@ -13,7 +13,8 @@
 
 | 工具 | 功能 |
 |------|------|
-| `trace-parse.mjs` | 将混合格式 trace 转换为统一结构化 NDJSON |
+| `trace-parse.mjs` | 将原始 trace 转换为统一结构化 NDJSON |
+| `trace-render.mjs` | 将结构化 NDJSON 渲染为 flat / tree / block / pipe 展示格式 |
 | `trace-filter.mjs` | 按类型、seq 范围、行号、函数名、变量等条件过滤 |
 | `trace-hot-lines.mjs` | 统计代码行执行热点（Top-N 排行）|
 | `trace-call-tree.mjs` | 重建函数调用树，支持深度限制与汇总统计 |
@@ -24,14 +25,18 @@
 
 ```
 ExecutionTrace 插件
-    ↓ trace.ndjson（混合格式 或 纯 JSON）
+    ↓ trace.ndjson（平铺流式 NDJSON，FORMAT_FLAT）
 trace-parse.mjs
     ↓ parsed.ndjson（统一结构化 NDJSON）
-trace-filter.mjs  ─→  trace-hot-lines.mjs
+trace-filter.mjs  ─→  trace-render.mjs      ← 展示格式转换（flat/tree/block/pipe）
+                  ─→  trace-hot-lines.mjs
                   ─→  trace-call-tree.mjs
                   ─→  trace-var-timeline.mjs
                   ─→  trace-range-extract.mjs
 ```
+
+**设计原则**：运行时只输出最轻量的平铺格式（无缓冲、不丢失数据）；
+树形/缩进等展示风格完全在离线侧（`trace-render.mjs`）按需生成，可重复渲染、任意过滤后再渲染。
 
 所有工具从 **stdin** 或文件读取，结果写到 **stdout**，统计摘要写到 **stderr**，可任意串联：
 
@@ -46,30 +51,29 @@ cat trace.ndjson \
 
 ## 2. trace-parse.mjs — 格式解析
 
-将 `ExecutionTraceAnalysis` 的原始输出（文本格式或 JSON 格式混合）转换为统一的结构化 NDJSON，
-供后续工具消费。
+将 `ExecutionTraceAnalysis` 的原始输出转换为统一的结构化 NDJSON，供后续工具消费。
 
 ### 支持的输入格式
 
-**文本格式（传统 `FORMAT_FLAT`，`OUTPUT_JSON_KV=false`）：**
+**标准格式（JSON kv，`ExecutionTrace` 默认输出）：**
+
+```
+[     1] [     1:1] ▶ script: /path/to/file.js
+[     2] [    10:5] CALL foo(2 args) {"a":[...]}
+[     3] [    10:5] RETN foo {"v":42}
+[     4] [    10:1] x = 1 + 2 {"w":{"x":3},"r":{"y":1}}
+[     5] [    11:1] ◀ script end
+```
+
+**兼容：传统文本 kv 格式（`OUTPUT_JSON_KV=false` 历史输出）：**
 
 ```
 [  123] [  10:5] CALL foo(2 args) ; this=..., arg0=...
 [  124] [  10:5] RETN foo ; =42
 [  125] [  10:5] x = 1 + 2 ; x=3
-[    1] ▶ script: /path/to/file.js
-[  999] ◀ script end
 ```
 
-**JSON 格式（`OUTPUT_JSON_KV=true`，默认）：**
-
-```
-[  123] [  10:5] CALL foo(2 args) {"a":[...]}
-[  124] [  10:5] RETN foo {"v":42}
-[  125] [  10:5] x = 1 + 2 {"w":{"x":3},"r":{"y":1}}
-```
-
-**已结构化的 JSON 行（直接透传）：**
+**兼容：已结构化的 JSON 行（直接透传）：**
 
 ```json
 {"seq":123,"line":10,"col":5,"type":"call","fn":"foo","args":2}
@@ -110,7 +114,65 @@ node tools/trace-parse.mjs --strict trace.ndjson
 
 ---
 
-## 3. trace-filter.mjs — 条件过滤
+## 3. trace-render.mjs — 展示格式渲染
+
+将结构化 NDJSON（`trace-parse.mjs` 的输出）渲染为人类可读的展示格式。
+运行时只输出最轻量的平铺格式；不同的展示风格在离线侧按需生成，可重复渲染。
+
+### 格式说明
+
+| 格式 | 说明 | 适用场景 |
+|------|------|----------|
+| `flat`（默认）| 平铺流式，与原始 trace 布局一致，无缩进 | 管道组合、程序消费 |
+| `tree` | Unicode 树形符号（┬ 进入 / └ 退出 / │ 延续线）| 人眼阅读调用链 |
+| `block` | `#region`/`#endregion` 折叠块 | VS Code 中打开可折叠查看 |
+| `pipe` | ASCII `|` 符号（数量 = 调用深度）| 纯 ASCII 终端/工具链 |
+
+### 选项
+
+| 选项 | 说明 |
+|------|------|
+| `--format FORMAT` | 输出格式：`flat`（默认）/ `tree` / `block` / `pipe` |
+| `--help` | 显示帮助信息 |
+
+### 示例
+
+```bash
+# 默认 flat 格式（与 trace-parse 输出一致）
+cat parsed.ndjson | node tools/trace-render.mjs
+
+# 树形格式（适合人眼阅读调用链）
+cat parsed.ndjson | node tools/trace-render.mjs --format tree
+
+# 生成 VS Code 可折叠的 block 格式
+cat parsed.ndjson | node tools/trace-render.mjs --format block > trace.log
+
+# ASCII pipe 格式
+cat parsed.ndjson | node tools/trace-render.mjs --format pipe
+
+# 先过滤再渲染（只看 decode 相关调用的树形视图）
+cat parsed.ndjson \
+  | node tools/trace-filter.mjs --fn "*decode*" \
+  | node tools/trace-render.mjs --format tree
+```
+
+**输出样例（tree 格式）：**
+
+```
+[     1] [     1:1] ▶ script: /path/to/file.js
+[     2] [    10:5] ┬ main(0 args)
+[     3] [    15:3] │ ┬ decode(1 args) ; arg0="hello"
+[     4] [    20:5] │ │ x = buf[i] ; x=104
+[     5] [    15:3] │ └ return decode ; =104
+[     6] [    10:5] └ return main ; =undefined
+```
+
+> **注意**：`tree` / `block` / `pipe` 格式根据 `call`/`return` 事件对实时推导调用深度。
+> 若输入已被 `trace-filter` 过滤（破坏了 call/return 配对），层次可能不完整，这是预期行为。
+
+---
+
+## 4. trace-filter.mjs — 条件过滤
 
 对结构化 NDJSON（`trace-parse.mjs` 的输出）按多种条件过滤，条件可叠加。
 
@@ -148,7 +210,7 @@ cat parsed.ndjson | node tools/trace-filter.mjs --line 42
 
 ---
 
-## 4. trace-hot-lines.mjs — 热点行统计
+## 5. trace-hot-lines.mjs — 热点行统计
 
 统计哪些代码行被执行次数最多（CPU 热点分析、循环体定位）。
 
@@ -188,7 +250,7 @@ cat parsed.ndjson | node tools/trace-hot-lines.mjs --json > hot.json
 
 ---
 
-## 5. trace-call-tree.mjs — 调用树重建
+## 6. trace-call-tree.mjs — 调用树重建
 
 根据 `call` / `return` 事件对，重建函数调用树结构，展示执行路径和深度。
 
@@ -234,7 +296,7 @@ cat parsed.ndjson \
 
 ---
 
-## 6. trace-var-timeline.mjs — 变量时序追踪
+## 7. trace-var-timeline.mjs — 变量时序追踪
 
 追踪指定变量（或所有变量）的值随时间（seq）变化的轨迹，支持读写区分和属性访问。
 
@@ -278,7 +340,7 @@ seq      | 行号    | 变量            | 类型        | 值
 
 ---
 
-## 7. trace-range-extract.mjs — 区间提取
+## 8. trace-range-extract.mjs — 区间提取
 
 按 seq 编号快速提取 trace 片段，支持上下文窗口，适合在发现异常后定位上下文。
 
@@ -317,7 +379,7 @@ cat parsed.ndjson | node tools/trace-range-extract.mjs --context 20 --src 5000
 
 ---
 
-## 8. 典型分析流程
+## 9. 典型分析流程
 
 ### 混淆代码逆向分析
 
@@ -328,15 +390,16 @@ node tools/trace-parse.mjs --compact trace.ndjson > parsed.ndjson
 # 步骤 2：找热点行，定位关键函数
 cat parsed.ndjson | node tools/trace-hot-lines.mjs --top 20
 
-# 步骤 3：看热点行附近的调用树
+# 步骤 3：以树形视图查看热点行附近的调用链（用 trace-render 代替 trace-call-tree）
 cat parsed.ndjson | node tools/trace-filter.mjs --line 231 \
-  | node tools/trace-call-tree.mjs --depth 3
+  | node tools/trace-render.mjs --format tree
 
 # 步骤 4：追踪关键变量的变化轨迹
 cat parsed.ndjson | node tools/trace-var-timeline.mjs --var key,result --writes
 
-# 步骤 5：在可疑 seq 附近提取上下文
-cat parsed.ndjson | node tools/trace-range-extract.mjs --context 30 8421
+# 步骤 5：在可疑 seq 附近提取上下文，用 block 格式便于在 VS Code 中折叠查看
+cat parsed.ndjson | node tools/trace-range-extract.mjs --context 30 8421 \
+  | node tools/trace-render.mjs --format block > context.log
 ```
 
 ### 定位高频函数
@@ -360,20 +423,19 @@ cat parsed.ndjson | node tools/trace-var-timeline.mjs --var width
 
 ---
 
-## 9. OUTPUT_JSON_KV 与工具兼容性
+## 10. 运行时格式与离线工具兼容性
 
-`ExecutionTraceAnalysis` 通过 `OUTPUT_JSON_KV`（`src/utils/traceFormatters.js`）控制 trace kv 部分的格式：
+`ExecutionTraceAnalysis` 运行时固定输出 **平铺流式 JSON-kv 格式**（`FORMAT_FLAT` + JSON kv），
+无调用栈缩进，每事件立即 emit，不等函数返回——这是最轻量、最健壮的格式，不会因为异步或异常而丢数据。
 
-| 模式 | 格式 | 说明 |
-|------|------|------|
-| `OUTPUT_JSON_KV=true`（默认）| `srcText {"w":{...},"r":{...},"f":[...]}` | 结构化 JSON，离线工具优先推荐 |
-| `OUTPUT_JSON_KV=false` | `srcText ; x=1, y=2` | 传统文本，人眼阅读友好 |
-
-`trace-parse.mjs` 自动兼容两种格式的混合输入（同一文件中可以同时出现两种格式），
-转换后的统一结构：
+`trace-parse.mjs` 将原始输出转换为统一结构化 NDJSON：
 - `w`：变量写入字典（`{ varName: value, ... }`）
 - `r`：变量读取字典（`{ varName: value, ... }`）
 - `f`：属性访问数组（`[{ base, offset, val, isComputed, isWrite }, ...]`）
-- `kv`：传统键值对（两种格式统一回退到此字段）
+- `kv`：兼容旧文本格式的回退字段
 
-后续工具（`filter`、`var-timeline` 等）同时支持 `w/r/f` 和 `kv` 字段，无需关心原始格式。
+`trace-parse.mjs` 同时兼容旧版传统文本 kv 格式（`OUTPUT_JSON_KV=false` 历史输出），两种格式可混合出现在同一文件中。
+
+后续工具（`filter`、`var-timeline`、`render` 等）同时支持 `w/r/f` 和 `kv` 字段，无需关心原始格式。
+
+**树形/缩进展示**不再由运行时负责，统一由 `trace-render.mjs` 在离线侧按需渲染。

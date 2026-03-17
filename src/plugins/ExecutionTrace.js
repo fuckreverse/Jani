@@ -11,34 +11,21 @@
  *     J$.W / J$.G / J$.P / J$.F / J$.M / J$.Xe 等钩子
  *     （方案F+C：不再需要 J$.R 变量读取插桩）。
  *
- * 每条 trace 行输出格式（由 OUTPUT_FORMAT 控制）：
+ * 输出格式（平铺流式，无调用栈缩进，每个事件立即输出）：
  *
- *   FORMAT_FLAT (8) — 平铺流式输出（默认）：无调用栈缩进，每个事件立即输出，不等函数返回。
- *     适合脚本退出后外部调用被插桩函数的场景（解决异步/延迟调用 trace 丢失问题）。
- *     所有行统一遵循 `[seq] [line:col] 描述 ; kv` 格式：
- *     [  1] [     1:1] var x = 1 ; x=1
- *     [  2] [     2:1] x += 1 ; x=2
- *     [  3] [     3:5] CALL .fromCharCode(1 args) ; this=[Function String], arg0=65
- *     [  4] [     3:5] RETN fromCharCode ; ="A"
- *     [  5] [     3:1] o += String.fromCharCode(c) ; o="A", c=65
+ *   [     1] [     1:1] ▶ script: /path/to/file.js
+ *   [     2] [     1:1] CALL foo(2 args) {"a":[...]}
+ *   [     3] [     1:1] RETN foo {"v":42}
+ *   [     4] [     2:1] x = 1 + 2 {"w":{"x":3},"r":{"y":1}}
+ *   [     5] [     3:1] ◀ script end
  *
- *   FORMAT_TREE (1) — Unicode 树形符号（seq/rc 固定宽度对齐）：
- *     [  9] [ 687:22] │ │ │ ┬ (anonymous)(0 args)
- *     [ 10] [3943:14] │ │ │ │ ┬ Object(1 args) ; arg0=Symbol(Symbol.iterator)
- *     [ 11] [3943:14] │ │ │ │ └ return Object ; ={}
- *     [ 12] [ 687:22] │ │ │ └ return (anonymous) ; =undefined
+ * kv 部分以结构化 JSON 输出（便于离线工具解析）：
+ *   CALL 行：{"a":[arg0, arg1, ...], "this": ...}
+ *   RETN 行：{"v": returnValue}
+ *   expr 行：{"w":{写入变量}, "r":{读取变量}, "f":[属性访问]}
  *
- *   FORMAT_BLOCK (2) — #region/#endregion 折叠块（VS Code 任意文件可折叠）：
- *     [  9] // #region [ 687:22] CALL (anonymous)(0 args)
- *     [ 10]   // #region [3943:14] CALL Object(1 args) ; arg0=Symbol(Symbol.iterator)
- *     [ 11]   // #endregion Object ; ={}
- *     [ 12] // #endregion (anonymous) ; =undefined
- *
- *   FORMAT_PIPE (4) — ASCII pipe 符号（| 数量 = 调用深度）：
- *     [  9] | | | (anonymous)(0 args) [ 687:22]
- *     [ 10] | | | | Object(1 args) [3943:14] ; arg0=Symbol(Symbol.iterator)
- *     [ 11] | | | | Object RETN ; ={} [3943:14]
- *     [ 12] | | | (anonymous) RETN ; =undefined [ 687:22]
+ * 如需树形/缩进展示，使用离线工具 trace-render.mjs（接受 trace-parse.mjs 输出）：
+ *   cat trace.ndjson | node tools/trace-parse.mjs | node tools/trace-render.mjs --format tree
  *
  * 用法：
  *   import { ExecutionTraceAnalysis } from './ExecutionTrace.js';
@@ -65,26 +52,19 @@ import { TraceLogger } from '../logger/TraceLogger.js';
 import { createDiagLogger, DOMAIN } from '../logger/diagnostics.js';
 import { serialize } from '../utils/serialize.js';
 import {
-    FORMAT_FLAT, FORMAT_TREE, FORMAT_BLOCK, FORMAT_PIPE,
-    OUTPUT_JSON_KV,
     fmtSeq,
-    createFormatter,
     FlatFormatter,
 } from '../utils/traceFormatters.js';
 import {
     $push as _push, $join as _join, $map as _map, $filter as _filter,
-    $splice as _splice, $unshift as _unshift, $pop as _pop,
-    $slice, $isArray, $keys, $strSplit, $strReplace, $strSlice, $strTrim,
+    $splice as _splice, $pop as _pop,
+    $isArray, $keys, $strSplit, $strReplace, $strSlice, $strTrim,
 } from '../runtime/NativeProxy.js';
 
 const dbg = createDiagLogger(DOMAIN.ANALYSIS);
 
-// ── 输出格式选择（硬编码，改这里切换）────────────────────────────────────────
-//   FORMAT_FLAT  (8) : 平铺流式输出（默认），无缩进，每事件立即输出，不等函数返回
-//   FORMAT_TREE  (1) : Unicode 树形符号（┬ │ └），seq/rc 固定宽度对齐
-//   FORMAT_BLOCK (2) : #region/#endregion 折叠块（VS Code 任意文件可折叠）
-//   FORMAT_PIPE  (4) : ASCII pipe 符号（| 数量 = 深度）
-const OUTPUT_FORMAT = FORMAT_FLAT;
+// 运行时使用的格式化器（唯一实例）
+const fmt = new FlatFormatter();
 
 // ── 工具 ─────────────────────────────────────────────────────────────────────
 
@@ -95,20 +75,20 @@ function getLocation(sandbox, iid) {
     // 1. smap["filename"] = { iid: [sl,sc,el,ec], code: "...", ... } （插桩器注入，多文件场景）
     // 2. smap[iid_string] = [sl,sc,el,ec] （扁平格式，单文件默认）
     // 3. smap[number] = { iid: [sl,sc,el,ec], ... } （运行时按 sid 存储）
-    
+
     // 优先尝试扁平格式：直接用 iid 作为 key
     const directEntry = smap[iid] ?? smap[String(iid)];
     if ($isArray(directEntry) && directEntry.length >= 4) {
         return directEntry;
     }
-    
+
     // 尝试按 sid 查找（多文件场景）
     const sidEntry = smap[sandbox.sid];
     if (sidEntry && typeof sidEntry === 'object' && !$isArray(sidEntry)) {
         const arr = sidEntry[iid];
         if ($isArray(arr) && arr.length >= 4) return arr;
     }
-    
+
     // 遍历查找：某些嵌套结构（如 smap["filename"] = { iid: [...] }）
     for (const key of $keys(smap)) {
         if (key === 'nBranches' || key === 'originalCodeFileName' || key === 'instrumentedCodeFileName') continue;
@@ -164,15 +144,6 @@ function _shortBase(base) {
     return serialize(base);
 }
 
-// ── 帧结构 ────────────────────────────────────────────────────────────────────
-
-class Frame {
-    constructor(depth) {
-        this.depth     = depth;
-        this.doneLines = [];
-    }
-}
-
 // ── 分析类 ───────────────────────────────────────────────────────────────────
 
 export class ExecutionTraceAnalysis {
@@ -199,19 +170,20 @@ export class ExecutionTraceAnalysis {
         this._sb    = sandbox;
         this._seq   = 0;
         this._lines = sourceCode ? $strSplit(sourceCode, /\r\n|\r|\n/) : null;
-        this._stack     = [];
+
+        // 调用栈元数据（只用于配对 CALL/RETN，不做树形缓冲）
         this._callStack = [];
-        this._fmt       = createFormatter(OUTPUT_FORMAT);
-        // FORMAT_FLAT（8）模式：每个事件立即 emit，不通过 Frame.doneLines 缓冲
-        this._flat = !(OUTPUT_FORMAT === FORMAT_TREE || OUTPUT_FORMAT === FORMAT_BLOCK || OUTPUT_FORMAT === FORMAT_PIPE);
-        // flat 模式下缓冲当前语句的变量 kv（writeVar/returnStmt/throwStmt 暂存于此，
+
+        // 缓冲当前语句的变量 kv（writeVar/returnStmt/throwStmt 暂存于此，
         // 由 endExpression 统一合并成一行输出，避免每个 writeVar 单独输出一行）
         this._pendingKvs = [];
-        // flat 模式下缓冲当前语句的变量读取值
-        // 方案F：由 endExpression 从 useNames/useValues 直接填充，不依赖 readVar hook
+        // 方案F：缓冲当前语句的变量读取值，由 endExpression 从 useNames/useValues 填充
         this._pendingReads = [];
         // 方案C：缓冲当前语句的属性读写（getField/putField 暂存于此）
         this._pendingFields = [];
+
+        // functionEnter/functionExit 嵌套追踪栈（区分 callPre 覆盖路径 vs 直接调用路径）
+        this._flatFnStack = [];
 
         if (options.logger instanceof TraceLogger) {
             this._logger = options.logger;
@@ -254,8 +226,6 @@ export class ExecutionTraceAnalysis {
         this._logger.key(level, text);
     }
 
-    _top() { return this._stack[this._stack.length - 1]; }
-
     /** emit 已格式化好的一行（seq 由调用侧 ++this._seq 分配，再传进来）*/
     _emitRaw(text) {
         this._logger.trace({ type: 'trace', seq: this._seq, text });
@@ -266,7 +236,6 @@ export class ExecutionTraceAnalysis {
         this._emitRaw(`[${fmtSeq(++this._seq)}] ${text}`);
     }
 
-
     /** 根据 iid 获取位置信息 */
     _loc(iid) {
         const loc = getLocation(this._sb, iid);
@@ -274,7 +243,7 @@ export class ExecutionTraceAnalysis {
         return { loc, rc };
     }
 
-    /** 将 kv 对象序列化为 JSON 字符串（用于 OUTPUT_JSON_KV 模式）*/
+    /** 将 kv 对象序列化为 JSON 字符串 */
     _serializeKvObj(kvObj) {
         return JSON.stringify(kvObj, (key, val) => {
             // 对大数组/对象做截断处理，避免 JSON 过长
@@ -286,28 +255,6 @@ export class ExecutionTraceAnalysis {
             }
             return val;
         });
-    }
-
-    /** 将 kv 对象转换为传统文本格式（用于 OUTPUT_JSON_KV=false 模式）*/
-    _kvObjToStr(kvObj) {
-        const parts = [];
-        for (const key of $keys(kvObj)) {
-            const val = kvObj[key];
-            if (key === 'a' && $isArray(val)) {
-                // 参数数组
-                for (let i = 0; i < val.length && i < 5; i++) {
-                    parts.push(`arg${i}=${serialize(val[i])}`);
-                }
-                if (val.length > 5) parts.push('...');
-            } else if (key === 'v') {
-                parts.push(`=${serialize(val)}`);
-            } else {
-                parts.push(`${key}=${serialize(val)}`);
-            }
-        }
-        let str = _join(parts, ', ');
-        if (str.length > 120) str = $strSlice(str, 0, 119) + '…';
-        return str;
     }
 
     // ── 函数调用边界 ──────────────────────────────────────────────────────────
@@ -326,137 +273,45 @@ export class ExecutionTraceAnalysis {
         if (isMethod && base !== undefined) kvObj.this = base;
         if (args && args.length > 0) kvObj.a = args;
 
-        if (this._flat) {
-            // 平铺模式：立即输出 CALL 行，只用轻量元数据栈（不缓冲 doneLines）
-            const callMeta = { rc, depth: 1, desc, name, kvObj };
-            // 在调用前保存当前语句积累的 pending 上下文（防止被调函数内部的钩子污染）。
-            // 例如：外层语句 `x = foo(y)` 调用 foo，foo 内部的 writeVar/putField 钩子
-            // 会向 _pendingKvs/_pendingFields 推入数据，如不隔离会混入外层语句的 trace。
-            _push(this._callStack, {
-                callMeta,
-                savedKvs:    this._pendingKvs,
-                savedReads:  this._pendingReads,
-                savedFields: this._pendingFields,
-            });
-            // 清空，确保被调函数内部积累的 pending 不会污染外层语句
-            this._pendingKvs    = [];
-            this._pendingReads  = [];
-            this._pendingFields = [];
+        // 在调用前保存当前语句积累的 pending 上下文（防止被调函数内部的钩子污染）。
+        // 例如：外层语句 `x = foo(y)` 调用 foo，foo 内部的 writeVar/putField 钩子
+        // 会向 _pendingKvs/_pendingFields 推入数据，如不隔离会混入外层语句的 trace。
+        _push(this._callStack, {
+            rc, desc, name, kvObj,
+            savedKvs:    this._pendingKvs,
+            savedReads:  this._pendingReads,
+            savedFields: this._pendingFields,
+        });
+        // 清空，确保被调函数内部积累的 pending 不会污染外层语句
+        this._pendingKvs    = [];
+        this._pendingReads  = [];
+        this._pendingFields = [];
 
-            // 根据 OUTPUT_JSON_KV 选择输出格式
-            const line = OUTPUT_JSON_KV
-                ? this._fmt.callLineJson(++this._seq, rc, 1, desc, this._serializeKvObj(kvObj))
-                : this._fmt.callLine(++this._seq, rc, 1, desc, this._kvObjToStr(kvObj));
-            this._emitRaw(line);
-            return { f, base, args, skip: false };
-        }
-
-        const parentDepth = this._stack.length > 0 ? this._top().depth : 0;
-
-        // 如果此时栈为空，说明是脚本退出后的异步回调（setTimeout / Promise / 事件监听器等）
-        // 自动推入一个虚拟"异步根帧"，使后续 trace 正常落帧，不再静默丢失
-        if (this._stack.length === 0) {
-            this._pushAsyncRootFrame(iid);
-        }
-
-        const callMeta = { rc, depth: parentDepth + 1, desc, name, kvObj };
-        _push(this._stack, new Frame(parentDepth + 1));
-        _push(this._callStack, { callMeta });
-
+        // 立即输出 CALL 行
+        const line = fmt.callLineJson(++this._seq, rc, 0, desc, this._serializeKvObj(kvObj));
+        this._emitRaw(line);
         return { f, base, args, skip: false };
     }
 
     call(iid, f, base, args, result, isConstructor, isMethod) {
-        if (this._flat) {
-            // 平铺模式：CALL 行已在 callPre 输出，此处只输出 RETN 行
-            if (this._callStack.length === 0) {
-                const name = f?.name || '(anonymous)';
-                dbg.error(`call(flat): callStack underflow — fn=${name} iid=${iid}`);
-                return { result };
-            }
-            const callInfo = _pop(this._callStack);
-            const name   = callInfo.callMeta?.name ?? (f?.name || '(anonymous)');
-            // 恢复外层语句的 pending 上下文（callPre 时保存的），并丢弃被调函数内部积累的 pending。
-            // 这样被调函数内部的变量读写不会出现在外层语句的 trace 行中。
-            if (callInfo.savedKvs !== undefined) {
-                this._pendingKvs    = callInfo.savedKvs;
-                this._pendingReads  = callInfo.savedReads;
-                this._pendingFields = callInfo.savedFields;
-            }
-            const { rc } = this._loc(iid);
-            // 根据 OUTPUT_JSON_KV 选择输出格式
-            const kvObj = { v: result };
-            const line = OUTPUT_JSON_KV
-                ? this._fmt.retLineJson(++this._seq, rc, 1, name, this._serializeKvObj(kvObj))
-                : this._fmt.retLine(++this._seq, rc, 1, name, serialize(result));
-            this._emitRaw(line);
-            this._logger.scheduleFlush?.();
-            return { result };
-        }
-
-        if (this._stack.length === 0 || this._callStack.length === 0) {
+        if (this._callStack.length === 0) {
             const name = f?.name || '(anonymous)';
-            dbg.error(
-                `call: stack underflow — stack=${this._stack.length}` +
-                ` fn=${name} iid=${iid}`
-            );
+            dbg.error(`call: callStack underflow — fn=${name} iid=${iid}`);
             return { result };
         }
-
-        const frame    = _pop(this._stack);
         const callInfo = _pop(this._callStack);
-        const { callMeta } = callInfo;
+        const name   = callInfo.name ?? (f?.name || '(anonymous)');
 
-        const name    = f?.name || '(anonymous)';
-        const { rc }  = this._loc(iid);
-        const retMeta = { rc, depth: callMeta.depth, name, result: serialize(result) };
+        // 恢复外层语句的 pending 上下文，丢弃被调函数内部积累的 pending
+        this._pendingKvs    = callInfo.savedKvs;
+        this._pendingReads  = callInfo.savedReads;
+        this._pendingFields = callInfo.savedFields;
 
-        const innerLines = frame.doneLines;
-
-        const parent = this._top();
-        if (parent) {
-            if (parent._isAsyncRoot) {
-                // 父帧是异步根帧：直接 emit 这次调用，然后检查根帧是否可以收尾
-                this._emitFormattedCall(callMeta, innerLines, retMeta);
-                this._maybeFlushAsyncRootFrame();
-                // 异步调用完成，少量 trace 可能达不到 RingBuffer 自动 flush 阈值，主动调度
-                this._logger.scheduleFlush?.();
-            } else {
-                _push(parent.doneLines, { type: 'call', callMeta, innerLines, retMeta });
-            }
-        } else {
-            this._emitFormattedCall(callMeta, innerLines, retMeta);
-        }
-
+        const { rc } = this._loc(iid);
+        const line = fmt.retLineJson(++this._seq, rc, 0, name, this._serializeKvObj({ v: result }));
+        this._emitRaw(line);
+        this._logger.scheduleFlush?.();
         return { result };
-    }
-
-    _emitFormattedCall(callMeta, innerLines, retMeta) {
-        // 只有 FlatFormatter 支持 JSON 输出；其他格式（tree/block/pipe）强制用传统格式
-        const useJson = OUTPUT_JSON_KV && (this._fmt instanceof FlatFormatter);
-        const kvStr = callMeta.kvStr || this._kvObjToStr(callMeta.kvObj || {});
-        const callLine = useJson
-            ? this._fmt.callLineJson(
-                ++this._seq, callMeta.rc, callMeta.depth, callMeta.desc,
-                this._serializeKvObj(callMeta.kvObj || {})
-              )
-            : this._fmt.callLine(
-                ++this._seq, callMeta.rc, callMeta.depth, callMeta.desc,
-                kvStr
-              );
-        this._emitRaw(callLine);
-
-        this._emitItems(innerLines);
-
-        const retLine = useJson
-            ? this._fmt.retLineJson(
-                ++this._seq, retMeta.rc, retMeta.depth, retMeta.name,
-                this._serializeKvObj({ v: retMeta.result })
-              )
-            : this._fmt.retLine(
-                ++this._seq, retMeta.rc, retMeta.depth, retMeta.name, retMeta.result
-              );
-        this._emitRaw(retLine);
     }
 
     // ── 脚本进出 ──────────────────────────────────────────────────────────────
@@ -464,10 +319,8 @@ export class ExecutionTraceAnalysis {
     scriptEnter(iid, instrumentedFileName, originalFileName) {
         // 若构造时未传 sourceCode（this._lines 为 null），
         // 尝试从 smap 内联的 code 字段补充（inlineSource:true 时有值）。
-        // 每次 scriptEnter 都刷新，天然支持多脚本场景。
         if (this._sb?.smap) {
             const sid = this._sb.sid;
-            // 优先按当前 sid 查；回退按 instrumentedFileName 查
             const entry = this._sb.smap[sid] ?? this._sb.smap[instrumentedFileName];
             if (entry?.code) {
                 this._lines = $strSplit(entry.code, /\r\n|\r|\n/);
@@ -475,26 +328,11 @@ export class ExecutionTraceAnalysis {
             }
         }
 
-        // scriptEnter 分配一个 seq，作为 trace 的第一条记录
         this._emitKeyLine(`▶ script: ${originalFileName}`);
         this._key('info', `▶ script: ${originalFileName}`);
-        if (!this._flat) {
-            _push(this._stack, new Frame(0));
-            _push(this._callStack, { callMeta: null });
-        }
     }
 
     scriptExit(iid, wrappedExceptionVal) {
-        if (!this._flat) {
-            if (this._stack.length === 0) {
-                dbg.error(`scriptExit: stack underflow (iid=${iid})`);
-            } else {
-                const frame = this._top();
-                this._emitItems(frame.doneLines);
-                _pop(this._stack);
-                _pop(this._callStack);
-            }
-        }
         const exitText = wrappedExceptionVal
             ? `◀ script end (exception: ${serialize(wrappedExceptionVal.exception)})`
             : `◀ script end`;
@@ -508,129 +346,62 @@ export class ExecutionTraceAnalysis {
     }
 
     functionEnter(iid, f, dis, args) {
-        if (this._flat) {
-            // 平铺模式：直接 emit CALL 行（对应 functionEnter 无 callPre 的情况：
-            // 脚本退出后 native 直接调用，或者 callPre 之后进入函数体）。
-            // 用 _flatFnDepth 追踪嵌套深度，只有最外层函数才需要 emit（callPre 负责外层调用的 CALL）。
-            // 注意：callPre 路径会先 emit CALL，此处 functionEnter 只处理无 callPre 的直接调用。
-            // 判断标准：_callStack 顶层是否已有由 callPre 推入的待匹配记录（_fromCallPre 标记）。
-            // 简化实现：用 _flatFnStack 跟踪每次 functionEnter 是否已由 callPre 覆盖
-            if (!this._flatFnStack) this._flatFnStack = [];
-            const topCall = this._callStack.length > 0 ? this._callStack[this._callStack.length - 1] : null;
-            if (topCall && !topCall._feCovered) {
-                // 已有 callPre 对应的记录，标记为已覆盖，不再重复 emit CALL
-                topCall._feCovered = true;
-                _push(this._flatFnStack, { _coveredByCallPre: true });
-            } else {
-                // 无 callPre：native 直接调用（脚本退出后），emit CALL 行
-                const name = f?.name || '(anonymous)';
-                const { rc } = this._loc(iid);
-                const callMeta = { rc, depth: 1, desc: `${name}(${args?.length ?? 0} args)`, kvStr: '', name };
-                _push(this._callStack, { callMeta, _directFe: true });
-                _push(this._flatFnStack, { _coveredByCallPre: false });
-                const line = this._fmt.callLine(++this._seq, rc, 1, callMeta.desc, '');
-                this._emitRaw(line);
-            }
-            return;
-        }
+        // 追踪每次 functionEnter 是否已由 callPre 覆盖（有 callPre 则不重复 emit CALL）
+        const topCall = this._callStack.length > 0
+            ? this._callStack[this._callStack.length - 1]
+            : null;
 
-        if (this._stack.length === 0) {
-            // 栈为空：脚本退出后被 native 代码直接调用（如浏览器直接调用注册的函数）。
-            // 推入异步根帧 + 合成帧。
-            // _feFrDepth 追踪此合成帧内部通过 native 调用触发的 Fe/Fr 嵌套深度：
-            //   = 0 时，下一个 functionExit 就是合成帧对应函数自身的出口
-            //   > 0 时，这个 functionExit 是某个内部 native 回调的出口，继续等
-            this._pushAsyncRootFrame(iid);
+        if (topCall && !topCall._feCovered) {
+            // 已有 callPre 对应的记录，标记为已覆盖，不再重复 emit CALL
+            topCall._feCovered = true;
+            _push(this._flatFnStack, { _coveredByCallPre: true });
+        } else {
+            // 无 callPre：native 直接调用（脚本退出后的异步回调），emit CALL 行
             const name = f?.name || '(anonymous)';
             const { rc } = this._loc(iid);
-            const callMeta = { rc, depth: 1, desc: `${name}(${args?.length ?? 0} args)`, kvStr: '', name };
-            const frame = new Frame(1);
-            frame._isSyntheticEntry = true;
-            frame._feFrDepth = 0;
-            _push(this._stack, frame);
-            _push(this._callStack, { callMeta });
-        } else {
-            // 栈不为空：只有 _stack 顶层就是合成帧时，才增加其嵌套深度计数。
-            // 如果合成帧之上还有 callPre 推的帧，则这次 Fe 属于那些帧内部，
-            // 不影响合成帧的 _feFrDepth（它们有自己的深度语义）。
-            const top = this._top();
-            if (top?._isSyntheticEntry) {
-                top._feFrDepth++;
-            }
+            const callMeta = { rc, desc: `${name}(${args?.length ?? 0} args)`, name };
+            _push(this._callStack, {
+                ...callMeta,
+                _directFe: true,
+                savedKvs:    this._pendingKvs,
+                savedReads:  this._pendingReads,
+                savedFields: this._pendingFields,
+            });
+            this._pendingKvs    = [];
+            this._pendingReads  = [];
+            this._pendingFields = [];
+            _push(this._flatFnStack, { _coveredByCallPre: false });
+            const line = fmt.callLine(++this._seq, rc, 0, callMeta.desc, '');
+            this._emitRaw(line);
         }
     }
 
     functionExit(iid, returnVal, wrappedExceptionVal) {
-        if (this._flat) {
-            if (wrappedExceptionVal) {
-                const exStr  = serialize(wrappedExceptionVal.exception);
-                const { rc } = this._loc(iid);
-                const line = this._fmt.infoLine(++this._seq, rc, 0, '✗ throw', `exception=${exStr}`);
-                this._emitRaw(line);
-                this._key('warn', `[${rc}] ✗ throw ; exception=${exStr}`);
-            }
-
-            if (!this._flatFnStack) this._flatFnStack = [];
-            const fnEntry = _pop(this._flatFnStack);
-            if (fnEntry && !fnEntry._coveredByCallPre) {
-                // 对应 _directFe 路径（无 callPre），需要输出 RETN 行
-                if (this._callStack.length > 0) {
-                    const callInfo = _pop(this._callStack);
-                    const name   = callInfo.callMeta?.name ?? '(anonymous)';
-                    const { rc } = this._loc(iid);
-                    const line   = this._fmt.retLine(++this._seq, rc, 1, name, serialize(returnVal));
-                    this._emitRaw(line);
-                    this._logger.scheduleFlush?.();
-                }
-            }
-            // 对应 callPre 覆盖路径：RETN 行已在 call() 里输出，此处无需额外处理
-
-            return { returnVal, wrappedExceptionVal, isBacktrack: false };
-        }
-
         if (wrappedExceptionVal) {
             const exStr  = serialize(wrappedExceptionVal.exception);
             const { rc } = this._loc(iid);
-            const frame  = this._top();
-            const depth = frame?.depth ?? 0;
-            if (frame) _push(frame.doneLines, { type: 'info', rc, depth, srcText: '✗ throw', kv: `exception=${exStr}` });
+            const line = fmt.infoLine(++this._seq, rc, 0, '✗ throw', `exception=${exStr}`);
+            this._emitRaw(line);
             this._key('warn', `[${rc}] ✗ throw ; exception=${exStr}`);
         }
 
-        // 只有 _stack 顶层就是合成帧时，才处理它的出口逻辑
-        const top = this._top();
-        if (top?._isSyntheticEntry) {
-            if (top._feFrDepth > 0) {
-                // 还有嵌套的内部 native 回调未退出，这个 functionExit 是内部的
-                top._feFrDepth--;
-            } else {
-                // _feFrDepth === 0：合成帧对应函数本身退出了
-                const frame    = _pop(this._stack);
+        const fnEntry = _pop(this._flatFnStack);
+        if (fnEntry && !fnEntry._coveredByCallPre) {
+            // 对应 _directFe 路径（无 callPre），需要输出 RETN 行
+            if (this._callStack.length > 0) {
                 const callInfo = _pop(this._callStack);
-                const { callMeta } = callInfo;
-                const { rc }  = this._loc(iid);
-                const retMeta = {
-                    rc,
-                    depth:  callMeta?.depth ?? 1,
-                    name:   callMeta?.name ?? '(anonymous)',
-                    result: serialize(returnVal),
-                };
-                const parent = this._top();
-                if (parent?._isAsyncRoot) {
-                    this._emitFormattedCall(callMeta, frame.doneLines, retMeta);
-                    this._maybeFlushAsyncRootFrame();
-                    // 异步调用完成，RingBuffer 里可能只有少量 trace（达不到自动 flush 阈值），
-                    // 主动调度一次 flush 确保数据及时写入 IDB / 文件后端
-                    this._logger.scheduleFlush?.();
-                } else if (parent) {
-                    _push(parent.doneLines, { type: 'call', callMeta, innerLines: frame.doneLines, retMeta });
-                } else {
-                    this._emitFormattedCall(callMeta, frame.doneLines, retMeta);
-                    // 同上，栈外直接 emit 时也调度 flush
-                    this._logger.scheduleFlush?.();
-                }
+                const name   = callInfo.name ?? '(anonymous)';
+                // 恢复外层 pending
+                this._pendingKvs    = callInfo.savedKvs    ?? [];
+                this._pendingReads  = callInfo.savedReads  ?? [];
+                this._pendingFields = callInfo.savedFields ?? [];
+                const { rc } = this._loc(iid);
+                const line = fmt.retLineJson(++this._seq, rc, 0, name, this._serializeKvObj({ v: returnVal }));
+                this._emitRaw(line);
+                this._logger.scheduleFlush?.();
             }
         }
+        // 对应 callPre 覆盖路径：RETN 行已在 call() 里输出，此处无需额外处理
 
         return { returnVal, wrappedExceptionVal, isBacktrack: false };
     }
@@ -642,18 +413,8 @@ export class ExecutionTraceAnalysis {
     // 彻底消除 INSTR_READ 插桩，不再有代码膨胀。
 
     writeVar(iid, name, val) {
-        if (this._flat) {
-            // flat 模式：暂存到 _pendingKvs，由 endExpression 统一合并输出
-            // 存储 {name, val, kv} 三元组，支持 JSON 和文本两种输出格式
-            _push(this._pendingKvs, { name, val, kv: `${name}=${serialize(val)}` });
-            return { result: val };
-        }
-        // 非 flat 模式（tree/block/pipe）：需要记录每条写入的位置信息
-        const { rc, loc } = this._loc(iid);
-        const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
-        const frame = this._top();
-        if (!frame) return { result: val };
-        _push(frame.doneLines, { type: 'info', rc, depth: frame.depth, srcText, kv: `${name}=${serialize(val)}` });
+        // 暂存到 _pendingKvs，由 endExpression 统一合并输出
+        _push(this._pendingKvs, { name, val });
         return { result: val };
     }
 
@@ -665,33 +426,14 @@ export class ExecutionTraceAnalysis {
     }
 
     returnStmt(iid, val) {
-        if (this._flat) {
-            // flat 模式：暂存到 _pendingKvs，由 endExpression 统一合并输出。位置由 Xe iid 提供
-            // 存储 val 支持 JSON 输出
-            _push(this._pendingKvs, { name: '(return)', val, kv: `(return)=${serialize(val)}` });
-            return { result: val };
-        }
-        const { rc, loc } = this._loc(iid);
-        const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
-        const frame = this._top();
-        if (!frame) return { result: val };
-        _push(frame.doneLines, { type: 'info', rc, depth: frame.depth, srcText, kv: `(return)=${serialize(val)}` });
+        // 暂存到 _pendingKvs，由 endExpression 统一合并输出
+        _push(this._pendingKvs, { name: '(return)', val });
         return { result: val };
     }
 
     throwStmt(iid, val) {
-        if (this._flat) {
-            // flat 模式：暂存到 _pendingKvs，由 endExpression 统一合并输出。位置由 Xe iid 提供
-            // （throw 语句也会触发 endExpression，由插桩器保证）
-            // 存储 val 支持 JSON 输出
-            _push(this._pendingKvs, { name: '(throw)', val, kv: `(throw)=${serialize(val)}` });
-            return { result: val };
-        }
-        const { rc, loc } = this._loc(iid);
-        const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
-        const frame = this._top();
-        if (!frame) return { result: val };
-        _push(frame.doneLines, { type: 'info', rc, depth: frame.depth, srcText, kv: `(throw)=${serialize(val)}` });
+        // 暂存到 _pendingKvs，由 endExpression 统一合并输出
+        _push(this._pendingKvs, { name: '(throw)', val });
         return { result: val };
     }
 
@@ -700,29 +442,16 @@ export class ExecutionTraceAnalysis {
     /**
      * 属性读取钩子（方案C）。
      * 暂存到 _pendingFields，由 endExpression 统一合并输出。
-     *
-     * @param {number} iid         指令 ID
-     * @param {*} base             基对象
-     * @param {string|number|*} offset  属性名/索引
-     * @param {*} val              属性值
-     * @param {boolean} isComputed 是否为计算属性（a[b] vs a.b）
-     * @param {boolean} isOpAssign 是否为复合赋值的读取部分
-     * @param {boolean} isMethodCall 是否为方法调用
      */
     getField(iid, base, offset, val, isComputed, isOpAssign, isMethodCall) {
-        if (this._flat) {
-            // 只在 flat 模式下暂存属性读取
-            // 过滤掉方法调用的 this 读取（避免冗余）
-            if (!isMethodCall) {
-                const baseStr = _shortBase(base);
-                const offsetStr = isComputed ? `[${serialize(offset)}]` : `.${String(offset)}`;
-                const key = `${baseStr}${offsetStr}`;
-                // 存储 fieldInfo 支持 JSON 输出
-                _push(this._pendingFields, {
-                    kv: `${key}=${serialize(val)}`,
-                    fieldInfo: { base: baseStr, offset: String(offset), val, isComputed }
-                });
-            }
+        // 过滤掉方法调用的 this 读取（避免冗余）
+        if (!isMethodCall) {
+            const baseStr = _shortBase(base);
+            const offsetStr = isComputed ? `[${serialize(offset)}]` : `.${String(offset)}`;
+            const key = `${baseStr}${offsetStr}`;
+            _push(this._pendingFields, {
+                fieldInfo: { base: baseStr, offset: String(offset), val, isComputed }
+            });
         }
         return { result: val };
     }
@@ -730,25 +459,13 @@ export class ExecutionTraceAnalysis {
     /**
      * 属性写入钩子（方案C）。
      * 暂存到 _pendingFields，由 endExpression 统一合并输出。
-     *
-     * @param {number} iid         指令 ID
-     * @param {*} base             基对象
-     * @param {string|number|*} offset  属性名/索引
-     * @param {*} val              写入值
-     * @param {boolean} isComputed 是否为计算属性
-     * @param {boolean} isOpAssign 是否为复合赋值
      */
     putField(iid, base, offset, val, isComputed, isOpAssign) {
-        if (this._flat) {
-            const baseStr = _shortBase(base);
-            const offsetStr = isComputed ? `[${serialize(offset)}]` : `.${String(offset)}`;
-            const key = `${baseStr}${offsetStr}`;
-            // 存储 fieldInfo 支持 JSON 输出
-            _push(this._pendingFields, {
-                kv: `${key}=${serialize(val)}`,
-                fieldInfo: { base: baseStr, offset: String(offset), val, isComputed, isWrite: true }
-            });
-        }
+        const baseStr = _shortBase(base);
+        const offsetStr = isComputed ? `[${serialize(offset)}]` : `.${String(offset)}`;
+        _push(this._pendingFields, {
+            fieldInfo: { base: baseStr, offset: String(offset), val, isComputed, isWrite: true }
+        });
         return { result: val };
     }
 
@@ -767,177 +484,72 @@ export class ExecutionTraceAnalysis {
      * @param {*[]} [useValues]     变量当前值列表（由运行时从 Shadow Frame 查询）
      */
     endExpression(iid, val, useNames, useScopes, useValues) {
-        if (this._flat) {
-            // flat 模式：聚合当前语句的所有 kv，合并成一行输出
-            const { rc, loc } = this._loc(iid);
-            const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
+        const { rc, loc } = this._loc(iid);
+        const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
 
-            // 方案F：若提供了 useNames/useValues，直接使用（不再依赖 readVar hook）
-            if (useNames && useValues && useNames.length > 0) {
-                const builtins = new Set(['String', 'Number', 'Boolean', 'Object', 'Array',
-                    'Function', 'Symbol', 'BigInt', 'Math', 'Date', 'RegExp', 'Error',
-                    'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError',
-                    'JSON', 'Promise', 'Map', 'Set', 'WeakMap', 'WeakSet', 'Proxy', 'Reflect',
-                    'console', 'window', 'global', 'globalThis', 'document', 'navigator',
-                    'undefined', 'NaN', 'Infinity']);
+        // 方案F：若提供了 useNames/useValues，直接使用（不再依赖 readVar hook）
+        if (useNames && useValues && useNames.length > 0) {
+            const builtins = new Set(['String', 'Number', 'Boolean', 'Object', 'Array',
+                'Function', 'Symbol', 'BigInt', 'Math', 'Date', 'RegExp', 'Error',
+                'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError',
+                'JSON', 'Promise', 'Map', 'Set', 'WeakMap', 'WeakSet', 'Proxy', 'Reflect',
+                'console', 'window', 'global', 'globalThis', 'document', 'navigator',
+                'undefined', 'NaN', 'Infinity']);
 
-                for (let i = 0; i < useNames.length; i++) {
-                    const name = useNames[i];
-                    if (builtins.has(name)) continue;
-                    _push(this._pendingReads, { name, val: useValues[i] });
-                }
-            }
-
-            // 合并 reads、writes 和 fields
-            const writes = this._pendingKvs;
-            const reads  = this._pendingReads;
-            const fields = this._pendingFields;
-            this._pendingKvs    = []; // 清空缓存，为下一条语句准备
-            this._pendingReads  = [];
-            this._pendingFields = [];
-
-            // 根据 OUTPUT_JSON_KV 选择输出格式
-            // 只有 FlatFormatter 支持 JSON 输出
-            const useJson = OUTPUT_JSON_KV && (this._fmt instanceof FlatFormatter);
-            if (useJson) {
-                // 结构化 JSON 输出
-                const kvObj = { w: {}, r: {}, f: [] };
-                const writtenNames = new Set();
-
-                // 写入变量
-                for (const w of writes) {
-                    if (w.name) {
-                        kvObj.w[w.name] = w.val;
-                        writtenNames.add(w.name);
-                    }
-                }
-
-                // 读取变量（过滤已写入的）
-                for (const r of reads) {
-                    if (!writtenNames.has(r.name)) {
-                        kvObj.r[r.name] = r.val;
-                    }
-                }
-
-                // 属性访问
-                for (const f of fields) {
-                    if (f.fieldInfo) kvObj.f.push(f.fieldInfo);
-                }
-
-                // 清理空对象
-                if ($keys(kvObj.w).length === 0) delete kvObj.w;
-                if ($keys(kvObj.r).length === 0) delete kvObj.r;
-                if (kvObj.f.length === 0) delete kvObj.f;
-
-                const line = this._fmt.infoLineJson(
-                    ++this._seq, rc, 0, srcText,
-                    $keys(kvObj).length > 0 ? this._serializeKvObj(kvObj) : '{}'
-                );
-                this._emitRaw(line);
-            } else {
-                // 传统文本格式输出
-                const writtenNames = new Set();
-                for (const w of writes) {
-                    const match = w.kv?.match(/^([^=]+)=/);
-                    if (match) writtenNames.add(match[1]);
-                }
-
-                const filteredReads = _filter(reads, r => !writtenNames.has(r.name));
-                const allKvs = [...writes, ...filteredReads, ...fields];
-
-                const kvStr = _join(_map(allKvs, p => p.kv || ''), ', ');
-                const line = this._fmt.infoLine(++this._seq, rc, 0, srcText, kvStr);
-                this._emitRaw(line);
-            }
-            return;
-        }
-
-        const frame = this._top();
-        if (!frame) return;
-
-        const items = _splice(frame.doneLines, 0, frame.doneLines.length);
-
-        if (items.length === 0) {
-            // 纯副作用/纯读语句：只记录源码位置行
-            const { rc, loc } = this._loc(iid);
-            const srcText = loc && this._lines ? extractSource(this._lines, loc) : `(iid=${iid})`;
-            const meta = { type: 'info', rc, depth: frame.depth, srcText, kv: '' };
-            if (this._stack.length <= 1) {
-                const line = this._fmt.infoLine(++this._seq, rc, frame.depth, srcText, '');
-                this._emitRaw(line);
-            } else {
-                _push(this._stack[this._stack.length - 1].doneLines, meta);
-            }
-            return;
-        }
-
-        if (this._stack.length <= 1) {
-            this._emitItems(items);
-        } else {
-            for (const item of items) {
-                _push(this._stack[this._stack.length - 1].doneLines, item);
+            for (let i = 0; i < useNames.length; i++) {
+                const name = useNames[i];
+                if (builtins.has(name)) continue;
+                _push(this._pendingReads, { name, val: useValues[i] });
             }
         }
-    }
 
-    _emitItems(items) {
-        for (const item of items) {
-            if (item.type === 'info') {
-                const line = this._fmt.infoLine(++this._seq, item.rc, item.depth, item.srcText, item.kv);
-                this._emitRaw(line);
-            } else if (item.type === 'call') {
-                this._emitFormattedCall(item.callMeta, item.innerLines, item.retMeta);
+        // 聚合当前语句的所有 kv，合并成一行输出
+        const writes = this._pendingKvs;
+        const reads  = this._pendingReads;
+        const fields = this._pendingFields;
+        this._pendingKvs    = [];
+        this._pendingReads  = [];
+        this._pendingFields = [];
+
+        // 结构化 JSON 输出
+        const kvObj = { w: {}, r: {}, f: [] };
+        const writtenNames = new Set();
+
+        // 写入变量
+        for (const w of writes) {
+            if (w.name) {
+                kvObj.w[w.name] = w.val;
+                writtenNames.add(w.name);
             }
         }
-    }
 
-    // ── 异步根帧管理 ──────────────────────────────────────────────────────────
-
-    /**
-     * 脚本退出后，首次接到异步回调时推入一个虚拟"异步根帧"。
-     * 该帧带有 _isAsyncRoot 标记，用于区分正常脚本帧。
-     * _asyncRootDepth 记录当前挂起的异步调用层数，以便在全部完成时自动弹出。
-     */
-    _pushAsyncRootFrame(iid) {
-        const { rc } = this._loc(iid);
-        const frame = new Frame(0);
-        frame._isAsyncRoot     = true;
-        frame._asyncPendingCalls = 0;
-        _push(this._stack, frame);
-        _push(this._callStack, { callMeta: null, _isAsyncRoot: true });
-        dbg.debug(`[async] pushed async root frame at ${rc}`);
-    }
-
-    /**
-     * 每次异步调用的 call/functionExit 返回后，检查异步根帧是否仍有挂起调用。
-     * 若已无挂起调用且栈只剩根帧，弹出根帧，不做 emit（根帧本身不产生输出行）。
-     */
-    _maybeFlushAsyncRootFrame() {
-        const top = this._top();
-        if (!top?._isAsyncRoot) return;
-        // 如果栈顶就是异步根帧（即其上方已无其他帧），弹出
-        if (this._stack.length === 1) {
-            _pop(this._stack);
-            _pop(this._callStack);
-            dbg.debug('[async] async root frame flushed');
+        // 读取变量（过滤已写入的）
+        for (const r of reads) {
+            if (!writtenNames.has(r.name)) {
+                kvObj.r[r.name] = r.val;
+            }
         }
+
+        // 属性访问
+        for (const f of fields) {
+            if (f.fieldInfo) kvObj.f.push(f.fieldInfo);
+        }
+
+        // 清理空字段
+        if ($keys(kvObj.w).length === 0) delete kvObj.w;
+        if ($keys(kvObj.r).length === 0) delete kvObj.r;
+        if (kvObj.f.length === 0) delete kvObj.f;
+
+        const line = fmt.infoLineJson(
+            ++this._seq, rc, 0, srcText,
+            $keys(kvObj).length > 0 ? this._serializeKvObj(kvObj) : '{}'
+        );
+        this._emitRaw(line);
     }
 
     // ── 执行结束 ──────────────────────────────────────────────────────────────
 
     endExecution() {
-        // 清理脚本主体执行时留下的残余帧（正常情况应已全部弹出）
-        while (this._stack.length > 0) {
-            const top = this._top();
-            if (top?._isAsyncRoot) {
-                // 异步根帧：脚本主体结束时可能仍有异步调用未回来，不强制弹出
-                break;
-            }
-            const frame = _pop(this._stack);
-            _pop(this._callStack);
-            this._emitItems(frame.doneLines);
-        }
-
         this._key('info', `=== ExecutionTrace: script done, ${this._seq} events so far (async callbacks may still fire) ===`);
 
         // ⚠️ 注意：此处故意 **不** 关闭 logger。
@@ -952,13 +564,6 @@ export class ExecutionTraceAnalysis {
      * @returns {Promise<void>}
      */
     async flush() {
-        // 将栈上所有异步根帧中已积累的 doneLines emit 出去
-        for (const frame of this._stack) {
-            if (frame._isAsyncRoot && frame.doneLines.length > 0) {
-                const items = _splice(frame.doneLines, 0, frame.doneLines.length);
-                this._emitItems(items);
-            }
-        }
         await this._loggerReady;
         await this._logger.flush?.();
     }
@@ -969,13 +574,6 @@ export class ExecutionTraceAnalysis {
      * @returns {Promise<void>}
      */
     async close() {
-        // 把还在栈上的所有帧的内容 emit 出去
-        while (this._stack.length > 0) {
-            const frame = _pop(this._stack);
-            _pop(this._callStack);
-            this._emitItems(frame.doneLines);
-        }
-
         this._key('info', `=== ExecutionTrace: closed, total ${this._seq} events ===`);
 
         try {

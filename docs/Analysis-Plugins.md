@@ -360,9 +360,11 @@ node bin/jalangi.mjs instrument-and-run \
 | **变量读取** | 方案 F：由插桩器将静态 use-set 注入 `Xe` 参数，运行时从 Shadow Frame 查询，零 `readVar` 插桩 |
 | **属性读写** | 方案 C：`getField`/`putField` 暂存到缓冲区，由 `endExpression` 统一合并输出 |
 | **日志后端** | 支持 IndexedDB（浏览器）、WebSocket、Node.js 文件、console 四种后端，通过 `TraceLogger` 统一管理 |
-| **输出格式** | 4 种格式可选：`FORMAT_FLAT`（默认平铺）、`FORMAT_TREE`（树形）、`FORMAT_BLOCK`（折叠块）、`FORMAT_PIPE`（管道符）|
+| **输出格式** | 固定为**平铺流式 JSON-kv 格式**（无缩进，每事件立即 emit）；树形/块状等展示格式由离线工具 `trace-render.mjs` 按需渲染 |
 
-### 输出格式（FORMAT_FLAT 默认）
+### 运行时输出（平铺流式）
+
+运行时固定输出最轻量的平铺格式，不维护调用栈、不缓冲行数据，每事件立即输出——这是最健壮的格式，不会因异步或异常而丢失数据。
 
 kv 部分的输出模式由 `src/utils/traceFormatters.js` 中的 `OUTPUT_JSON_KV` 常量控制：
 
@@ -390,7 +392,22 @@ kv 部分输出为逗号分隔的 `key=value` 文本，适合直接阅读：
 [     5] [      3:1] o += String.fromCharCode(c) ; o="A", c=65
 ```
 
-> 离线分析工具链（`tools/trace-parse.mjs` 等）自动兼容两种格式的混合输入。
+### 离线渲染（trace-render.mjs）
+
+树形、块状、管道符等展示格式由离线工具 `trace-render.mjs` 按需生成：
+
+```bash
+# 解析原始 trace
+cat trace.ndjson | node tools/trace-parse.mjs > parsed.ndjson
+
+# 渲染为树形视图（适合人眼阅读调用链）
+cat parsed.ndjson | node tools/trace-render.mjs --format tree
+
+# 渲染为 VS Code 可折叠的 block 格式
+cat parsed.ndjson | node tools/trace-render.mjs --format block > trace.log
+```
+
+> 离线分析工具链自动兼容两种 kv 格式的混合输入。
 > 详见 [Offline-Analysis-Tools.md](./Offline-Analysis-Tools.md)。
 
 ### 用法
