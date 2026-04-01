@@ -1,22 +1,27 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * @file serialize —— 将任意 JS 值序列化为人可读的单行字符串。
+ * @file serialize —— 将任意 JS 值序列化为人可读的单行字符串，或合法 JSON 字符串。
  *
  * 设计目标：
  *   - 无任何外部依赖，可在 Node.js 与浏览器中直接使用
  *   - 有界：字符串/容器超过阈值时截断，避免输出爆炸
- *   - 深度控制：对象/数组嵌套超过 MAX_DEPTH 层时折叠为 …
- *   - 安全：内部 getter 抛异常时降级为 Object.prototype.toString
+ *   - 深度控制：对象/数组嵌套超过 MAX_DEPTH 层时折叠
+ *   - 安全：内部 getter 抛异常时降级；循环引用用 WeakSet 显式检测
  *
  * 导出：
- *   serialize(value, depth?)  → string
+ *   serialize(value, depth?)    → 人可读字符串（供日志/控制台展示）
+ *   serializeJson(value)        → 合法 JSON 字符串（供 trace-parse 等工具解析）
  */
 
 export const MAX_BYTES       = 1000;
-export const MAX_DEPTH       = 2;      // 对象递归深度
-export const MAX_ARRAY_ITEMS = 200;    // Array 最多显示元素数
+export const MAX_DEPTH       = 2;      // 对象递归深度（serialize 模式）
+export const MAX_ARRAY_ITEMS = 200;    // Array 最多显示元素数（serialize 模式）
 export const MAX_MAP_ITEMS   = 100;    // Map/Set 最多显示条目数
+
+// JSON 模式专属限制
+export const JSON_MAX_DEPTH       = 3;
+export const JSON_MAX_ARRAY_ITEMS = 10;
 
 // ── 防御性：从 NativeProxy 导入原生方法快照 ───────────────────────────────────
 // 被分析代码可能对 Array.prototype.push / join / sort 及 Object.keys 等方法做 monkey-patch，
@@ -24,8 +29,28 @@ export const MAX_MAP_ITEMS   = 100;    // Map/Set 最多显示条目数
 // 所有内部操作均通过 NativeProxy 中预先捕获的原生引用进行。
 import {
     $push as _push, $join as _join, $sort as _sort, $keys as _keys,
+    $isArray as _isArray,
     $strSlice as _strSlice, $strReplace as _strReplace,
 } from '../runtime/NativeProxy.js';
+
+// ── 共享：plain object 判断 ───────────────────────────────────────────────────
+
+const _ObjProto = Object.prototype;
+
+/**
+ * 判断是否是 plain object（原型为 Object.prototype 或 null）。
+ * 包裹 try-catch，对任何宿主对象都安全。
+ */
+function _isPlainObj(v) {
+    try {
+        const proto = Object.getPrototypeOf(v);
+        return proto === _ObjProto || proto === null;
+    } catch (_e) {
+        return false;
+    }
+}
+
+// ── serialize（人可读模式）────────────────────────────────────────────────────
 
 /**
  * 将任意 JS 值序列化为人可读的单行字符串。
@@ -155,7 +180,7 @@ export function serialize(v, depth = 0) {
             }
             return `[${_join(items, ',')}]`;
         }
-        // Plain Object
+        // Plain Object（含宿主对象兜底）
         try {
             const keys = _keys(v);
             if (keys.length === 0) return '{}';
@@ -189,4 +214,114 @@ export function serialize(v, depth = 0) {
         }
     }
     return String(v);
+}
+
+// ── serializeJson（合法 JSON 模式）───────────────────────────────────────────
+
+/**
+ * 将任意 JS 值安全序列化为合法 JSON 字符串。
+ *
+ * 与 serialize() 的区别：
+ *   - 输出是合法 JSON（可直接 JSON.parse 还原）
+ *   - 不依赖 JSON.stringify 的属性自动枚举，避免宿主对象 getter 的 Illegal invocation
+ *   - 用 WeakSet 显式检测循环引用
+ *   - 非 plain object（DOM 元素、宿主对象等）降级为 serialize() 结果的 JSON 字符串字面量
+ *
+ * @param {*} v   要序列化的值
+ * @returns {string}  合法 JSON 字符串
+ */
+export function serializeJson(v) {
+    return _serializeJsonCore(v, new WeakSet(), 0);
+}
+
+/**
+ * serializeJson 内部递归实现。
+ * @param {*}        v     当前值
+ * @param {WeakSet}  seen  已访问对象集合（循环引用检测）
+ * @param {number}   depth 当前递归深度
+ * @returns {string}  JSON 片段字符串（不含外层包装，可直接拼接）
+ */
+function _serializeJsonCore(v, seen, depth) {
+    // ── 基础类型 ──────────────────────────────────────────────────────────────
+    if (v === null)      return 'null';
+    if (v === undefined) return 'null'; // JSON.stringify 省略 undefined 值，顶层统一降级为 null
+    const t = typeof v;
+    if (t === 'boolean')  return v ? 'true' : 'false';
+    if (t === 'number')   return isFinite(v) ? String(v) : '"' + String(v) + '"';
+    if (t === 'bigint')   return '"' + String(v) + 'n"';
+    if (t === 'symbol')   return '"' + v.toString() + '"';
+    if (t === 'function') return '"[Function ' + (v.name || 'anonymous') + ']"';
+    if (t === 'string') {
+        // 截断后用 JSON.stringify 处理转义（仅对字符串调用，安全）
+        const s = v.length > MAX_BYTES ? _strSlice(v, 0, MAX_BYTES) + '…' : v;
+        return JSON.stringify(s);
+    }
+
+    // ── object ────────────────────────────────────────────────────────────────
+    if (t === 'object') {
+        // 循环引用
+        if (seen.has(v)) return '"[Circular]"';
+
+        // 深度超限 → 委托 serialize() 折叠，再包成 JSON 字符串字面量
+        if (depth >= JSON_MAX_DEPTH) {
+            return _fallbackToSerialize(v);
+        }
+
+        // 数组（_isArray 不访问 getter，安全）
+        if (_isArray(v)) {
+            if (v.length > JSON_MAX_ARRAY_ITEMS) {
+                return '"[...' + v.length + ' items]"';
+            }
+            seen.add(v);
+            const parts = [];
+            for (let i = 0; i < v.length; i++) {
+                let item;
+                try { item = v[i]; } catch (_e) { item = undefined; }
+                _push(parts, _serializeJsonCore(item, seen, depth + 1));
+            }
+            seen.delete(v);
+            return '[' + _join(parts, ',') + ']';
+        }
+
+        // 只对 plain object 手动枚举属性（每次属性读取单独 try-catch）；
+        // 非 plain object（宿主对象、Date、RegExp、DOM 元素等）不枚举，
+        // 直接降级为 serialize() 字符串，避免任何 getter 副作用。
+        if (!_isPlainObj(v)) {
+            return _fallbackToSerialize(v);
+        }
+
+        // plain object：手动枚举，每次属性读取独立 try-catch
+        seen.add(v);
+        let keys;
+        try { keys = _keys(v); } catch (_e) { seen.delete(v); return '"[Object]"'; }
+
+        const parts = [];
+        for (let i = 0; i < keys.length; i++) {
+            const k = keys[i];
+            let val;
+            try { val = v[k]; } catch (_e) { val = '[getter error]'; }
+            // 与 JSON.stringify 行为一致：跳过值为 undefined 的属性（不输出该 key）
+            if (val === undefined) continue;
+            const ks = JSON.stringify(String(k));
+            _push(parts, ks + ':' + _serializeJsonCore(val, seen, depth + 1));
+        }
+        seen.delete(v);
+        return '{' + _join(parts, ',') + '}';
+    }
+
+    // fallback（理论上不会到达）
+    return JSON.stringify(String(v));
+}
+
+/**
+ * 将值委托给 serialize() 得到人可读字符串，
+ * 再用 JSON.stringify 包成合法 JSON 字符串字面量。
+ * 整个过程包裹 try-catch，不会抛出。
+ */
+function _fallbackToSerialize(v) {
+    try {
+        return JSON.stringify(serialize(v));
+    } catch (_e) {
+        return '"[Object]"';
+    }
 }

@@ -573,17 +573,37 @@ ${sandboxVar}.analysis.use(__jalangiAnalysis);`
 ${deferredSnippet}
 `;
 
+    // DYNAMIC_IMPORT_MAP: key 为 TraceLogger.js 里 await import() 实际使用的路径
+    // （rollup resolveDynamicImport 拿到的是 importer 视角的原始 specifier）
+    // ── 动态 import specifier → 目标模块 id（绝对路径或 stub）
     const DYNAMIC_IMPORT_MAP = {
-        './backends/IdbWorkerBackend.js':   SRC('logger', 'transport', 'IdbBackend.js'),
+        // TraceLogger.js 中的动态 import（路径相对于 TraceLogger.js）
+        './transport/IdbBackend.js':        SRC('logger', 'transport', 'IdbBackend.js'),
+        './transport/WsBackend.js':         opts.wsUrl ? SRC('logger', 'transport', 'WsBackend.js') : '\0stub:WsBackend',
+        './transport/NodeStreamBackend.js': '\0stub:NodeStreamBackend',
+        './transport/MemoryBackend.js':     '\0stub:MemoryBackend',
         './LogManager.js':                  SRC('logger', 'LogManager.js'),
+        // 旧路径别名（防止其他模块遗留的旧 specifier）
+        './backends/IdbWorkerBackend.js':   SRC('logger', 'transport', 'IdbBackend.js'),
         '../plugins/ExecutionTrace.js':     '\0stub:ExecutionTrace',
-        // WsBackend 已统一支持 main / worker / sab 三种模式，旧名称作为别名保留
         './backends/WsSabBackend.js':       opts.wsUrl ? SRC('logger', 'transport', 'WsBackend.js') : '\0stub:WsSabBackend',
         './backends/WsWorkerBackend.js':    opts.wsUrl ? SRC('logger', 'transport', 'WsBackend.js') : '\0stub:WsWorkerBackend',
         './backends/WsBackend.js':          opts.wsUrl ? SRC('logger', 'transport', 'WsBackend.js') : '\0stub:WsBackend',
         './backends/NodeStreamBackend.js':  '\0stub:NodeStreamBackend',
         './backends/MemoryBackend.js':      '\0stub:MemoryBackend',
     };
+
+    // Node.js 内置模块列表：在浏览器 bundle 中 stub 为空模块，
+    // 防止 rollup 将其提升为 IIFE 外部参数（导致 node_fs is not defined 等错误）
+    const NODE_BUILTINS = new Set([
+        'fs', 'path', 'os', 'url', 'module', 'crypto', 'stream', 'events',
+        'util', 'assert', 'http', 'https', 'net', 'tls', 'zlib', 'child_process',
+        'worker_threads', 'perf_hooks', 'process', 'buffer',
+    ]);
+    const isNodeBuiltin = (id) =>
+        NODE_BUILTINS.has(id) ||
+        id.startsWith('node:') ||
+        (id.startsWith('node_') && NODE_BUILTINS.has(id.slice(5)));
 
     const rollupWarnings = [];
     const plugins = [
@@ -627,13 +647,28 @@ ${deferredSnippet}
         },
         {
             name: 'jalangi-resolve-dynamic-imports',
+            // 拦截静态 import 中的 Node.js 内置模块，stub 为空模块，
+            // 避免 rollup 将其列为 IIFE 外部参数
+            resolveId(id) {
+                if (isNodeBuiltin(id)) {
+                    log.debug(`stub Node builtin (static): "${id}"`);
+                    return '\0stub:node-builtin:' + id;
+                }
+            },
             resolveDynamicImport(specifier) {
                 if (typeof specifier !== 'string') return null;
+                if (isNodeBuiltin(specifier)) {
+                    log.debug(`stub Node builtin (dynamic): "${specifier}"`);
+                    return '\0stub:node-builtin:' + specifier;
+                }
                 const mapped = DYNAMIC_IMPORT_MAP[specifier];
                 if (mapped) log.debug(`resolve-dynamic-import: "${specifier}" → "${mapped}"`);
                 return mapped ?? null;
             },
             load(id) {
+                if (id.startsWith('\0stub:node-builtin:')) {
+                    return '// Node.js built-in stub (browser bundle)\nexport default {};\n';
+                }
                 const stubs = {
                     '\0stub:WsSabBackend':      'export class WsSabBackend { static isSupported() { return false; } }', // stub（未配置 wsUrl 时）
                     '\0stub:WsWorkerBackend':   'export class WsWorkerBackend {}', // stub（未配置 wsUrl 时）

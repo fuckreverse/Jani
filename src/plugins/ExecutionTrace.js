@@ -50,7 +50,7 @@
 
 import { TraceLogger } from '../logger/TraceLogger.js';
 import { createDiagLogger, DOMAIN } from '../logger/diagnostics.js';
-import { serialize } from '../utils/serialize.js';
+import { serialize, serializeJson } from '../utils/serialize.js';
 import {
     fmtSeq,
     FlatFormatter,
@@ -143,6 +143,7 @@ function _shortBase(base) {
     if (typeof base === 'object') return '{…}';
     return serialize(base);
 }
+
 
 // ── 分析类 ───────────────────────────────────────────────────────────────────
 
@@ -243,18 +244,9 @@ export class ExecutionTraceAnalysis {
         return { loc, rc };
     }
 
-    /** 将 kv 对象序列化为 JSON 字符串 */
+    /** 将 kv 对象序列化为合法 JSON 字符串（委托 serializeJson，安全处理宿主对象） */
     _serializeKvObj(kvObj) {
-        return JSON.stringify(kvObj, (key, val) => {
-            // 对大数组/对象做截断处理，避免 JSON 过长
-            if ($isArray(val) && val.length > 10) {
-                return `[...${val.length} items]`;
-            }
-            if (typeof val === 'function') {
-                return `[Function${val.name ? ' ' + val.name : ''}]`;
-            }
-            return val;
-        });
+        return serializeJson(kvObj);
     }
 
     // ── 函数调用边界 ──────────────────────────────────────────────────────────
