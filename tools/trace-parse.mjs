@@ -92,17 +92,25 @@ function parseLine(line) {
  * 解析 trace 内容部分
  */
 function parseContent(seq, line, col, content) {
-    // CALL .method(N args) ; kv
-    // CALL funcName(N args) ; kv
+    // CALL .method(N args) ; kv          ← 旧格式（分号分隔）
+    // CALL funcName(N args) {"a":[...]}  ← 新格式（直接 JSON）
     // CALL new ClassName(N args) ; kv
     // CALL (anonymous)(N args) ; kv
     // 注意：CALL 可能出现在文本开头（原始 FlatFormatter 格式）
     const callMatch = content.match(
-        /^CALL\s+(?:(new)\s+)?(?:\.)?([^\s(]+|\(anonymous\))\((\d+)\s*args\)\s*(?:;\s*(.*))?$/
+        /^CALL\s+(?:(new)\s+)?(?:\.)?([^\s(]+|\(anonymous\))\((\d+)\s*args\)\s*(.*)?$/
     );
     if (callMatch) {
-        const [, isNew, fn, argsStr, kvStr] = callMatch;
-        const kv = parseKv(kvStr);
+        const [, isNew, fn, argsStr, tail] = callMatch;
+        const tailTrimmed = (tail ?? '').trim();
+        let kv = {};
+        // 新格式：tail 直接是 JSON 对象
+        if (tailTrimmed.startsWith('{')) {
+            try { kv = JSON.parse(tailTrimmed); } catch { kv = {}; }
+        } else if (tailTrimmed.startsWith(';')) {
+            // 旧格式：; key=val, key=val
+            kv = parseKv(tailTrimmed.slice(1).trim());
+        }
         return {
             seq,
             line,

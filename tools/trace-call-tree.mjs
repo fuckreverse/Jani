@@ -69,30 +69,39 @@ class CallTreeBuilder {
         }
     }
 
-    computeStats(node = this.root, depth = 0) {
-        node.stats.calls = node.children.length;
-        node.stats.totalDepth = depth;
-
-        for (const child of node.children) {
-            this.computeStats(child, depth + 1);
+    computeStats() {
+        // 迭代版（避免深递归爆栈）
+        const stack = [{ node: this.root, depth: 0 }];
+        while (stack.length > 0) {
+            const { node, depth } = stack.pop();
+            node.stats.calls = node.children.length;
+            node.stats.totalDepth = depth;
+            for (const child of node.children) {
+                stack.push({ node: child, depth: depth + 1 });
+            }
         }
     }
 
     formatTree(node = this.root, depth = 0, maxDepth = Infinity) {
-        if (depth > maxDepth) return [];
-
+        // 迭代版（避免深递归爆栈）
         const lines = [];
-        const indent = '  '.repeat(depth);
+        // 栈帧：{ node, depth }；使用逆序入栈保证子节点按原顺序输出
+        const stack = [{ node, depth }];
+        while (stack.length > 0) {
+            const { node: cur, depth: d } = stack.pop();
+            if (d > maxDepth) continue;
 
-        if (node !== this.root) {
-            const retSeq = node.returnSeq ? `→${node.returnSeq}` : '';
-            lines.push(`${indent}${node.fn}() [L${node.line}] [${node.callSeq}${retSeq}]`);
+            if (cur !== this.root) {
+                const indent  = '  '.repeat(d - 1);
+                const retSeq  = cur.returnSeq ? `→${cur.returnSeq}` : '';
+                lines.push(`${indent}${cur.fn}() [L${cur.line}] [${cur.callSeq}${retSeq}]`);
+            }
+
+            // 逆序压栈，保证先进先出顺序
+            for (let i = cur.children.length - 1; i >= 0; i--) {
+                stack.push({ node: cur.children[i], depth: d + 1 });
+            }
         }
-
-        for (const child of node.children) {
-            lines.push(...this.formatTree(child, depth + 1, maxDepth));
-        }
-
         return lines;
     }
 
