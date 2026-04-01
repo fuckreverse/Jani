@@ -19,6 +19,7 @@ src/runtime/      运行时钩子框架（JalangiSandbox / HookDispatcher / SMem
 src/logger/       日志系统（RingBuffer / LogManager / 多后端）→ 详见 docs/Logger-System.md
 src/preprocess/   预处理（反混淆 / 语法降级）→ 详见 docs/Preprocessing.md
 src/plugins/      示例分析插件（ExecutionTrace / dlint / tutorial / coverage 等）→ 详见 docs/Analysis-Plugins.md
+tools/            离线 Trace 后处理工具链（trace-parse / render / filter / call-tree 等）→ 详见 docs/Offline-Analysis-Tools.md
 test/             测试套件（unit / integration）→ 详见 docs/Testing-System.md
 docs/             全量文档索引，见下方「文档索引」
 ```

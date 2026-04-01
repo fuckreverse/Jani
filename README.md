@@ -66,6 +66,13 @@ bin/              命令行入口
 
 tools/
   trace-server/   浏览器端 Trace 收集服务器（WebSocket）
+  trace-parse.mjs       原始 trace → 结构化 NDJSON（多线程并行，默认启用）
+  trace-render.mjs      结构化 NDJSON → flat / tree / block / pipe 展示格式
+  trace-filter.mjs      按类型 / seq / 行号 / 函数名 / 变量过滤
+  trace-hot-lines.mjs   代码行执行热点统计（Top-N）
+  trace-call-tree.mjs   函数调用树重建（支持深度限制与汇总统计）
+  trace-var-timeline.mjs 变量值时序追踪
+  trace-range-extract.mjs 按 seq 区间快速提取片段（含 context 窗口）
 
 test/
   unit/           单元测试（插桩器 / 日志 / 序列化）
@@ -254,6 +261,34 @@ npm run trace-server
 # 每次 WebSocket 连接写入 traces/ 目录下独立文件
 ```
 
+#### 离线 Trace 后处理（`tools/` 工具链）
+
+`ExecutionTrace` 插件产生的原始 trace 文件可通过 `tools/` 下的工具链进行离线分析，遵循 Unix 管道哲学（一工具一事，可任意串联）：
+
+```bash
+# 步骤 1：将原始 trace 解析为结构化 NDJSON（默认多线程加速）
+node tools/trace-parse.mjs traces/trace_xxx.ndjson > parsed.ndjson
+
+# 步骤 2：以树形视图查看函数调用链
+cat parsed.ndjson | node tools/trace-render.mjs --format tree
+
+# 步骤 3：找出执行最频繁的代码行（热点分析）
+cat parsed.ndjson | node tools/trace-hot-lines.mjs --top 20
+
+# 步骤 4：重建函数调用树（汇总统计）
+cat parsed.ndjson | node tools/trace-call-tree.mjs --summary
+
+# 步骤 5：追踪变量值变化轨迹
+cat parsed.ndjson | node tools/trace-var-timeline.mjs --var key,result
+
+# 管道组合示例：只看 decode 相关调用的完整路径
+cat parsed.ndjson \
+  | node tools/trace-filter.mjs --type call --fn "*decode*" \
+  | node tools/trace-call-tree.mjs --summary
+```
+
+完整工具文档见 [`docs/Offline-Analysis-Tools.md`](docs/Offline-Analysis-Tools.md)。
+
 ---
 
 ### 编程 API
@@ -404,6 +439,7 @@ npm run test:logging
 | [`docs/Analysis-Plugins.md`](docs/Analysis-Plugins.md) | 示例插件详解 |
 | [`docs/Scope-Aware-Instrumentation.md`](docs/Scope-Aware-Instrumentation.md) | 作用域感知插桩技术设计 |
 | [`docs/Testing-System.md`](docs/Testing-System.md) | 测试体系结构与方法 |
+| [`docs/Offline-Analysis-Tools.md`](docs/Offline-Analysis-Tools.md) | `tools/` 离线 Trace 分析工具链（trace-parse / render / filter / call-tree 等）|
 
 ---
 

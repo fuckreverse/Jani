@@ -93,6 +93,16 @@ cat trace.ndjson \
 
 其中 `w`（writes）、`r`（reads）、`f`（fields）是结构化的 JSON 对象，`kv` 是传统键值对（两种格式兼容）。
 
+### 选项
+
+| 选项 | 说明 |
+|------|------|
+| `--strict` | 遇到无法解析的行时报错退出（默认跳过并计入统计）|
+| `--compact` | 紧凑输出（默认即紧凑，保留此选项向后兼容）|
+| `--pretty` | 格式化输出（带缩进，调试用）|
+| `--workers N` | 并行 Worker 线程数；默认自动取 CPU 核心数；`0` 禁用多线程 |
+| `--help` | 显示帮助信息 |
+
 ### 用法
 
 ```bash
@@ -102,15 +112,32 @@ cat trace.ndjson | node tools/trace-parse.mjs > parsed.ndjson
 # 直接读文件
 node tools/trace-parse.mjs trace.ndjson > parsed.ndjson
 
-# 原始解析结果（包含更多细节）
-node tools/trace-parse.mjs --raw trace.ndjson
-
-# 紧凑输出（单行 JSON，适合大文件）
+# 紧凑输出（单行 JSON，适合大文件，默认即紧凑）
 node tools/trace-parse.mjs --compact trace.ndjson > parsed.ndjson
 
 # 严格模式（遇到无法解析的行报错退出）
 node tools/trace-parse.mjs --strict trace.ndjson
+
+# 多线程加速（默认自动使用所有 CPU 核心）
+node tools/trace-parse.mjs trace.ndjson > parsed.ndjson
+
+# 指定 Worker 数（如 4 核）
+node tools/trace-parse.mjs --workers 4 trace.ndjson > parsed.ndjson
+
+# 禁用多线程（单线程模式，调试用）
+node tools/trace-parse.mjs --workers 0 trace.ndjson > parsed.ndjson
 ```
+
+### 性能说明
+
+`trace-parse.mjs` 默认启用多线程模式（Worker Threads），处理大文件时自动并行利用全部 CPU 核心：
+
+- **主线程**：流式读取文件、切割行批次、按序收集结果并写出，保证输出顺序与输入一致
+- **Worker 线程**：每批 8192 行并行解析和序列化
+- 热路径全部使用手动字符串扫描（`charCodeAt` / `indexOf`），无正则开销
+- 实测 346 MB 文件，单线程约 8.9s，多线程（10 核）约 4.4s（wall time）
+
+对于超大文件（> 500 MB），推荐使用默认多线程模式，或通过 `--workers N` 微调并发度。
 
 ---
 
