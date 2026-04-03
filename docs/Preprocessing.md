@@ -1,4 +1,4 @@
-# 预处理模块（src/preprocess/）
+# DOC-04 · 预处理模块（src/preprocess/）
 
 预处理模块在插桩前对 JavaScript 源代码进行 AST 级变换，目标是在**不改变逻辑语义**的前提下：
 

@@ -1,4 +1,4 @@
-# 作用域感知插桩——技术设计文档
+# DOC-09 · 作用域感知插桩——技术设计文档
 
 > **目标**：构建一套工业级 JS 动态逆向分析工具，核心能力包括：
 > 1. **作用域感知的精简插桩**——用"左值状态机"替代无差别右值 log，消除代码体积膨胀
@@ -887,10 +887,11 @@ const visitorAntiDetection = {
 | `SMemory` 向后兼容代码改用 `globalThis.J$` | `SMemory.js` | ✅ |
 | `DataFlowAnalyzer.processPutField()` key 解析修复 | `DataFlowAnalyzer.js` | ✅ |
 
-#### 6.1.3 单测覆盖（`test/instrument.test.mjs`）
+#### 6.1.3 单测覆盖
 
-- 当前共 **265 个测试用例**，**全部通过**（`npm test`）
+- 当前整个测试套件共约 **~507 个测试用例**，**全部通过**（`npm test`）
 - 覆盖：ES5～ES2022 插桩语法、`arguments` 重命名、闭包 Shadow Frame（7 个场景）、异步 ContextID、采样模式、source map、按需 Config 等
+- 详见 [DOC-12 · Testing-System.md](./Testing-System.md)
 
 ---
 

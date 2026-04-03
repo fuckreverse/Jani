@@ -5,17 +5,22 @@ Jani 是一个面向 JavaScript 的**动态分析框架**，通过 AST 插桩在
 
 ## 文档目录
 
-| 文档 | 内容简介 |
-|------|---------|
-| [Overview.md](./Overview.md) | 项目概况、系统架构、快速上手 |
-| [Instrumentation-Engine.md](./Instrumentation-Engine.md) | 插桩器核心原理与 API 参考 |
-| [Preprocessing.md](./Preprocessing.md) | 预处理模块（反混淆 + 语法降级）|
-| [Runtime-System.md](./Runtime-System.md) | 运行时沙盒、J$ 对象与钩子函数 |
-| [Analysis-Development.md](./Analysis-Development.md) | 编写自定义分析插件的完整指南 |
-| [Configuration.md](./Configuration.md) | Config 配置字段参考 |
-| [Analysis-Plugins.md](./Analysis-Plugins.md) | 分析插件介绍（tutorial / dlint / coverage / dsjs 等）|
-| [Scope-Aware-Instrumentation.md](./Scope-Aware-Instrumentation.md) | 作用域感知插桩技术设计文档 |
-| [Offline-Analysis-Tools.md](./Offline-Analysis-Tools.md) | `tools/` 离线分析工具集（trace-parse / filter / hot-lines / call-tree 等）|
+| 编号 | 文档 | 内容简介 |
+|------|------|---------|
+| DOC-01 | [Overview.md](./Overview.md) | 项目概况、系统架构、快速上手 |
+| DOC-02 | [Instrumentation-Engine.md](./Instrumentation-Engine.md) | 插桩器核心原理与 API 参考 |
+| DOC-03 | [Configuration.md](./Configuration.md) | Config 配置字段参考 |
+| DOC-04 | [Preprocessing.md](./Preprocessing.md) | 预处理模块（反混淆 + 语法降级）|
+| DOC-05 | [Runtime-System.md](./Runtime-System.md) | 运行时沙盒、J$ 对象与钩子函数 |
+| DOC-06 | [Logger-System.md](./Logger-System.md) | 统一日志系统（RingBuffer / LogManager / 多后端）|
+| DOC-07 | [Analysis-Development.md](./Analysis-Development.md) | 编写自定义分析插件的完整指南 |
+| DOC-08 | [Analysis-Plugins.md](./Analysis-Plugins.md) | 分析插件介绍（tutorial / dlint / coverage / dsjs 等）|
+| DOC-09 | [Scope-Aware-Instrumentation.md](./Scope-Aware-Instrumentation.md) | 作用域感知插桩技术设计文档 |
+| DOC-10 | [CLI-Reference.md](./CLI-Reference.md) | 命令行工具完整参考（jalangi / preprocess / 后处理工具链）|
+| DOC-11 | [Offline-Analysis-Tools.md](./Offline-Analysis-Tools.md) | `tools/` 离线分析工具集（trace-decode / render / filter / call-tree 等）|
+| DOC-12 | [Testing-System.md](./Testing-System.md) | 测试体系结构（~507 个测试用例）与覆盖薄弱点 |
+| DOC-13 | [Dynamic-Analysis-Design-Philosophy.md](./Dynamic-Analysis-Design-Philosophy.md) | 动态分析框架设计哲学与核心概念 |
+| DOC-14 | [Code-Issues.md](./Code-Issues.md) | 已知代码问题与待修复 Bug 记录 |
 
 ## 快速开始
 
@@ -29,8 +34,9 @@ npm install
 
 ```bash
 npm test
-# 或
-node test/instrument.test.mjs
+# 分组运行
+npm run test:unit
+npm run test:integration
 ```
 
 ### 以编程方式插桩
@@ -84,7 +90,7 @@ src/
     astUtil.js         ← AST 遍历与上下文枚举（CONTEXT）
     scope.js           ← 词法作用域分析（Scope 类，ScopeID）
     iid.js             ← IID 计数器与源码位置映射
-    wrappers.js        ← AST 节点包装函数库（模板缓存优化）
+    wrappers.js        ← AST 节点包装函数库（@babel/types 直接构建 AST）
     dataflow.js        ← 静态 SSA def-use 分析（Pass 0，决策表）
     pluginAnalyzer.js  ← 插件静态分析器（按需 Config 推导）
     instrument.d.ts    ← 插桩器公开 API 类型声明
@@ -118,14 +124,40 @@ src/
     workers/
       idb-worker.js    ← IndexedDB Worker（Blob URL 内联）
   plugins/             ← 示例分析插件
+    ExecutionTrace.js  ← 语句级执行跟踪（逆向分析专用）
+    tutorial/          ← 入门示例
+    dlint/             ← 运行时代码质量检测
+    coverage/          ← 覆盖率驱动测试框架
+    dsjs/              ← 动态类型统计
+    pldi16/            ← PLDI 2016 论文配套示例
+    frames/            ← 帧栈基础设施
   Constants.js         ← 全局常量
 test/
   unit/
-    instrument.test.mjs  ← 插桩器端到端集成测试（312 个用例）
-    preprocess.test.mjs  ← 预处理模块单元测试（78 个用例）
+    instrument.test.mjs    ← 插桩器静态输出单元测试（~115 个用例）
+    preprocess.test.mjs    ← 预处理模块单元测试（~79 个用例）
+    logging.test.mjs       ← 日志系统单元测试（~39 个用例）
+    native-proxy.test.mjs  ← NativeProxy 原生方法快照单元测试（~57 个用例）
+    serialize.test.mjs     ← serialize() 工具函数单元测试（~45 个用例）
   integration/           ← 运行时集成测试
-docs/                  ← 项目文档
+    e2e.test.mjs                ← 端到端语义测试（~70 个用例）
+    hooks.test.mjs              ← 钩子参数验证（~40 个用例）
+    runtime.test.mjs            ← 运行时框架层测试（~70 个用例）
+    logging.test.mjs            ← 日志系统 IO 集成测试（~8 个用例）
+    execution-trace.test.mjs    ← ExecutionTrace 插件完整测试（~40 个用例）
+    dlint.test.mjs              ← dlint 规则端到端测试（~33 个用例）
+    full-pipeline.test.mjs      ← 全流程端到端测试（~51 个用例）
+docs/                  ← 项目文档（本目录）
 bin/
   jalangi.mjs          ← 插桩/运行 CLI 统一入口
   preprocess.mjs       ← 预处理 CLI 工具
+tools/                 ← 离线 trace 后处理工具链
+  trace-server/        ← 浏览器端 WebSocket Trace 收集服务器
+  trace-decode.mjs     ← JTB1 二进制 trace 解码
+  trace-render.mjs     ← NDJSON 渲染为 flat/tree/block/pipe 格式
+  trace-filter.mjs     ← 按类型、seq、函数名等条件过滤
+  trace-hot-lines.mjs  ← 热点行统计
+  trace-call-tree.mjs  ← 函数调用树重建
+  trace-var-timeline.mjs   ← 变量值时序追踪
+  trace-range-extract.mjs  ← seq 区间快速提取
 ```

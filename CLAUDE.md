@@ -97,18 +97,21 @@ npm run test:unit / test:integration / test:logging  # 分组
 
 ## 文档索引
 
-| 文档 | 对应范围 |
-|------|---------|
-| [`docs/Overview.md`](docs/Overview.md) | 整体架构、钩子一览、使用方式 |
-| [`docs/Instrumentation-Engine.md`](docs/Instrumentation-Engine.md) | `src/instrument/` 全部模块、`init()` / `instrumentCode()` API |
-| [`docs/Configuration.md`](docs/Configuration.md) | Config 对象所有字段 |
-| [`docs/Preprocessing.md`](docs/Preprocessing.md) | `src/preprocess/` 反混淆 + 语法降级 |
-| [`docs/Runtime-System.md`](docs/Runtime-System.md) | `src/runtime/` 运行时框架 |
-| [`docs/Logger-System.md`](docs/Logger-System.md) | `src/logger/` 日志系统 + Trace Server |
-| [`docs/Analysis-Development.md`](docs/Analysis-Development.md) | 分析插件接口（`AnalysisTemplate`）|
-| [`docs/Analysis-Plugins.md`](docs/Analysis-Plugins.md) | `src/plugins/` 示例插件 |
-| [`docs/Scope-Aware-Instrumentation.md`](docs/Scope-Aware-Instrumentation.md) | 作用域感知插桩技术设计 |
-| [`docs/Testing-System.md`](docs/Testing-System.md) | `test/` 测试体系结构、方法、TODO |
-| [`docs/Offline-Analysis-Tools.md`](docs/Offline-Analysis-Tools.md) | `tools/` 离线分析工具集（trace-decode / render / filter / hot-lines / call-tree 等）|
+| 编号 | 文档 | 对应范围 |
+|------|------|---------|
+| DOC-01 | [`docs/Overview.md`](docs/Overview.md) | 整体架构、钩子一览、使用方式 |
+| DOC-02 | [`docs/Instrumentation-Engine.md`](docs/Instrumentation-Engine.md) | `src/instrument/` 全部模块、`init()` / `instrumentCode()` API |
+| DOC-03 | [`docs/Configuration.md`](docs/Configuration.md) | Config 对象所有字段 |
+| DOC-04 | [`docs/Preprocessing.md`](docs/Preprocessing.md) | `src/preprocess/` 反混淆 + 语法降级 |
+| DOC-05 | [`docs/Runtime-System.md`](docs/Runtime-System.md) | `src/runtime/` 运行时框架 |
+| DOC-06 | [`docs/Logger-System.md`](docs/Logger-System.md) | `src/logger/` 日志系统 + Trace Server |
+| DOC-07 | [`docs/Analysis-Development.md`](docs/Analysis-Development.md) | 分析插件接口（`AnalysisTemplate`）|
+| DOC-08 | [`docs/Analysis-Plugins.md`](docs/Analysis-Plugins.md) | `src/plugins/` 示例插件 |
+| DOC-09 | [`docs/Scope-Aware-Instrumentation.md`](docs/Scope-Aware-Instrumentation.md) | 作用域感知插桩技术设计 |
+| DOC-10 | [`docs/CLI-Reference.md`](docs/CLI-Reference.md) | CLI 工具完整参考（jalangi / preprocess / 后处理工具链）|
+| DOC-11 | [`docs/Offline-Analysis-Tools.md`](docs/Offline-Analysis-Tools.md) | `tools/` 离线分析工具集（trace-decode / render / filter / hot-lines / call-tree 等）|
+| DOC-12 | [`docs/Testing-System.md`](docs/Testing-System.md) | `test/` 测试体系结构、方法、TODO |
+| DOC-13 | [`docs/Dynamic-Analysis-Design-Philosophy.md`](docs/Dynamic-Analysis-Design-Philosophy.md) | 动态分析框架设计哲学与核心概念 |
+| DOC-14 | [`docs/Code-Issues.md`](docs/Code-Issues.md) | 已知代码问题与待修复 Bug 记录 |
 
 **文档同步原则**：代码变更时同步更新对应文档；只更新受影响的文档，不整体重写；以代码为准。

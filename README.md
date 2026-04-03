@@ -25,7 +25,7 @@ Jani 核心插桩逻辑参考了 Samsung/jalangi2 的设计思想，但进行了
 
 ## 架构概览
 
-整体流程分为三个阶段：**预处理 → 插桩 → 运行时分析**。
+整体流程分为四个阶段：**预处理 → 插桩 → 运行时分析 → 后处理**。
 
 ```
 JavaScript 源代码
@@ -44,7 +44,18 @@ JavaScript 源代码
       │
       ▼ 执行插桩后代码
   运行时沙盒 (src/runtime/)
-  └── J$ = JalangiSandbox → HookDispatcher → 分析插件
+  ├── J$ = JalangiSandbox → HookDispatcher → 分析插件
+  └── ExecutionTrace 插件 → 原始 trace 文件（traces/）
+      │
+      ▼ 离线分析（可选）
+  后处理工具链 (tools/)
+  ├── trace-parse.mjs    原始 trace → 结构化 NDJSON（多线程）
+  ├── trace-render.mjs   NDJSON → flat / tree / block / pipe 展示
+  ├── trace-filter.mjs   按类型 / seq / 行号 / 函数名 / 变量过滤
+  ├── trace-hot-lines.mjs  代码行执行热点统计（Top-N）
+  ├── trace-call-tree.mjs  函数调用树重建（含汇总统计）
+  ├── trace-var-timeline.mjs  变量值时序追踪
+  └── trace-range-extract.mjs 按 seq 区间快速提取片段
 ```
 
 ---

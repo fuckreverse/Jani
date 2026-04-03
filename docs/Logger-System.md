@@ -1,4 +1,4 @@
-# Logger 日志系统
+# DOC-06 · Logger 日志系统
 
 > 源码路径：`src/logger/`、`src/encoding/`
 

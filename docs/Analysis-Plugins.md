@@ -1,4 +1,4 @@
-# 示例分析插件
+# DOC-08 · 示例分析插件
 
 `src/plugins/` 目录下提供了多个示例分析插件，涵盖不同的动态分析场景，
 既可直接使用，也是编写自定义分析的参考范本。
@@ -397,18 +397,24 @@ kv 部分输出为逗号分隔的 `key=value` 文本，适合直接阅读：
 树形、块状、管道符等展示格式由离线工具 `trace-render.mjs` 按需生成：
 
 ```bash
-# 解析原始 trace
-cat trace.ndjson | node tools/trace-parse.mjs > parsed.ndjson
+# 解码 JTB1 二进制 trace（推荐，直接使用 trace-decode）
+node tools/trace-decode.mjs trace.bin --smap trace.smap.json > parsed.ndjson
 
 # 渲染为树形视图（适合人眼阅读调用链）
 cat parsed.ndjson | node tools/trace-render.mjs --format tree
 
 # 渲染为 VS Code 可折叠的 block 格式
 cat parsed.ndjson | node tools/trace-render.mjs --format block > trace.log
+
+# 一步完成：decode → render（管道组合）
+node tools/trace-decode.mjs trace.bin --smap trace.smap.json \
+  | node tools/trace-render.mjs --format tree
 ```
 
+> **注意**：对于 `.bin` 文件，请直接使用 `trace-decode.mjs`；`trace-parse.mjs` 是兼容层，
+> 主要用于兼容旧文本格式的 trace。
 > 离线分析工具链自动兼容两种 kv 格式的混合输入。
-> 详见 [Offline-Analysis-Tools.md](./Offline-Analysis-Tools.md)。
+> 详见 [DOC-11 · Offline-Analysis-Tools.md](./Offline-Analysis-Tools.md)。
 
 ### 用法
 
