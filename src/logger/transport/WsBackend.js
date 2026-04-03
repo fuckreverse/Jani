@@ -33,15 +33,12 @@
  *   `new URL('./ws.worker.js', import.meta.url)` 替换为预先创建好的 Blob URL。
  *
  * 服务端协议（见 tools/trace-server/server.mjs）：
- *   客户端 → 服务端：
- *     二进制帧：[u32 batchId][u32 count][u32 size0][event0][u32 size1][event1]...
- *     或文本帧：JSON { batchId, events: [...] }
- *   服务端 → 客户端：
- *     二进制帧：[u32 batchId]  （4 字节 ack）
- *     或文本帧：JSON { type: 'ack', batchId }
+ *   协议（二进制）：
+ *     客户端 → 服务端：[u32 batchId LE][JTB1 事件流（无文件头，直接事件序列）]
+ *     服务端 → 客户端：[u32 batchId LE]  （4 字节 ack）
  */
 
-import { serializeBatchToBinary, serializeBatchToNDJSON } from '../../encoding/EventSerializer.js';
+import { serializeBatch } from '../../encoding/EventSerializer.js';
 import { createDiagLogger, isDebugEnabled, DOMAIN } from '../diagnostics.js';
 
 const log = createDiagLogger(DOMAIN.BACKEND_WS);
@@ -53,7 +50,7 @@ export class WsBackend {
      * @param {object} [options]
      * @param {'main'|'worker'|'sab'} [options.mode='worker']  运行模式
      * @param {string}  [options.url='ws://127.0.0.1:9229/trace']  服务端地址
-     * @param {'binary'|'ndjson'} [options.format='binary']    消息格式
+     * @param {'binary'} [options.format='binary']    消息格式（仅支持 binary/JTB1）
      *
      * === 'main' 模式专属选项 ===
      * @param {number}  [options.windowSize=4]     未确认批次数上限（背压窗口）
@@ -359,16 +356,13 @@ class _MainTransport {
     }
 
     _serialize(batchId, batch) {
-        if (this._format === 'binary') {
-            const batchBuf = serializeBatchToBinary(batch);
-            const out      = new ArrayBuffer(4 + batchBuf.byteLength);
-            const view     = new DataView(out);
-            view.setUint32(0, batchId, true);
-            new Uint8Array(out, 4).set(new Uint8Array(batchBuf));
-            return out;
-        } else {
-            return JSON.stringify({ batchId, events: batch.map(_safeEventForJSON) }) + '\n';
-        }
+        // 只支持二进制格式（JTB1）
+        const batchBuf = serializeBatch(batch);
+        const out      = new ArrayBuffer(4 + batchBuf.byteLength);
+        const view     = new DataView(out);
+        view.setUint32(0, batchId, true);
+        new Uint8Array(out, 4).set(new Uint8Array(batchBuf));
+        return out;
     }
 
     _sendRaw(data) {
@@ -564,16 +558,13 @@ class _WorkerTransport {
     }
 
     _serialize(batchId, batch) {
-        if (this._format === 'binary') {
-            const batchBuf = serializeBatchToBinary(batch);
-            const out      = new ArrayBuffer(4 + batchBuf.byteLength);
-            const view     = new DataView(out);
-            view.setUint32(0, batchId, true);
-            new Uint8Array(out, 4).set(new Uint8Array(batchBuf));
-            return out;
-        } else {
-            return JSON.stringify({ batchId, events: batch }) + '\n';
-        }
+        // 只支持二进制格式（JTB1）
+        const batchBuf = serializeBatch(batch);
+        const out      = new ArrayBuffer(4 + batchBuf.byteLength);
+        const view     = new DataView(out);
+        view.setUint32(0, batchId, true);
+        new Uint8Array(out, 4).set(new Uint8Array(batchBuf));
+        return out;
     }
 
     _handleMessage(msg) {
@@ -807,17 +798,13 @@ class _SabTransport {
     }
 
     _serialize(batch) {
+        // 只支持二进制格式（JTB1）
         const batchId = ++this._batchIdCounter;
-        if (this._format === 'binary') {
-            const batchBuf = serializeBatchToBinary(batch);
-            const out  = new ArrayBuffer(4 + batchBuf.byteLength);
-            new DataView(out).setUint32(0, batchId >>> 0, true);
-            new Uint8Array(out, 4).set(new Uint8Array(batchBuf));
-            return new Uint8Array(out);
-        } else {
-            const str  = JSON.stringify({ batchId, events: batch }) + '\n';
-            return new TextEncoder().encode(str);
-        }
+        const batchBuf = serializeBatch(batch);
+        const out  = new ArrayBuffer(4 + batchBuf.byteLength);
+        new DataView(out).setUint32(0, batchId >>> 0, true);
+        new Uint8Array(out, 4).set(new Uint8Array(batchBuf));
+        return new Uint8Array(out);
     }
 
     _tryWriteSlot(data) {
@@ -910,19 +897,4 @@ class _SabTransport {
             this._connectWaiters.push({ resolve, reject });
         });
     }
-}
-
-// ── NDJSON 序列化辅助（主线程模式内部用）──────────────────────────────────────
-function _safeEventForJSON(ev) {
-    const safe = {};
-    for (const key of Object.keys(ev)) {
-        const v = ev[key];
-        if (v === undefined)  { safe[key] = '__undefined__'; continue; }
-        if (v === null)       { safe[key] = null; continue; }
-        const t = typeof v;
-        if (t === 'boolean' || t === 'number' || t === 'string') { safe[key] = v; continue; }
-        if (t === 'function') { safe[key] = `[Function:${v.name ?? ''}]`; continue; }
-        try { safe[key] = JSON.parse(JSON.stringify(v)); } catch { safe[key] = '[object]'; }
-    }
-    return safe;
 }

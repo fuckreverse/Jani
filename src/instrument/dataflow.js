@@ -57,8 +57,15 @@ export const Decision = Object.freeze({
  * 每个 use-site（Identifier 出现在 RHS 上下文的位置）对应一条决策。
  * 键格式：`${scopeId}:${name}:${line}:${col}`（基于 Babel AST 位置信息）。
  *
+ * 返回值格式（Map 的 value）：
+ *   - `Decision.FULL`        — 字符串 `'full'`
+ *   - `Decision.LIGHTWEIGHT` — 对象 `{ decision: 'lightweight', defLocKey: 'line:col' | null }`
+ *     其中 `defLocKey` 是 def-site 节点的 `"startLine:startCol"` 位置字符串，
+ *     供 wrappers.js 中 `resolveDefIids()` 阶段将其关联到 def-site 的 iid。
+ *     当 def-site 位置无法获取时（如函数形参、隐式声明），`defLocKey` 为 `null`。
+ *
  * @param {object} ast  Babel Program 节点（已经过 addScopes 处理，含 .scope 字段）
- * @returns {Map<string, string>}  插桩决策表
+ * @returns {Map<string, string | { decision: string, defLocKey: string | null }>}  插桩决策表
  */
 export function analyzeDefUse(ast) {
     const decisions = new Map();
@@ -143,7 +150,25 @@ export function analyzeDefUse(ast) {
             // Q-3 修复：无论 binding.constant 是 true 还是 false，
             // 只要没有属性 mutation（已在上方排除），都走轻量路径（Rl/Shadow Frame）。
             // Shadow Frame 对重赋值也能正确追踪，因此两个分支可合并为无条件赋值。
-            decisions.set(key, Decision.LIGHTWEIGHT);
+            //
+            // 同时记录 def-site 的位置 key，供 wrappers.js 在插桩完成后关联 defIid（smap 用途）。
+            // def-site 是 binding.path.node 或 binding.identifier：
+            //   - 函数参数：binding.path.node 是 Identifier（形参本身）
+            //   - 变量声明：binding.path.node 是 VariableDeclarator
+            //     其 .id 是实际的 Identifier（如 `const x = 1` 中的 `x`）
+            // 我们统一用 binding.path.node.id?.loc ?? binding.path.node.loc 来获取 def 的 loc。
+            let defLocKey = null;
+            {
+                const defNode = binding.path?.node;
+                if (defNode) {
+                    const defLocNode = defNode.id ?? defNode;
+                    const dl = defLocNode.loc?.start;
+                    if (dl) {
+                        defLocKey = `${dl.line}:${dl.column}`;
+                    }
+                }
+            }
+            decisions.set(key, { decision: Decision.LIGHTWEIGHT, defLocKey });
         },
     });
 

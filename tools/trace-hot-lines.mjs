@@ -3,10 +3,14 @@
  * trace-hot-lines.mjs — 热点代码行统计
  *
  * 用法：
- *   cat parsed.ndjson | node tools/trace-hot-lines.mjs
- *   cat parsed.ndjson | node tools/trace-hot-lines.mjs --top 20
- *   cat parsed.ndjson | node tools/trace-hot-lines.mjs --by-type
- *   cat parsed.ndjson | node tools/trace-hot-lines.mjs --help
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs --top 20
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs --by-type
+ *   node tools/trace-hot-lines.mjs --help
+ *
+ * 输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
+ *   事件类型：CALL_PRE, CALL, FUNCTION_ENTER, FUNCTION_EXIT,
+ *             END_EXPR, SCRIPT_ENTER, SCRIPT_EXIT, KEY_EVENT 等
  *
  * 输出：
  *   热点行统计表格（行号、命中次数、类型分布）
@@ -20,7 +24,7 @@ import { createInterface } from 'readline';
 
 class LineStats {
     constructor() {
-        // line -> { count, types: { call: N, expr: N, ... } }
+        // line -> { count, types: { CALL_PRE: N, END_EXPR: N, ... } }
         this.lines = new Map();
         this.total = 0;
     }
@@ -54,9 +58,11 @@ function printHelp() {
 trace-hot-lines.mjs — 热点代码行统计
 
 用法：
-  cat parsed.ndjson | node tools/trace-hot-lines.mjs
-  cat parsed.ndjson | node tools/trace-hot-lines.mjs --top 20
-  cat parsed.ndjson | node tools/trace-hot-lines.mjs --by-type
+  node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs
+  node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs --top 20
+  node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs --by-type
+
+输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
 
 选项：
   --top N       显示前 N 个热点行（默认 10）

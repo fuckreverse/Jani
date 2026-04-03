@@ -3,10 +3,14 @@
  * trace-call-tree.mjs — 重建调用树
  *
  * 用法：
- *   cat parsed.ndjson | node tools/trace-call-tree.mjs
- *   cat parsed.ndjson | node tools/trace-call-tree.mjs --depth 5
- *   cat parsed.ndjson | node tools/trace-call-tree.mjs --json
- *   cat parsed.ndjson | node tools/trace-call-tree.mjs --help
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-call-tree.mjs
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-call-tree.mjs --depth 5
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-call-tree.mjs --json
+ *   node tools/trace-call-tree.mjs --help
+ *
+ * 输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
+ *   - CALL_PRE 事件：函数调用开始（含 fn 字段）
+ *   - CALL 事件：函数调用结束（含 fn、result 字段）
  *
  * 输出：
  *   树形调用图（带缩进和统计）
@@ -24,6 +28,7 @@ class CallNode {
         this.line = line;
         this.callSeq = callSeq;
         this.returnSeq = null;
+        this.result = undefined;
         this.children = [];
         this.parent = null;
         this.stats = {
@@ -43,6 +48,7 @@ class CallNode {
             line: this.line,
             callSeq: this.callSeq,
             returnSeq: this.returnSeq,
+            result: this.result,
             children: this.children.length > 0 ? this.children.map(c => c.toJSON()) : undefined,
         };
     }
@@ -53,17 +59,59 @@ class CallTreeBuilder {
         this.root = new CallNode('<root>', 0, 0);
         this.current = this.root;
         this.allNodes = [];
+        // iid → pending CallNode（用于匹配 CALL_PRE 和 CALL 配对）
+        this._pendingByIid = new Map();
     }
 
     process(record) {
-        if (record.type === 'call') {
-            const node = new CallNode(record.fn, record.line, record.seq);
+        // CALL_PRE：函数调用开始
+        if (record.type === 'CALL_PRE') {
+            const node = new CallNode(
+                record.fn ?? '(anonymous)',
+                record.line ?? 0,
+                record.seq
+            );
             this.current.addChild(node);
             this.current = node;
             this.allNodes.push(node);
-        } else if (record.type === 'return') {
-            if (this.current !== this.root) {
+            // 记录 iid 用于后续 CALL 配对
+            if (record.iid != null) {
+                this._pendingByIid.set(record.iid, node);
+            }
+        }
+        // CALL：函数调用结束（返回值）
+        else if (record.type === 'CALL') {
+            // 尝试通过 iid 精确匹配 CALL_PRE
+            let node = null;
+            if (record.iid != null && this._pendingByIid.has(record.iid)) {
+                node = this._pendingByIid.get(record.iid);
+                this._pendingByIid.delete(record.iid);
+            }
+
+            if (node && this.current !== this.root) {
+                // 通过堆栈找到对应的 CallNode
+                let cur = this.current;
+                while (cur !== this.root && cur !== node) {
+                    cur.returnSeq = record.seq;
+                    cur = cur.parent || this.root;
+                }
+                if (cur === node) {
+                    cur.returnSeq = record.seq;
+                    cur.result = record.result;
+                    this.current = cur.parent || this.root;
+                } else {
+                    // 未找到匹配节点，退出当前帧
+                    if (this.current !== this.root) {
+                        this.current.returnSeq = record.seq;
+                        this.current = this.current.parent || this.root;
+                    }
+                }
+            } else if (this.current !== this.root) {
+                // 无法精确匹配，按深度退出
                 this.current.returnSeq = record.seq;
+                if (record.result !== undefined) {
+                    this.current.result = record.result;
+                }
                 this.current = this.current.parent || this.root;
             }
         }
@@ -85,7 +133,6 @@ class CallTreeBuilder {
     formatTree(node = this.root, depth = 0, maxDepth = Infinity) {
         // 迭代版（避免深递归爆栈）
         const lines = [];
-        // 栈帧：{ node, depth }；使用逆序入栈保证子节点按原顺序输出
         const stack = [{ node, depth }];
         while (stack.length > 0) {
             const { node: cur, depth: d } = stack.pop();
@@ -94,7 +141,8 @@ class CallTreeBuilder {
             if (cur !== this.root) {
                 const indent  = '  '.repeat(d - 1);
                 const retSeq  = cur.returnSeq ? `→${cur.returnSeq}` : '';
-                lines.push(`${indent}${cur.fn}() [L${cur.line}] [${cur.callSeq}${retSeq}]`);
+                const result  = cur.result !== undefined ? ` =${JSON.stringify(cur.result)}` : '';
+                lines.push(`${indent}${cur.fn}() [L${cur.line}] [${cur.callSeq}${retSeq}]${result}`);
             }
 
             // 逆序压栈，保证先进先出顺序
@@ -134,16 +182,18 @@ class CallTreeBuilder {
     }
 }
 
-// ── 主程序 ─────────────────────────────────────────────────────────────
+// ── 主程序 ─────────────────────────────────────────────────────────
 
 function printHelp() {
     console.log(`
 trace-call-tree.mjs — 重建调用树
 
 用法：
-  cat parsed.ndjson | node tools/trace-call-tree.mjs
-  cat parsed.ndjson | node tools/trace-call-tree.mjs --depth 5
-  cat parsed.ndjson | node tools/trace-call-tree.mjs --json
+  node tools/trace-decode.mjs trace.bin | node tools/trace-call-tree.mjs
+  node tools/trace-decode.mjs trace.bin | node tools/trace-call-tree.mjs --depth 5
+  node tools/trace-decode.mjs trace.bin | node tools/trace-call-tree.mjs --json
+
+输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
 
 选项：
   --depth N     限制显示深度（默认无限制）

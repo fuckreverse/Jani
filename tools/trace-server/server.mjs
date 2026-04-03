@@ -4,39 +4,41 @@
 /**
  * trace-server — Jani WebSocket 日志收集服务。
  *
- * 接收来自浏览器 WsBackend 的事件批次，写入本地文件（NDJSON 格式）。
+ * 接收来自 WsBackend 的 JTB1 二进制事件批次，写入本地 .bin 文件。
  * 每个 WebSocket 连接对应一个独立文件，文件名包含时间戳和序号。
  *
  * 启动：
- *   node tools/trace-server/server.mjs [--port 9229] [--out traces] [--format binary|ndjson] [--no-text-only] [--no-clear] [--help]
+ *   node tools/trace-server/server.mjs [--port 9229] [--out traces] [--no-clear] [--help]
  *
  * 协议（见 WsBackend.js）：
- *   二进制模式：
- *     客户端 → 服务端：[u32 batchId LE][u32 count LE][u32 size0 LE][event0 binary]...
+ *   二进制模式（默认）：
+ *     客户端 → 服务端：[u32 batchId LE][JTB1 事件流（无文件头，直接事件序列）]
  *     服务端 → 客户端：[u32 batchId LE]（4 字节 ack）
- *   NDJSON 模式：
- *     客户端 → 服务端：JSON 行 { batchId, events: [...] }
- *     服务端 → 客户端：JSON 行 { type: 'ack', batchId }
  *
  * 输出格式（磁盘）：
- *   默认（--text-only）：trace 类型事件只写入 text 字段的纯文本，其余事件仍为 JSON。
- *   --no-text-only：所有事件统一输出为 NDJSON（一行一个 JSON 对象），可用 `jq` 直接分析。
+ *   每个 WebSocket 连接生成一个独立 .bin 文件（JTB1 格式）：
+ *     文件头（8 字节）+ 事件序列（每条 12 字节头 + payload）
+ *   文件名格式：trace_<YYYYMMDD>_<HHmmss>_<ms>_<seq>.bin
  *
- * 输出目录：
- *   每个 WebSocket 连接生成一个独立文件，存放在 --out 指定的目录下。
- *   文件名格式：trace_<YYYYMMDD>_<HHmmss>_<ms>_<seq>.ndjson
+ * 后处理：
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format tree
  */
 
 import { createServer }   from 'node:http';
 import { WebSocketServer } from 'ws';
-import { createWriteStream, mkdirSync, readdirSync, rmSync, existsSync } from 'node:fs';
+import {
+    createWriteStream, mkdirSync, readdirSync, rmSync, existsSync, writeFileSync,
+} from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath }     from 'node:url';
 import { parseArgs }         from 'node:util';
 
 import {
-    deserializeBatchFromBinary,
-    serializeBatchToNDJSON,
+    createFileHeader,
+    isBinaryTrace,
+    FILE_HEADER_SIZE,
+    EVENT_HEADER_SIZE,
+    deserializeEvent,
 } from '../../src/encoding/EventSerializer.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -45,14 +47,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const { values: args } = parseArgs({
     options: {
-        port:        { type: 'string',  default: '9229'    },
-        out:         { type: 'string',  default: 'traces'  },  // 输出目录
-        format:      { type: 'string',  default: 'binary'  },  // binary | ndjson
-        verbose:     { type: 'boolean', default: false     },
-        'text-only': { type: 'boolean', default: true      },  // trace 事件只存 text
-        'max-payload': { type: 'string', default: '0'      },  // 0=无限制，单位：MB
-        clear:       { type: 'boolean', default: true      },  // 启动时清空输出目录
-        help:        { type: 'boolean', default: false     },  // 显示帮助
+        port:          { type: 'string',  default: '9229'    },
+        out:           { type: 'string',  default: 'traces'  },  // 输出目录
+        verbose:       { type: 'boolean', default: false     },
+        'max-payload': { type: 'string',  default: '0'       },  // 0=无限制，单位：MB
+        clear:         { type: 'boolean', default: true      },  // 启动时清空输出目录
+        help:          { type: 'boolean', default: false     },  // 显示帮助
     },
     strict: false,
 });
@@ -65,37 +65,35 @@ Usage: node tools/trace-server/server.mjs [options]
 
 Options:
   --port <number>        WebSocket 监听端口（默认: 9229）
-  --out <dir>            输出目录（默认: traces）。每个连接写入独立文件
-  --format <mode>        接收格式：binary | ndjson（默认: binary）
-  --text-only            trace 事件只写 text 字段（默认开启，用 --no-text-only 关闭）
-  --clear                启动时清空输出目录中的 .ndjson 文件（默认开启，用 --no-clear 关闭）
+  --out <dir>            输出目录（默认: traces）。每个连接写入独立 .bin 文件
+  --clear                启动时清空输出目录中的 .bin 文件（默认开启，用 --no-clear 关闭）
   --max-payload <MB>     最大消息体积（MB），0 表示无限制（默认: 0）
   --verbose              打印每个 batch 的接收日志
   --help                 显示此帮助信息
 
 文件命名：
-  每个 WebSocket 连接生成一个独立文件：
-    trace_<YYYYMMDD>_<HHmmss>_<ms>_<seq>.ndjson
+  每个 WebSocket 连接生成一个独立 .bin 文件：
+    trace_<YYYYMMDD>_<HHmmss>_<ms>_<seq>.bin
+
+后处理：
+  node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format tree
 `);
     process.exit(0);
 }
 
 const PORT        = parseInt(args.port, 10);
 const OUT_DIR     = resolve(args.out);
-const FORMAT      = args.format === 'ndjson' ? 'ndjson' : 'binary';
 const VERBOSE     = args.verbose;
-const TEXT_ONLY   = args['text-only'];
 const MAX_PAYLOAD = args['max-payload'] === '0' ? 0 : parseInt(args['max-payload'], 10) * 1024 * 1024;
 const CLEAR       = args.clear;
 
 // ─── 输出目录初始化 ────────────────────────────────────────────────────────────
 
-// 确保输出目录存在
 mkdirSync(OUT_DIR, { recursive: true });
 
-// 启动时根据 --clear 选项决定是否清空目录中的 .ndjson 文件
+// 启动时根据 --clear 选项决定是否清空目录中的 .bin 文件
 if (CLEAR && existsSync(OUT_DIR)) {
-    const files = readdirSync(OUT_DIR).filter(f => f.endsWith('.ndjson'));
+    const files = readdirSync(OUT_DIR).filter(f => f.endsWith('.bin') || f.endsWith('.smap.json'));
     for (const f of files) {
         rmSync(join(OUT_DIR, f));
     }
@@ -115,7 +113,7 @@ function makeTraceFilePath() {
     const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
     const ms   = pad(now.getMilliseconds(), 3);
     const seq  = pad(++connSeq, 3);
-    return join(OUT_DIR, `trace_${date}_${time}_${ms}_${seq}.ndjson`);
+    return join(OUT_DIR, `trace_${date}_${time}_${ms}_${seq}.bin`);
 }
 
 // ─── 统计 ──────────────────────────────────────────────────────────────────────
@@ -145,13 +143,11 @@ const statsTimer = setInterval(printStats, 5000);
 // ─── HTTP 服务器 ────────────────────────────────────────────────────────────────
 
 const httpServer = createServer((req, res) => {
-    // 提供简单的健康检查端点
     if (req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok', ...stats }));
         return;
     }
-    // 提供统计查询端点
     if (req.url === '/stats') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(stats));
@@ -166,17 +162,18 @@ const httpServer = createServer((req, res) => {
 const wss = new WebSocketServer({
     server: httpServer,
     path: '/trace',
-    maxPayload: MAX_PAYLOAD || undefined,  // 0 表示无限制
+    maxPayload: MAX_PAYLOAD || undefined,
 });
 
 wss.on('connection', (ws, req) => {
     const clientAddr = req.socket.remoteAddress;
     stats.connections++;
 
-    // 为本次连接创建独立的输出文件
+    // 为本次连接创建独立的输出文件（.bin 格式）
     const traceFile  = makeTraceFilePath();
-    const outStream  = createWriteStream(traceFile, { flags: 'w', encoding: 'utf8' });
+    const outStream  = createWriteStream(traceFile, { flags: 'w' });
     let   eventCount = 0;
+    let   headerWritten = false;
 
     outStream.on('error', (err) => {
         console.error(`[server] Output stream error (${traceFile}):`, err.message);
@@ -185,64 +182,66 @@ wss.on('connection', (ws, req) => {
     console.log(`[server] Client connected: ${clientAddr} (total: ${stats.connections})`);
     console.log(`[server]   → Writing to: ${traceFile}`);
 
-    if (FORMAT === 'binary') {
-        ws.binaryType = 'arraybuffer';
-    }
+    // 使用二进制帧
+    ws.binaryType = 'arraybuffer';
 
     ws.on('message', (data, isBinary) => {
         try {
-            stats.bytesReceived += isBinary ? data.byteLength : Buffer.byteLength(data, 'utf8');
+            stats.bytesReceived += isBinary ? (data.byteLength ?? Buffer.byteLength(data)) : Buffer.byteLength(data, 'utf8');
 
-            let batchId, events;
-
-            if (isBinary) {
-                // 二进制格式：[u32 batchId][rest = serializeBatchToBinary output]
-                // Node.js ws 库的 message 事件：isBinary=true 时 data 是 Buffer；
-                // isBinary=false（文本帧）时 data 也是 Buffer，但需走 NDJSON 路径，
-                // 因此必须以 isBinary 标志为唯一判据，不能用 data instanceof Buffer。
-                const buf  = data instanceof Buffer
-                    ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
-                    : data;  // 浏览器端 ArrayBuffer
-                const view = new DataView(buf);
-                batchId    = view.getUint32(0, true);
-                // 剩余部分是标准批次格式
-                const rest = buf.slice(4);
-                events     = deserializeBatchFromBinary(rest);
-            } else {
-                // NDJSON 格式（文本帧）：{ batchId, events: [...] }
-                const msg  = JSON.parse(data.toString());
-                batchId    = msg.batchId;
-                events     = msg.events ?? [];
+            if (!isBinary) {
+                // 文本帧：不支持，忽略并提示
+                console.warn(`[server] Received text frame from ${clientAddr}, expected binary. Ignoring.`);
+                return;
             }
 
-            // 写入文件（每条一行）
-            let line = '';
-            for (const ev of events) {
-                if (TEXT_ONLY && ev.type === 'trace' && ev.text != null) {
-                    line += ev.text + '\n';
-                } else {
-                    line += JSON.stringify(ev) + '\n';
+            // 二进制帧：[u32 batchId LE][事件流 bytes]
+            // 事件流 = 连续的 EventSerializer 事件（12字节头 + payload），无文件头
+            const buf  = data instanceof Buffer
+                ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+                : data;
+            const view = new DataView(buf);
+
+            const batchId    = view.getUint32(0, true);
+            const eventBytes = buf.slice(4);  // 剩余部分是事件流
+
+            // 首次写入：先写文件头
+            if (!headerWritten) {
+                const header = createFileHeader();
+                outStream.write(Buffer.from(header));
+                headerWritten = true;
+            }
+
+            // 统计事件数
+            let batchEventCount = 0;
+            if (eventBytes.byteLength >= EVENT_HEADER_SIZE) {
+                const ev = new DataView(eventBytes);
+                let offset = 0;
+                while (offset + EVENT_HEADER_SIZE <= eventBytes.byteLength) {
+                    const payloadLen = ev.getUint16(offset + 10, true);
+                    offset += EVENT_HEADER_SIZE + payloadLen;
+                    batchEventCount++;
+                    if (offset <= 0) break; // 防止无限循环
                 }
             }
-            if (line) outStream.write(line);
 
-            eventCount           += events.length;
+            // 直接写入事件字节流到文件
+            if (eventBytes.byteLength > 0) {
+                outStream.write(Buffer.from(eventBytes));
+            }
+
+            eventCount           += batchEventCount;
             stats.batchesReceived++;
-            stats.eventsReceived += events.length;
+            stats.eventsReceived += batchEventCount;
 
             if (VERBOSE) {
-                console.log(`[server] batch #${batchId}: ${events.length} events → ${traceFile}`);
+                console.log(`[server] batch #${batchId}: ${batchEventCount} events → ${traceFile}`);
             }
 
-            // 发送 ack：格式与收到的帧类型保持一致
-            // 二进制帧 → 4 字节二进制 ack；文本帧（NDJSON）→ JSON ack
-            if (isBinary) {
-                const ack = new ArrayBuffer(4);
-                new DataView(ack).setUint32(0, batchId, true);
-                ws.send(ack);
-            } else {
-                ws.send(JSON.stringify({ type: 'ack', batchId }));
-            }
+            // 发送 ack（4 字节二进制）
+            const ack = new ArrayBuffer(4);
+            new DataView(ack).setUint32(0, batchId, true);
+            ws.send(ack);
 
         } catch (err) {
             stats.errors++;
@@ -253,9 +252,9 @@ wss.on('connection', (ws, req) => {
     ws.on('close', (code, reason) => {
         stats.connections = Math.max(0, stats.connections - 1);
         console.log(`[server] Client disconnected: ${clientAddr} (code=${code}, active: ${stats.connections})`);
-        // 关闭本连接的输出流
         outStream.end(() => {
             console.log(`[server]   → Trace saved: ${traceFile} (${eventCount} events)`);
+            console.log(`[server]   → Decode with: node tools/trace-decode.mjs ${traceFile}`);
         });
     });
 
@@ -273,8 +272,7 @@ httpServer.listen(PORT, () => {
     console.log(`[server]   Health    : http://0.0.0.0:${PORT}/health`);
     console.log(`[server]   Stats     : http://0.0.0.0:${PORT}/stats`);
     console.log(`[server]   Output dir: ${OUT_DIR}`);
-    console.log(`[server]   Format    : ${FORMAT}`);
-    console.log(`[server]   Text-only : ${TEXT_ONLY}`);
+    console.log(`[server]   Format    : JTB1 binary (.bin)`);
     console.log(`[server]   Clear     : ${CLEAR}`);
     if (MAX_PAYLOAD) {
         console.log(`[server]   MaxPayload: ${args['max-payload']}MB`);
@@ -290,7 +288,6 @@ async function shutdown(signal) {
     clearInterval(statsTimer);
     printStats();
 
-    // 关闭所有 WS 连接（ws.close 会触发 close 事件，进而关闭各自的 outStream）
     for (const ws of wss.clients) {
         ws.close(1001, 'server shutdown');
     }

@@ -224,7 +224,13 @@ export class TraceLogger {
                 log.debug('opening NodeStreamBackend', { path: opts.nodeFile });
                 try {
                     const { NodeStreamBackend } = await import('./transport/NodeStreamBackend.js');
-                    backends.push(new NodeStreamBackend({ path: opts.nodeFile }));
+                    const nodeBackend = new NodeStreamBackend({
+                        path: opts.nodeFile,
+                        ...(opts.smap != null && { smap: opts.smap }),
+                    });
+                    backends.push(nodeBackend);
+                    // 内部保存引用，以便外部通过 setSmap() 更新 smap
+                    this._nodeBackend = nodeBackend;
                     log.debug('NodeStreamBackend ready', { path: opts.nodeFile });
                 } catch (err) {
                     log.error('NodeStreamBackend init failed:', err.message, err.stack ?? '');
@@ -382,6 +388,22 @@ export class TraceLogger {
             log.error('close() error:', err.message, err.stack ?? '');
         }
         this._mgr = null;
+    }
+
+    /**
+     * 设置（或更新）smap 对象，传递给 NodeStreamBackend，在 close() 时自动写出 .smap.json。
+     * 通常由 ExecutionTrace 插件在 scriptEnter 之前调用：
+     *   logger.setSmap(buildSmapJson(sourceMapObject));
+     *
+     * @param {object} smapObj  buildSmapJson() 返回的 smap 对象
+     */
+    setSmap(smapObj) {
+        if (this._nodeBackend?.setSmap) {
+            this._nodeBackend.setSmap(smapObj);
+        } else if (this._opts) {
+            // init 尚未完成，缓存到 opts 中，_doInit 完成时会传入
+            this._opts.smap = smapObj;
+        }
     }
 
     /**

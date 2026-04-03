@@ -22,45 +22,54 @@ import { WebSocketServer } from 'ws';
 // 被测模块
 import { LogManager }        from '../../src/logger/LogManager.js';
 import { NodeStreamBackend } from '../../src/logger/transport/NodeStreamBackend.js';
+import {
+    deserializeAll, isBinaryTrace, MAGIC, FILE_HEADER_SIZE,
+} from '../../src/encoding/EventSerializer.js';
 
 // ════════════════════════════════════════════════════════════════════════════════
 // 1. NodeStreamBackend
 // ════════════════════════════════════════════════════════════════════════════════
 
 describe('NodeStreamBackend', () => {
-    test('写入文件并读回（NDJSON 格式）', async () => {
-        const outPath = join(tmpdir(), `jalangi-test-${Date.now()}.ndjson`);
+    test('写入文件并读回（JTB1 二进制格式）', async () => {
+        const outPath = join(tmpdir(), `jalangi-test-${Date.now()}.bin`);
         try {
             const backend = new NodeStreamBackend({ path: outPath, append: false });
             await backend.write([
-                { type: 'READ',  iid: 8,  value: 1   },
-                { type: 'WRITE', iid: 16, value: 'x' },
+                { type: 'SCRIPT_ENTER', iid: 8,  seq: 1, file: 'a.js' },
+                { type: 'SCRIPT_EXIT',  iid: 16, seq: 2 },
             ]);
             await backend.flush();
             await backend.close();
 
-            const lines = readFileSync(outPath, 'utf8').trim().split('\n').filter(Boolean);
-            assert.equal(lines.length, 2);
-            assert.equal(JSON.parse(lines[0]).type, 'READ');
-            assert.equal(JSON.parse(lines[1]).type, 'WRITE');
+            const buf = readFileSync(outPath);
+            // 文件头应以 JTB1 魔数开头
+            assert.ok(isBinaryTrace(buf), '文件应以 JTB1 魔数开头');
+            // 反序列化所有事件
+            const events = deserializeAll(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+            assert.equal(events.length, 2, `期望 2 条事件，实际 ${events.length}`);
+            assert.equal(events[0].type, 'SCRIPT_ENTER');
+            assert.equal(events[1].type, 'SCRIPT_EXIT');
         } finally {
             if (existsSync(outPath)) unlinkSync(outPath);
         }
     });
 
-    test('多批次追加写入', async () => {
-        const outPath = join(tmpdir(), `jalangi-test-${Date.now()}.ndjson`);
+    test('多批次写入', async () => {
+        const outPath = join(tmpdir(), `jalangi-test-${Date.now()}.bin`);
         try {
             const backend = new NodeStreamBackend({ path: outPath, append: false });
             for (let i = 0; i < 5; i++) {
-                await backend.write([{ type: 'READ', iid: i * 8, value: i }]);
+                await backend.write([{ type: 'END_EXPR', iid: (i + 1) * 8, seq: i + 1, writes: [], reads: [], fields: [] }]);
             }
             await backend.close();
 
-            const lines = readFileSync(outPath, 'utf8').trim().split('\n');
-            assert.equal(lines.length, 5);
+            const buf = readFileSync(outPath);
+            assert.ok(isBinaryTrace(buf), '文件应以 JTB1 魔数开头');
+            const events = deserializeAll(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+            assert.equal(events.length, 5, `期望 5 条事件，实际 ${events.length}`);
             for (let i = 0; i < 5; i++) {
-                assert.equal(JSON.parse(lines[i]).iid, i * 8);
+                assert.equal(events[i].iid, (i + 1) * 8, `第 ${i} 条 iid 不匹配`);
             }
         } finally {
             if (existsSync(outPath)) unlinkSync(outPath);
@@ -68,29 +77,56 @@ describe('NodeStreamBackend', () => {
     });
 
     test('writeSync 在关闭前写入（尽力而为）', async () => {
-        const outPath = join(tmpdir(), `jalangi-test-${Date.now()}.ndjson`);
+        const outPath = join(tmpdir(), `jalangi-test-${Date.now()}.bin`);
         try {
             const backend = new NodeStreamBackend({ path: outPath, append: false });
-            backend.writeSync([{ type: 'SCRIPT_ENTER', iid: 8 }]);
+            backend.writeSync([{ type: 'SCRIPT_ENTER', iid: 8, seq: 1, file: 'sync.js' }]);
             await backend.close();
-            assert.ok(readFileSync(outPath, 'utf8').includes('SCRIPT_ENTER'));
+
+            const buf = readFileSync(outPath);
+            assert.ok(isBinaryTrace(buf), '文件应以 JTB1 魔数开头');
+            const events = deserializeAll(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+            assert.ok(events.length >= 1, 'writeSync 写入的事件应能读回');
+            assert.equal(events[0].type, 'SCRIPT_ENTER');
         } finally {
             if (existsSync(outPath)) unlinkSync(outPath);
         }
     });
 
     test('NodeStreamBackend + LogManager 集成', async () => {
-        const outPath = join(tmpdir(), `jalangi-test-${Date.now()}.ndjson`);
+        const outPath = join(tmpdir(), `jalangi-test-${Date.now()}.bin`);
         try {
             const backend = new NodeStreamBackend({ path: outPath, append: false });
             const mgr     = new LogManager({ backends: [backend], autoClose: false, flushThreshold: 2 });
-            for (let i = 0; i < 10; i++) mgr.push({ type: 'READ', iid: i * 8, value: i });
+            for (let i = 0; i < 10; i++) {
+                mgr.push({ type: 'END_EXPR', iid: (i + 1) * 8, seq: i + 1, writes: [], reads: [], fields: [] });
+            }
             await mgr.close();
 
-            const lines = readFileSync(outPath, 'utf8').trim().split('\n').filter(Boolean);
-            assert.equal(lines.length, 10);
+            const buf = readFileSync(outPath);
+            assert.ok(isBinaryTrace(buf), '文件应以 JTB1 魔数开头');
+            const events = deserializeAll(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+            assert.equal(events.length, 10, `期望 10 条事件，实际 ${events.length}`);
         } finally {
             if (existsSync(outPath)) unlinkSync(outPath);
+        }
+    });
+
+    test('setSmap — close 时写出 .smap.json', async () => {
+        const outPath = join(tmpdir(), `jalangi-test-${Date.now()}.bin`);
+        const smapPath = outPath.replace('.bin', '.smap.json');
+        try {
+            const backend = new NodeStreamBackend({ path: outPath, append: false });
+            backend.setSmap({ iids: { 8: [1, 0, 1, 10] }, file: 'test.js' });
+            await backend.write([{ type: 'SCRIPT_ENTER', iid: 8, seq: 1, file: 'test.js' }]);
+            await backend.close();
+
+            assert.ok(existsSync(smapPath), `.smap.json 文件应被创建: ${smapPath}`);
+            const smap = JSON.parse(readFileSync(smapPath, 'utf8'));
+            assert.equal(smap.file, 'test.js', 'smap 内容应正确');
+        } finally {
+            if (existsSync(outPath)) unlinkSync(outPath);
+            if (existsSync(smapPath)) unlinkSync(smapPath);
         }
     });
 });
@@ -115,7 +151,7 @@ function startMockServer(port) {
         ws.binaryType = 'arraybuffer';
         ws.on('message', (data, isBinary) => {
             if (isBinary) {
-                // 二进制帧：[u32 batchId][serializeBatchToBinary output]
+                // 二进制帧：[u32 batchId][JTB1 事件流 serializeBatch output]
                 const buf     = data instanceof Buffer
                     ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
                     : data;
@@ -205,41 +241,74 @@ describe('WsBackend + trace-server 端到端回路', () => {
         }
     });
 
-    // ExecutionTrace 使用 ndjson 格式（{type:'trace', seq, text} 无法用二进制编码）
-    test('WsBackend ndjson 格式：文本帧正确发送和 ack，字段完整保留', async () => {
-        const server = await startMockServer(WS_PORT + 2);
+    // JTB1 二进制格式：验证多种事件类型批次能正确通过 WsBackend 传输
+    test('WsBackend JTB1 二进制格式：多种事件类型批次正确发送和 ack', async () => {
+        const { deserializeAll, createFileHeader } =
+            await import('../../src/encoding/EventSerializer.js');
+
+        // 这个测试需要额外捕获原始二进制帧，所以启动一个自定义 server
+        const capturedFrames = [];
+        const http3 = createServer();
+        const wss3  = new WebSocketServer({ server: http3 });
+        const received3 = [];
+        wss3.on('connection', (ws) => {
+            ws.binaryType = 'arraybuffer';
+            ws.on('message', (data, isBinary) => {
+                if (!isBinary) return;
+                const buf = data instanceof Buffer
+                    ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+                    : data;
+                const batchId = new DataView(buf).getUint32(0, true);
+                received3.push(batchId);
+                capturedFrames.push(buf.slice(4)); // 跳过 u32 batchId
+                const ack = new ArrayBuffer(4);
+                new DataView(ack).setUint32(0, batchId, true);
+                ws.send(ack);
+            });
+        });
+        const port3 = WS_PORT + 2;
+        await new Promise((resolve, reject) => { http3.listen(port3, resolve); http3.on('error', reject); });
+
         try {
             const { WsBackend } = await import('../../src/logger/transport/WsBackend.js');
             const backend = new WsBackend({
-                url:         `ws://127.0.0.1:${WS_PORT + 2}`,
-                format:      'ndjson',   // ExecutionTrace 实际使用的格式
-                mode:        'main',     // Node.js 环境无 Worker，使用主线程模式
+                url:         `ws://127.0.0.1:${port3}`,
+                format:      'binary',  // JTB1 二进制格式（唯一支持的格式）
+                mode:        'main',    // Node.js 环境无 Worker，使用主线程模式
                 autoConnect: true,
                 windowSize:  4,
             });
 
             await new Promise(r => setTimeout(r, 200));
 
-            // 模拟 ExecutionTrace 写入的事件（type 不在 EVENT_TYPE 枚举里）
-            const traceBatch = [
-                { type: 'trace', seq: 1, text: '[  1] [1:1] CALL foo(0 args)' },
-                { type: 'trace', seq: 2, text: '[  2] [2:3] x=42' },
-                { type: 'key',   level: 'info', text: '▶ script: test.js' },
+            // 写入 JTB1 标准事件类型
+            const batch = [
+                { type: 'SCRIPT_ENTER',  iid: 8,  seq: 1, file: 'test.js' },
+                { type: 'END_EXPR',      iid: 16, seq: 2, writes: [{ name: 'x', val: 42 }], reads: [], fields: [] },
+                { type: 'SCRIPT_EXIT',   iid: 24, seq: 3 },
             ];
-            await backend.write(traceBatch);
+            await backend.write(batch);
             await backend.flush();
             await backend.close();
 
-            assert.equal(server.received.length, 1, `期望 1 批，实际 ${server.received.length}`);
-            assert.equal(server.events.length, 3, `期望 3 条事件，实际 ${server.events.length}`);
-            // 验证字段完整（ndjson 不会丢失 seq/text/level）
-            assert.equal(server.events[0].type,  'trace');
-            assert.equal(server.events[0].seq,   1);
-            assert.equal(server.events[0].text,  '[  1] [1:1] CALL foo(0 args)');
-            assert.equal(server.events[2].type,  'key');
-            assert.equal(server.events[2].level, 'info');
+            assert.equal(received3.length, 1, `期望 1 批，实际 ${received3.length}`);
+            assert.equal(capturedFrames.length, 1, '应捕获到 1 帧');
+
+            // 验证接收到的事件流能用 deserializeAll 正确解析（拼上 JTB1 文件头）
+            const headerBuf = new Uint8Array(createFileHeader());
+            const frameBuf  = new Uint8Array(capturedFrames[0]);
+            const combined  = new Uint8Array(headerBuf.byteLength + frameBuf.byteLength);
+            combined.set(headerBuf, 0);
+            combined.set(frameBuf, headerBuf.byteLength);
+            const events = deserializeAll(combined.buffer);
+            assert.equal(events.length, 3, `期望 3 条事件，实际 ${events.length}`);
+            assert.equal(events[0].type, 'SCRIPT_ENTER');
+            assert.equal(events[0].file, 'test.js');
+            assert.equal(events[1].type, 'END_EXPR');
+            assert.equal(events[1].writes[0].value, 42);
+            assert.equal(events[2].type, 'SCRIPT_EXIT');
         } finally {
-            await server.close();
+            await new Promise(r => { wss3.close(); http3.close(r); });
         }
     });
 });

@@ -3,23 +3,26 @@
  * trace-filter.mjs — 按条件过滤结构化 trace 数据
  *
  * 用法：
- *   cat parsed.ndjson | node tools/trace-filter.mjs --type call
- *   cat parsed.ndjson | node tools/trace-filter.mjs --seq 100-200
- *   cat parsed.ndjson | node tools/trace-filter.mjs --line 10
- *   cat parsed.ndjson | node tools/trace-filter.mjs --fn fromCharCode
- *   cat parsed.ndjson | node tools/trace-filter.mjs --help
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --type CALL_PRE
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --seq 100-200
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --line 10
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --fn fromCharCode
+ *   node tools/trace-filter.mjs --help
  *
  * 过滤条件（可组合）：
- *   --type TYPE     事件类型：call, return, expr, script_enter, script_exit
+ *   --type TYPE     事件类型（JTB1 格式）：
+ *                     CALL_PRE, CALL, FUNCTION_ENTER, FUNCTION_EXIT,
+ *                     END_EXPR, SCRIPT_ENTER, SCRIPT_EXIT, KEY_EVENT,
+ *                     WRITE_VAR, READ_VAR_FULL
  *   --seq RANGE     seq 范围，如 100-200 或 100+
  *   --line N        只保留指定行号
- *   --fn PATTERN    函数名匹配（支持 * 通配符）
- *   --has-var NAME  只保留涉及指定变量的行
- *   --has-call      只保留包含函数调用的行
+ *   --fn PATTERN    函数名匹配（支持 * 通配符，适用于 CALL_PRE/CALL）
+ *   --has-var NAME  只保留涉及指定变量的行（适用于 END_EXPR/WRITE_VAR/READ_VAR_FULL）
+ *   --has-call      只保留 CALL_PRE 事件
  *   --no-internal   过滤掉内部变量（以 _ 开头或过长的混淆变量名）
  *
  * 输出：
- *   过滤后的 NDJSON 行
+ *   过滤后的 NDJSON 行（可继续管道到 trace-render.mjs 等工具）
  */
 
 import { createReadStream } from 'fs';
@@ -53,13 +56,19 @@ function matchPattern(str, pattern) {
 }
 
 /**
- * 检查是否涉及指定变量
+ * 检查 END_EXPR / WRITE_VAR / READ_VAR_FULL 事件是否涉及指定变量
  */
 function hasVar(record, varName) {
-    const kv = record.kv || {};
-    if (varName in kv) return true;
-    if (record.w && varName in record.w) return true;
-    if (record.r && varName in record.r) return true;
+    // END_EXPR: writes=[{name,value}], reads=[{name,value}]
+    if (record.type === 'END_EXPR') {
+        if (record.writes?.some(w => w.name === varName)) return true;
+        if (record.reads?.some(r => r.name === varName)) return true;
+        return false;
+    }
+    // WRITE_VAR / READ_VAR_FULL: { name }
+    if (record.type === 'WRITE_VAR' || record.type === 'READ_VAR_FULL') {
+        return record.name === varName;
+    }
     return false;
 }
 
@@ -67,7 +76,7 @@ function hasVar(record, varName) {
  * 检查是否是内部/混淆变量名
  */
 function isInternalVar(name) {
-    // 单字母或短变量名
+    // 单字母或短变量名不过滤
     if (name.length <= 2) return false;
     // 以 _ 开头
     if (name.startsWith('_')) return true;
@@ -77,51 +86,18 @@ function isInternalVar(name) {
 }
 
 /**
- * 过滤记录中的内部变量
+ * 过滤 END_EXPR 中的内部变量
  */
-function filterInternalVars(record) {
+function filterInternalVarsFromRecord(record) {
+    if (record.type !== 'END_EXPR') return record;
+
     const newRecord = { ...record };
 
-    if (newRecord.kv) {
-        const newKv = {};
-        for (const [k, v] of Object.entries(newRecord.kv)) {
-            if (!isInternalVar(k)) {
-                newKv[k] = v;
-            }
-        }
-        if (Object.keys(newKv).length > 0) {
-            newRecord.kv = newKv;
-        } else {
-            delete newRecord.kv;
-        }
+    if (newRecord.writes?.length > 0) {
+        newRecord.writes = newRecord.writes.filter(w => !isInternalVar(w.name));
     }
-
-    if (newRecord.w) {
-        const newW = {};
-        for (const [k, v] of Object.entries(newRecord.w)) {
-            if (!isInternalVar(k)) {
-                newW[k] = v;
-            }
-        }
-        if (Object.keys(newW).length > 0) {
-            newRecord.w = newW;
-        } else {
-            delete newRecord.w;
-        }
-    }
-
-    if (newRecord.r) {
-        const newR = {};
-        for (const [k, v] of Object.entries(newRecord.r)) {
-            if (!isInternalVar(k)) {
-                newR[k] = v;
-            }
-        }
-        if (Object.keys(newR).length > 0) {
-            newRecord.r = newR;
-        } else {
-            delete newRecord.r;
-        }
+    if (newRecord.reads?.length > 0) {
+        newRecord.reads = newRecord.reads.filter(r => !isInternalVar(r.name));
     }
 
     return newRecord;
@@ -134,18 +110,21 @@ function printHelp() {
 trace-filter.mjs — 按条件过滤结构化 trace 数据
 
 用法：
-  cat parsed.ndjson | node tools/trace-filter.mjs --type call
-  cat parsed.ndjson | node tools/trace-filter.mjs --seq 100-200
-  cat parsed.ndjson | node tools/trace-filter.mjs --fn fromCharCode
+  node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --type CALL_PRE
+  node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --seq 100-200
+  node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --fn fromCharCode
 
 过滤条件（可组合）：
-  --type TYPE       事件类型：call, return, expr, script_enter, script_exit
+  --type TYPE       事件类型（JTB1 格式）：
+                      CALL_PRE, CALL, FUNCTION_ENTER, FUNCTION_EXIT,
+                      END_EXPR, SCRIPT_ENTER, SCRIPT_EXIT, KEY_EVENT,
+                      WRITE_VAR, READ_VAR_FULL
   --seq RANGE       seq 范围，如 100-200 或 100+
   --line N          只保留指定行号
-  --fn PATTERN      函数名匹配（支持 * 通配符）
-  --has-var NAME    只保留涉及指定变量的行
-  --has-call        只保留包含函数调用的行
-  --no-internal     过滤掉内部变量（以 _ 开头或过长的混淆变量名）
+  --fn PATTERN      函数名匹配（支持 * 通配符，适用于 CALL_PRE/CALL）
+  --has-var NAME    只保留涉及指定变量的行（适用于 END_EXPR/WRITE_VAR/READ_VAR_FULL）
+  --has-call        只保留 CALL_PRE 事件（函数调用）
+  --no-internal     过滤掉内部变量（以 _ 开头或混淆变量名）
   --invert          反转过滤条件
 
 输出：
@@ -245,6 +224,7 @@ async function main() {
             match = false;
         }
 
+        // fn 匹配：适用于 CALL_PRE 和 CALL 事件的 fn 字段
         if (filters.fn && !matchPattern(record.fn || '', filters.fn)) {
             match = false;
         }
@@ -253,7 +233,8 @@ async function main() {
             match = false;
         }
 
-        if (filters.hasCall && record.type !== 'call') {
+        // --has-call 只保留 CALL_PRE
+        if (filters.hasCall && record.type !== 'CALL_PRE') {
             match = false;
         }
 
@@ -266,9 +247,9 @@ async function main() {
             passed++;
             let outputRecord = record;
 
-            // 过滤内部变量
+            // 过滤内部变量（仅对 END_EXPR 有效）
             if (filters.noInternal) {
-                outputRecord = filterInternalVars(record);
+                outputRecord = filterInternalVarsFromRecord(record);
             }
 
             console.log(JSON.stringify(outputRecord));

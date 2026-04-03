@@ -58,6 +58,40 @@ function printLineInfoAux(i, ast) {
     }
 }
 
+/**
+ * 为指定 iid 写入源码文本（srcText）。
+ * 由 wrappers.js 在插桩时调用，用于丰富 smap 信息。
+ * 若该 iid 的位置条目尚未创建，则等位置记录完成后由调用方确保顺序。
+ * 实际上在 wrappers.js 中，先调用 printIidToLoc，再调用此函数，顺序有保障。
+ *
+ * @param {number} iid
+ * @param {string} text  截取的源码文本（已截断至合理长度）
+ */
+function setIidSrcText(iid, text) {
+    const entry = iidSourceInfo[iid];
+    if (Array.isArray(entry)) {
+        entry[4] = text;
+    }
+    // 若 entry 尚不存在（iid 未对应位置），则忽略（安全降级）
+}
+
+/**
+ * 为指定 iid 写入 def-site iid（defIid）。
+ * 由 wrappers.js 在 LIGHTWEIGHT 读取插桩时调用。
+ *
+ * @param {number} iid
+ * @param {number} defIid
+ */
+function setIidDefIid(iid, defIid) {
+    const entry = iidSourceInfo[iid];
+    if (Array.isArray(entry)) {
+        // [sl, sc, el, ec, srcText?, defIid?]
+        // 若 srcText 未设置，用 null 占位
+        if (entry.length < 5) entry[4] = null;
+        entry[5] = defIid;
+    }
+}
+
 const printIidToLoc        = (ast) => printLineInfoAux(memIid, ast);
 /** iid+2 is reserved for the implicit getField inside a method call (see analysis.M) */
 const printSpecialIidToLoc = (ast) => printLineInfoAux(memIid + 2, ast);
@@ -142,4 +176,7 @@ export {
     printModIidToLoc,
     printOpIidToLoc,
     printCondIidToLoc,
+    // smap 扩展字段写入
+    setIidSrcText,
+    setIidDefIid,
 };

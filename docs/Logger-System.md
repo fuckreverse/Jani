@@ -20,15 +20,15 @@ Jani 的日志系统服务于两类截然不同的需求：
 ```
 src/
 ├── encoding/
-│   └── EventSerializer.js      事件序列化协议层（NDJSON 和自定义二进制格式）
+│   └── EventSerializer.js      事件序列化协议层（JTB1 紧凑二进制格式）
 └── logger/
     ├── diagnostics.js          诊断日志工厂（createDiagLogger、速率限制、Debug 开关）
     ├── LogManager.js           事件缓冲与后端分发（RingBuffer → 后端）
     ├── TraceLogger.js          Trace 数据的高层门面（按环境自动选后端）
     ├── RingBuffer.js           单线程环形缓冲区（极低开销的同步 push）
-    └── transport/              所有传输后端（原 backends/ + workers/ 合并重组）
+    └── transport/              所有传输后端
         ├── MemoryBackend.js    内存后端（测试用）
-        ├── NodeStreamBackend.js Node.js 文件流后端（NDJSON 写文件）
+        ├── NodeStreamBackend.js Node.js 文件流后端（写 .bin 二进制文件 + 配套 .smap.json）
         ├── IdbBackend.js       IndexedDB 后端（原 IdbWorkerBackend，Worker 是内部实现细节）
         ├── idb.worker.js       IDB Worker 脚本（Classic Worker，internal，勿直接 import）
         ├── WsBackend.js        WebSocket 后端（三种模式合一：main / worker / sab）
@@ -41,7 +41,7 @@ src/
 概念层                  实现文件                 说明
 ─────────────────────────────────────────────────────────────────
 诊断（Diagnostics）     diagnostics.js           低频系统日志，直接输出 console.*
-协议（Protocol）        encoding/EventSerializer.js  事件 wire format，多方共享
+协议（Protocol）        encoding/EventSerializer.js  JTB1 二进制 wire format，多方共享
 传输（Transport）       logger/transport/         后端实现，负责序列化和 IO
 Trace 门面（Facade）    logger/TraceLogger.js     高层 API，按环境选后端
 ```
@@ -63,7 +63,7 @@ Trace 门面（Facade）    logger/TraceLogger.js     高层 API，按环境选�
         ▼
   backend.write(batch)  ─── 可同时分发给多个后端 ───►
         ├── MemoryBackend        (测试)
-        ├── NodeStreamBackend    (Node.js 文件)
+        ├── NodeStreamBackend    (Node.js 文件，JTB1 二进制)
         └── WsBackend            (主线程 / Worker 线程 / SAB 三种模式)
 ```
 
@@ -244,7 +244,7 @@ const { mgr, backend } = await createMemoryLogManager();
 // 根据后端类型名称创建（自动 import 对应模块）
 const mgr = await createLogManager('idb',         { dbName: 'my-db' });
 const mgr = await createLogManager('ws',          { url: 'ws://localhost:9229/trace' });
-const mgr = await createLogManager('node-stream', { path: 'trace.ndjson' });
+const mgr = await createLogManager('node-stream', { path: 'trace.bin' });
 const mgr = await createLogManager('memory');
 ```
 
@@ -296,7 +296,7 @@ const logger = new TraceLogger({
     wsFormat:    'binary', // 'binary'（高吞吐）或 'ndjson'（可读性）
 
     // Node.js 选项
-    nodeFile:    'jalangi-trace.ndjson',  // false = 只用控制台
+    nodeFile:    'jalangi-trace.bin',  // false = 只用控制台；文件后缀应为 .bin
     nodeConsole: false,
 
     // 通用选项
@@ -322,7 +322,7 @@ SAB 条件不满足时自动降级到 worker 模式（控制台 warn 提示）
 
 ```js
 // 写普通 trace（高频路径，走 LogManager）
-logger.trace({ type: 'trace', seq: 42, text: '[1:5] const x ...' });
+logger.trace({ type: 'END_EXPR', iid: 8, seq: 42, writes: [], reads: [], fields: [] });
 
 // 写重点事件（低频，同步输出到控制台 + 写入后端）
 logger.key('info',  '▶ script: foo.js');
@@ -337,6 +337,18 @@ await logger.close();
 // 调试属性
 logger.isReady;         // 后端是否已就绪
 logger.preInitQueueSize; // pre-init 队列长度（0 表示已 replay）
+```
+
+### smap 注入
+
+`TraceLogger` 暴露了 `setSmap(smapObj)` 方法，会透传给底层 `NodeStreamBackend`，
+在 `close()` 时自动将 smap 写出为与 `.bin` 配对的 `.smap.json` 文件：
+
+```js
+// 在 instrument-and-run 模式中，由 loader 钩子注入 smap
+logger.setSmap(buildSmapJson(sourceMapObject));
+// close() 时自动生成 trace.smap.json（与 trace.bin 同目录）
+await logger.close();
 ```
 
 ### Pre-init 缓冲机制
@@ -356,64 +368,204 @@ _doInit() 完成  →  _flushPreInitQueue()
 
 ## 6. `encoding/EventSerializer.js` — 事件序列化协议层
 
-> **重要**：`EventSerializer.js` 已从 `src/logger/` 移至 `src/encoding/`，作为独立的**协议层**。
-> 它不属于任何单一传输方式，而是 Jalangi 事件的标准 wire format，供以下模块共同依赖：
+> **重要**：`EventSerializer.js` 位于 `src/encoding/`，作为独立的**协议层**，
+> 不属于任何单一传输方式。它是 Jalangi 事件的标准 wire format，供以下模块共同依赖：
+> - `src/logger/transport/NodeStreamBackend.js`（文件端序列化）
 > - `src/logger/transport/WsBackend.js`（发送端序列化）
 > - `tools/trace-server/server.mjs`（接收端反序列化）
-> - 未来：IDB 存储、离线分析模块、跨语言消费工具等
+> - 离线分析模块、跨语言消费工具等
 
-支持两种序列化格式，后端根据 `format` 选项选择：
+**设计原则**：轻运行时，重后处理。运行时只写最小信息，所有格式化 / 渲染交由后处理工具完成。
 
-### NDJSON 格式
+### JTB1 二进制格式（Jani Trace Binary v1）
+
+文件后缀：`.bin`
+
+#### 文件头（8 字节）
 
 ```
-每条事件 → 一行 JSON（'\n' 分隔）
+[0..3]  u8×4  魔数  0x4A 0x54 0x42 0x31（ASCII "JTB1"）
+[4]     u8    版本  0x01
+[5..7]  保留  3 字节
 ```
 
-适合：`NodeStreamBackend`（文件分析）、`WsBackend`（调试，可读性优先）
+#### 事件头（12 字节，定长，小端序）
+
+```
+[0]      u8   eventType   — 事件类型（EVENT_TYPE.*）
+[1]      u8   flags       — 位标志（FLAGS.*，见下文）
+[2..5]   u32  iid         — 指令 ID（对应 smap.json 中的 iid 条目）
+[6..9]   u32  seq         — 事件序号（全局单调递增）
+[10..11] u16  payloadLen  — 本事件 payload 字节数（0 = 无 payload）
+```
+
+事件头之后紧跟 `payloadLen` 字节的可变 payload，再之后是下一条事件。
+
+#### 事件类型（EVENT_TYPE）
+
+| 值 | 名称 | Payload 概述 |
+|----|------|-------------|
+| `0x01` | `SCRIPT_ENTER` | `[filename u16+UTF8]` |
+| `0x02` | `SCRIPT_EXIT` | 若有异常：`[exception_val]` |
+| `0x03` | `CALL_PRE` | `[fnName u16+UTF8][argc u8][arg0_val]...[argN_val][this_val?]` |
+| `0x04` | `CALL` | `[fnName u16+UTF8][result_val]` |
+| `0x05` | `FUNCTION_ENTER` | 无 |
+| `0x06` | `FUNCTION_EXIT` | 若有异常：`[exception_val]` |
+| `0x07` | `END_EXPR` | `[wCount u8][rCount u8][fCount u8]` 后跟三组条目 |
+| `0x08` | `KEY_EVENT` | `[level u8][text u16+UTF8]` |
+| `0x09` | `WRITE_VAR` | `[name u16+UTF8][val]` |
+| `0x0A` | `READ_VAR_FULL` | `[name u16+UTF8][val]` |
+
+`END_EXPR` 是最高频的事件类型，编码了一条表达式语句的所有读写操作：
+- **writes**：`[name u16+UTF8][val]` × wCount
+- **reads**：`[name u16+UTF8][val]` × rCount（val 可能是 `OMITTED`）
+- **fields**：`[base u16+UTF8][offset u16+UTF8][isWrite u8][val]` × fCount
+
+#### flags 位掩码（FLAGS）
+
+| 位 | 名称 | 含义 |
+|----|------|------|
+| `0x01` | `HAS_EXCEPTION` | `CALL` / `FUNCTION_EXIT`：有异常值 |
+| `0x02` | `IS_CONSTRUCTOR` | `CALL_PRE`：new 调用 |
+| `0x04` | `IS_METHOD` | `CALL_PRE`：方法调用 |
+| `0x08` | `HAS_THIS` | `CALL_PRE`：包含 this 值 |
+| `0x10` | `VALUE_OMITTED` | 通用：值已省略（可通过 smap.defIid 追溯） |
+| `0x20` | `IS_WRITE` | field 条目：属性写入 |
+| `0x40` | `DIRECT_FE` | `FUNCTION_ENTER`：无 callPre 覆盖 |
+
+#### 值编码（VALUE_TYPE）
+
+每个值在 payload 中用 1 字节 valueType + 可变字节数编码：
+
+| 值 | 名称 | 后续字节 |
+|----|------|---------|
+| `0x00` | `OMITTED` | 无（值可通过 smap.defIid 追溯） |
+| `0x01` | `NULL` | 无 |
+| `0x02` | `UNDEFINED` | 无 |
+| `0x03` | `BOOL_T` | 无（true） |
+| `0x04` | `BOOL_F` | 无（false） |
+| `0x05` | `INT32` | 4 字节 i32（小端）— 整数优化 |
+| `0x06` | `FLOAT64` | 8 字节 f64（小端） |
+| `0x07` | `STRING` | u16 长度 + UTF-8 字节（最长 256 字符，超限截断加 `…`） |
+| `0x08` | `OBJECT` | u16 长度 + JSON UTF-8 字节（最长 256 字符） |
+| `0x09` | `FUNCTION` | u8 名称长度 + ASCII 字节（最长 255） |
+
+#### 值省略（FAI 优化）
+
+当静态分析确定某 read-site 对应唯一 def-site 时（`Decision.LIGHTWEIGHT`），
+值编码为 `VALUE_TYPE.OMITTED`（1 字节），节省写入开销。
+后处理工具加载 `.smap.json` 后，通过 `smap[iid].defIid` 追溯到对应 write 事件的实际值。
+
+### 主要 API
 
 ```js
-import { serializeBatchToNDJSON, serializeEventToJSON } from '../../encoding/EventSerializer.js';
+import {
+    // 序列化
+    serializeEvent,       // 单条事件 → ArrayBuffer（含 12B 头 + payload）
+    serializeBatch,       // 事件数组 → ArrayBuffer（紧密排列，无分隔符）
+    createFileHeader,     // 创建 8 字节文件头（含魔数和版本）
 
-const text = serializeBatchToNDJSON(events);  // 返回多行 NDJSON 字符串
+    // 反序列化
+    deserializeEvent,     // 从 DataView offset 处读取一条事件
+    deserializeAll,       // 整个 Buffer → 事件数组（跳过文件头）
+    iterateBinary,        // 遍历整个 Buffer，逐条调用回调
+
+    // 工具
+    isBinaryTrace,        // 检查 Buffer 是否以 JTB1 魔数开头
+
+    // 常量
+    EVENT_TYPE, EVENT_TYPE_NAME, FLAGS, VALUE_TYPE,
+    MAGIC, FORMAT_VERSION, FILE_HEADER_SIZE, EVENT_HEADER_SIZE,
+} from '../../encoding/EventSerializer.js';
 ```
 
-文件可直接用 `jq` 分析：
-```bash
-jq 'select(.type=="READ")' jalangi-trace.ndjson
-```
-
-### 二进制格式
-
-每条事件编码为固定 16 字节头部 + 可选变长负载：
-
-```
-字节偏移  长度  内容
-[0]       u8   事件类型（EVENT_TYPE.*）
-[1]       u8   flags（保留）
-[2..5]    u32  iid（小端）
-[6..9]    u32  sid（小端）
-[10]      u8   值类型（null/undefined/bool/number/string/object/function）
-[11]      u8   保留
-[12..15]  u32  变长负载长度
-[16..]         变长负载（number=8字节 float64，string/object/function=UTF-8字节）
-```
-
-批次格式（多条合并）：`[u32 count][u32 size0][event0][u32 size1][event1]...`
-
-适合：`WsBackend(mode='worker')` / `WsBackend(mode='sab')`（高吞吐，约 16 字节/条 vs NDJSON 的 100~300 字节/条）
+**使用示例**（NodeStreamBackend 写入端）：
 
 ```js
-import { serializeBatchToBinary, deserializeBatchFromBinary } from '../../encoding/EventSerializer.js';
-import { EVENT_TYPE } from '../../encoding/EventSerializer.js';
+import { serializeBatch, createFileHeader } from '../../encoding/EventSerializer.js';
 
-const buf    = serializeBatchToBinary(events);   // → ArrayBuffer
-const events = deserializeBatchFromBinary(buf);  // 反序列化（服务端/测试用）
+// 文件开头写一次头
+stream.write(Buffer.from(createFileHeader()));
+
+// 每批事件追加写入
+const batch = [
+    { type: 'SCRIPT_ENTER', iid: 8,  seq: 1, file: 'foo.js' },
+    { type: 'END_EXPR',     iid: 16, seq: 2, writes: [{ name: 'x', val: 42 }], reads: [], fields: [] },
+];
+stream.write(Buffer.from(serializeBatch(batch)));
+```
+
+**使用示例**（后处理读取端）：
+
+```js
+import { isBinaryTrace, deserializeAll } from '../../encoding/EventSerializer.js';
+import { readFileSync } from 'node:fs';
+
+const raw = readFileSync('trace.bin');
+if (!isBinaryTrace(raw)) throw new Error('not a JTB1 file');
+
+const events = deserializeAll(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
+for (const ev of events) {
+    if (ev.type === 'END_EXPR') {
+        for (const w of ev.writes) console.log(`WRITE ${w.name} = ${w.value}`);
+    }
+}
+```
+
+### 体积对比
+
+| 格式 | 典型字节/条事件 | 备注 |
+|------|----------------|------|
+| JTB1 二进制 | 12～30 B | 无分隔符，整数用 i32，常量值无附加字节 |
+| NDJSON（旧格式） | 100～300 B | 每条一行 JSON，字段名全文本 |
+
+---
+
+## 7. `.smap.json` — Source Map 文件
+
+`.smap.json` 是与 `.bin` 配对的位置信息文件，在**离线后处理阶段**将 iid 映射回源码位置。
+
+### 文件命名规则
+
+- `trace.bin` → `trace.smap.json`（同目录，`.bin` 后缀替换为 `.smap.json`）
+- 其他后缀 → 追加 `.smap.json`（如 `trace.dat` → `trace.dat.smap.json`）
+
+### 生成方式
+
+由插桩器的 `buildSmapJson(sourceMapObject)` 函数生成，包含：
+- 每个 iid 对应的源码位置（`[startLine, startCol, endLine, endCol]`）
+- 可选：`defIid`（该 read-site 对应的 def-site iid，用于 FAI 值省略追溯）
+- 源文件名、原始源码（可选）
+
+### 写出方式
+
+`NodeStreamBackend` 在 `close()` 时自动写出：
+
+```js
+const backend = new NodeStreamBackend({ path: 'trace.bin' });
+backend.setSmap(buildSmapJson(sourceMapObject));  // 注入 smap
+await backend.close();  // 自动写出 trace.smap.json
+```
+
+在 `instrument-and-run` 模式中，loader 钩子插桩后立即调用 `tracer.setSmap()` 注入当前文件的 smap，
+实现 `.bin` 和 `.smap.json` 的自动配对。
+
+### 格式示例
+
+```json
+{
+  "file": "foo.js",
+  "iids": {
+    "8":  [1, 0, 1, 5],
+    "16": [2, 4, 2, 9],
+    "24": { "loc": [3, 0, 3, 7], "defIid": 8 }
+  }
+}
 ```
 
 ---
 
-## 7. 后端接口规范（LogBackend）
+## 8. 后端接口规范（LogBackend）
 
 所有后端实现以下接口（非强制继承，duck typing）：
 
@@ -436,9 +588,9 @@ interface LogBackend {
 
 ---
 
-## 8. 各后端详解
+## 9. 各后端详解
 
-### 8.1 `MemoryBackend`（`transport/MemoryBackend.js`）
+### 9.1 `MemoryBackend`（`transport/MemoryBackend.js`）
 
 最简单的后端，所有事件保存在内存数组中，**仅用于测试**。
 
@@ -452,24 +604,43 @@ const reads    = backend.getEventsOfType('READ');
 backend.clear();  // 清空
 ```
 
-### 8.2 `NodeStreamBackend`（`transport/NodeStreamBackend.js`）
+### 9.2 `NodeStreamBackend`（`transport/NodeStreamBackend.js`）
 
-Node.js 专用，通过 `fs.WriteStream` 将事件序列化为 NDJSON 写入文件。
+Node.js 专用，通过 `fs.WriteStream` 将事件序列化为 **JTB1 二进制格式** 写入 `.bin` 文件。
+可选：在 `close()` 时自动将 smap 写出为配对的 `.smap.json`。
 
 ```js
 import { NodeStreamBackend } from '../../logger/transport/NodeStreamBackend.js';
 
 const backend = new NodeStreamBackend({
-    path:          'jalangi-trace.ndjson',  // 或传入 stream: existingWritable
-    append:        true,           // false = 覆盖
-    highWaterMark: 65536,          // WriteStream 缓冲上限（字节）
-    autoFlush:     false,          // 每批后调用 flush（增加 syscall）
+    path:          'jalangi-trace.bin',   // 输出文件路径（.bin）
+    stream:        null,                  // 或传入已有 Writable（优先于 path）
+    append:        false,                 // 二进制 trace 不支持追加，固定覆盖
+    highWaterMark: 65536,                 // WriteStream 缓冲上限（字节）
+    autoFlush:     false,                 // 每批后调用 flush（增加 syscall）
+    smap:          null,                  // 初始 smap 对象（可后续通过 setSmap 更新）
 });
+```
+
+**smap 注入**：
+
+```js
+backend.setSmap(smapObj);   // 注入 smap（可在 write 之后、close 之前任意时刻调用）
+await backend.close();      // 自动写出 jalangi-trace.smap.json
+```
+
+**文件格式**：
+
+```
+[8B 文件头: 魔数 JTB1 + 版本]
+[12B 事件头 + payloadLen 字节 payload]   ← 事件 1
+[12B 事件头 + payloadLen 字节 payload]   ← 事件 2
+...
 ```
 
 背压处理：`write()` 检测 `stream.writableNeedDrain`，背压时等待 `drain` 事件。
 
-### 8.3 `WsBackend`（`transport/WsBackend.js`）
+### 9.3 `WsBackend`（`transport/WsBackend.js`）
 
 统一的 WebSocket 后端，通过 `mode` 参数切换三种内部实现。
 
@@ -517,7 +688,7 @@ const backend = new WsBackend({ url, mode: 'sab',    format: 'binary', slotDataB
 WsBackend.isSabSupported()  // → boolean
 ```
 
-### 8.4 `IdbBackend`（`transport/IdbBackend.js`）
+### 9.4 `IdbBackend`（`transport/IdbBackend.js`）
 
 > 原 `IdbWorkerBackend`，已去掉"Worker"后缀（Worker 是内部实现细节）。
 
@@ -535,7 +706,7 @@ await backend.init();  // 等待 Worker 启动 + IDB 连接就绪
 
 ---
 
-## 9. Worker 脚本
+## 10. Worker 脚本
 
 两个 Worker 脚本均为 **Classic Worker**（无 `import`，自包含），原因是 Blob URL 不支持 Module Worker。
 它们是对应后端类的**内部实现细节**，不应直接 import，也不应被外部模块依赖。
@@ -576,7 +747,7 @@ await backend.init();  // 等待 Worker 启动 + IDB 连接就绪
 
 ---
 
-## 10. 在分析插件中使用日志系统
+## 11. 在分析插件中使用日志系统
 
 ### 最简使用（只需诊断日志）
 
@@ -605,7 +776,10 @@ tracer.init();  // 不 await，事件自动缓冲
 let seq = 0;
 
 export function read(iid, name, val) {
-    tracer.trace({ type: 'READ', iid, name, value: val, seq: seq++ });
+    tracer.trace({
+        type: 'END_EXPR', iid, seq: seq++,
+        writes: [], reads: [{ name, val }], fields: [],
+    });
     return { result: val };
 }
 
@@ -620,31 +794,35 @@ export function endExecution() {
 ```js
 import { TraceLogger } from '../../logger/TraceLogger.js';
 
-const tracer = new TraceLogger({ nodeFile: 'my-trace.ndjson' });
+const tracer = new TraceLogger({ nodeFile: 'my-trace.bin' });
 await tracer.init();
 
 export function write(iid, name, val) {
-    tracer.trace({ type: 'WRITE', iid, name, value: val });
+    tracer.trace({
+        type: 'END_EXPR', iid, seq: 0,
+        writes: [{ name, val }], reads: [], fields: [],
+    });
     return { result: val };
 }
 
 export async function endExecution() {
     await tracer.close();
+    // 生成 my-trace.bin 和（如有 smap）my-trace.smap.json
 }
 ```
 
 ---
 
-## 11. 典型配置场景
+## 12. 典型配置场景
 
 ### 场景一：Node.js 单次分析，结果存文件
 
 ```js
-const tracer = new TraceLogger({ nodeFile: 'trace.ndjson' });
+const tracer = new TraceLogger({ nodeFile: 'trace.bin' });
 await tracer.init();
 // ... 分析运行 ...
 await tracer.close();
-// 分析文件：jq 'select(.type=="READ")' trace.ndjson
+// 解码文件：node tools/trace-decode.mjs trace.bin --smap trace.smap.json
 ```
 
 ### 场景二：浏览器高频插桩，实时传输到 trace server
@@ -654,7 +832,7 @@ await tracer.close();
 const tracer = new TraceLogger({
     wsUrl:    'ws://localhost:9229/trace',
     wsWorker: true,     // 推荐：Worker 线程发送，不阻塞主线程
-    wsFormat: 'binary', // 高吞吐
+    wsFormat: 'binary', // 高吞吐（JTB1）
 });
 tracer.init();
 ```
@@ -689,16 +867,16 @@ import { createMemoryLogManager } from '../../logger/LogManager.js';
 
 const { mgr, backend } = await createMemoryLogManager();
 
-mgr.push({ type: 'READ', iid: 8, sid: 1, name: 'x', value: 42 });
+mgr.push({ type: 'END_EXPR', iid: 8, seq: 1, writes: [{ name: 'x', val: 42 }], reads: [], fields: [] });
 await mgr.flush();
 
 const events = backend.getEvents();
-assert.strictEqual(events[0].type, 'READ');
+assert.strictEqual(events[0].type, 'END_EXPR');
 ```
 
 ---
 
-## 12. 注意事项 & 常见问题
+## 13. 注意事项 & 常见问题
 
 ### `forceSyncFlushThreshold` 的用途
 
@@ -709,10 +887,20 @@ LogManager 的 `forceSyncFlushThreshold` 选项是**验证工具**，不是生�
 ### WsBackend SAB 模式的 `slotDataBytes` 选择
 
 每个槽的大小决定单个 batch 序列化后的最大字节数：
-- `binary` 格式：约 16 字节/条，256 条 ≈ 4KB，64KB 默认值足够
+- `binary` 格式（JTB1）：约 12～30 字节/条，256 条 ≈ 4～8KB，64KB 默认值足够
 - `ndjson` 格式：约 100～300 字节/条，32 条 ≈ 6KB，建议设为 `2 * 1024 * 1024`（2MB）
 
 `TraceLogger` 已针对 `ndjson` 格式自动放大 `slotDataBytes`，无需手动配置。
+
+### NodeStreamBackend 不支持追加模式
+
+二进制 JTB1 格式要求文件头位于文件开头，因此**不支持** `append: true`（总是覆盖写）。
+如需合并多次运行的 trace，应在后处理阶段拼接，而非直接追加文件。
+
+### .smap.json 写出失败
+
+`_writeSmapJson()` 内部使用 `writeFileSync` 同步写出，写出失败只打印 `log.error` 日志而不抛出异常。
+可通过 `JALANGI_DEBUG=backend:node` 开启调试日志查看详情。
 
 ### 页面刷新时数据丢失问题
 
@@ -740,10 +928,15 @@ LogManager 的 `forceSyncFlushThreshold` 选项是**验证工具**，不是生�
 | `new WsWorkerBackend(opts)` | `new WsBackend({ ...opts, mode: 'worker' })` | 合并入 WsBackend |
 | `new WsSabBackend(opts)` | `new WsBackend({ ...opts, mode: 'sab' })` | 合并入 WsBackend |
 | `import ... from 'logger/EventSerializer.js'` | `import ... from 'encoding/EventSerializer.js'` | 移至独立模块 |
+| `NodeStreamBackend({ path: 'x.ndjson' })` | `NodeStreamBackend({ path: 'x.bin' })` | 格式由 NDJSON 改为 JTB1 二进制 |
+| `serializeBatchToNDJSON(events)` | `serializeBatch(events)` | NDJSON 已废弃，改用 JTB1 二进制 |
+| `serializeBatchToBinary(events)` | `serializeBatch(events)` | 旧 batch 格式已删除，改为流式排列 |
+
+> **注**：旧版 `serializeBatchToNDJSON`、`serializeBatchToBinary`、`deserializeBatchFromBinary`、`serializeEventToJSON`、`deserializeEventFromBinary` 等废弃 API 已从代码库完全移除。
 
 ---
 
-## 13. 扩展：自定义后端
+## 14. 扩展：自定义后端
 
 实现 `LogBackend` 接口即可：
 
@@ -784,16 +977,16 @@ const mgr = new LogManager({ backends: [new MyCustomBackend({ ... })] });
 
 ---
 
-## 14. Trace Server（`tools/trace-server/server.mjs`）
+## 15. Trace Server（`tools/trace-server/server.mjs`）
 
-Trace Server 是一个独立的 Node.js WebSocket 服务器，负责接收来自浏览器端 `WsBackend` 推送的事件批次，并将其持久化到本地文件。
+Trace Server 是一个独立的 Node.js WebSocket 服务器，负责接收来自浏览器端 `WsBackend` 推送的 JTB1 二进制事件批次，并将其持久化到本地 `.bin` 文件。
 
-> 依赖 `src/encoding/EventSerializer.js` 进行二进制帧反序列化。
+> 依赖 `src/encoding/EventSerializer.js` 进行 JTB1 二进制帧解析。
 
 ### 启动
 
 ```bash
-# 默认启动（端口 9229，输出目录 traces/，启动时清空目录中的旧 .ndjson 文件）
+# 默认启动（端口 9229，输出目录 traces/，启动时清空目录中的旧 .bin 文件）
 npm run trace-server
 
 # 自定义端口和输出目录
@@ -801,9 +994,6 @@ node tools/trace-server/server.mjs --port 9230 --out my-traces
 
 # 保留历史文件（不清空）
 node tools/trace-server/server.mjs --no-clear
-
-# 输出完整 NDJSON（默认只保存 trace 事件的 text 字段）
-node tools/trace-server/server.mjs --no-text-only
 
 # 查看所有选项
 node tools/trace-server/server.mjs --help
@@ -814,29 +1004,46 @@ node tools/trace-server/server.mjs --help
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--port <number>` | `9229` | WebSocket 监听端口 |
-| `--out <dir>` | `traces` | 输出**目录**路径（每个连接写入独立文件） |
-| `--format <mode>` | `binary` | 接收格式：`binary`（高吞吐）或 `ndjson` |
-| `--text-only` | 开启 | trace 类型事件只写 `text` 字段；`--no-text-only` 输出完整 JSON |
-| `--clear` | 开启 | 启动时删除输出目录中的所有 `.ndjson` 文件；`--no-clear` 跳过清空 |
+| `--out <dir>` | `traces` | 输出**目录**路径（每个连接写入独立 `.bin` 文件） |
+| `--clear` | 开启 | 启动时删除输出目录中的所有 `.bin` 和 `.smap.json` 文件；`--no-clear` 跳过清空 |
 | `--max-payload <MB>` | `0`（无限制）| 最大单条消息体积（MB） |
 | `--verbose` | 关闭 | 打印每个 batch 的接收日志（含目标文件名） |
 | `--help` | — | 显示帮助信息 |
 
+### 传输协议
+
+客户端（`WsBackend`）发送二进制帧，格式为：
+
+```
+[u32 batchId LE][JTB1 事件流（无文件头，直接事件序列）]
+```
+
+服务端收到后回复 ACK（4 字节 `u32 batchId LE`）。
+
 ### 每连接独立文件（会话隔离）
 
-每个 WebSocket 连接对应一个独立的输出文件，不同会话（页面刷新、多个 Tab、多次分析）的数据**不会混写**到同一文件中。
+每个 WebSocket 连接对应一个独立的输出 `.bin` 文件，不同会话（页面刷新、多个 Tab、多次分析）的数据**不会混写**到同一文件中。
 
 **文件命名格式**：
 
 ```
-traces/trace_<YYYYMMDD>_<HHmmss>_<ms>_<seq>.ndjson
+traces/trace_<YYYYMMDD>_<HHmmss>_<ms>_<seq>.bin
 ```
 
 示例：
 
 ```
-traces/trace_20260314_153042_123_001.ndjson   ← 第 1 个连接
-traces/trace_20260314_153043_456_002.ndjson   ← 第 2 个连接（页面刷新后）
+traces/trace_20260314_153042_123_001.bin   ← 第 1 个连接
+traces/trace_20260314_153043_456_002.bin   ← 第 2 个连接（页面刷新后）
+```
+
+**文件格式**：服务端首次写入时生成 JTB1 文件头（8B），随后将每批收到的事件流追加到文件中：
+
+```
+[8B 文件头：魔数 JTB1 + 版本]
+[12B 事件头 + payload]   ← 批次 1 事件
+[12B 事件头 + payload]   ← 批次 2 事件
+...
 ```
 
 ### HTTP 端点
@@ -846,14 +1053,17 @@ traces/trace_20260314_153043_456_002.ndjson   ← 第 2 个连接（页面刷新
 | `GET /health` | 健康检查，返回 `{ status: 'ok', ...stats }` |
 | `GET /stats` | 统计信息（连接数、批次数、事件数、字节数、错误数）|
 
-### 输出格式
+### 后处理
 
-**默认（`--text-only`，推荐）**：`trace` 类型事件只写入 `text` 字段的纯文本，
-其他类型事件（如 `key`）仍写为 JSON 行。可直接用 `grep` / `cat` 阅读。
-
-**`--no-text-only`**：所有事件统一输出为 NDJSON（一行一个 JSON 对象），可用 `jq` 直接分析：
+收到的 `.bin` 文件可直接用后处理工具链分析：
 
 ```bash
-# 过滤 read 事件
-cat traces/trace_*.ndjson | jq 'select(.type == "read")'
+# 解码并以树形格式渲染
+node tools/trace-decode.mjs traces/trace_*.bin | node tools/trace-render.mjs --format tree
+
+# 过滤特定事件类型
+node tools/trace-decode.mjs traces/trace_*.bin | node tools/trace-filter.mjs --type CALL_PRE
+
+# 带 smap 解析源码位置
+node tools/trace-decode.mjs traces/trace_*.bin --smap traces/trace_*.smap.json
 ```

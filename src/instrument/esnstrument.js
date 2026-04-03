@@ -987,6 +987,9 @@ function transformString(code, sourceType, enableSampling) {
         transformAst(newAst, visitorMergeBodyPre, undefined, CONTEXT.RHS);
     }
 
+    // 插桩完成后，关联 LIGHTWEIGHT read-site 的 defIid（写入 iidSourceInfo，供 smap.json 导出）
+    W.resolveDefIids();
+
     W.setInstrDecisions(null);
     W.setStmtUseMap(null);
 
@@ -1169,6 +1172,67 @@ function instrumentEvalCode(code, iid, isDirect) {
     }).code;
 }
 
+// ─── smap.json 构建工具 ─────────────────────────────────────────────────────────
+
+/**
+ * 将 `sourceMapObject`（insertCode 返回的 sourceInfo）转换为分离存储的 smap.json 格式。
+ *
+ * 输出格式：
+ * ```json
+ * {
+ *   "version": 1,
+ *   "originalFile": "foo.js",
+ *   "instrumentedFile": "foo.inst.js",
+ *   "iids": {
+ *     "9":  [1, 1, 1, 10],
+ *     "17": [2, 3, 2, 15, "x + y"],
+ *     "25": [3, 1, 3, 8,  "return x", 17]
+ *   }
+ * }
+ * ```
+ *
+ * iids 条目格式：`[sl, sc, el, ec]` 或 `[sl, sc, el, ec, srcText]` 或 `[sl, sc, el, ec, srcText, defIid]`
+ *
+ * 跳过 sourceMapObject 中的非 iid 键（`nBranches`、`originalCodeFileName`、`instrumentedCodeFileName`、
+ * `url`、`evalSid`、`evalIid`、`code`）。
+ *
+ * @param {object} sourceMapObject  来自 instrumentCode().sourceMapObject 的 sourceInfo 对象
+ * @returns {object}  smap.json 内容对象（可直接 JSON.stringify）
+ */
+function buildSmapJson(sourceMapObject) {
+    const NON_IID_KEYS = new Set([
+        'nBranches', 'originalCodeFileName', 'instrumentedCodeFileName',
+        'url', 'evalSid', 'evalIid', 'code',
+    ]);
+
+    const iids = {};
+    for (const [key, val] of Object.entries(sourceMapObject)) {
+        if (NON_IID_KEYS.has(key)) continue;
+        if (!Array.isArray(val)) continue;
+        // val = [sl, sc, el, ec] 或 [sl, sc, el, ec, srcText?, defIid?]
+        // 压缩尾部 null/undefined：smap.json 中只记录非空字段
+        let entry = val.slice(0, 4);  // 至少保留 [sl, sc, el, ec]
+        if (val.length >= 5 && val[4] != null) {
+            entry = [...entry, val[4]];
+            if (val.length >= 6 && val[5] != null) {
+                entry = [...entry, val[5]];
+            }
+        }
+        iids[key] = entry;
+    }
+
+    return {
+        version:          1,
+        originalFile:     sourceMapObject.originalCodeFileName ?? '',
+        instrumentedFile: sourceMapObject.instrumentedCodeFileName ?? '',
+        ...(sourceMapObject.nBranches != null && { nBranches: sourceMapObject.nBranches }),
+        ...(sourceMapObject.url       != null && { url:       sourceMapObject.url }),
+        ...(sourceMapObject.evalSid   != null && { evalSid:   sourceMapObject.evalSid }),
+        ...(sourceMapObject.evalIid   != null && { evalIid:   sourceMapObject.evalIid }),
+        iids,
+    };
+}
+
 // pluginAnalyzer 工具函数（analyzePluginHooks/buildConfigFromHooks/buildConfigFromPlugins/fullConfig）
 // 请直接从 './pluginAnalyzer.js' 导入，不在此再导出。
-export { init, instrumentCode, instrumentEvalCode };
+export { init, instrumentCode, instrumentEvalCode, buildSmapJson };

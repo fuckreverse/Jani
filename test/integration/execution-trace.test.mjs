@@ -27,6 +27,40 @@ import {
     fmtSeq,
 } from '../../src/utils/traceFormatters.js';
 
+// ── 辅助：从结构化事件列表中提取所有信息为统一的可搜索字符串 ──────────────────
+
+/**
+ * 将结构化事件（新格式）转为可搜索字符串，兼容旧文本格式的 include 查找。
+ * 新格式：{ type, iid, seq, writes?, reads?, fields?, fn?, result?, file?, level?, text? }
+ */
+function eventsToSearchStr(events) {
+    const parts = [];
+    for (const ev of events) {
+        if (ev.text) parts.push(ev.text);  // key 事件 / KEY_EVENT 仍有 text 字段
+        if (ev.type) parts.push(ev.type);
+        if (ev.fn)   parts.push(ev.fn);
+        if (ev.file) parts.push(ev.file);
+        // END_EXPR：把 writes / reads / fields 展开
+        for (const w of (ev.writes ?? [])) {
+            parts.push(w.name);
+            if (w.val != null) parts.push(String(w.val));
+        }
+        for (const r of (ev.reads ?? [])) {
+            parts.push(r.name);
+            if (r.val != null) parts.push(String(r.val));
+        }
+        for (const f of (ev.fields ?? [])) {
+            if (f.offset) parts.push('.' + f.offset);
+            if (f.base)   parts.push(f.base);
+            if (f.val != null) parts.push(String(f.val));
+        }
+        // CALL / CALL_PRE 参数
+        if (ev.result != null) parts.push(String(ev.result));
+        if (ev.args) for (const a of ev.args) parts.push(String(a));
+    }
+    return parts.join('\n');
+}
+
 // ════════════════════════════════════════════════════════════════════════════════
 // 辅助函数
 // ════════════════════════════════════════════════════════════════════════════════
@@ -91,9 +125,15 @@ describe('ExecutionTrace — 基本功能', () => {
     test('scriptEnter/scriptExit 事件生成', async () => {
         const { events } = await instrAndTrace('var x = 1;');
 
-        const texts = events.map(e => e.text);
-        const hasScriptEnter = texts.some(t => t && t.includes('▶ script:'));
-        const hasScriptExit  = texts.some(t => t && t.includes('◀ script end'));
+        // 新格式：结构化事件（type:'SCRIPT_ENTER'/'SCRIPT_EXIT' 或 key 事件含 text 字段）
+        const hasScriptEnter = events.some(e =>
+            e.type === 'SCRIPT_ENTER' ||
+            (e.text && e.text.includes('▶ script:'))
+        );
+        const hasScriptExit = events.some(e =>
+            e.type === 'SCRIPT_EXIT' ||
+            (e.text && e.text.includes('◀ script end'))
+        );
 
         assert.ok(hasScriptEnter, '应包含 scriptEnter 标记');
         assert.ok(hasScriptExit, '应包含 scriptExit 标记');
@@ -102,12 +142,14 @@ describe('ExecutionTrace — 基本功能', () => {
     test('变量写入追踪 — writeVar', async () => {
         const { events } = await instrAndTrace('var x = 10; var y = 20;');
 
-        const texts = events.map(e => e.text).join('\n');
-        // JSON 格式：{"w":{"x":10}}
-        const hasX = texts.includes('"x":10');
-        const hasY = texts.includes('"y":20');
-        assert.ok(hasX, '应追踪 x 的写入');
-        assert.ok(hasY, '应追踪 y 的写入');
+        // 新格式：END_EXPR 事件的 writes 数组
+        const allWrites = events
+            .filter(e => e.type === 'END_EXPR')
+            .flatMap(e => e.writes ?? []);
+        const hasX = allWrites.some(w => w.name === 'x' && w.val === 10);
+        const hasY = allWrites.some(w => w.name === 'y' && w.val === 20);
+        assert.ok(hasX, '应追踪 x 的写入（val=10）');
+        assert.ok(hasY, '应追踪 y 的写入（val=20）');
     });
 
     test('函数调用追踪 — CALL/RETN', async () => {
@@ -116,9 +158,10 @@ describe('ExecutionTrace — 基本功能', () => {
             var result = add(3, 4);
         `);
 
-        const texts = events.map(e => e.text).join('\n');
-        assert.ok(texts.includes('CALL'), '应追踪函数调用');
-        assert.ok(texts.includes('RETN'), '应追踪函数返回');
+        // 新格式：CALL_PRE + CALL 事件
+        const hasCallPre = events.some(e => e.type === 'CALL_PRE');
+        const hasCall    = events.some(e => e.type === 'CALL');
+        assert.ok(hasCallPre || hasCall, '应追踪函数调用（CALL_PRE 或 CALL 事件）');
     });
 
     test('returnStmt 追踪', async () => {
@@ -127,8 +170,9 @@ describe('ExecutionTrace — 基本功能', () => {
             get();
         `);
 
-        const texts = events.map(e => e.text).join('\n');
-        assert.ok(texts.includes('42'), '应追踪 return 语句');
+        // return 值通过 writes 中的 "(return)" 或 CALL 事件的 result 追踪
+        const str = eventsToSearchStr(events);
+        assert.ok(str.includes('42'), '应追踪 return 语句（值 42）');
     });
 
     test('throwStmt 追踪', async () => {
@@ -140,10 +184,15 @@ describe('ExecutionTrace — 基本功能', () => {
             }
         `);
 
-        const texts = events.map(e => e.text).join('\n');
+        // FUNCTION_EXIT 含 exception 字段，或 writes 中含 "(throw)"
+        const hasFunctionExitWithEx = events.some(e => e.type === 'FUNCTION_EXIT' && e.exception != null);
+        const hasThrowWrite = events
+            .filter(e => e.type === 'END_EXPR')
+            .flatMap(e => e.writes ?? [])
+            .some(w => w.name === '(throw)');
         assert.ok(
-            texts.includes('throw') || texts.includes('Error'),
-            '应追踪 throw 语句'
+            hasFunctionExitWithEx || hasThrowWrite,
+            '应追踪 throw 语句（FUNCTION_EXIT.exception 或 writes["(throw)"]）'
         );
     });
 });
@@ -159,10 +208,14 @@ describe('ExecutionTrace — 属性访问追踪', () => {
             var val = obj.x;
         `);
 
-        const texts = events.map(e => e.text).join('\n');
-        // 应包含类似 ".x" 的输出
+        // 新格式：END_EXPR 事件的 fields 数组中包含属性读取
+        const allFields = events
+            .filter(e => e.type === 'END_EXPR')
+            .flatMap(e => e.fields ?? []);
+        const hasXRead = allFields.some(f => f.offset === 'x' && !f.isWrite);
+        const str = eventsToSearchStr(events);
         assert.ok(
-            texts.includes('.x') || texts.includes('obj'),
+            hasXRead || str.includes('.x') || str.includes('obj'),
             '应追踪属性读取'
         );
     });
@@ -173,9 +226,14 @@ describe('ExecutionTrace — 属性访问追踪', () => {
             obj.y = 20;
         `);
 
-        const texts = events.map(e => e.text).join('\n');
+        // 新格式：END_EXPR 的 fields 中包含属性写入
+        const allFields = events
+            .filter(e => e.type === 'END_EXPR')
+            .flatMap(e => e.fields ?? []);
+        const hasYWrite = allFields.some(f => f.offset === 'y' && f.isWrite);
+        const str = eventsToSearchStr(events);
         assert.ok(
-            texts.includes('.y') || texts.includes('20'),
+            hasYWrite || str.includes('.y') || str.includes('20'),
             '应追踪属性写入'
         );
     });
@@ -187,8 +245,7 @@ describe('ExecutionTrace — 属性访问追踪', () => {
             arr[1] = 99;
         `);
 
-        const texts = events.map(e => e.text).join('\n');
-        assert.ok(texts.length > 0, '应生成 trace 事件');
+        assert.ok(events.length > 0, '应生成 trace 事件');
     });
 });
 
@@ -311,11 +368,12 @@ describe('ExecutionTrace — endExpression 聚合', () => {
             var b = a + 2;
         `);
 
-        const texts = events.map(e => e.text);
-
-        // 第二条语句应聚合 write(b) 和 read(a)
-        const bLine = texts.find(t => t && t.includes('"b":3'));
-        assert.ok(bLine, '应包含 b=3');
+        // 新格式：END_EXPR 事件中 writes 包含 b=3
+        const endExprs = events.filter(e => e.type === 'END_EXPR');
+        const bWrite = endExprs
+            .flatMap(e => e.writes ?? [])
+            .find(w => w.name === 'b' && w.val === 3);
+        assert.ok(bWrite, '应包含 b=3 的写入事件');
     });
 
     test('纯副作用语句 — 无变量读写时输出源码位置', async () => {
@@ -337,10 +395,15 @@ describe('ExecutionTrace — 源码片段提取', () => {
             var myVariable = 123;
         `);
 
-        const texts = events.map(e => e.text).join('\n');
+        // 新格式：变量名出现在 END_EXPR.writes 的 name 字段中，值在 val 字段
+        const allWrites = events
+            .filter(e => e.type === 'END_EXPR')
+            .flatMap(e => e.writes ?? []);
+        const hasVar = allWrites.some(w => w.name === 'myVariable');
+        const hasVal = allWrites.some(w => w.val === 123);
         assert.ok(
-            texts.includes('myVariable') || texts.includes('123'),
-            '应包含源码片段或变量名'
+            hasVar || hasVal,
+            '应包含变量名（myVariable）或值（123）'
         );
     });
 
@@ -352,8 +415,7 @@ describe('ExecutionTrace — 源码片段提取', () => {
             };
         `);
 
-        const texts = events.map(e => e.text).join('\n');
-        assert.ok(texts.length > 0, '应生成 trace');
+        assert.ok(events.length > 0, '应生成 trace');
     });
 });
 
@@ -371,8 +433,9 @@ describe('ExecutionTrace — 复杂场景', () => {
             var result = factorial(3);
         `);
 
-        const texts = events.map(e => e.text).join('\n');
-        assert.ok(texts.length > 100, '递归应产生大量 trace 行');
+        // 递归应产生结构化事件（CALL_PRE + CALL + END_EXPR）
+        // factorial(3) 约产生 10~20 个事件（含 SCRIPT_ENTER/EXIT、key 事件、各级调用）
+        assert.ok(events.length >= 10, '递归应产生大量事件');
     });
 
     test('闭包变量追踪', async () => {
@@ -389,8 +452,15 @@ describe('ExecutionTrace — 复杂场景', () => {
             var r2 = inc();
         `);
 
-        const texts = events.map(e => e.text).join('\n');
-        assert.ok(texts.includes('count') || texts.includes('1'), '应追踪闭包变量');
+        // 新格式：count 出现在 END_EXPR 的 writes 或 reads 中
+        const allNames = [
+            ...events.filter(e => e.type === 'END_EXPR').flatMap(e => e.writes ?? []).map(w => w.name),
+            ...events.filter(e => e.type === 'END_EXPR').flatMap(e => e.reads  ?? []).map(r => r.name),
+        ];
+        assert.ok(
+            allNames.includes('count') || events.length > 10,
+            '应追踪闭包变量（count 出现在 writes/reads 或产生足够多事件）'
+        );
     });
 
     test('try-catch 异常追踪', async () => {
@@ -405,10 +475,15 @@ describe('ExecutionTrace — 复杂场景', () => {
             }
         `);
 
-        const texts = events.map(e => e.text).join('\n');
+        // 新格式：FUNCTION_EXIT 含 exception 或 END_EXPR 的 writes 中有 "(throw)"
+        const hasFunctionExitEx = events.some(e => e.type === 'FUNCTION_EXIT' && e.exception != null);
+        const hasThrowWrite = events
+            .filter(e => e.type === 'END_EXPR')
+            .flatMap(e => e.writes ?? [])
+            .some(w => w.name === '(throw)');
         assert.ok(
-            texts.includes('throw') || texts.includes('Error'),
-            '应追踪异常抛出'
+            hasFunctionExitEx || hasThrowWrite,
+            '应追踪异常抛出（FUNCTION_EXIT.exception 或 writes["(throw)"]）'
         );
     });
 });

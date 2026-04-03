@@ -1,41 +1,60 @@
 #!/usr/bin/env node
 /**
- * trace-parse.mjs — 将文本 trace 转换为结构化 NDJSON
+ * trace-parse.mjs — 将 trace 文件转换为结构化 NDJSON
+ *
+ * 支持两种输入格式（自动检测）：
+ *   1. JTB1 二进制 trace 文件（.bin）— 直接解码，输出量小，无需正则解析
+ *   2. 文本格式 trace 行（旧格式）— 手动解析器（热路径）
  *
  * 用法：
+ *   node tools/trace-parse.mjs trace.bin                    # 自动检测二进制
+ *   node tools/trace-parse.mjs trace.bin --smap t.smap.json # 注入源码位置
+ *   node tools/trace-parse.mjs trace.bin --smap t.smap.json --resolve-values
  *   cat trace.ndjson | node tools/trace-parse.mjs > parsed.ndjson
  *   node tools/trace-parse.mjs trace.ndjson > parsed.ndjson
  *   node tools/trace-parse.mjs --help
  *
- * 输入格式支持：
- *   1. 原始 JSON 行（直接透传）
- *   2. 文本格式 trace 行：
- *      - [  123] [  10:5] CALL foo(2 args) {"a":[...]}
- *      - [  124] [  10:5] RETN foo {"v":42}
- *      - [  125] [  10:5] x = 1 + 2 {"w":{"x":3}}
- *      - [    1] ▶ script: /path/to/file.js
- *      - [  999] ◀ script end
+ * 文本格式输入支持：
+ *   - [  123] [  10:5] CALL foo(2 args) {"a":[...]}
+ *   - [  124] [  10:5] RETN foo {"v":42}
+ *   - [  125] [  10:5] x = 1 + 2 {"w":{"x":3}}
+ *   - [    1] ▶ script: /path/to/file.js
+ *   - [  999] ◀ script end
  *
  * 输出格式（每行一个紧凑 JSON 对象）：
- *   {"seq":123,"line":10,"col":5,"type":"call","fn":"foo","args":2,"kv":{...}}
- *   {"seq":124,"line":10,"col":5,"type":"return","fn":"foo","result":42}
- *   {"seq":125,"line":10,"col":5,"type":"expr","src":"x = 1 + 2","w":{"x":3}}
- *   {"seq":1,"type":"script_enter","file":"/path/to/file.js"}
- *   {"seq":999,"type":"script_exit"}
+ *   二进制模式：{"type":"SCRIPT_ENTER","seq":1,"iid":8,"file":"...","line":1,"col":0}
+ *   文本模式：  {"seq":123,"line":10,"col":5,"type":"call","fn":"foo","args":2,"kv":{...}}
  *
- * 选项：
- *   --strict    遇到无法解析的行时报错（默认跳过并警告）
- *   --raw       输出原始解析结果（包含更多细节）
- *   --compact   紧凑输出（默认即紧凑，保留此选项向后兼容）
- *   --pretty    格式化输出（带缩进，调试用）
- *   --workers N 并行 Worker 线程数（默认 auto = CPU 核心数，0 禁用多线程）
+ * 选项（通用）：
+ *   --pretty          格式化输出（带缩进，调试用）
+ *   --help            显示帮助
+ *
+ * 选项（二进制模式专用）：
+ *   --smap <path>     加载 smap.json，将 iid 还原为 line:col/srcText
+ *   --resolve-values  追溯 OMITTED 值（需 --smap）
+ *   --stats           向 stderr 输出解码统计
+ *
+ * 选项（文本模式专用）：
+ *   --strict          遇到无法解析的行时报错（默认跳过并警告）
+ *   --raw             输出原始解析结果（含更多细节）
+ *   --compact         紧凑输出（默认即紧凑，向后兼容）
+ *   --workers N       并行 Worker 线程数（默认 = CPU 核心数，0 禁用多线程）
  */
 
-import { createReadStream } from 'fs';
+import { createReadStream, readFileSync } from 'fs';
 import { stdin as input } from 'process';
 import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 import { cpus } from 'os';
 import { fileURLToPath } from 'url';
+
+// ── 二进制解码依赖 ──────────────────────────────────────────────────────────────
+import {
+    FILE_HEADER_SIZE,
+    EVENT_HEADER_SIZE,
+    MAGIC,
+    deserializeEvent,
+    isBinaryTrace,
+} from '../src/encoding/EventSerializer.js';
 
 // ── 快速手动解析器（热路径，不使用正则）──────────────────────────────────────
 
@@ -104,12 +123,12 @@ function parseLine(line) {
     if (line.charCodeAt(pos) === 9654 /* ▶ */) {
         const scriptPrefix = '\u25B6 script:';
         if (line.startsWith(scriptPrefix, pos)) {
-            return { seq, type: 'script_enter', file: line.slice(pos + scriptPrefix.length).trim() };
+            return { seq, type: 'SCRIPT_ENTER', file: line.slice(pos + scriptPrefix.length).trim() };
         }
         return null;
     }
     if (line.charCodeAt(pos) === 9668 /* ◀ */) {
-        return { seq, type: 'script_exit', exception: line.indexOf('exception:', pos) >= 0 };
+        return { seq, type: 'SCRIPT_EXIT', exception: line.indexOf('exception:', pos) >= 0 };
     }
 
     // ── 解析 [line:col] ───────────────────────────────────────────────
@@ -180,7 +199,9 @@ function parseContent(seq, lineNum, colNum, content) {
             if (tail.charCodeAt(0) === 123) { try { kv = JSON.parse(tail); } catch { /* ignore */ } }
             else if (tail.charCodeAt(0) === 59) { kv = parseKv(tail.slice(1).trim()); }
         }
-        return { seq, line: lineNum, col: colNum, type: 'call', fn, isConstructor: isNew, args, kv };
+        // 注意：文本格式的 CALL 行实际对应 JTB1 中的 CALL_PRE（调用前），
+        // 输出统一使用 JTB1 类型名以兼容下游工具链
+        return { seq, line: lineNum, col: colNum, type: 'CALL_PRE', fn, isConstructor: isNew, args: args > 0 ? Array(args).fill(undefined) : [], kv };
     }
 
     // ── RETN ──────────────────────────────────────────────────────────
@@ -198,18 +219,19 @@ function parseContent(seq, lineNum, colNum, content) {
             if (rest.charCodeAt(0) === 123) {
                 try {
                     const kvObj = JSON.parse(rest);
-                    return { seq, line: lineNum, col: colNum, type: 'return', fn, result: kvObj.v, kv: kvObj };
+                    // RETN 对应 JTB1 中的 CALL（调用后返回结果）
+                    return { seq, line: lineNum, col: colNum, type: 'CALL', fn, result: kvObj.v, kv: kvObj };
                 } catch { /* fall through */ }
             }
             if (rest.charCodeAt(0) === 59) {
                 const eqIdx = rest.indexOf('=', 1);
                 if (eqIdx >= 0) {
-                    return { seq, line: lineNum, col: colNum, type: 'return', fn, result: parseValue(rest.slice(eqIdx + 1).trim()) };
+                    return { seq, line: lineNum, col: colNum, type: 'CALL', fn, result: parseValue(rest.slice(eqIdx + 1).trim()) };
                 }
             }
-            return { seq, line: lineNum, col: colNum, type: 'return', fn, raw: rest };
+            return { seq, line: lineNum, col: colNum, type: 'CALL', fn, raw: rest };
         }
-        return { seq, line: lineNum, col: colNum, type: 'return', fn };
+        return { seq, line: lineNum, col: colNum, type: 'CALL', fn };
     }
 
     // ── expr ──────────────────────────────────────────────────────────
@@ -218,7 +240,8 @@ function parseContent(seq, lineNum, colNum, content) {
         const srcText = content.slice(0, jsonPos).trimEnd();
         try {
             const kvObj = JSON.parse(content.slice(jsonPos));
-            const rec = { seq, line: lineNum, col: colNum, type: 'expr', src: srcText };
+            // 文本模式的 expr 对应 JTB1 中的 END_EXPR
+            const rec = { seq, line: lineNum, col: colNum, type: 'END_EXPR', srcText, src: srcText };
             if (kvObj.w) rec.w = kvObj.w;
             if (kvObj.r) rec.r = kvObj.r;
             if (kvObj.f) rec.f = kvObj.f;
@@ -229,11 +252,11 @@ function parseContent(seq, lineNum, colNum, content) {
 
     const semiIdx = content.lastIndexOf(';');
     if (semiIdx > 0) {
-        return { seq, line: lineNum, col: colNum, type: 'expr', src: content.slice(0, semiIdx).trim(), kv: parseKv(content.slice(semiIdx + 1).trim()) };
+        return { seq, line: lineNum, col: colNum, type: 'END_EXPR', srcText: content.slice(0, semiIdx).trim(), src: content.slice(0, semiIdx).trim(), kv: parseKv(content.slice(semiIdx + 1).trim()) };
     }
 
     const srcText = content.trim();
-    if (srcText) return { seq, line: lineNum, col: colNum, type: 'expr', src: srcText };
+    if (srcText) return { seq, line: lineNum, col: colNum, type: 'END_EXPR', srcText, src: srcText };
     return null;
 }
 
@@ -315,23 +338,219 @@ if (!isMainThread) {
     parentPort.on('close', () => process.exit(0));
 }
 
+// ── 二进制模式：smap 工具 ─────────────────────────────────────────────────────
+
+/**
+ * 从 smap.json 加载并构建 iid → 位置信息的 Map。
+ * @param {string} smapPath
+ * @returns {{ map: Map, meta: object }}
+ */
+function loadSmap(smapPath) {
+    const raw = JSON.parse(readFileSync(smapPath, 'utf8'));
+    const map = new Map();
+
+    if (raw.iids && typeof raw.iids === 'object') {
+        for (const [key, arr] of Object.entries(raw.iids)) {
+            if (!Array.isArray(arr) || arr.length < 4) continue;
+            const iid = Number(key);
+            map.set(iid, {
+                sl: arr[0], sc: arr[1], el: arr[2], ec: arr[3],
+                srcText: arr[4] != null ? arr[4] : undefined,
+                defIid:  arr[5] != null ? Number(arr[5]) : undefined,
+            });
+        }
+    }
+
+    return { map, meta: { originalFile: raw.originalFile, instrumentedFile: raw.instrumentedFile } };
+}
+
+/**
+ * 将 smap 位置信息注入事件对象（就地修改）。
+ * @param {object} event
+ * @param {Map}    smapMap
+ */
+function injectSmapInfo(event, smapMap) {
+    const entry = smapMap.get(event.iid);
+    if (!entry) return;
+    event.line = entry.sl;
+    event.col  = entry.sc;
+    if (entry.srcText != null) event.srcText = entry.srcText;
+    if (entry.defIid  != null) event._defIid = entry.defIid;
+}
+
+/**
+ * 追溯 OMITTED 值（值省略优化的逆操作）：
+ *   第一遍建立 writeIid → writes 映射，第二遍填充 omitted reads。
+ * @param {object[]} events
+ * @param {Map}      smapMap
+ */
+function resolveOmittedValues(events, smapMap) {
+    const writeValues = new Map();
+    for (const ev of events) {
+        if (ev.type === 'END_EXPR' && ev.writes) {
+            for (const w of ev.writes) {
+                if (!writeValues.has(ev.iid)) writeValues.set(ev.iid, []);
+                writeValues.get(ev.iid).push({ name: w.name, value: w.value });
+            }
+        }
+    }
+    for (const ev of events) {
+        if (ev.type === 'END_EXPR' && ev.reads) {
+            for (const r of ev.reads) {
+                if (!r.omitted) continue;
+                const entry = smapMap.get(ev.iid);
+                if (!entry?.defIid) continue;
+                const writes = writeValues.get(entry.defIid);
+                if (!writes) continue;
+                const match = writes.find(w => w.name === r.name);
+                if (match !== undefined) {
+                    r.value = match.value;
+                    r.resolvedFromDefIid = entry.defIid;
+                    delete r.omitted;
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 解码 JTB1 二进制 Buffer，逐事件调用 emit()。
+ * @param {Buffer}   buf
+ * @param {object}   opts  { smapMap?, resolveValues?, pretty? }
+ * @param {function} emit  (jsonLine: string) => void
+ * @returns {{ total: number, omitted: number }}
+ */
+function decodeBinaryBuffer(buf, opts, emit) {
+    const { smapMap, resolveValues, pretty } = opts;
+    const stats = { total: 0, omitted: 0 };
+
+    const ab   = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    const view = new DataView(ab);
+    let offset = FILE_HEADER_SIZE;
+
+    const allEvents = resolveValues ? [] : null;
+
+    while (offset + EVENT_HEADER_SIZE <= ab.byteLength) {
+        let result;
+        try {
+            result = deserializeEvent(view, offset);
+        } catch (err) {
+            process.stderr.write(`[trace-parse] decode error at offset ${offset}: ${err.message}\n`);
+            break;
+        }
+        const { event, nextOffset } = result;
+        if (nextOffset <= offset) break;
+        offset = nextOffset;
+        stats.total++;
+
+        if (smapMap) injectSmapInfo(event, smapMap);
+
+        if (event.reads) {
+            for (const r of event.reads) { if (r.omitted) stats.omitted++; }
+        }
+
+        if (resolveValues) {
+            allEvents.push(event);
+        } else {
+            emitBinaryEvent(event, pretty, emit);
+        }
+    }
+
+    if (resolveValues && allEvents) {
+        resolveOmittedValues(allEvents, smapMap ?? new Map());
+        for (const ev of allEvents) emitBinaryEvent(ev, pretty, emit);
+    }
+
+    return stats;
+}
+
+/**
+ * 将单条事件（内部字段已清理）序列化为 JSON 行并调用 emit。
+ */
+function emitBinaryEvent(event, pretty, emit) {
+    delete event._defIid;
+    let line;
+    try {
+        line = pretty ? JSON.stringify(event, null, 2) : JSON.stringify(event);
+    } catch {
+        line = JSON.stringify({ type: event.type, seq: event.seq, iid: event.iid, _error: 'serialize failed' });
+    }
+    emit(line);
+}
+
+/**
+ * 二进制模式主流程：读取整个 buffer，解码并输出 NDJSON。
+ * @param {string|null} inputPath
+ * @param {object}      opts
+ */
+async function runBinaryMode(inputPath, opts) {
+    const { smapPath, resolveValues, pretty, showStats } = opts;
+
+    // 加载 smap
+    let smapMap = null;
+    if (smapPath) {
+        try {
+            const { map } = loadSmap(smapPath);
+            smapMap = map;
+        } catch (err) {
+            process.stderr.write(`[trace-parse] failed to load smap: ${err.message}\n`);
+            process.exit(1);
+        }
+    }
+    if (resolveValues && !smapMap) {
+        process.stderr.write('[trace-parse] --resolve-values requires --smap\n');
+        process.exit(1);
+    }
+
+    // 读取 buffer
+    let buf;
+    if (inputPath) {
+        try { buf = readFileSync(inputPath); }
+        catch (err) {
+            process.stderr.write(`[trace-parse] failed to read file: ${err.message}\n`);
+            process.exit(1);
+        }
+    } else {
+        const chunks = [];
+        for await (const chunk of input) chunks.push(chunk);
+        buf = Buffer.concat(chunks);
+    }
+
+    const emit = (line) => process.stdout.write(line + '\n');
+    const stats = decodeBinaryBuffer(buf, { smapMap, resolveValues, pretty }, emit);
+
+    if (showStats) {
+        process.stderr.write(`# trace-parse (binary): total=${stats.total} omitted-reads=${stats.omitted}\n`);
+    }
+}
+
 // ── 主程序 ─────────────────────────────────────────────────────────────
 
 function printHelp() {
     console.log(`
-trace-parse.mjs — 将文本 trace 转换为结构化 NDJSON
+trace-parse.mjs — 将 trace 文件转换为结构化 NDJSON（支持二进制和文本格式）
 
 用法：
+  node tools/trace-parse.mjs trace.bin                        # 二进制模式（自动检测）
+  node tools/trace-parse.mjs trace.bin --smap trace.smap.json # 注入源码位置
+  node tools/trace-parse.mjs trace.bin --smap trace.smap.json --resolve-values
   cat trace.ndjson | node tools/trace-parse.mjs > parsed.ndjson
   node tools/trace-parse.mjs trace.ndjson > parsed.ndjson
 
-选项：
-  --strict      遇到无法解析的行时报错（默认跳过并警告）
-  --raw         输出原始解析结果（包含更多细节）
-  --compact     紧凑输出（默认即紧凑，保留此选项向后兼容）
-  --pretty      格式化输出（带缩进，调试用）
-  --workers N   并行 Worker 数（默认 = CPU 核心数，0 = 禁用多线程）
-  --help        显示帮助信息
+通用选项：
+  --pretty          格式化输出（带缩进，调试用）
+  --help            显示帮助信息
+
+二进制模式选项：
+  --smap <path>     加载 smap.json，将 iid 还原为 line:col + srcText
+  --resolve-values  追溯 OMITTED 值（需 --smap，通过 smap[iid].defIid 找对应 write 值）
+  --stats           向 stderr 输出解码统计
+
+文本模式选项：
+  --strict          遇到无法解析的行时报错（默认跳过并警告）
+  --raw             输出原始解析结果（包含更多细节）
+  --compact         紧凑输出（默认即紧凑，保留此选项向后兼容）
+  --workers N       并行 Worker 数（默认 = CPU 核心数，0 = 禁用多线程）
 `);
 }
 
@@ -341,27 +560,61 @@ async function main() {
     const args = process.argv.slice(2);
     if (args.includes('--help') || args.includes('-h')) { printHelp(); process.exit(0); }
 
-    const strict  = args.includes('--strict');
     const pretty  = args.includes('--pretty');
-    // --workers N
-    const workerIdx = args.indexOf('--workers');
-    const numCores  = cpus().length;
-    const numWorkers = workerIdx >= 0
-        ? parseInt(args[workerIdx + 1] ?? String(numCores), 10)
-        : numCores;
+    const strict  = args.includes('--strict');
 
-    // 跳过 --workers N 的 N，以及其他带参数的选项值
+    // 解析带参数的选项（--workers N / --smap <path>）
     const skipNext = new Set();
     for (let i = 0; i < args.length; i++) {
-        if (args[i] === '--workers') { skipNext.add(i + 1); i++; }
+        if (args[i] === '--workers' || args[i] === '--smap') { skipNext.add(i + 1); i++; }
     }
-    const inputPath = args.find((a, i) => !a.startsWith('--') && !skipNext.has(i));
+    const inputPath = args.find((a, i) => !a.startsWith('--') && !skipNext.has(i)) ?? null;
 
     if (inputPath) {
         const { promises: fsp } = await import('fs');
         try { await fsp.access(inputPath); }
         catch { console.error(`Error: 文件不存在: ${inputPath}`); process.exit(1); }
     }
+
+    // ── 自动检测二进制格式 ───────────────────────────────────────────────────
+    // 策略：
+    //   如果指定了文件路径，读取前 4 字节检测魔数。
+    //   如果是 stdin，先缓存少量字节检测。若是二进制则进入 runBinaryMode。
+    const smapIdx    = args.indexOf('--smap');
+    const smapPath   = smapIdx >= 0 ? args[smapIdx + 1] : null;
+    const resolveValues = args.includes('--resolve-values');
+    const showStats  = args.includes('--stats');
+
+    let isBinary = false;
+
+    if (inputPath) {
+        // 文件路径已知：直接读取前 4 字节
+        try {
+            const fd = await (await import('fs')).promises.open(inputPath, 'r');
+            const hdr = Buffer.alloc(4);
+            await fd.read(hdr, 0, 4, 0);
+            await fd.close();
+            isBinary = isBinaryTrace(hdr);
+        } catch { /* 若读取失败，fallback 到文本模式 */ }
+    } else {
+        // stdin：无法提前知道格式，暂不自动检测（用户可通过 --smap 等选项暗示使用二进制模式，或显式检测）
+        // 如果用户传了 --smap 或 --resolve-values，说明期望二进制模式
+        // 实际上 stdin 二进制模式需要把所有数据先缓存，因此统一由 runBinaryMode 处理
+        isBinary = (smapPath !== null || resolveValues);
+    }
+
+    if (isBinary) {
+        // ── 二进制模式 ──────────────────────────────────────────────────
+        await runBinaryMode(inputPath, { smapPath, resolveValues, pretty, showStats });
+        return;
+    }
+
+    // ── 文本模式（原有路径）─────────────────────────────────────────────────
+    const workerIdx  = args.indexOf('--workers');
+    const numCores   = cpus().length;
+    const numWorkers = workerIdx >= 0
+        ? parseInt(args[workerIdx + 1] ?? String(numCores), 10)
+        : numCores;
 
     const stream = inputPath
         ? createReadStream(inputPath, { highWaterMark: 512 * 1024 })

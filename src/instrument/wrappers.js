@@ -335,12 +335,22 @@ function wrapAwait(node, argument) {
 /**
  * 轻量变量读取钩子包装器。
  * 签名: J$.Rl(iid, defScopeId, name) → value
+ *
+ * @param {object}      node       AST 节点（提供位置信息）
+ * @param {object}      name       StringLiteral 变量名节点
+ * @param {number}      defScopeId def-site 的 scopeId
+ * @param {string|null} [defLocKey]  def-site 位置 key（`"line:col"`），用于 resolveDefIids
  */
-function wrapReadLightweight(node, name, defScopeId) {
+function wrapReadLightweight(node, name, defScopeId, defLocKey) {
     if (!Config.INSTR_READ || Config.INSTR_READ(name.value, node)) {
         IID.printIidToLoc(node);
+        const iidNode = IID.getIid();
+        if (defLocKey !== undefined) {
+            // 将 (readIid, defLocKey) 加入待处理队列，待 resolveDefIids() 关联 defIid
+            _pendingDefIids.push([iidNode.value, defLocKey ?? null]);
+        }
         const ret = jalangiCall('Rl',
-            IID.getIid(),
+            iidNode,
             t.numericLiteral(defScopeId),
             name
         );
@@ -361,6 +371,25 @@ function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration,
     }
     if (!Config.INSTR_WRITE || Config.INSTR_WRITE(name.value, node)) {
         IID.printIidToLoc(node);
+        // 记录 def-site 位置 → 即将分配的 iid（用于 resolveDefIids 阶段关联 LIGHTWEIGHT read 的 defIid）
+        // node.loc.start 是赋值/声明节点的起始位置（与 analyzeDefUse 中 binding.path.node 的 loc 一致）
+        if (node.loc?.start) {
+            const dl = node.loc.start;
+            // IID.memIid 在 printIidToLoc 后、getIid 前已指向将要分配的 iid
+            // 通过 getPrevIidNoInc 无法在 getIid 之前取值，改为在 getIid 后记录
+            const iidNode = IID.getIid();
+            const allocatedIid = iidNode.value;
+            _writeLocToIid.set(`${dl.line}:${dl.column}`, allocatedIid);
+            const bitsNode = t.numericLiteral(createBitPattern(isGlobal, isScriptLocal, isDeclaration));
+            const lhsNode = lhs ?? t.identifier('undefined');
+            const args = [iidNode, name, val, lhsNode, bitsNode];
+            if (scopeId !== undefined && scopeId !== null) {
+                args.push(t.numericLiteral(scopeId));
+            }
+            const ret = callExpr(memberExpr(_jalangiVar, 'W'), args);
+            transferLoc(ret, node);
+            return ret;
+        }
         const bitsNode = t.numericLiteral(createBitPattern(isGlobal, isScriptLocal, isDeclaration));
         // lhs 为 undefined 时（const/let 声明，避免 TDZ），使用 identifier('undefined')
         const lhsNode = lhs ?? t.identifier('undefined');
@@ -1205,8 +1234,12 @@ function instrumentLoad(ast, isTypeof) {
                 defScope.hasOwnVar(ast.name) !== 'blockDefun' &&
                 ast.name !== 'arguments';
 
-            if (decision === 'lightweight' && isSafeForLightweight) {
-                return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id);
+            // 兼容新格式：decision 可能是 { decision: 'lightweight', defLocKey } 对象
+            const decisionStr = (decision && typeof decision === 'object') ? decision.decision : decision;
+            const defLocKey   = (decision && typeof decision === 'object') ? decision.defLocKey : undefined;
+
+            if (decisionStr === 'lightweight' && isSafeForLightweight) {
+                return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id, defLocKey);
             }
 
             if (decision === null) {
@@ -1220,7 +1253,8 @@ function instrumentLoad(ast, isTypeof) {
                     defScope.hasOwnVar(ast.name) !== 'blockDefun' &&
                     ast.name !== 'arguments';
                 if (canUseLightweight) {
-                    return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id);
+                    // decision===null 时无 defLocKey（未经 analyzeDefUse 分析），defLocKey 传 null
+                    return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id, null);
                 }
             }
 
@@ -1309,6 +1343,8 @@ function init(config, jalangiVar) {
 function resetPerFile() {
     labelCounter = 0;
     tmpVarCounter = 0;
+    _writeLocToIid = new Map();
+    _pendingDefIids = [];
 }
 
 // ─── 插桩决策表（由 dataflow.js analyzeDefUse 生成，供 instrumentLoad 查询）
@@ -1317,6 +1353,36 @@ let _instrDecisions = null;
 
 function setInstrDecisions(decisions) {
     _instrDecisions = decisions;
+}
+
+// ─── def-site iid 关联表（每次 resetPerFile 时清空）─────────────────────────────
+
+/**
+ * wrapWrite 在插桩时填充：`"startLine:startCol" → iid`（def-site 位置 → 分配的 iid）。
+ * 用于后续 resolveDefIids() 阶段从 LIGHTWEIGHT read 的 defLocKey 查出 defIid。
+ */
+let _writeLocToIid = new Map();
+
+/**
+ * wrapReadLightweight 在插桩时填充：`[readIid, defLocKey]` 对的列表。
+ * 待 transformString 完成后由 resolveDefIids() 一次性关联 defIid。
+ */
+let _pendingDefIids = [];
+
+/**
+ * 在 esnstrument.js 的 transformString() 完成后调用，
+ * 批量处理 _pendingDefIids 队列，将 readIid → defIid 写入 iidSourceInfo。
+ */
+function resolveDefIids() {
+    for (const [readIid, defLocKey] of _pendingDefIids) {
+        if (!defLocKey) continue;
+        const defIid = _writeLocToIid.get(defLocKey);
+        if (defIid != null) {
+            IID.setIidDefIid(readIid, defIid);
+        }
+    }
+    _pendingDefIids = [];
+    _writeLocToIid = new Map();
 }
 
 // ─── 语句级 use-set 映射（方案F，由 dataflow.js analyzeStmtUse 生成）
@@ -1340,7 +1406,7 @@ function getStmtUse(node) {
 // ─── 导出 ──────────────────────────────────────────────────────────────────────
 
 export {
-    init, resetPerFile, setInstrDecisions, setStmtUseMap, getStmtUse,
+    init, resetPerFile, setInstrDecisions, setStmtUseMap, getStmtUse, resolveDefIids,
     // scope 状态管理
     setScope, popScope, getScope,
     // AST 辅助

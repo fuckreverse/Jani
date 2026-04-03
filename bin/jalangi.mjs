@@ -447,7 +447,7 @@ function ensureDir(filePath) {
 }
 
 /**
- * 加载并初始化插桩器，返回 instrumentCode 函数。
+ * 加载并初始化插桩器，返回 { instrumentCode, buildSmapJson }。
  *
  * @param {string}   sandboxVar    沙盒变量名
  * @param {string[]} [analyses]    分析插件路径列表。
@@ -456,7 +456,7 @@ function ensureDir(filePath) {
  */
 async function loadInstrumenter(sandboxVar, analyses) {
     const instrModule = await import(`${ROOT_DIR}/src/instrument/esnstrument.js`);
-    const { init, instrumentCode } = instrModule;
+    const { init, instrumentCode, buildSmapJson } = instrModule;
     const { buildConfigFromPlugins, fullConfig } = await import(`${ROOT_DIR}/src/instrument/pluginAnalyzer.js`);
 
     let config;
@@ -473,7 +473,7 @@ async function loadInstrumenter(sandboxVar, analyses) {
     }
 
     init(config, null, null, sandboxVar);
-    return instrumentCode;
+    return { instrumentCode, buildSmapJson };
 }
 
 // ── rollup 运行时打包（浏览器专用）───────────────────────────────────────────
@@ -796,7 +796,7 @@ async function cmdInstrument(common, instrArgs) {
 
     // ── 加载并执行插桩 ────────────────────────────────────────────────────────
     const doneLoad = log.phase('加载插桩器');
-    const instrumentCode = await loadInstrumenter(sandboxVar, instrOpts.analyses);
+    const { instrumentCode } = await loadInstrumenter(sandboxVar, instrOpts.analyses);
     doneLoad();
 
     const doneInstr = log.phase('插桩目标代码');
@@ -1104,10 +1104,14 @@ async function cmdInstrumentAndRun(common, iarArgs) {
     const sandboxVar = common.randomVar ? randomVarName() : common.sandboxVar;
 
     // ── 加载插桩器 ────────────────────────────────────────────────────────────
-    const instrumentCode = await loadInstrumenter(sandboxVar, iarOpts.analyses);
+    const { instrumentCode, buildSmapJson } = await loadInstrumenter(sandboxVar, iarOpts.analyses);
 
     // ── 设置全局沙盒 ──────────────────────────────────────────────────────────
-    if (!global[sandboxVar]) global[sandboxVar] = {};
+    // 必须是 JalangiSandbox 实例，否则插桩代码调用 J$.Sr() 等方法时会报 "not a function"
+    const { JalangiSandbox } = await import(`${ROOT_DIR}/src/runtime/JalangiSandbox.js`);
+    if (!global[sandboxVar] || typeof global[sandboxVar].Sr !== 'function') {
+        global[sandboxVar] = new JalangiSandbox();
+    }
     const sandbox = global[sandboxVar];
     sandbox.initParams = iarOpts.initParams;
 
@@ -1163,6 +1167,18 @@ async function cmdInstrumentAndRun(common, iarArgs) {
             writeFileSync(instFilename, result.code, 'utf8');
             if (result.sourceMapString) {
                 writeFileSync(makeMapFilename(filename), result.sourceMapString, 'utf8');
+            }
+        }
+
+        // 将 smap 传给 logger，使 NodeStreamBackend 在 close() 时自动写出 .smap.json
+        // sandbox.tracer 由 ExecutionTraceAnalysis 构造时设置（sandbox.tracer = this._logger）
+        if (result.sourceMapObject && sandbox.tracer?.setSmap) {
+            try {
+                const smapObj = buildSmapJson(result.sourceMapObject);
+                sandbox.tracer.setSmap(smapObj);
+                log.debug(`smap 已传给 logger: ${filename} (${Object.keys(smapObj.iids ?? {}).length} iids)`);
+            } catch (smapErr) {
+                log.warn(`smap 传递失败（${filename}）: ${smapErr.message}`);
             }
         }
 

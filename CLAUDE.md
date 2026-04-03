@@ -19,7 +19,7 @@ src/runtime/      运行时钩子框架（JalangiSandbox / HookDispatcher / SMem
 src/logger/       日志系统（RingBuffer / LogManager / 多后端）→ 详见 docs/Logger-System.md
 src/preprocess/   预处理（反混淆 / 语法降级）→ 详见 docs/Preprocessing.md
 src/plugins/      示例分析插件（ExecutionTrace / dlint / tutorial / coverage 等）→ 详见 docs/Analysis-Plugins.md
-tools/            离线 Trace 后处理工具链（trace-parse / render / filter / call-tree 等）→ 详见 docs/Offline-Analysis-Tools.md
+tools/            离线 Trace 后处理工具链（trace-decode / render / filter / call-tree 等）→ 详见 docs/Offline-Analysis-Tools.md
 test/             测试套件（unit / integration）→ 详见 docs/Testing-System.md
 docs/             全量文档索引，见下方「文档索引」
 ```
@@ -60,6 +60,9 @@ npm run test:unit / test:integration / test:logging  # 分组
 | `test/integration/hooks.test.mjs` | 钩子参数验证 + observeOnly / instrumentEval |
 | `test/integration/runtime.test.mjs` | 运行时框架 API 边界（HookDispatcher / SMemory / DataFlowAnalyzer）|
 | `test/integration/logging.test.mjs` | 日志系统真实 IO（NodeStreamBackend / WsBackend）|
+| `test/integration/execution-trace.test.mjs` | ExecutionTrace 插件完整功能（FORMAT_FLAT/TREE/BLOCK/PIPE）|
+| `test/integration/dlint.test.mjs` | dlint 六条规则端到端验证 |
+| `test/integration/full-pipeline.test.mjs` | 全流程端到端（预处理→插桩→vm 执行→后处理工具链，51 个测试）|
 
 **原则**：优先修改现有测试文件；只有主题明显不同时才新建；避免重复测试同一行为。
 
@@ -106,6 +109,6 @@ npm run test:unit / test:integration / test:logging  # 分组
 | [`docs/Analysis-Plugins.md`](docs/Analysis-Plugins.md) | `src/plugins/` 示例插件 |
 | [`docs/Scope-Aware-Instrumentation.md`](docs/Scope-Aware-Instrumentation.md) | 作用域感知插桩技术设计 |
 | [`docs/Testing-System.md`](docs/Testing-System.md) | `test/` 测试体系结构、方法、TODO |
-| [`docs/Offline-Analysis-Tools.md`](docs/Offline-Analysis-Tools.md) | `tools/` 离线分析工具集（trace-parse / filter / hot-lines / call-tree 等）|
+| [`docs/Offline-Analysis-Tools.md`](docs/Offline-Analysis-Tools.md) | `tools/` 离线分析工具集（trace-decode / render / filter / hot-lines / call-tree 等）|
 
 **文档同步原则**：代码变更时同步更新对应文档；只更新受影响的文档，不整体重写；以代码为准。

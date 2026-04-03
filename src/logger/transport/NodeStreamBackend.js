@@ -1,30 +1,39 @@
 // JALANGI DO NOT INSTRUMENT
 
 /**
- * NodeStreamBackend — Node.js 文件流日志后端。
+ * NodeStreamBackend — Node.js 文件流日志后端（二进制格式）。
  *
- * 将事件批次序列化为 NDJSON，通过 Node.js fs.WriteStream 写入文件。
+ * 将事件批次序列化为紧凑二进制格式（JTB1，见 EventSerializer.js），
+ * 通过 Node.js fs.WriteStream 写入 .bin 文件。
  * WriteStream 内置了操作系统级别的写缓冲和背压机制（drain 事件），
  * 非常适合高吞吐写文件场景。
  *
  * 支持两种输出目标：
- *  1. 文件路径（默认：'jalangi-trace.ndjson'）
+ *  1. 文件路径（默认：'jalangi-trace.bin'）
  *  2. 已有的 Writable Stream（传入 options.stream）
  *
  * 使用方式（Node.js analysis 中）：
  *
  *   import { NodeStreamBackend } from '.../logger/transport/NodeStreamBackend.js';
- *   const backend = new NodeStreamBackend({ path: 'my-trace.ndjson' });
+ *   const backend = new NodeStreamBackend({ path: 'my-trace.bin' });
  *   // 与 LogManager 配合：
  *   const mgr = new LogManager({ backends: [backend] });
  *
- * 输出格式：
- *   每条事件为一行 JSON（NDJSON 标准）。
- *   文件可直接用 jq 分析：  jq 'select(.type=="READ")' my-trace.ndjson
+ * 输出格式（二进制 JTB1）：
+ *   文件 = [魔数 8B 文件头][事件1: 12B头 + payload][事件2: 12B头 + payload]...
+ *   可用 trace-decode.mjs 解码：
+ *     node tools/trace-decode.mjs trace.bin --smap trace.smap.json
+ *
+ * smap.json 写出：
+ *   若构造时提供了 smap（通过 setSmap(smapObj) 或 options.smap），
+ *   在 close() 时自动写出与 .bin 配对的 .smap.json 文件。
  */
 
-import { createWriteStream } from 'node:fs';
-import { serializeBatchToNDJSON } from '../../encoding/EventSerializer.js';
+import { createWriteStream, writeFileSync } from 'node:fs';
+import {
+    serializeBatch,
+    createFileHeader,
+} from '../../encoding/EventSerializer.js';
 import { createDiagLogger, DOMAIN } from '../diagnostics.js';
 
 const log = createDiagLogger(DOMAIN.BACKEND_NODE);
@@ -32,23 +41,27 @@ const log = createDiagLogger(DOMAIN.BACKEND_NODE);
 export class NodeStreamBackend {
     /**
      * @param {object} [options]
-     * @param {string}  [options.path='jalangi-trace.ndjson']  输出文件路径
+     * @param {string}  [options.path='jalangi-trace.bin']  输出文件路径（.bin）
      * @param {import('node:stream').Writable} [options.stream]  直接传入 Writable（优先于 path）
-     * @param {boolean} [options.append=true]  是否追加模式（false = 覆盖）
+     * @param {boolean} [options.append=false]   是否追加模式（二进制 trace 不支持追加，默认覆盖）
      * @param {number}  [options.highWaterMark=65536]  WriteStream 缓冲上限（字节）
      * @param {boolean} [options.autoFlush=false]  每批后调用 flush（降低延迟但增加 syscall）
+     * @param {object|null} [options.smap=null]  初始 smap 对象（可在 close 时自动写出 .smap.json）
      */
     constructor(options = {}) {
         const {
-            path          = 'jalangi-trace.ndjson',
+            path          = 'jalangi-trace.bin',
             stream        = null,
-            append        = true,
+            append        = false,
             highWaterMark = 65536,
             autoFlush     = false,
+            smap          = null,
         } = options;
 
+        this._path      = path;
         this._autoFlush = autoFlush;
         this._closed    = false;
+        this._smap      = smap;
 
         // 统计
         this.stats = { batchCount: 0, totalEvents: 0, bytesWritten: 0, errors: 0 };
@@ -58,8 +71,7 @@ export class NodeStreamBackend {
             this._managed = false;   // 外部流，不由我们关闭
         } else {
             this._stream  = createWriteStream(path, {
-                flags:         append ? 'a' : 'w',
-                encoding:      'utf8',
+                flags:        append ? 'a' : 'w',
                 highWaterMark,
             });
             this._managed = true;
@@ -70,8 +82,9 @@ export class NodeStreamBackend {
             log.error('stream error:', err.message);
         });
 
-        this._drainable = true;
+        this._drainable    = true;
         this._drainPromise = null;
+        this._drainResolve = null;
 
         this._stream.on('drain', () => {
             this._drainable = true;
@@ -81,12 +94,38 @@ export class NodeStreamBackend {
                 r();
             }
         });
+
+        // 写文件头（魔数 + 版本）
+        this._writeFileHeader();
+    }
+
+    // ── 文件头写入 ─────────────────────────────────────────────────────────────
+
+    /**
+     * 在文件流开始时写入 JTB1 文件头（8 字节）。
+     * @private
+     */
+    _writeFileHeader() {
+        const headerBuf = createFileHeader();
+        const nodeBuffer = Buffer.from(headerBuf);
+        this._stream.write(nodeBuffer);
+        this.stats.bytesWritten += nodeBuffer.length;
+    }
+
+    // ── smap 管理 ─────────────────────────────────────────────────────────────
+
+    /**
+     * 设置（或更新）smap 对象。将在 close() 时自动写出为 .smap.json 文件。
+     * @param {object} smapObj  buildSmapJson() 返回的 smap 对象
+     */
+    setSmap(smapObj) {
+        this._smap = smapObj;
     }
 
     // ── LogBackend 接口 ────────────────────────────────────────────────────────
 
     /**
-     * 批量写入事件到文件。
+     * 批量写入事件到文件（二进制格式）。
      * 如果底层 stream 背压，等待 drain 再继续。
      * @param {Array} batch
      * @returns {Promise<void>}
@@ -98,12 +137,15 @@ export class NodeStreamBackend {
             await this._waitDrain();
         }
 
-        const text = serializeBatchToNDJSON(batch);
+        // 序列化为二进制（serializeBatch 产生连续的事件流）
+        const arrBuf = serializeBatch(batch);
+        const nodeBuf = Buffer.from(arrBuf);
+
         this.stats.batchCount++;
         this.stats.totalEvents += batch.length;
-        this.stats.bytesWritten += Buffer.byteLength(text, 'utf8');
+        this.stats.bytesWritten += nodeBuf.length;
 
-        const ok = this._stream.write(text);
+        const ok = this._stream.write(nodeBuf);
         if (!ok) {
             this._drainable = false;
         }
@@ -114,30 +156,21 @@ export class NodeStreamBackend {
     }
 
     /**
-     * 同步写入（用于 beforeunload / process.exit 场景）。
-     * 注意：Node.js fs.WriteStream 没有真正的同步写入，
-     * 此方法触发写入但不等待完成（尽力而为）。
+     * 同步写入（用于 process.exit 场景，尽力而为）。
      * @param {Array} batch
      */
     writeSync(batch) {
         if (this._closed) return;
-        const text = serializeBatchToNDJSON(batch);
-        this._stream.write(text);
+        const arrBuf = serializeBatch(batch);
+        this._stream.write(Buffer.from(arrBuf));
     }
 
     /**
-     * 等待底层 stream 将所有缓冲数据写入 OS（非 fsync，只是清空用户空间缓冲）。
-     *
-     * `drain` 事件只在 stream.write() 返回 false（背压）后才会触发，
-     * 因此不能单纯靠监听 drain 来判断"写完了"。
-     * 正确做法：通过 writableNeedDrain 判断是否真的在背压状态；
-     * 否则缓冲区虽非空但流未背压，此时数据已在 OS 写入队列，直接 resolve 即可。
-     *
+     * 等待底层 stream 将所有缓冲数据写入 OS。
      * @returns {Promise<void>}
      */
     flush() {
         return new Promise((resolve, reject) => {
-            // 没有背压，缓冲区数据已提交给 OS，直接完成
             const needDrain = this._stream.writableNeedDrain !== undefined
                 ? this._stream.writableNeedDrain
                 : !this._drainable;
@@ -147,7 +180,6 @@ export class NodeStreamBackend {
                 return;
             }
 
-            // 处于背压状态，等待 drain 事件
             const onDrain = () => { cleanup(); resolve(); };
             const onError = (err) => { cleanup(); reject(err); };
             const cleanup = () => {
@@ -160,7 +192,7 @@ export class NodeStreamBackend {
     }
 
     /**
-     * 关闭文件流（flush 后关闭）。
+     * 关闭文件流（flush 后关闭），并写出 .smap.json（如有）。
      * @returns {Promise<void>}
      */
     close() {
@@ -168,14 +200,16 @@ export class NodeStreamBackend {
         this._closed = true;
 
         return new Promise((resolve, reject) => {
-            const done = () => resolve();
+            const done = () => {
+                this._writeSmapJson();
+                resolve();
+            };
             if (!this._managed) {
                 this.flush().then(done, reject);
                 return;
             }
-            // 等待写入完成后关闭
             this._stream.end((err) => {
-                if (err) reject(err); else resolve();
+                if (err) { reject(err); } else { done(); }
             });
         });
     }
@@ -191,5 +225,30 @@ export class NodeStreamBackend {
             };
         });
         return this._drainPromise;
+    }
+
+    /**
+     * 在 close 时写出 .smap.json 文件（与 .bin 配对）。
+     * 文件名：将 .bin 后缀替换为 .smap.json，或追加 .smap.json。
+     * @private
+     */
+    _writeSmapJson() {
+        if (!this._smap) return;
+        if (!this._managed || !this._path) return;
+
+        let smapPath = this._path;
+        if (smapPath.endsWith('.bin')) {
+            smapPath = smapPath.slice(0, -4) + '.smap.json';
+        } else {
+            smapPath = smapPath + '.smap.json';
+        }
+
+        try {
+            const json = JSON.stringify(this._smap, null, 2);
+            writeFileSync(smapPath, json, 'utf8');
+            log.debug(`smap.json written to ${smapPath}`);
+        } catch (err) {
+            log.error(`failed to write smap.json to ${smapPath}:`, err.message);
+        }
     }
 }

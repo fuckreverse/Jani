@@ -20,9 +20,8 @@ import assert from 'node:assert/strict';
 import { RingBuffer }           from '../../src/logger/RingBuffer.js';
 import {
     EVENT_TYPE,
-    serializeEventToJSON, serializeBatchToNDJSON,
-    serializeEventToBinary, serializeBatchToBinary,
-    deserializeEventFromBinary, deserializeBatchFromBinary,
+    serializeEvent, serializeBatch, deserializeEvent, deserializeAll,
+    createFileHeader, isBinaryTrace, FILE_HEADER_SIZE,
 } from '../../src/encoding/EventSerializer.js';
 import { MemoryBackend }        from '../../src/logger/transport/MemoryBackend.js';
 import { LogManager, createMemoryLogManager } from '../../src/logger/LogManager.js';
@@ -103,72 +102,133 @@ describe('RingBuffer', () => {
 
 describe('EventSerializer', () => {
     test('EVENT_TYPE 枚举完整', () => {
-        assert.ok(EVENT_TYPE.READ        !== undefined);
-        assert.ok(EVENT_TYPE.WRITE       !== undefined);
-        assert.ok(EVENT_TYPE.GET_FIELD   !== undefined);
+        // 新格式：EVENT_TYPE 包含 SCRIPT_ENTER、END_EXPR、CALL_PRE 等
         assert.ok(EVENT_TYPE.SCRIPT_ENTER !== undefined);
+        assert.ok(EVENT_TYPE.SCRIPT_EXIT  !== undefined);
+        assert.ok(EVENT_TYPE.CALL_PRE     !== undefined);
+        assert.ok(EVENT_TYPE.CALL         !== undefined);
+        assert.ok(EVENT_TYPE.END_EXPR     !== undefined);
     });
 
-    test('serializeEventToJSON 产生合法 JSON', () => {
-        const json   = serializeEventToJSON({ type: 'READ', iid: 8, sid: 1, name: 'x', value: 42 });
-        const parsed = JSON.parse(json);
-        assert.equal(parsed.type,  'READ');
-        assert.equal(parsed.iid,   8);
-        assert.equal(parsed.value, 42);
+    test('createFileHeader 产生正确魔数', () => {
+        const header = createFileHeader();
+        const bytes = new Uint8Array(header);
+        assert.equal(bytes[0], 0x4A); // J
+        assert.equal(bytes[1], 0x54); // T
+        assert.equal(bytes[2], 0x42); // B
+        assert.equal(bytes[3], 0x31); // 1
+        assert.equal(bytes[4], 0x01); // version
+        assert.equal(header.byteLength, FILE_HEADER_SIZE);
     });
 
-    test('serializeEventToJSON 正确处理 undefined 值', () => {
-        const parsed = JSON.parse(serializeEventToJSON({ type: 'READ', iid: 8, value: undefined }));
-        assert.equal(parsed.value, '__undefined__');
+    test('isBinaryTrace 正确识别 JTB1 文件', () => {
+        const header = new Uint8Array(createFileHeader());
+        assert.ok(isBinaryTrace(header));
+        assert.ok(!isBinaryTrace(new Uint8Array([0x7B, 0x22, 0x74, 0x79]))); // JSON {
+        assert.ok(!isBinaryTrace(new Uint8Array([]))); // 空
     });
 
-    test('serializeBatchToNDJSON 每条一行', () => {
-        const ndjson = serializeBatchToNDJSON([
-            { type: 'READ',  iid: 8,  value: 1 },
-            { type: 'WRITE', iid: 16, value: 'hello' },
-        ]);
-        const lines = ndjson.trim().split('\n');
-        assert.equal(lines.length, 2);
-        assert.equal(JSON.parse(lines[0]).type, 'READ');
-        assert.equal(JSON.parse(lines[1]).type, 'WRITE');
-    });
-
-    test('二进制：number 值往返', () => {
-        const buf = serializeEventToBinary({ type: 'READ', iid: 24, sid: 2, value: 3.14 });
-        assert.ok(buf instanceof ArrayBuffer);
-        const { event } = deserializeEventFromBinary(new DataView(buf), 0);
-        assert.equal(event.iid, 24);
-        assert.equal(event.sid, 2);
-        assert.ok(Math.abs(event.value - 3.14) < 1e-10);
-    });
-
-    test('二进制：string 值往返', () => {
-        const buf = serializeEventToBinary({ type: 'WRITE', iid: 32, sid: 1, value: 'hello world' });
-        const { event } = deserializeEventFromBinary(new DataView(buf), 0);
-        assert.equal(event.value, 'hello world');
-    });
-
-    test('二进制：null / boolean 值往返', () => {
-        for (const value of [null, true, false]) {
-            const buf = serializeEventToBinary({ type: 'READ', iid: 0, sid: 0, value });
-            const { event } = deserializeEventFromBinary(new DataView(buf), 0);
-            assert.equal(event.value, value);
-        }
-    });
-
-    test('批次二进制：serializeBatchToBinary / deserializeBatchFromBinary 往返', () => {
+    test('serializeBatch / deserializeAll 完整批次往返', () => {
         const batch = [
-            { type: 'READ',    iid: 8,  sid: 1, value: 42    },
-            { type: 'WRITE',   iid: 16, sid: 1, value: 'foo' },
-            { type: 'LITERAL', iid: 24, sid: 1, value: null  },
-            { type: 'BINARY',  iid: 32, sid: 1, value: true  },
+            { type: 'SCRIPT_ENTER', iid: 8,  seq: 1, file: 'a.js' },
+            { type: 'END_EXPR',     iid: 16, seq: 2, writes: [{ name: 'x', val: 42 }], reads: [], fields: [] },
+            { type: 'CALL_PRE',     iid: 24, seq: 3, fn: 'foo', args: [1, 'two'], isConstructor: false, isMethod: false },
+            { type: 'SCRIPT_EXIT',  iid: 32, seq: 4 },
         ];
-        const result = deserializeBatchFromBinary(serializeBatchToBinary(batch));
-        assert.equal(result.length,    4);
-        assert.equal(result[0].iid,    8);
-        assert.equal(result[1].value,  'foo');
-        assert.equal(result[2].value,  null);
-        assert.equal(result[3].value,  true);
+        // serializeBatch 产生连续事件流（无文件头）
+        const batchBuf = serializeBatch(batch);
+        // 拼接文件头 + 事件流才能用 deserializeAll
+        const headerBuf = createFileHeader();
+        const combined = new Uint8Array(headerBuf.byteLength + batchBuf.byteLength);
+        combined.set(new Uint8Array(headerBuf), 0);
+        combined.set(new Uint8Array(batchBuf), headerBuf.byteLength);
+        const events = deserializeAll(combined.buffer);
+        assert.equal(events.length, 4);
+        assert.equal(events[0].type, 'SCRIPT_ENTER');
+        assert.equal(events[0].file, 'a.js');
+        assert.equal(events[1].type, 'END_EXPR');
+        assert.equal(events[1].writes[0].value, 42);
+        assert.equal(events[2].type, 'CALL_PRE');
+        assert.equal(events[2].fn, 'foo');
+        assert.equal(events[3].type, 'SCRIPT_EXIT');
+    });
+
+    test('JTB1 二进制：serializeEvent/deserializeEvent SCRIPT_ENTER 往返', () => {
+        const buf = serializeEvent({ type: 'SCRIPT_ENTER', iid: 8, seq: 1, file: 'test.js' });
+        assert.ok(buf instanceof ArrayBuffer);
+        // deserializeEvent 需要跳过头部（从 offset=0 开始，不含文件魔数）
+        const { event } = deserializeEvent(new DataView(buf), 0);
+        assert.equal(event.type, 'SCRIPT_ENTER');
+        assert.equal(event.iid,  8);
+        assert.equal(event.seq,  1);
+        assert.equal(event.file, 'test.js');
+    });
+
+    test('JTB1 二进制：END_EXPR 含 writes/reads 往返', () => {
+        const ev = {
+            type: 'END_EXPR', iid: 24, seq: 2,
+            writes: [{ name: 'x', val: 42,    omit: false }],
+            reads:  [{ name: 'y', val: 3.14,  omit: false }],
+            fields: [],
+        };
+        const buf = serializeEvent(ev);
+        const { event } = deserializeEvent(new DataView(buf), 0);
+        assert.equal(event.type,            'END_EXPR');
+        assert.equal(event.iid,             24);
+        assert.equal(event.writes.length,   1);
+        assert.equal(event.writes[0].name,  'x');
+        assert.equal(event.writes[0].value, 42);
+        assert.equal(event.reads.length,    1);
+        assert.equal(event.reads[0].name,   'y');
+        assert.ok(Math.abs(event.reads[0].value - 3.14) < 1e-10);
+    });
+
+    test('JTB1 二进制：OMITTED 值往返', () => {
+        const ev = {
+            type: 'END_EXPR', iid: 32, seq: 3,
+            writes: [],
+            reads:  [{ name: 'z', val: undefined, omit: true }],
+            fields: [],
+        };
+        const buf = serializeEvent(ev);
+        const { event } = deserializeEvent(new DataView(buf), 0);
+        assert.equal(event.reads[0].name,    'z');
+        assert.equal(event.reads[0].omitted, true);
+    });
+
+    test('JTB1 二进制：CALL_PRE 含 args 往返', () => {
+        const ev = {
+            type: 'CALL_PRE', iid: 40, seq: 4,
+            fn: 'add', isConstructor: false, isMethod: false,
+            args: [1, 'hello', null, true],
+        };
+        const buf = serializeEvent(ev);
+        const { event } = deserializeEvent(new DataView(buf), 0);
+        assert.equal(event.type, 'CALL_PRE');
+        assert.equal(event.fn,   'add');
+        assert.equal(event.args[0], 1);
+        assert.equal(event.args[1], 'hello');
+        assert.equal(event.args[2], null);
+        assert.equal(event.args[3], true);
+    });
+
+    test('JTB1 二进制：各事件类型 type/iid/seq 正确保存', () => {
+        const batch = [
+            { type: 'SCRIPT_ENTER',   iid: 8,  seq: 1, file: 'a.js' },
+            { type: 'END_EXPR',       iid: 16, seq: 2, writes: [{ name: 'x', val: 42 }], reads: [], fields: [] },
+            { type: 'CALL_PRE',       iid: 24, seq: 3, fn: 'foo', args: [], isConstructor: false, isMethod: false },
+            { type: 'CALL',           iid: 24, seq: 4, fn: 'foo', result: 99 },
+            { type: 'FUNCTION_ENTER', iid: 32, seq: 5 },
+            { type: 'FUNCTION_EXIT',  iid: 32, seq: 6 },
+            { type: 'SCRIPT_EXIT',    iid: 40, seq: 7 },
+        ];
+        for (const ev of batch) {
+            const buf = serializeEvent(ev);
+            const { event } = deserializeEvent(new DataView(buf), 0);
+            assert.equal(event.type, ev.type, `type mismatch for ${ev.type}`);
+            assert.equal(event.iid,  ev.iid,  `iid mismatch for ${ev.type}`);
+            assert.equal(event.seq,  ev.seq,  `seq mismatch for ${ev.type}`);
+        }
     });
 });
 

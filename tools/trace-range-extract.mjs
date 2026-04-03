@@ -3,10 +3,12 @@
  * trace-range-extract.mjs — seq 区间快速提取
  *
  * 用法：
- *   cat parsed.ndjson | node tools/trace-range-extract.mjs 100-200
- *   cat parsed.ndjson | node tools/trace-range-extract.mjs 100+
- *   cat parsed.ndjson | node tools/trace-range-extract.mjs --before 50 --after 50 100
- *   cat parsed.ndjson | node tools/trace-range-extract.mjs --help
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs 100-200
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs 100+
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs --before 50 --after 50 100
+ *   node tools/trace-range-extract.mjs --help
+ *
+ * 输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
  *
  * 输出：
  *   指定范围内的 trace 行
@@ -23,15 +25,17 @@ function printHelp() {
 trace-range-extract.mjs — seq 区间快速提取
 
 用法：
-  cat parsed.ndjson | node tools/trace-range-extract.mjs 100-200
-  cat parsed.ndjson | node tools/trace-range-extract.mjs 100+
-  cat parsed.ndjson | node tools/trace-range-extract.mjs --before 50 --after 50 100
+  node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs 100-200
+  node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs 100+
+  node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs --before 50 --after 50 100
+
+输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
 
 选项：
   --before N    提取目标 seq 之前 N 条记录
   --after N     提取目标 seq 之后 N 条记录
   --context N   等同于 --before N --after N
-  --src         输出原始文本格式（非 JSON）
+  --src         输出简化的文本格式（非 JSON）
   --help        显示帮助信息
 
 区间格式：
@@ -124,26 +128,44 @@ async function main() {
             if (seq !== undefined && seq >= minSeq && seq <= maxSeq) {
                 extracted++;
                 if (srcFormat) {
-                    // 还原为简化的文本格式
+                    // 还原为简化的文本格式（使用 JTB1 字段）
                     const lineNum = record.line || '?';
                     const col = record.col || '?';
                     let content;
 
                     switch (record.type) {
-                        case 'call':
-                            content = `CALL ${record.fn}(${record.args} args)`;
+                        case 'CALL_PRE': {
+                            const n = record.args?.length ?? 0;
+                            const prefix = record.isConstructor ? 'new ' : '';
+                            content = `CALL ${prefix}${record.fn ?? '?'}(${n} args)`;
                             break;
-                        case 'return':
-                            content = `RETN ${record.fn} ; =${record.result ?? '?'}`;
+                        }
+                        case 'CALL':
+                            content = `RETN ${record.fn ?? '?'} ; =${JSON.stringify(record.result ?? null)}`;
                             break;
-                        case 'script_enter':
-                            content = `▶ script: ${record.file}`;
+                        case 'FUNCTION_ENTER':
+                            content = `FUNC_ENTER ${record.fn ?? '?'}${record.directFe ? ' (direct)' : ''}`;
                             break;
-                        case 'script_exit':
-                            content = '◀ script end';
+                        case 'FUNCTION_EXIT':
+                            content = `FUNC_EXIT${record.exception != null ? ' (exception)' : ''}`;
+                            break;
+                        case 'END_EXPR': {
+                            const src = record.srcText ?? record.src ?? `(iid=${record.iid})`;
+                            const writes = record.writes?.map(w => `${w.name}=${JSON.stringify(w.value)}`).join(', ') ?? '';
+                            content = `${src}${writes ? ' ; w: ' + writes : ''}`;
+                            break;
+                        }
+                        case 'SCRIPT_ENTER':
+                            content = `▶ script: ${record.file ?? '?'}`;
+                            break;
+                        case 'SCRIPT_EXIT':
+                            content = `◀ script end${record.exception != null ? ' (exception)' : ''}`;
+                            break;
+                        case 'KEY_EVENT':
+                            content = `[${(record.level ?? 'info').toUpperCase()}] ${record.text ?? ''}`;
                             break;
                         default:
-                            content = record.src || JSON.stringify(record.kv || {});
+                            content = JSON.stringify(record);
                     }
 
                     console.log(`[${String(seq).padStart(6)}] [${String(lineNum).padStart(5)}:${String(col).padStart(3)}] ${content}`);

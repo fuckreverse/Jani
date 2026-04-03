@@ -2,14 +2,14 @@
 /**
  * trace-render.mjs — 将结构化 NDJSON 渲染为各种展示格式
  *
- * 接收 trace-parse.mjs 输出的结构化 NDJSON，按指定风格渲染后输出到 stdout。
+ * 接收 trace-decode.mjs 输出的结构化 NDJSON，按指定风格渲染后输出到 stdout。
  *
  * 用法：
- *   cat parsed.ndjson | node tools/trace-render.mjs
- *   cat parsed.ndjson | node tools/trace-render.mjs --format tree
- *   cat parsed.ndjson | node tools/trace-render.mjs --format block
- *   cat parsed.ndjson | node tools/trace-render.mjs --format pipe
- *   cat parsed.ndjson | node tools/trace-render.mjs --format flat
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format tree
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format block
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format pipe
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format flat
  *   node tools/trace-render.mjs --format tree parsed.ndjson
  *
  * 选项：
@@ -23,15 +23,19 @@
  *   block  #region/#endregion 折叠块（VS Code 任意文件可折叠）
  *   pipe   ASCII pipe 符号（| 数量 = 调用深度），纯 ASCII 适合工具链
  *
- * 注意：tree / block / pipe 格式需要完整的 call/return 对才能正确重建层次；
+ * 注意：tree / block / pipe 格式需要完整的 CALL_PRE/CALL 对才能正确重建层次；
  *       若上游 trace-filter 过滤掉了部分事件，深度重建可能不完整（这是预期行为）。
+ *
+ * 输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
+ *   事件类型：SCRIPT_ENTER, SCRIPT_EXIT, CALL_PRE, CALL, FUNCTION_ENTER,
+ *             FUNCTION_EXIT, END_EXPR, KEY_EVENT, WRITE_VAR, READ_VAR_FULL
  */
 
 import { createReadStream } from 'fs';
 import { stdin as input } from 'process';
 import { createInterface } from 'readline';
 
-// ── 对齐常量（与运行时 traceFormatters.js 保持一致）─────────────────────────
+// ── 对齐常量 ──────────────────────────────────────────────────────────────────
 const SEQ_WIDTH = 6;
 const RC_WIDTH  = 9;
 
@@ -46,8 +50,7 @@ function fmtRc(rc) {
 // ── 格式渲染器 ────────────────────────────────────────────────────────────────
 
 /**
- * FlatRenderer — 原样输出（保持 trace-parse 结构化后的文本表示）
- * 对于已有 text 字段的记录直接透传；否则重新格式化。
+ * FlatRenderer — 平铺流式输出
  */
 class FlatRenderer {
     render(record, depth) {
@@ -55,39 +58,59 @@ class FlatRenderer {
         const rc  = record.line != null ? `${record.line}:${record.col ?? 0}` : '?:?';
 
         switch (record.type) {
-            case 'call': {
-                const desc = _callDesc(record);
-                const kv   = _callKv(record);
+            // ── JTB1 格式事件类型 ──────────────────────────────────────────
+            case 'CALL_PRE': {
+                const desc = _callPreDesc(record);
+                const kv   = _callPreKv(record);
                 return `[${fmtSeq(seq)}] [${fmtRc(rc)}] CALL ${desc}${kv ? ' ' + kv : ''}`;
             }
-            case 'return': {
+            case 'CALL': {
                 const name = record.fn ?? '(anonymous)';
                 const v    = record.result !== undefined ? JSON.stringify(record.result) : '?';
                 return `[${fmtSeq(seq)}] [${fmtRc(rc)}] RETN ${name} {"v":${v}}`;
             }
-            case 'expr': {
-                const src = record.src ?? `(seq=${seq})`;
-                const kv  = _exprKv(record);
+            case 'FUNCTION_ENTER': {
+                const fn = record.fn ?? '(anonymous)';
+                const direct = record.directFe ? ' (direct)' : '';
+                return `[${fmtSeq(seq)}] [${fmtRc(rc)}] FUNC_ENTER ${fn}${direct}`;
+            }
+            case 'FUNCTION_EXIT': {
+                const ex = record.exception != null
+                    ? ` (exception: ${JSON.stringify(record.exception)})`
+                    : '';
+                return `[${fmtSeq(seq)}] [${fmtRc(rc)}] FUNC_EXIT${ex}`;
+            }
+            case 'END_EXPR': {
+                const src = record.srcText ?? record.src ?? `(iid=${record.iid})`;
+                const kv  = _endExprKv(record);
                 return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${src}${kv ? ' ' + kv : ''}`;
             }
-            case 'script_enter':
+            case 'SCRIPT_ENTER':
                 return `[${fmtSeq(seq)}] ▶ script: ${record.file ?? '?'}`;
-            case 'script_exit': {
+            case 'SCRIPT_EXIT': {
                 const ex = record.exception != null
                     ? ` (exception: ${JSON.stringify(record.exception)})`
                     : '';
                 return `[${fmtSeq(seq)}] ◀ script end${ex}`;
             }
+            case 'KEY_EVENT': {
+                const level = record.level ?? 'info';
+                return `[${fmtSeq(seq)}] [${level.toUpperCase()}] ${record.text ?? ''}`;
+            }
+            case 'WRITE_VAR':
+                return `[${fmtSeq(seq)}] [${fmtRc(rc)}] WRITE ${record.name} = ${serialize(record.value)}`;
+            case 'READ_VAR_FULL':
+                return `[${fmtSeq(seq)}] [${fmtRc(rc)}] READ  ${record.name} = ${serialize(record.value)}`;
             default:
-                return record._raw ?? JSON.stringify(record);
+                return JSON.stringify(record);
         }
     }
 }
 
 /**
  * TreeRenderer — Unicode 树形符号
- *   ┬ 进入（call）
- *   └ 退出（return）
+ *   ┬ 进入（CALL_PRE）
+ *   └ 退出（CALL）
  *   │ 延续线
  */
 class TreeRenderer {
@@ -101,34 +124,48 @@ class TreeRenderer {
         const rc  = record.line != null ? `${record.line}:${record.col ?? 0}` : '?:?';
 
         switch (record.type) {
-            case 'call': {
-                const desc = _callDesc(record);
-                const kv   = _callKv(record);
+            case 'CALL_PRE': {
+                const desc = _callPreDesc(record);
+                const kv   = _callPreKv(record);
                 const ind  = this._prefix(depth, '┬ ');
                 return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}${desc}${kv ? ' ; ' + kv : ''}`;
             }
-            case 'return': {
+            case 'CALL': {
                 const name = record.fn ?? '(anonymous)';
                 const v    = record.result !== undefined ? serialize(record.result) : '?';
                 const ind  = this._prefix(depth, '└ ');
                 return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}return ${name} ; =${v}`;
             }
-            case 'expr': {
-                const src = record.src ?? `(seq=${seq})`;
-                const kv  = _exprKvFlat(record);
+            case 'FUNCTION_ENTER': {
+                const fn  = record.fn ?? '(anonymous)';
+                const ind = this._prefix(depth, '→ ');
+                return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}${fn} enter`;
+            }
+            case 'FUNCTION_EXIT': {
+                const ind = this._prefix(depth, '← ');
+                const ex  = record.exception != null ? ` (exception)` : '';
+                return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}exit${ex}`;
+            }
+            case 'END_EXPR': {
+                const src = record.srcText ?? record.src ?? `(iid=${record.iid})`;
+                const kv  = _endExprKvFlat(record);
                 const ind = '│ '.repeat(depth);
                 return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${ind}${src}${kv ? ' ; ' + kv : ''}`;
             }
-            case 'script_enter':
+            case 'SCRIPT_ENTER':
                 return `[${fmtSeq(seq)}] ▶ script: ${record.file ?? '?'}`;
-            case 'script_exit': {
+            case 'SCRIPT_EXIT': {
                 const ex = record.exception != null
                     ? ` (exception: ${serialize(record.exception)})`
                     : '';
                 return `[${fmtSeq(seq)}] ◀ script end${ex}`;
             }
+            case 'KEY_EVENT': {
+                const level = record.level ?? 'info';
+                return `[${fmtSeq(seq)}] [${level.toUpperCase()}] ${record.text ?? ''}`;
+            }
             default:
-                return record._raw ?? JSON.stringify(record);
+                return JSON.stringify(record);
         }
     }
 }
@@ -147,34 +184,48 @@ class BlockRenderer {
         const rc  = record.line != null ? `${record.line}:${record.col ?? 0}` : '?:?';
 
         switch (record.type) {
-            case 'call': {
-                const desc = _callDesc(record);
-                const kv   = _callKv(record);
+            case 'CALL_PRE': {
+                const desc = _callPreDesc(record);
+                const kv   = _callPreKv(record);
                 const ind  = this._indent(depth);
                 return `[${fmtSeq(seq)}] ${ind}// #region [${fmtRc(rc)}] CALL ${desc}${kv ? ' ; ' + kv : ''}`;
             }
-            case 'return': {
+            case 'CALL': {
                 const name = record.fn ?? '(anonymous)';
                 const v    = record.result !== undefined ? serialize(record.result) : '?';
                 const ind  = this._indent(depth);
                 return `[${fmtSeq(seq)}] ${ind}// #endregion ${name} ; =${v}  [${fmtRc(rc)}]`;
             }
-            case 'expr': {
-                const src = record.src ?? `(seq=${seq})`;
-                const kv  = _exprKvFlat(record);
+            case 'FUNCTION_ENTER': {
+                const fn  = record.fn ?? '(anonymous)';
+                const ind = this._indent(depth);
+                return `[${fmtSeq(seq)}] ${ind}// #region [${fmtRc(rc)}] FUNC ${fn}`;
+            }
+            case 'FUNCTION_EXIT': {
+                const ind = this._indent(depth);
+                const ex  = record.exception != null ? ` (exception)` : '';
+                return `[${fmtSeq(seq)}] ${ind}// #endregion FUNC_EXIT${ex}  [${fmtRc(rc)}]`;
+            }
+            case 'END_EXPR': {
+                const src = record.srcText ?? record.src ?? `(iid=${record.iid})`;
+                const kv  = _endExprKvFlat(record);
                 const ind = '  '.repeat(Math.max(depth - 1, 0));
                 return `[${fmtSeq(seq)}] ${ind}${src}${kv ? ' ; ' + kv : ''}  [${fmtRc(rc)}]`;
             }
-            case 'script_enter':
+            case 'SCRIPT_ENTER':
                 return `[${fmtSeq(seq)}] ▶ script: ${record.file ?? '?'}`;
-            case 'script_exit': {
+            case 'SCRIPT_EXIT': {
                 const ex = record.exception != null
                     ? ` (exception: ${serialize(record.exception)})`
                     : '';
                 return `[${fmtSeq(seq)}] ◀ script end${ex}`;
             }
+            case 'KEY_EVENT': {
+                const level = record.level ?? 'info';
+                return `[${fmtSeq(seq)}] [${level.toUpperCase()}] ${record.text ?? ''}`;
+            }
             default:
-                return record._raw ?? JSON.stringify(record);
+                return JSON.stringify(record);
         }
     }
 }
@@ -193,31 +244,43 @@ class PipeRenderer {
         const rc  = record.line != null ? `${record.line}:${record.col ?? 0}` : '?:?';
 
         switch (record.type) {
-            case 'call': {
-                const desc = _callDesc(record);
-                const kv   = _callKv(record);
+            case 'CALL_PRE': {
+                const desc = _callPreDesc(record);
+                const kv   = _callPreKv(record);
                 return `[${fmtSeq(seq)}] ${this._pipes(depth)}${desc} [${fmtRc(rc)}]${kv ? ' ; ' + kv : ''}`;
             }
-            case 'return': {
+            case 'CALL': {
                 const name = record.fn ?? '(anonymous)';
                 const v    = record.result !== undefined ? serialize(record.result) : '?';
                 return `[${fmtSeq(seq)}] ${this._pipes(depth)}${name} RETN ; =${v}  [${fmtRc(rc)}]`;
             }
-            case 'expr': {
-                const src = record.src ?? `(seq=${seq})`;
-                const kv  = _exprKvFlat(record);
+            case 'FUNCTION_ENTER': {
+                const fn = record.fn ?? '(anonymous)';
+                return `[${fmtSeq(seq)}] ${this._pipes(depth)}${fn} ENTER  [${fmtRc(rc)}]`;
+            }
+            case 'FUNCTION_EXIT': {
+                const ex = record.exception != null ? ' (exception)' : '';
+                return `[${fmtSeq(seq)}] ${this._pipes(depth)}FUNC_EXIT${ex}  [${fmtRc(rc)}]`;
+            }
+            case 'END_EXPR': {
+                const src = record.srcText ?? record.src ?? `(iid=${record.iid})`;
+                const kv  = _endExprKvFlat(record);
                 return `[${fmtSeq(seq)}] ${this._pipes(depth)}${src}${kv ? ' ; ' + kv : ''}  [${fmtRc(rc)}]`;
             }
-            case 'script_enter':
+            case 'SCRIPT_ENTER':
                 return `[${fmtSeq(seq)}] ▶ script: ${record.file ?? '?'}`;
-            case 'script_exit': {
+            case 'SCRIPT_EXIT': {
                 const ex = record.exception != null
                     ? ` (exception: ${serialize(record.exception)})`
                     : '';
                 return `[${fmtSeq(seq)}] ◀ script end${ex}`;
             }
+            case 'KEY_EVENT': {
+                const level = record.level ?? 'info';
+                return `[${fmtSeq(seq)}] [${level.toUpperCase()}] ${record.text ?? ''}`;
+            }
             default:
-                return record._raw ?? JSON.stringify(record);
+                return JSON.stringify(record);
         }
     }
 }
@@ -241,79 +304,83 @@ function serialize(val) {
     return String(val);
 }
 
-/** 从 call 记录生成描述字符串 */
-function _callDesc(record) {
+/** 从 CALL_PRE 记录生成描述字符串 */
+function _callPreDesc(record) {
     const name = record.fn ?? '(anonymous)';
-    const n    = record.args ?? 0;
+    const n    = record.args?.length ?? 0;
     if (record.isConstructor) return `new ${name}(${n} args)`;
     return `${name}(${n} args)`;
 }
 
-/** 从 call 记录生成 kv 字符串（用于 flat 格式：保留 JSON） */
-function _callKv(record) {
-    if (!record.kv && !record.a) return '';
-    if (record.kv && typeof record.kv === 'object') {
-        return JSON.stringify(record.kv);
-    }
-    // 兼容旧格式
+/** 从 CALL_PRE 记录生成 kv 字符串 */
+function _callPreKv(record) {
     const parts = [];
-    if (record.this !== undefined) parts.push(`this=${serialize(record.this)}`);
-    if (Array.isArray(record.a)) {
-        record.a.slice(0, 5).forEach((v, i) => parts.push(`arg${i}=${serialize(v)}`));
-        if (record.a.length > 5) parts.push('...');
+    if (record.base !== undefined) parts.push(`this=${serialize(record.base)}`);
+    if (Array.isArray(record.args)) {
+        record.args.slice(0, 5).forEach((v, i) => parts.push(`arg${i}=${serialize(v)}`));
+        if (record.args.length > 5) parts.push('...');
     }
     return parts.join(', ');
 }
 
-/** 从 expr 记录生成 kv JSON 字符串（用于 flat 格式） */
-function _exprKv(record) {
+/**
+ * 从 END_EXPR 记录生成 kv JSON 字符串（用于 flat 格式）
+ * END_EXPR 格式：writes=[{name, value}], reads=[{name, value}], fields=[{base, offset, isWrite, value}]
+ */
+function _endExprKv(record) {
     const obj = {};
-    if (record.w && Object.keys(record.w).length > 0) obj.w = record.w;
-    if (record.r && Object.keys(record.r).length > 0) obj.r = record.r;
-    if (record.f && record.f.length > 0) obj.f = record.f;
-    if (record.kv && typeof record.kv === 'object' && Object.keys(record.kv).length > 0) {
-        return JSON.stringify(record.kv);
+    if (record.writes?.length > 0) {
+        obj.w = {};
+        for (const w of record.writes) obj.w[w.name] = w.value;
+    }
+    if (record.reads?.length > 0) {
+        obj.r = {};
+        for (const r of record.reads) {
+            if (!r.omitted) obj.r[r.name] = r.value;
+        }
+    }
+    if (record.fields?.length > 0) {
+        obj.f = record.fields.map(f => ({
+            base: f.base,
+            offset: f.offset,
+            isWrite: f.isWrite,
+            val: f.value,
+        }));
     }
     return Object.keys(obj).length > 0 ? JSON.stringify(obj) : '';
 }
 
-/** 从 expr 记录生成扁平文本 kv 字符串（用于 tree/block/pipe 格式，更易读） */
-function _exprKvFlat(record) {
+/** 从 END_EXPR 记录生成扁平文本 kv 字符串（用于 tree/block/pipe 格式，更易读） */
+function _endExprKvFlat(record) {
     const parts = [];
 
     // 写入变量
-    const w = record.w;
-    if (w && typeof w === 'object') {
-        for (const [k, v] of Object.entries(w)) {
-            parts.push(`${k}=${serialize(v)}`);
+    if (record.writes?.length > 0) {
+        for (const w of record.writes) {
+            parts.push(`${w.name}=${serialize(w.value)}`);
         }
     }
 
-    // 读取变量
-    const r = record.r;
-    if (r && typeof r === 'object') {
-        const written = new Set(w ? Object.keys(w) : []);
-        for (const [k, v] of Object.entries(r)) {
-            if (!written.has(k)) parts.push(`${k}=${serialize(v)}`);
+    // 读取变量（只显示未被 write 覆盖的）
+    if (record.reads?.length > 0) {
+        const written = new Set((record.writes ?? []).map(w => w.name));
+        for (const r of record.reads) {
+            if (!written.has(r.name)) {
+                if (r.omitted) {
+                    parts.push(`${r.name}=<omitted>`);
+                } else {
+                    parts.push(`${r.name}=${serialize(r.value)}`);
+                }
+            }
         }
     }
 
     // 属性访问
-    const f = record.f;
-    if (Array.isArray(f)) {
-        for (const fi of f) {
-            const key = fi.isComputed ? `[${fi.offset}]` : `.${fi.offset}`;
-            parts.push(`${fi.base}${key}=${serialize(fi.val)}`);
-        }
-    }
-
-    // 兼容旧 kv 字符串格式
-    if (!parts.length && record.kv) {
-        if (typeof record.kv === 'string') return record.kv;
-        if (typeof record.kv === 'object') {
-            for (const [k, v] of Object.entries(record.kv)) {
-                parts.push(`${k}=${serialize(v)}`);
-            }
+    if (record.fields?.length > 0) {
+        for (const f of record.fields) {
+            const key = `${f.base}.${f.offset}`;
+            const arrow = f.isWrite ? '←' : '→';
+            parts.push(`${key}${arrow}${serialize(f.value)}`);
         }
     }
 
@@ -334,7 +401,7 @@ function createRenderer(format) {
 
 // ── 深度追踪器 ─────────────────────────────────────────────────────────────────
 //
-// 从 call/return 事件对实时维护当前调用深度，供渲染器使用。
+// 从 CALL_PRE/CALL 事件对实时维护当前调用深度，供渲染器使用。
 // 注意：若输入流经过 trace-filter 过滤，可能缺少部分配对，深度可能偏差（符合预期）。
 
 class DepthTracker {
@@ -344,12 +411,19 @@ class DepthTracker {
 
     /** 在渲染前调用，返回此事件应使用的深度 */
     depthFor(record) {
-        if (record.type === 'call') {
+        // 进入调用：CALL_PRE（调用前）或 FUNCTION_ENTER（函数体内）
+        if (record.type === 'CALL_PRE') {
             const d = this._depth;
             this._depth++;
             return d;
         }
-        if (record.type === 'return') {
+        // 退出调用：CALL（完成后返回值）
+        if (record.type === 'CALL') {
+            this._depth = Math.max(0, this._depth - 1);
+            return this._depth;
+        }
+        // FUNCTION_EXIT 也减少深度
+        if (record.type === 'FUNCTION_EXIT') {
             this._depth = Math.max(0, this._depth - 1);
             return this._depth;
         }
@@ -364,34 +438,41 @@ function printHelp() {
 trace-render.mjs — 将结构化 NDJSON 渲染为各种展示格式
 
 用法：
-  cat parsed.ndjson | node tools/trace-render.mjs
-  cat parsed.ndjson | node tools/trace-render.mjs --format tree
+  node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs
+  node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format tree
   node tools/trace-render.mjs --format block parsed.ndjson
 
 选项：
   --format FORMAT   输出格式（默认 flat）
-                      flat   平铺流式（与原始 trace 相同的布局）
+                      flat   平铺流式
                       tree   Unicode 树形符号（┬ / └ / │）
                       block  #region/#endregion 折叠块（VS Code 可折叠）
                       pipe   ASCII pipe 符号（| 数量 = 调用深度）
-  --no-seq          不输出 seq 编号前缀（仅供参考，目前保留 seq）
+  --no-seq          不输出 seq 编号前缀（保留选项，目前始终输出 seq）
   --help            显示帮助信息
+
+输入格式：
+  trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
+  事件类型：SCRIPT_ENTER, SCRIPT_EXIT, CALL_PRE, CALL,
+            FUNCTION_ENTER, FUNCTION_EXIT, END_EXPR, KEY_EVENT
 
 示例：
   # 以树形格式查看完整调用链
-  cat trace.ndjson | node tools/trace-parse.mjs | node tools/trace-render.mjs --format tree
+  node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format tree
 
-  # 只看 decode 相关调用的调用树
-  cat trace.ndjson \\
-    | node tools/trace-parse.mjs \\
-    | node tools/trace-filter.mjs --fn "*decode*" \\
-    | node tools/trace-render.mjs --format tree
+  # 带 smap 解析源码位置后渲染
+  node tools/trace-decode.mjs trace.bin --smap trace.smap.json | node tools/trace-render.mjs --format tree
+
+  # 先过滤再渲染
+  node tools/trace-decode.mjs trace.bin \\
+    | node tools/trace-filter.mjs --type CALL_PRE \\
+    | node tools/trace-render.mjs --format pipe
 
   # 生成 VS Code 可折叠的 block 格式
-  cat trace.ndjson | node tools/trace-parse.mjs | node tools/trace-render.mjs --format block > trace.log
+  node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format block > trace.log
 
 注意：
-  tree / block / pipe 格式根据 call/return 配对实时推导调用深度。
+  tree / block / pipe 格式根据 CALL_PRE/CALL 配对实时推导调用深度。
   若输入已被 trace-filter 过滤（破坏了配对），层次可能不完整，这是预期行为。
 `);
 }

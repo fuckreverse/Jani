@@ -7,10 +7,12 @@
 
 ## 一、总体概况
 
-Jani 的测试体系由 **11 个测试文件**组成，按"单元测试 → 集成测试"两层划分，均使用 Node.js 内置 `node:test` 框架（ESM，无第三方测试框架依赖）。所有测试集中在 `test/` 目录下：
+Jani 的测试体系由 **12 个测试文件**组成，按"单元测试 → 集成测试"两层划分，均使用 Node.js 内置 `node:test` 框架（ESM，无第三方测试框架依赖）。所有测试集中在 `test/` 目录下：
 
 ```
 test/
+├── fixtures/
+│   └── all-syntax.js           # 全语法样例（ES5~ES2022，用于 full-pipeline 集成测试）
 ├── helpers/
 │   └── shared-helpers.mjs      # 公共辅助工具（ALL_CONFIG / instr / runInSandbox / instrAndRun / createSpy）
 ├── unit/
@@ -25,7 +27,8 @@ test/
     ├── hooks.test.mjs          # 钩子调用验证 + 分析插件集成测试
     ├── logging.test.mjs        # 日志系统集成测试（含真实 IO）
     ├── execution-trace.test.mjs # ExecutionTrace 插件完整功能测试
-    └── dlint.test.mjs          # dlint 规则端到端测试
+    ├── dlint.test.mjs          # dlint 规则端到端测试
+    └── full-pipeline.test.mjs  # 全流程端到端集成测试（预处理→插桩→执行→后处理工具链）
 ```
 
 ### 运行方式
@@ -101,7 +104,7 @@ npm run test:logging
 | 测试组 | 测试数量 | 核心验证点 |
 |--------|----------|-----------|
 | RingBuffer | 7 | push/drain 基本往返、`drain(maxCount)` 限量、自动扩容（不丢弃）、扩容后环形绕回、`shouldFlush` 阈值、`clear`、wrap-around 正确性 |
-| EventSerializer | 9 | `EVENT_TYPE` 枚举完整性、`serializeEventToJSON`（undefined 值处理）、`serializeBatchToNDJSON` 每行独立、二进制往返（number/string/null/boolean）、批次二进制序列化往返 |
+| EventSerializer | 9 | `EVENT_TYPE` 枚举完整性、`createFileHeader` 魔数验证、`isBinaryTrace` 识别 JTB1、`serializeEvent`/`deserializeEvent` 二进制往返（number/string/null/boolean）、`serializeBatch`/`deserializeAll` 完整批次往返、各事件类型 type/iid/seq 完整性 |
 | MemoryBackend | 5 | write/getEvents、`getEventsOfType` 过滤、`flush` noop、`close` 后 write 抛出、`clear` 清空 |
 | LogManager | 8 | log 路由到后端、close 后 log 静默丢弃、flush 前不丢失、多后端同时接收、动态 addBackend/removeBackend、close 时 flush 剩余、`getStats`、`drainBatchSize` 分批控制 |
 | TraceLogger | 10 | `trace()`/`key()` 写入、`key()` 多级别（info/warn/error）、pre-init 缓冲（init 前写入不丢失）、`_mgr.flush()` 落盘、`close()` 后丢弃、`scheduleFlush()` 异步调度、多次 `init()` 幂等、`nodeFile=false` 降级、trace/key 路由差异 |
@@ -197,12 +200,13 @@ npm run test:logging
 
 ### 2.9 `test/integration/logging.test.mjs` — 日志系统集成测试
 
-**测试策略**：含真实 IO 测试，在系统临时目录写文件并读回验证，以及启动 mock WebSocket 服务器做端到端回路测试。
+**测试策略**：含真实 IO 测试，在系统临时目录写 `.bin` 文件并读回验证，使用 `isBinaryTrace` 检查 JTB1 魔数、`deserializeAll` 验证事件完整性；以及启动 mock WebSocket 服务器做端到端回路测试。
 
 | 测试组 | 核心验证点 |
 |--------|-----------|
-| NodeStreamBackend | NDJSON 格式写文件读回、多批次追加写入、`writeSync`（beforeclose 尽力写）、与 LogManager 集成 |
-| WsBackend + trace-server 回路 | 成功连接并发送批次收到 ack（binary 格式）、与 LogManager 集成 9 条事件分 3 批、ndjson 格式文本帧字段完整保留（trace/key 类型） |
+| NodeStreamBackend | JTB1 二进制格式写文件读回（`isBinaryTrace` 验证魔数 + `deserializeAll` 反序列化）、多批次写入（5 条事件 iid 顺序正确）、`writeSync`（beforeclose 尽力写）、与 LogManager 集成（10 条事件） |
+| NodeStreamBackend smap | `setSmap` 注入 smap → `close()` 自动写出 `.smap.json`，内容可读回验证 |
+| WsBackend + trace-server 回路 | 成功连接并发送批次收到 ack（JTB1 二进制格式，batchId 从 1 开始）、与 LogManager 集成 9 条事件分 3 批、JTB1 多种事件类型批次正确发送并可 `deserializeAll` 反序列化验证 |
 
 ### 2.10 `test/integration/execution-trace.test.mjs` — ExecutionTrace 插件完整功能测试
 
@@ -240,6 +244,30 @@ npm run test:logging
 | ShadowProtoProperty | 4 | 对象属性遮蔽原型属性触发、无遮蔽不触发、多次遮蔽计数、实例独立 |
 | UndefinedOffset | 4 | 用 `undefined` 作属性键触发、正常属性键不触发、多次触发计数、实例独立 |
 | 综合规则联用 | 4 | 同一代码段触发多条不同规则、规则互不干扰、复合场景多规则 |
+
+### 2.12 `test/integration/full-pipeline.test.mjs` — 全流程端到端集成测试
+
+**测试策略**：以 `test/fixtures/all-syntax.js`（覆盖 ES5~ES2022 全部语法的综合样例）为输入，完整执行"预处理 → CLI 插桩 → API 插桩 + vm 执行 → 后处理工具链"全流程，并验证每一步的中间产物格式和语义正确性。当前仅覆盖 Node.js 后端。
+
+**关键设计**：
+- Step 3 通过 API（`init` + `instrumentCode` + `JalangiSandbox` + `TraceLogger`）在当前进程内完成插桩与执行，保证 trace.bin 稳定写出；
+- `vm.createContext` 不注入 `Array/Object` 等内置构造函数，避免跨 context 的 `instanceof` 失败；
+- API 生成的 `smap` 与 CLI 生成的 `smap` iid 独立，各自保存以供后续 `--smap` 注入使用。
+
+| 测试步骤（Step）| 测试数量 | 核心验证点 |
+|----------------|----------|-----------|
+| Step 0: 前置条件 | 3 | 样例文件含所有关键语法节点、`jalangi --help` exit 0、后处理工具文件存在 |
+| Step 1: 预处理 | 2 | `preprocessCode` API 成功运行写出文件、预处理后保留关键结构且不含插桩钩子 |
+| Step 2: CLI 插桩 | 4 | `jalangi instrument` exit 0、插桩文件含 `J$.` 和防重插桩标记、`smap.json` 含数字 IID 键和 `[sl,sc,el,ec]` 数组、`node --check` 语法检查通过 |
+| Step 3: API 插桩 + vm 执行 | 2 | 语义正确性全量验证（**51 个断言**，覆盖 ES5~ES2022 各特性）、trace.bin JTB1 魔数与规模验证 |
+| Step 4: trace-decode | 6 | 解码 NDJSON exit 0、事件条数与类型（含 FUNCTION_EXIT）、`--smap` 注入行号、`--stats` total 与行数一致 |
+| Step 5: trace-render | 7 | flat/tree/pipe/block 四种格式 exit 0 且有内容、行数数量级一致（允许 3×+100 差异）、block 含 `#region` |
+| Step 6: trace-filter | 4 | `--type CALL_PRE` 过滤纯净、`--has-call` 与 `--type CALL_PRE` 条数一致、`--fn fact` ≥5 次递归调用、`--seq` 范围过滤后事件数减少且 seq 合规 |
+| Step 7: trace-hot-lines | 3 | 统计有输出、`--top 5` 行数不超过全量+5、`--by-type` exit 0 |
+| Step 8: trace-call-tree | 4 | 文本格式 exit 0 且含内容、`--json` 输出可解析为合法 JSON、调用树含样例函数名、`--depth 2` exit 0 |
+| Step 9: 完整管道连通性 | 5 | decode\|filter\|render 三段管道 exit 0、fact 调用树管道、seq 严格单调递增（跳过元数据事件）、CALL_PRE/CALL 数量级一致、FUNCTION_ENTER > 0 |
+| Step 10: 插桩配置变体 | 6 | `--inline-iid` 内联 iid map、`--no-source-map` 不产生 `.map.json`、`--dry-run` 不写文件、`--random-var` 使用 `__jal_` 前缀、`--split-runtime` 生成 `.runtime.mjs`、`--vlcq-source-map` 产生标准 Source Map v3 |
+| Step 11: 边缘案例与容错 | 5 | 无效魔数文件非零退出并报错、`--pretty` 输出含换行、`SCRIPT_ENTER` 有 iid 正整数、`--no-internal` 过滤后行数不超原始、`instrument-and-run --no-write` 处理简单脚本 exit 0 |
 
 ---
 
@@ -299,15 +327,16 @@ npm run test:logging
 | 自定义插件 | 用户继承 `PreprocessPlugin` 并覆写 `apply()` 的端到端流程 |
 | `sourceMap` 保留 | 预处理后 VLCQ source map 位置信息的正确性 |
 
-### 4.4 日志系统（`src/logger/`）
+### 4.4 日志系统（`src/logger/`、`src/encoding/`）
 
 | 模块 | 现状 | 建议补充 |
 |------|------|---------|
-| `TraceLogger.js` | `trace/key`路由、pre-init 缓冲、flush/close、scheduleFlush、幂等 init 均已覆盖 | 补充：`isDebugEnabled` 域控制 |
+| `TraceLogger.js` | `trace/key`路由、pre-init 缓冲、flush/close、scheduleFlush、幂等 init 均已覆盖 | 补充：`isDebugEnabled` 域控制、`setSmap` 透传到 `NodeStreamBackend` |
 | `LogManager.js` 背压 | 只测了 `drainBatchSize`，无背压 reject 测试 | 补充：写满时的阻塞/丢弃行为 |
+| `NodeStreamBackend` | JTB1 二进制写入（魔数验证 + 反序列化）、多批次、writeSync、LogManager 集成、setSmap 写出 `.smap.json` 均已覆盖 | 补充：背压（大 batch 阻塞 drain 事件）、autoFlush=true 路径 |
 | `WsWorkerBackend.js` / `WsSabBackend.js` | **完全未覆盖** | 需要 Worker 环境；建议补充 mock Worker 的单元测试 |
 | `IdbWorkerBackend.js` | **完全未覆盖** | 需要 IndexedDB 环境（浏览器）；暂缓 |
-| `EventSerializer` 边界 | 已覆盖常见类型 | 补充：超长字符串序列化（截断）、非 ASCII 字符、负数 iid |
+| `EventSerializer` 边界 | 已覆盖：JTB1 魔数、serializeEvent/serializeBatch/deserializeAll 往返（常见值类型）、isBinaryTrace、VALUE_TYPE.OMITTED（省略值） | 补充：超长字符串截断、非 ASCII 字符（CJK）、FLOAT64 精度保持、负数 iid |
 | `WsBackend` 重连/断线 | 未覆盖 | 补充：连接中断后的重试行为、窗口满时的背压 |
 
 ### 4.5 端到端分析插件（`src/plugins/`）
@@ -344,7 +373,8 @@ npm run test:logging
 | `integration/runtime.test.mjs` | 集成 | ~70 |
 | `integration/e2e.test.mjs` | 集成/端到端 | ~70 |
 | `integration/hooks.test.mjs` | 集成 | ~40 |
-| `integration/logging.test.mjs` | 集成（IO）| ~7 |
+| `integration/logging.test.mjs` | 集成（IO）| ~8 |
 | `integration/execution-trace.test.mjs` | 集成 | ~40 |
 | `integration/dlint.test.mjs` | 集成 | ~33 |
-| **合计** | | **527** |
+| `integration/full-pipeline.test.mjs` | 集成/全流程 | ~51 |
+| **合计** | | **~507** |

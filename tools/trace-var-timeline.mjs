@@ -3,10 +3,15 @@
  * trace-var-timeline.mjs — 变量值时序追踪
  *
  * 用法：
- *   cat parsed.ndjson | node tools/trace-var-timeline.mjs --var x
- *   cat parsed.ndjson | node tools/trace-var-timeline.mjs --var x,y,z
- *   cat parsed.ndjson | node tools/trace-var-timeline.mjs --all --limit 50
- *   cat parsed.ndjson | node tools/trace-var-timeline.mjs --help
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --var x
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --var x,y,z
+ *   node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --all --limit 50
+ *   node tools/trace-var-timeline.mjs --help
+ *
+ * 输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
+ *   - END_EXPR：写/读变量（writes=[{name,value}], reads=[{name,value,omitted?}], fields=[{base,offset,isWrite,value}]）
+ *   - WRITE_VAR：单独写入变量（name, value）
+ *   - READ_VAR_FULL：单独读取变量（name, value）
  *
  * 输出：
  *   变量值变化时序表（seq、行号、值）
@@ -22,7 +27,7 @@ class VarTimeline {
     constructor(targetVars = null, limit = 100) {
         this.targetVars = targetVars; // null 表示追踪所有
         this.limit = limit;
-        this.changes = []; // [{ seq, line, var, oldValue, newValue, type }]
+        this.changes = []; // [{ seq, line, var, value, type }]
     }
 
     shouldTrack(varName) {
@@ -33,70 +38,84 @@ class VarTimeline {
     process(record) {
         if (this.changes.length >= this.limit) return;
 
-        const { seq, line, kv, w, r, f } = record;
+        const { seq, line } = record;
 
-        // 处理结构化格式 (w/r)
-        if (w) {
-            for (const [varName, val] of Object.entries(w)) {
-                if (this.shouldTrack(varName)) {
-                    this.changes.push({
-                        seq,
-                        line,
-                        var: varName,
-                        value: this.formatValue(val),
-                        type: 'write',
-                    });
+        // ── END_EXPR 事件（JTB1 格式）────────────────────────────────────
+        if (record.type === 'END_EXPR') {
+            // 处理写入（writes 数组）
+            if (record.writes?.length > 0) {
+                for (const w of record.writes) {
+                    if (this.shouldTrack(w.name)) {
+                        this.changes.push({
+                            seq,
+                            line,
+                            var: w.name,
+                            value: this.formatValue(w.value),
+                            type: 'write',
+                        });
+                    }
                 }
             }
+
+            // 处理读取（reads 数组）
+            if (record.reads?.length > 0) {
+                for (const r of record.reads) {
+                    if (this.shouldTrack(r.name)) {
+                        this.changes.push({
+                            seq,
+                            line,
+                            var: r.name,
+                            value: r.omitted ? '<omitted>' : this.formatValue(r.value),
+                            type: 'read',
+                        });
+                    }
+                }
+            }
+
+            // 处理属性访问（fields 数组）
+            if (record.fields?.length > 0) {
+                for (const f of record.fields) {
+                    const key = `${f.base}.${f.offset}`;
+                    if (this.shouldTrack(key) || this.shouldTrack(f.offset)) {
+                        this.changes.push({
+                            seq,
+                            line,
+                            var: key,
+                            value: this.formatValue(f.value),
+                            type: f.isWrite ? 'field-write' : 'field-read',
+                        });
+                    }
+                }
+            }
+            return;
         }
 
-        if (r) {
-            for (const [varName, val] of Object.entries(r)) {
-                if (this.shouldTrack(varName)) {
-                    this.changes.push({
-                        seq,
-                        line,
-                        var: varName,
-                        value: this.formatValue(val),
-                        type: 'read',
-                    });
-                }
+        // ── WRITE_VAR 事件 ───────────────────────────────────────────────
+        if (record.type === 'WRITE_VAR') {
+            if (this.shouldTrack(record.name)) {
+                this.changes.push({
+                    seq,
+                    line,
+                    var: record.name,
+                    value: this.formatValue(record.value),
+                    type: 'write',
+                });
             }
+            return;
         }
 
-        // 处理传统格式 (kv)
-        if (kv && !w && !r) {
-            for (const [varName, val] of Object.entries(kv)) {
-                // 过滤掉一些特殊的 key
-                if (varName === 'this' || varName.startsWith('arg')) continue;
-                if (varName.startsWith('[') || varName.startsWith('"')) continue;
-                if (varName.includes('.')) continue;
-
-                if (this.shouldTrack(varName)) {
-                    this.changes.push({
-                        seq,
-                        line,
-                        var: varName,
-                        value: this.formatValue(val),
-                        type: 'kv',
-                    });
-                }
+        // ── READ_VAR_FULL 事件 ──────────────────────────────────────────
+        if (record.type === 'READ_VAR_FULL') {
+            if (this.shouldTrack(record.name)) {
+                this.changes.push({
+                    seq,
+                    line,
+                    var: record.name,
+                    value: this.formatValue(record.value),
+                    type: 'read',
+                });
             }
-        }
-
-        // 处理属性访问
-        if (f) {
-            for (const field of f) {
-                if (this.shouldTrack(field.offset)) {
-                    this.changes.push({
-                        seq,
-                        line,
-                        var: field.offset,
-                        value: this.formatValue(field.val),
-                        type: field.isWrite ? 'field-write' : 'field-read',
-                    });
-                }
-            }
+            return;
         }
     }
 
@@ -107,8 +126,10 @@ class VarTimeline {
             if (val.__type === 'function') return `[Function ${val.name || 'anonymous'}]`;
             if (val.__type === 'array') return `[...${val.length}]`;
             if (val.__type === 'object') return '{...}';
+            // 包含 [Function:xxx] 格式（来自二进制解码）
             return JSON.stringify(val);
         }
+        if (typeof val === 'string' && val.startsWith('[Function:')) return val;
         return String(val);
     }
 
@@ -135,9 +156,11 @@ function printHelp() {
 trace-var-timeline.mjs — 变量值时序追踪
 
 用法：
-  cat parsed.ndjson | node tools/trace-var-timeline.mjs --var x
-  cat parsed.ndjson | node tools/trace-var-timeline.mjs --var x,y,z
-  cat parsed.ndjson | node tools/trace-var-timeline.mjs --all --limit 50
+  node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --var x
+  node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --var x,y,z
+  node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --all --limit 50
+
+输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
 
 选项：
   --var NAMES   追踪指定变量（逗号分隔）
@@ -220,9 +243,9 @@ async function main() {
         console.log(
             String(c.seq).padStart(7) + ' | ' +
             String(c.line || '-').padStart(7) + ' | ' +
-            c.var.slice(0, 15).padEnd(15) + ' | ' +
+            (c.var || '-').slice(0, 15).padEnd(15) + ' | ' +
             c.type.padEnd(11) + ' | ' +
-            c.value.slice(0, 40)
+            String(c.value).slice(0, 40)
         );
     }
 }
