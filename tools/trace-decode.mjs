@@ -208,13 +208,16 @@ function decodeBuffer(buf, opts, emit) {
     // 跳过文件头
     let offset = FILE_HEADER_SIZE;
 
+    // 字典解压：DICT_ENTRY 事件写入此 Map，后续 STRING_REF / 0xFFFF 哨兵引用它
+    const dict = new Map();
+
     // 如果 resolveValues，先收集所有事件到数组，然后批量处理
     const allEvents = resolveValues ? [] : null;
 
     while (offset + EVENT_HEADER_SIZE <= ab.byteLength) {
         let result;
         try {
-            result = deserializeEvent(view, offset);
+            result = deserializeEvent(view, offset, dict);
         } catch (err) {
             process.stderr.write(`[trace-decode] decode error at offset ${offset}: ${err.message}\n`);
             break;
@@ -225,6 +228,9 @@ function decodeBuffer(buf, opts, emit) {
         // 防死循环
         if (nextOffset <= offset) break;
         offset = nextOffset;
+
+        // DICT_ENTRY 是字典控制事件，deserializeEvent 已自动更新 dict，跳过输出
+        if (event.type === 'DICT_ENTRY') continue;
 
         statsCounter.total++;
 

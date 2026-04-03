@@ -19,6 +19,11 @@
  *   // 与 LogManager 配合：
  *   const mgr = new LogManager({ backends: [backend] });
  *
+ * 启用字典压缩（Value Pool）：
+ *
+ *   const backend = new NodeStreamBackend({ path: 'my-trace.bin', usePool: true });
+ *   // 高频字符串（变量名、文件名、属性名）自动被字典压缩，通常可减少 30-50% trace 体积。
+ *
  * 输出格式（二进制 JTB1）：
  *   文件 = [魔数 8B 文件头][事件1: 12B头 + payload][事件2: 12B头 + payload]...
  *   可用 trace-decode.mjs 解码：
@@ -33,6 +38,7 @@ import { createWriteStream, writeFileSync } from 'node:fs';
 import {
     serializeBatch,
     createFileHeader,
+    EventSerializerWithPool,
 } from '../../encoding/EventSerializer.js';
 import { createDiagLogger, DOMAIN } from '../diagnostics.js';
 
@@ -47,6 +53,7 @@ export class NodeStreamBackend {
      * @param {number}  [options.highWaterMark=65536]  WriteStream 缓冲上限（字节）
      * @param {boolean} [options.autoFlush=false]  每批后调用 flush（降低延迟但增加 syscall）
      * @param {object|null} [options.smap=null]  初始 smap 对象（可在 close 时自动写出 .smap.json）
+     * @param {boolean} [options.usePool=false]  启用字典压缩（Value Pool），减少重复字符串开销
      */
     constructor(options = {}) {
         const {
@@ -56,12 +63,17 @@ export class NodeStreamBackend {
             highWaterMark = 65536,
             autoFlush     = false,
             smap          = null,
+            usePool       = false,
         } = options;
 
         this._path      = path;
         this._autoFlush = autoFlush;
         this._closed    = false;
         this._smap      = smap;
+
+        // 字典压缩
+        this._usePool   = usePool;
+        this._poolSerializer = usePool ? new EventSerializerWithPool() : null;
 
         // 统计
         this.stats = { batchCount: 0, totalEvents: 0, bytesWritten: 0, errors: 0 };
@@ -106,7 +118,9 @@ export class NodeStreamBackend {
      * @private
      */
     _writeFileHeader() {
-        const headerBuf = createFileHeader();
+        const headerBuf = this._poolSerializer
+            ? this._poolSerializer.createFileHeader()
+            : createFileHeader();
         const nodeBuffer = Buffer.from(headerBuf);
         this._stream.write(nodeBuffer);
         this.stats.bytesWritten += nodeBuffer.length;
@@ -137,18 +151,7 @@ export class NodeStreamBackend {
             await this._waitDrain();
         }
 
-        // 序列化为二进制（serializeBatch 产生连续的事件流）
-        const arrBuf = serializeBatch(batch);
-        const nodeBuf = Buffer.from(arrBuf);
-
-        this.stats.batchCount++;
-        this.stats.totalEvents += batch.length;
-        this.stats.bytesWritten += nodeBuf.length;
-
-        const ok = this._stream.write(nodeBuf);
-        if (!ok) {
-            this._drainable = false;
-        }
+        this._writeBatch(batch);
 
         if (this._autoFlush) {
             await this.flush();
@@ -161,8 +164,36 @@ export class NodeStreamBackend {
      */
     writeSync(batch) {
         if (this._closed) return;
-        const arrBuf = serializeBatch(batch);
-        this._stream.write(Buffer.from(arrBuf));
+        this._writeBatch(batch);
+    }
+
+    /**
+     * 内部：序列化并写入一个 batch（同步）。
+     * 支持有 pool 和无 pool 两种路径。
+     * @param {Array} batch
+     * @private
+     */
+    _writeBatch(batch) {
+        this.stats.batchCount++;
+        this.stats.totalEvents += batch.length;
+
+        if (this._poolSerializer) {
+            // 有状态字典压缩路径：返回 ArrayBuffer[]
+            const buffers = this._poolSerializer.serializeBatch(batch);
+            for (const arrBuf of buffers) {
+                const nodeBuf = Buffer.from(arrBuf);
+                this.stats.bytesWritten += nodeBuf.length;
+                const ok = this._stream.write(nodeBuf);
+                if (!ok) this._drainable = false;
+            }
+        } else {
+            // 无状态路径（向后兼容）
+            const arrBuf = serializeBatch(batch);
+            const nodeBuf = Buffer.from(arrBuf);
+            this.stats.bytesWritten += nodeBuf.length;
+            const ok = this._stream.write(nodeBuf);
+            if (!ok) this._drainable = false;
+        }
     }
 
     /**
@@ -212,6 +243,14 @@ export class NodeStreamBackend {
                 if (err) { reject(err); } else { done(); }
             });
         });
+    }
+
+    /**
+     * 返回字典压缩统计信息（仅在 usePool=true 时有意义）。
+     * @returns {{ dictSize: number, dictEntries: number }|null}
+     */
+    getPoolStats() {
+        return this._poolSerializer ? this._poolSerializer.getStats() : null;
     }
 
     // ── 内部方法 ──────────────────────────────────────────────────────────────

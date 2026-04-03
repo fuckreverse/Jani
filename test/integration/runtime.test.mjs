@@ -211,7 +211,7 @@ describe('SMemory / SMemoryPlugin', () => {
         const mem    = new SMemory(FAKE_CONSTANTS);
         const plugin = new SMemoryPlugin(mem);
         const fakeF  = function () {};
-        fakeF['*J$F*'] = null;
+        // 新方案：defineFunction 不写属性，只需直接 functionEnter
         mem.functionEnter(fakeF);
         const ret = plugin.functionExit(1, 'retVal', undefined);
         assert.ok(ret && 'returnVal' in ret && 'isBacktrack' in ret, '返回值应含 returnVal 和 isBacktrack');
@@ -1016,6 +1016,59 @@ describe('SMemory — getShadowObjectOfObject', () => {
     });
 });
 
+describe('SMemory — 透明插桩验证（WeakMap 方案）', () => {
+    test('getShadowObjectOfObject 不向目标对象写任何属性', () => {
+        const mem = new SMemory(FAKE_CONSTANTS);
+        const obj = { x: 1 };
+        const before = Object.getOwnPropertyNames(obj).slice().sort();
+        mem.getShadowObjectOfObject(obj);
+        const after = Object.getOwnPropertyNames(obj).slice().sort();
+        assert.deepEqual(after, before, '调用 getShadowObjectOfObject 后对象自身属性列表不应改变');
+    });
+
+    test('getShadowObjectOfObject 对 frozen 对象不崩溃且正常返回影子', () => {
+        const mem = new SMemory(FAKE_CONSTANTS);
+        const frozen = Object.freeze({ y: 2 });
+        let shadow;
+        assert.doesNotThrow(() => { shadow = mem.getShadowObjectOfObject(frozen); },
+            'frozen 对象调用 getShadowObjectOfObject 不应抛出');
+        assert.ok(shadow !== undefined, 'frozen 对象应能正常获取影子对象');
+        const id = mem.getIDFromShadowObjectOrFrame(shadow);
+        assert.ok(typeof id === 'number' && id > 0, 'frozen 对象影子 ID 应为正整数');
+    });
+
+    test('defineFunction 不向函数对象写任何属性', () => {
+        const mem = new SMemory(FAKE_CONSTANTS);
+        const fn  = function myFn() {};
+        const before = Object.getOwnPropertyNames(fn).slice().sort();
+        mem.defineFunction(fn);
+        const after = Object.getOwnPropertyNames(fn).slice().sort();
+        assert.deepEqual(after, before, 'defineFunction 后函数对象自身属性列表不应改变');
+    });
+
+    test('同一对象多次调用 getShadowObjectOfObject 属性数量不变', () => {
+        const mem = new SMemory(FAKE_CONSTANTS);
+        const obj = { a: 1, b: 2 };
+        mem.getShadowObjectOfObject(obj);
+        mem.getShadowObjectOfObject(obj);
+        mem.getShadowObjectOfObject(obj);
+        assert.deepEqual(
+            Object.getOwnPropertyNames(obj).sort(),
+            ['a', 'b'],
+            '多次调用后属性列表应保持不变'
+        );
+    });
+
+    test('sealed 对象不崩溃', () => {
+        const mem    = new SMemory(FAKE_CONSTANTS);
+        const sealed = Object.seal({ z: 3 });
+        let shadow;
+        assert.doesNotThrow(() => { shadow = mem.getShadowObjectOfObject(sealed); },
+            'sealed 对象调用 getShadowObjectOfObject 不应抛出');
+        assert.ok(shadow !== undefined, 'sealed 对象应能正常获取影子对象');
+    });
+});
+
 describe('SMemory — 影子帧生命周期', () => {
     test('initialize 向当前帧注册变量', () => {
         const mem = new SMemory(FAKE_CONSTANTS);
@@ -1026,7 +1079,7 @@ describe('SMemory — 影子帧生命周期', () => {
     test('functionEnter/functionReturn：帧栈正确压入和弹出', () => {
         const mem = new SMemory(FAKE_CONSTANTS);
         const fn  = function foo() {};
-        fn['*J$F*'] = null; // 模拟已被 SMemory.defineFunction 处理过
+        // 新方案：不再向函数对象写属性，直接 functionEnter
 
         mem.functionEnter(fn);
         // 执行期间，当前帧应为新帧
@@ -1081,9 +1134,8 @@ describe('SMemory — 影子帧生命周期', () => {
         const mem = new SMemory(FAKE_CONSTANTS);
 
         const fn1 = function outer() {};
-        fn1['*J$F*'] = null;
+        // 新方案：不再向函数对象写属性
         const fn2 = function inner() {};
-        fn2['*J$F*'] = null;
 
         // 嵌套进入
         mem.functionEnter(fn1);

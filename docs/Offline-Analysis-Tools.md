@@ -63,6 +63,16 @@ node tools/trace-decode.mjs trace.bin \
 | `--pretty` | 格式化输出（带缩进，调试用）|
 | `--help` | 显示帮助信息 |
 
+### 字典压缩透明解码
+
+当 trace 文件由 `NodeStreamBackend({ usePool: true })` 或 `WsBackend({ mode: 'main', usePool: true })` 写入时，
+文件中会包含 `DICT_ENTRY`（事件类型 `0x0A`）条目和 `STRING_REF` 值引用。
+`trace-decode.mjs` 在解码过程中**自动维护字典状态**：
+
+- 遇到 `DICT_ENTRY` 时将 `id → string` 写入内部字典，该事件**不输出**到 NDJSON
+- 遇到 `STRING_REF` 时从字典中查找，将字段值**自动还原**为原始字符串
+- 对下游工具（`trace-filter.mjs`、`trace-render.mjs` 等）完全透明，无需任何额外选项
+
 ### 输出格式
 
 每行一个紧凑 JSON 对象，字段随事件类型而定：
@@ -146,6 +156,11 @@ node tools/trace-decode.mjs trace.bin --smap trace.smap.json | node tools/trace-
 | `--pretty` | 格式化输出（带缩进，调试用）|
 | `--workers N` | （文本模式）并行 Worker 线程数；默认自动取 CPU 核心数；`0` 禁用多线程 |
 | `--help` | 显示帮助信息 |
+
+### 字典压缩透明解码（二进制模式）
+
+在二进制模式（`.bin` 文件）下，`trace-parse.mjs` 与 `trace-decode.mjs` 采用相同的字典维护逻辑：
+自动识别并处理 `DICT_ENTRY` 事件和 `STRING_REF` 引用，对用户完全透明。
 
 ### 用法
 

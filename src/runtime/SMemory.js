@@ -4,14 +4,52 @@
  * @file Shadow Memory —— 为每个 JS 对象、函数和活动帧关联一个唯一的"影子对象"和 ID。
  * @author  Koushik Sen
  *
+ * ## 透明性设计（WeakMap 方案）
+ *
+ * 旧实现通过 `Object.defineProperty` 将特殊属性直接写到目标对象/函数上，
+ * 会导致以下副作用，破坏"透明插桩"原则：
+ *
+ *   1. `Object.getOwnPropertyNames(obj)` 结果多出 `*J$O*`、`*J$A*`、`*J$F*` 等框架属性名
+ *      → 被分析代码可感知插桩存在（身份不透明）
+ *   2. `Object.freeze(obj)` / `Object.seal(obj)` 后 defineProperty 抛异常，
+ *      try-catch 吞掉，影子对象静默创建失败 → 分析工具拿不到 ID（功能静默缺失）
+ *   3. 每次 defineProperty 触发 V8 Hidden Class 分裂 → 所有被分析对象 JIT 降级
+ *   4. `defineFunction(f)` 向函数写 `*J$F*`，`Object.getOwnPropertyNames(f)` 可见
+ *      → 分析框架的存在感泄露给被分析代码
+ *
+ * 现方案改用三个 WeakMap，**完全不向目标对象/函数写任何属性**：
+ *
+ *   _shadowMap    : (object | function) → { _id, _actual }
+ *     替代 SPECIAL_PROP_SOBJECT / SPECIAL_PROP_ACTUAL（createShadowObject 写到目标对象上）
+ *
+ *   _fnDefFrameMap : function → frame
+ *     替代 SPECIAL_PROP_FRAME（defineFunction 写到函数上）
+ *     含义：函数 f 在哪个帧中被定义（defineFunction 时的 frame）
+ *
+ *   _frameParentMap : frame → parentFrame
+ *     替代 SPECIAL_PROP_FRAME（functionEnter 写到新帧对象上）
+ *     含义：新帧的父帧链（getFrame 沿此链向上查找变量）
+ *
+ * 三个 WeakMap 职责分离，键类型不同（对象/函数 vs 帧对象），逻辑清晰。
+ *
+ * ### 对外 API 完全兼容
+ *
+ * - `getShadowObjectOfObject(val)`            → 返回影子记录 { _id, _actual }
+ * - `getIDFromShadowObjectOrFrame(shadow)`    → 读 shadow._id
+ * - `getActualObjectOrFunctionFromShadowObjectOrFrame(shadow)` → 读 shadow._actual
+ * - `getShadowObject(obj, prop, isGetField)`  → 同旧接口，owner 换成影子记录
+ * - `getShadowFrame(name)`                    → 同旧接口，返回帧影子记录
+ * - `getFrame(name)`                          → 同旧接口，返回原始帧对象
+ * - `defineFunction(f)`                       → 不写属性，用 _fnDefFrameMap
+ * - `initialize` / `functionEnter` / `functionReturn` 等 → 行为不变
+ *
  * 这是一个框架级服务，不是普通的分析插件。
  *
  * 使用方式（推荐）：
- *   import { HookDispatcher } from './HookDispatcher.js';
- *   const host = new HookDispatcher();
- *   host.enableShadowMemory();        // 创建 SMemory 并挂到 J$.smemory
- *   // 现在业务插件可以通过 J$.smemory 访问影子内存
- *   host.use(new MyAnalysis(J$.smemory));
+ *   import { SMemory, SMemoryPlugin } from './SMemory.js';
+ *   const smemory = new SMemory(J$);
+ *   J$.smemory = smemory;
+ *   J$.analysis.use(new SMemoryPlugin(smemory));
  *
  * 向后兼容用法（旧式，与原来 --analysis SMemory.js 行为相同）：
  *   sandbox.analysis = new SMemoryPlugin(sandbox);
@@ -20,7 +58,8 @@
 
 import {
     $push, $pop,
-    $create, $defineProperty, $getOwnPropertyDescriptor, $getPrototypeOf,
+    $create, $getOwnPropertyDescriptor, $getPrototypeOf,
+    $wmGet, $wmSet, $wmHas,
 } from './NativeProxy.js';
 
 // ─── SMemory：影子内存服务 ────────────────────────────────────────────────────
@@ -43,26 +82,53 @@ export class SMemory {
     constructor(sandboxOrConstants) {
         const Constants = sandboxOrConstants?.Constants ?? sandboxOrConstants;
 
-        const PREFIX              = Constants.JALANGI_VAR;
-        const SPECIAL_PROP_SOBJECT = `*${PREFIX}O*`;
-        const SPECIAL_PROP_FRAME   = `*${PREFIX}F*`;
-        const SPECIAL_PROP_ACTUAL  = `*${PREFIX}A*`;
+        const HOP = Constants.HOP;
 
         let objectId    = 1;
         let scriptCount = 0;
-        const HOP       = Constants.HOP;
 
         let frame      = $create(null);
         const frameStack = [frame];
 
-        // Node.js 环境：为 process.env 建立影子对象
-        const processEnv  = !Constants.isBrowser && typeof process !== 'undefined' && process?.env;
-        const shadowEnv   = $create(null);
-        if (processEnv) {
-            shadowEnv[SPECIAL_PROP_SOBJECT] = objectId;
-            shadowEnv[SPECIAL_PROP_ACTUAL]  = process.env;
-            objectId += 2;
-        }
+        // ── 三个 WeakMap 替代 defineProperty ─────────────────────────────────────
+        //
+        // 1. _shadowMap
+        //    键：被分析的目标对象或函数（typeof obj === 'object' || 'function'）
+        //    值：{ _id: number, _actual: object }
+        //    替代旧方案中写在目标对象上的 SPECIAL_PROP_SOBJECT / SPECIAL_PROP_ACTUAL 属性。
+        //
+        // 2. _fnDefFrameMap
+        //    键：函数对象（typeof fn === 'function'）
+        //    值：frame 对象（$create(null) 产生的帧）
+        //    含义：函数 fn 被"定义"（defineFunction 调用）时的活跃帧。
+        //    替代旧方案中写在函数上的 SPECIAL_PROP_FRAME 属性（defineFunction 时写入）。
+        //    functionEnter(f) 通过 $wmGet(_fnDefFrameMap, f) 读取 f 定义时的帧，
+        //    从而在新帧上恢复正确的作用域链。
+        //
+        // 3. _frameParentMap
+        //    键：帧对象（$create(null) 产生）
+        //    值：父帧对象（也是 $create(null) 产生）
+        //    含义：帧的词法父帧，构成帧链（getFrame 沿链向上搜索变量）。
+        //    替代旧方案中写在新帧对象上的 SPECIAL_PROP_FRAME 属性（functionEnter 时写入）。
+        //
+        // 三个 WeakMap 的键类型语义不同，不会混淆：
+        //   _shadowMap      键 = 任意被分析对象/函数（来自被分析代码）
+        //   _fnDefFrameMap  键 = 函数（来自被分析代码）
+        //   _frameParentMap 键 = 框架内部帧对象（$create(null)，不来自被分析代码）
+        //
+        // 所有操作均通过 NativeProxy.$wmGet/$wmSet/$wmHas 访问，
+        // 防止用户代码 monkey-patch WeakMap.prototype 后触发钩子递归。
+
+        const _shadowMap      = new WeakMap();
+        const _fnDefFrameMap  = new WeakMap();
+        const _frameParentMap = new WeakMap();
+
+        // ── 帧影子 Map（帧的影子记录，独立于 _shadowMap 以区分框架内部帧与被分析对象）──
+        //
+        // 帧是框架内部创建的 null-prototype 对象（$create(null)），
+        // 它本身不会出现在被分析代码中，但 getShadowFrame/getIDFromShadowObjectOrFrame
+        // 需要为它分配一个唯一的 ID，以便分析插件追踪变量所在帧。
+        const _frameShadowMap = new WeakMap();
 
         // ── 私有工具 ──────────────────────────────────────────────────────────────
 
@@ -83,20 +149,39 @@ export class SMemory {
                 : { owner: oldObj,    isProperty: true };
         }
 
-        function createShadowObject(val) {
+        /**
+         * 获取或创建目标对象的影子记录（存储在 _shadowMap 中）。
+         *
+         * 与旧 createShadowObject 的区别：
+         *   - 完全不向 val 写属性
+         *   - 对 Object.freeze / Object.seal 的对象也能正确工作
+         *   - 不触发 V8 Hidden Class 变化
+         *
+         * @param {*} val
+         * @returns {{ _id: number, _actual: * } | undefined}
+         */
+        function getOrCreateShadowRecord(val) {
             const type = typeof val;
-            if ((type === 'object' || type === 'function') && val !== null && !HOP(val, SPECIAL_PROP_SOBJECT)) {
-                $defineProperty(val, SPECIAL_PROP_SOBJECT, { enumerable: false, writable: true, configurable: true });
-                $defineProperty(val, SPECIAL_PROP_ACTUAL,  { enumerable: false, writable: true, configurable: true });
-                try {
-                    val[SPECIAL_PROP_SOBJECT] = $create(null);
-                    val[SPECIAL_PROP_SOBJECT][SPECIAL_PROP_SOBJECT] = objectId;
-                    val[SPECIAL_PROP_SOBJECT][SPECIAL_PROP_ACTUAL]  = val;
-                    objectId += 2;
-                } catch {
-                    // 某些 DOM 对象不允许附加特殊属性，直接忽略
-                }
-            }
+            if ((type !== 'object' && type !== 'function') || val === null) return undefined;
+            if ($wmHas(_shadowMap, val)) return $wmGet(_shadowMap, val);
+            const record = { _id: objectId, _actual: val };
+            objectId += 2;
+            $wmSet(_shadowMap, val, record);
+            return record;
+        }
+
+        /**
+         * 获取或创建帧对象的影子记录（存储在 _frameShadowMap 中）。
+         *
+         * @param {object} frameObj  帧对象（$create(null) 创建）
+         * @returns {{ _id: number, _actual: undefined }}
+         */
+        function getOrCreateFrameShadowRecord(frameObj) {
+            if ($wmHas(_frameShadowMap, frameObj)) return $wmGet(_frameShadowMap, frameObj);
+            const record = { _id: objectId, _actual: undefined };
+            objectId += 2;
+            $wmSet(_frameShadowMap, frameObj, record);
+            return record;
         }
 
         // ── 公开查询 API ──────────────────────────────────────────────────────────
@@ -106,11 +191,11 @@ export class SMemory {
          * @param {object}  obj
          * @param {string}  prop
          * @param {boolean} isGetField - true=读取操作，false=写入操作
-         * @returns {{ owner: object, isProperty: boolean }}
+         * @returns {{ owner: { _id, _actual } | undefined, isProperty: boolean } | false}
          */
         this.getShadowObject = (obj, prop, isGetField) => {
             const ownerAndAccess = getOwnerAndAccess(obj, prop, isGetField);
-            if (ownerAndAccess.owner !== undefined) {
+            if (ownerAndAccess && ownerAndAccess.owner !== undefined) {
                 ownerAndAccess.owner = this.getShadowObjectOfObject(ownerAndAccess.owner);
             }
             return ownerAndAccess;
@@ -119,70 +204,86 @@ export class SMemory {
         /**
          * 获取变量所在活动帧的影子对象。
          * @param {string} name - 变量名
-         * @returns {object}
+         * @returns {{ _id: number, _actual: undefined }}
          */
         this.getShadowFrame = (name) => {
-            const f   = this.getFrame(name);
-            const ret = this.getShadowObjectOfObject(f);
-            $defineProperty(ret, SPECIAL_PROP_ACTUAL, { enumerable: false, writable: true, configurable: true });
-            ret[SPECIAL_PROP_ACTUAL] = f[SPECIAL_PROP_ACTUAL];
-            return ret;
+            const f = this.getFrame(name);
+            return getOrCreateFrameShadowRecord(f);
         };
 
         /**
          * 从影子对象或影子帧中取出唯一 ID。
-         * @param {object} obj
+         *
+         * 新方案：影子记录格式是 { _id, _actual }，直接读 ._id。
+         *
+         * @param {{ _id: number } | null | undefined} obj
          * @returns {number|undefined}
          */
         this.getIDFromShadowObjectOrFrame = (obj) => {
             if (obj === undefined || obj === null) return undefined;
-            return obj[SPECIAL_PROP_SOBJECT];
+            if (typeof obj._id === 'number') return obj._id;
+            return undefined;
         };
 
         /**
          * 从影子对象中取出对应的真实对象。
-         * @param {object} obj
+         *
+         * 新方案：直接读 ._actual。
+         *
+         * @param {{ _actual: * } | null | undefined} obj
          * @returns {*}
          */
-        this.getActualObjectOrFunctionFromShadowObjectOrFrame = (obj) => obj[SPECIAL_PROP_ACTUAL];
+        this.getActualObjectOrFunctionFromShadowObjectOrFrame = (obj) => {
+            if (obj === undefined || obj === null) return undefined;
+            return obj._actual;
+        };
 
         /**
          * 获取持有变量 name 的活动帧（原始帧对象，非影子对象）。
+         *
+         * 沿 _frameParentMap 构成的帧链向上搜索第一个拥有 name 属性的帧。
+         * 若整条链都没有，返回根帧（frameStack[0]）。
+         *
          * @param {string} name
          * @returns {object}
          */
         this.getFrame = (name) => {
             let tmp = frame;
-            while (tmp && !HOP(tmp, name)) {
-                tmp = tmp[SPECIAL_PROP_FRAME];
+            while (tmp) {
+                if (HOP(tmp, name)) return tmp;
+                const parent = $wmGet(_frameParentMap, tmp);
+                if (parent === undefined) break;
+                tmp = parent;
             }
-            return tmp ?? frameStack[0];
+            return frameStack[0];
         };
 
         /**
          * 获取 val 对应的影子对象；val 为 null/undefined/原始值时返回 undefined。
+         *
+         * 返回格式 { _id: number, _actual: object }。
+         * getIDFromShadowObjectOrFrame / getActualObjectOrFunctionFromShadowObjectOrFrame
+         * 已同步更新为读新格式。
+         *
          * @param {*} val
-         * @returns {object|undefined}
+         * @returns {{ _id: number, _actual: * } | undefined}
          */
         this.getShadowObjectOfObject = (val) => {
-            if (processEnv && val === process.env) return shadowEnv;
-            createShadowObject(val);
-            const type = typeof val;
-            if ((type === 'object' || type === 'function') && val !== null && HOP(val, SPECIAL_PROP_SOBJECT)) {
-                if (typeof val[SPECIAL_PROP_SOBJECT] === 'object') {
-                    return val[SPECIAL_PROP_SOBJECT];
-                }
-            }
-            return undefined;
+            return getOrCreateShadowRecord(val);
         };
 
         // ── 内部状态维护（由 SMemoryPlugin 钩子驱动）────────────────────────────
 
-        /** 将函数 f 与当前活动帧关联（用于跨帧追踪闭包）。 */
+        /**
+         * 将函数 f 与当前活动帧关联（用于跨帧追踪闭包）。
+         *
+         * 新方案：不再向 f 写 SPECIAL_PROP_FRAME 属性，
+         * 改用 _fnDefFrameMap.set(f, frame)。
+         * f 本身不受任何修改，对被分析代码完全透明。
+         */
         this.defineFunction = (f) => {
             if (typeof f !== 'function') return;
-            $defineProperty(f, SPECIAL_PROP_FRAME, { enumerable: false, writable: true, configurable: true });
-            f[SPECIAL_PROP_FRAME] = frame;
+            $wmSet(_fnDefFrameMap, f, frame);
         };
 
         /** 在当前帧中注册变量 name。 */
@@ -190,13 +291,28 @@ export class SMemory {
             frame[name] = undefined;
         };
 
-        /** 函数调用时压入新帧。 */
+        /**
+         * 函数调用时压入新帧。
+         *
+         * 新方案：
+         *   - 新帧到父帧的链通过 _frameParentMap.set(newFrame, parentFrame) 存储，
+         *     替代旧方案在新帧上写 SPECIAL_PROP_FRAME 属性。
+         *   - 新帧的"词法父帧"：取 f 定义时的帧（_fnDefFrameMap.get(f)），
+         *     这样闭包函数进入时，getFrame 可以沿链正确找到外层帧中的变量。
+         *     若 f 没有被 defineFunction 处理过（_fnDefFrameMap 无记录），
+         *     则回退到当前活跃帧（parentFrame），与旧方案的 fallback 行为一致。
+         *
+         * @param {*} f  被调用的函数对象
+         */
         this.functionEnter = (f) => {
-            $push(frameStack, frame = $create(null));
-            $defineProperty(frame, SPECIAL_PROP_FRAME,  { enumerable: false, writable: true, configurable: true });
-            $defineProperty(frame, SPECIAL_PROP_ACTUAL, { enumerable: false, writable: true, configurable: true });
-            frame[SPECIAL_PROP_FRAME]  = f[SPECIAL_PROP_FRAME];
-            frame[SPECIAL_PROP_ACTUAL] = f;
+            const parentFrame = frame;
+            frame = $create(null);
+            $push(frameStack, frame);
+
+            // 词法父帧：优先用 f 在 defineFunction 时记录的定义帧（闭包链正确性）
+            // 若 f 未被 defineFunction 处理（如匿名立即执行函数），则用当前父帧
+            const defFrame = (typeof f === 'function') ? $wmGet(_fnDefFrameMap, f) : undefined;
+            $wmSet(_frameParentMap, frame, defFrame ?? parentFrame);
         };
 
         /** 函数返回时弹出帧。 */
@@ -215,8 +331,9 @@ export class SMemory {
                     if (Constants.isBrowser) {
                         frame = frameStack[0];
                     } else {
-                        $push(frameStack, frame = $create(null));
-                        frame[SPECIAL_PROP_FRAME] = frameStack[0];
+                        const newFrame = $create(null);
+                        $wmSet(_frameParentMap, newFrame, frameStack[0]);
+                        $push(frameStack, frame = newFrame);
                     }
                     $push(isEvalScript, false);
                 } else {

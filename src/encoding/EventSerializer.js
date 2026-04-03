@@ -27,15 +27,16 @@
  *
  *     [0]   u8  valueType  (VALUE_TYPE.*)
  *     后续字节（依 valueType）：
- *       OMITTED   → 无后续（值可通过 smap.defIid 追溯）
- *       NULL      → 无后续
- *       UNDEFINED → 无后续
- *       BOOL_T/F  → 无后续
- *       INT32     → 4 字节 i32（小端）
- *       FLOAT64   → 8 字节 f64（小端）
- *       STRING    → u16 长度 + UTF-8 字节
- *       OBJECT    → u16 长度 + JSON UTF-8 字节
- *       FUNCTION  → u8 名称长度 + ASCII 字节（最长 255）
+ *       OMITTED    → 无后续（值可通过 smap.defIid 追溯）
+ *       NULL       → 无后续
+ *       UNDEFINED  → 无后续
+ *       BOOL_T/F   → 无后续
+ *       INT32      → 4 字节 i32（小端）
+ *       FLOAT64    → 8 字节 f64（小端）
+ *       STRING     → u16 长度 + UTF-8 字节
+ *       OBJECT     → u16 长度 + UTF-8 字节
+ *       FUNCTION   → u8 名称长度 + ASCII 字节（最长 255）
+ *       STRING_REF → u16 字典 ID（引用已注册的字符串，3 字节 vs 原始编码）
  *
  * ### 批次格式（流式写入，NodeStreamBackend 使用）
  *
@@ -56,12 +57,31 @@
  *                                     [read_count u8]([name_str][val])*  ← val 可能是 OMITTED
  *                                     [field_count u8]([base_str][offset_str][isWrite u8][val])*
  *   KEY_EVENT       = 0x08   payload: [level u8][text_str]
+ *   DICT_ENTRY      = 0x09   payload: [id u16][str_len u16][UTF-8 字节]
+ *                             含义：将 id 注册到字典，后续 STRING_REF 可引用
+ *   WRITE_VAR       = 0x0B   payload: [name_str][val]
+ *   READ_VAR_FULL   = 0x0C   payload: [name_str][val]
  *
  * ## 值省略（fai 优化）
  *
  *   当静态分析确定某 read-site 对应唯一 def-site 时（Decision.LIGHTWEIGHT），
  *   值编码为 VALUE_TYPE.OMITTED。
  *   后处理工具加载 smap.json 后，通过 smap[iid].defIid 追溯到对应 write 事件的值。
+ *
+ * ## 值池压缩（Value Pool / Dictionary Compression）
+ *
+ *   高频重复的字符串（变量名、文件名、属性名等）在运行时会被反复写入 trace。
+ *   StringPool 为每个首次出现的字符串分配一个 u16 ID（1..65535），
+ *   并在流中插入 DICT_ENTRY 事件注册映射。后续出现同一字符串时，
+ *   使用 VALUE_TYPE.STRING_REF（1 字节类型 + 2 字节 ID = 3 字节）代替完整 UTF-8 编码。
+ *
+ *   适用阈值：字符串长度 >= MIN_POOL_STR_LEN（默认 4）时才考虑入池，
+ *   避免短字符串（如 "x"、"y"）产生额外的 DICT_ENTRY 开销。
+ *
+ *   使用方式（有状态版本）：
+ *     const serializer = new EventSerializerWithPool();
+ *     const headerBuf  = serializer.createFileHeader();
+ *     const eventBuf   = serializer.serializeBatch(batch);  // 可能前置若干 DICT_ENTRY 事件
  */
 
 // ─── 魔数 & 版本 ──────────────────────────────────────────────────────────────
@@ -87,9 +107,9 @@ export const EVENT_TYPE = Object.freeze({
     FUNCTION_EXIT:  0x06,
     END_EXPR:       0x07,
     KEY_EVENT:      0x08,
-    // 保留给未来扩展
-    WRITE_VAR:      0x09,  // 单独写变量事件（低频路径，如 declare）
-    READ_VAR_FULL:  0x0A,  // fai 路径的读取（含实际值）
+    DICT_ENTRY:     0x09,  // 字典条目：注册字符串 ID → 字符串内容
+    WRITE_VAR:      0x0B,  // 单独写变量事件（低频路径，如 declare）
+    READ_VAR_FULL:  0x0C,  // fai 路径的读取（含实际值）
 });
 
 /** 事件类型反向映射（用于调试/解码） */
@@ -112,16 +132,17 @@ export const FLAGS = Object.freeze({
 // ─── 值类型常量 ────────────────────────────────────────────────────────────────
 
 export const VALUE_TYPE = Object.freeze({
-    OMITTED:   0x00,  // 值省略（可追溯），无后续字节
-    NULL:      0x01,  // null，无后续字节
-    UNDEFINED: 0x02,  // undefined，无后续字节
-    BOOL_T:    0x03,  // true，无后续字节
-    BOOL_F:    0x04,  // false，无后续字节
-    INT32:     0x05,  // 整数，4 字节 i32（小端）— 整数优化
-    FLOAT64:   0x06,  // 浮点数，8 字节 f64（小端）
-    STRING:    0x07,  // 字符串，u16 长度 + UTF-8
-    OBJECT:    0x08,  // 对象 JSON，u16 长度 + UTF-8
-    FUNCTION:  0x09,  // 函数，u8 名称长度 + ASCII
+    OMITTED:    0x00,  // 值省略（可追溯），无后续字节
+    NULL:       0x01,  // null，无后续字节
+    UNDEFINED:  0x02,  // undefined，无后续字节
+    BOOL_T:     0x03,  // true，无后续字节
+    BOOL_F:     0x04,  // false，无后续字节
+    INT32:      0x05,  // 整数，4 字节 i32（小端）— 整数优化
+    FLOAT64:    0x06,  // 浮点数，8 字节 f64（小端）
+    STRING:     0x07,  // 字符串，u16 长度 + UTF-8
+    OBJECT:     0x08,  // 对象 JSON，u16 长度 + UTF-8
+    FUNCTION:   0x09,  // 函数，u8 名称长度 + ASCII
+    STRING_REF: 0x0A,  // 字符串引用（字典压缩），2 字节 u16 ID
 });
 
 // ─── 编码工具 ──────────────────────────────────────────────────────────────────
@@ -173,9 +194,10 @@ function readUtf8u8(view, offset) {
  * 计算将一个值编码为 VALUE_TYPE 序列所需的字节数（不含 valueType 字节本身）。
  * @param {*} v
  * @param {boolean} [omit=false]  是否省略值（LIGHTWEIGHT 路径）
- * @returns {{ vt: number, extraBytes: number, strBytes?: Uint8Array }}
+ * @param {StringPool|null} [pool=null]  字符串池（非 null 时对 string 类型做池化）
+ * @returns {{ vt: number, extraBytes: number, strBytes?: Uint8Array, poolId?: number }}
  */
-function measureValue(v, omit = false) {
+function measureValue(v, omit = false, pool = null) {
     if (omit) return { vt: VALUE_TYPE.OMITTED, extraBytes: 0 };
     if (v === null)      return { vt: VALUE_TYPE.NULL,      extraBytes: 0 };
     if (v === undefined) return { vt: VALUE_TYPE.UNDEFINED, extraBytes: 0 };
@@ -194,6 +216,14 @@ function measureValue(v, omit = false) {
         return { vt: VALUE_TYPE.FUNCTION, extraBytes: 1 + nb.length, strBytes: nb };
     }
     if (t === 'string') {
+        // 字典压缩：若有 pool，尝试用 STRING_REF（3字节）代替完整编码
+        if (pool !== null) {
+            const id = pool.lookup(v);
+            if (id !== null) {
+                // 已在字典中：STRING_REF = 1(vt) + 2(id) = 3 字节，仅 extraBytes 计 2
+                return { vt: VALUE_TYPE.STRING_REF, extraBytes: 2, poolId: id };
+            }
+        }
         const nb = encodeUtf8(v.length > 256 ? v.slice(0, 255) + '…' : v);
         return { vt: VALUE_TYPE.STRING, extraBytes: 2 + nb.length, strBytes: nb };
     }
@@ -208,18 +238,28 @@ function measureValue(v, omit = false) {
 /**
  * 计算字符串编码为 u16+UTF8 所需字节数。
  * @param {string} s
- * @returns {{ bytes: number, nb: Uint8Array }}
+ * @param {StringPool|null} [pool=null]
+ * @returns {{ bytes: number, nb: Uint8Array, poolId: number|null }}
  */
-function measureStr(s) {
+function measureStr(s, pool = null) {
+    // 字典压缩：对字符串字段（变量名、文件名、属性名等）也做池化
+    if (pool !== null) {
+        const id = pool.lookup(s);
+        if (id !== null) {
+            // STRING_REF 编码：1(vt) + 2(id) = 3 字节（替代 u16+bytes）
+            // 注意：measureStr 用于"名称"字段，不带 vt 字节，所以这里返回特殊标记
+            return { bytes: -1, nb: null, poolId: id };
+        }
+    }
     const nb = encodeUtf8(s.length > 65535 ? s.slice(0, 65534) + '…' : s);
-    return { bytes: 2 + nb.length, nb };
+    return { bytes: 2 + nb.length, nb, poolId: null };
 }
 
 /**
  * 将值写入 DataView，返回写入后的新 offset。
  * @param {DataView} view
  * @param {number}   offset
- * @param {{ vt: number, extraBytes: number, strBytes?: Uint8Array }} measured
+ * @param {{ vt: number, extraBytes: number, strBytes?: Uint8Array, poolId?: number }} measured
  * @param {*}        v
  * @returns {number}  新 offset
  */
@@ -249,6 +289,12 @@ function writeValue(view, offset, measured, v) {
             offset += nb.length;
             break;
         }
+        case VALUE_TYPE.STRING_REF: {
+            // 2 字节 u16 ID
+            view.setUint16(offset, measured.poolId, true);
+            offset += 2;
+            break;
+        }
         case VALUE_TYPE.STRING:
         case VALUE_TYPE.OBJECT: {
             const nb = measured.strBytes;
@@ -263,12 +309,50 @@ function writeValue(view, offset, measured, v) {
 }
 
 /**
+ * 将"名称"字段（u16 + UTF-8）写入 DataView，支持 STRING_REF 压缩。
+ *
+ * 当 poolId 非 null 时，写入格式为 [0xFF 0xFF][u16 poolId]（4 字节），
+ * 解码器通过 0xFFFF 长度哨兵识别这是一个字典引用而非字面字符串长度。
+ *
+ * @param {DataView} view
+ * @param {number}   offset
+ * @param {{ bytes: number, nb: Uint8Array|null, poolId: number|null }} measured
+ * @returns {number}  新 offset
+ */
+function writeStr(view, offset, measured) {
+    if (measured.poolId !== null) {
+        // 使用 0xFFFF 作为哨兵长度，后跟 u16 字典 ID（共 4 字节）
+        view.setUint16(offset, 0xFFFF, true);
+        offset += 2;
+        view.setUint16(offset, measured.poolId, true);
+        offset += 2;
+    } else {
+        view.setUint16(offset, measured.nb.length, true);
+        offset += 2;
+        new Uint8Array(view.buffer, view.byteOffset + offset).set(measured.nb);
+        offset += measured.nb.length;
+    }
+    return offset;
+}
+
+/**
+ * 计算"名称"字段的实际字节数（writeStr 对应的 measure）。
+ * poolId 非 null 时返回 4（哨兵 2B + ID 2B）。
+ * @param {{ bytes: number, poolId: number|null }} measured
+ * @returns {number}
+ */
+function strFieldBytes(measured) {
+    return measured.poolId !== null ? 4 : measured.bytes;
+}
+
+/**
  * 读取一个值，返回 JS 值和新 offset。
  * @param {DataView} view
  * @param {number}   offset
+ * @param {Map<number,string>|null} [dict=null]  字符串字典（解码 STRING_REF 用）
  * @returns {{ value: *, omitted: boolean, end: number }}
  */
-function readValue(view, offset) {
+function readValue(view, offset, dict = null) {
     const vt = view.getUint8(offset);
     offset += 1;
     let value;
@@ -304,6 +388,12 @@ function readValue(view, offset) {
             offset = r.end;
             break;
         }
+        case VALUE_TYPE.STRING_REF: {
+            const id = view.getUint16(offset, true);
+            offset += 2;
+            value = dict ? (dict.get(id) ?? `[ref:${id}]`) : `[ref:${id}]`;
+            break;
+        }
         case VALUE_TYPE.STRING: {
             const r = readUtf8u16(view, offset);
             value = r.str;
@@ -322,40 +412,216 @@ function readValue(view, offset) {
     return { value, omitted, end: offset };
 }
 
-// ─── 事件序列化 ────────────────────────────────────────────────────────────────
+/**
+ * 读取"名称"字段（u16+UTF-8 或 0xFFFF 哨兵+ID 字典引用）。
+ * @param {DataView} view
+ * @param {number}   offset
+ * @param {Map<number,string>|null} [dict=null]
+ * @returns {{ str: string, end: number }}
+ */
+function readStr(view, offset, dict = null) {
+    const len = view.getUint16(offset, true);
+    offset += 2;
+    if (len === 0xFFFF) {
+        // 字典引用
+        const id = view.getUint16(offset, true);
+        offset += 2;
+        const str = dict ? (dict.get(id) ?? `[ref:${id}]`) : `[ref:${id}]`;
+        return { str, end: offset };
+    }
+    const bytes = new Uint8Array(view.buffer, offset, len);
+    const str = td ? td.decode(bytes) : Buffer.from(bytes).toString('utf8');
+    return { str, end: offset + len };
+}
+
+// ─── StringPool（字典压缩核心）───────────────────────────────────────────────
+
+/**
+ * 最小入池字符串长度。短字符串（如单字母变量名）入池收益低，
+ * 因为 DICT_ENTRY 事件本身有 12+4 字节头开销，只有字符串足够长且出现足够频繁时才合算。
+ */
+const MIN_POOL_STR_LEN = 4;
+
+/**
+ * 字典最大容量（u16 ID 上限，0 保留，有效 ID 为 1..65535）。
+ */
+const MAX_POOL_SIZE = 65535;
+
+/**
+ * StringPool — 字符串字典压缩状态机。
+ *
+ * 每个 EventSerializerWithPool 实例持有一个 StringPool。
+ * 使用方在序列化每个 batch 之前，调用 registerBatch() 将 batch 中所有字符串提前
+ * 注册到字典，然后调用 flushDictEntries() 取出需要写出的新 DICT_ENTRY 事件列表。
+ *
+ * 线程安全：单线程使用，不需要锁。
+ */
+export class StringPool {
+    constructor() {
+        /** string → id */
+        this._map = new Map();
+        /** 下一个可用 ID */
+        this._nextId = 1;
+        /** 本轮新注册的条目（待 flush 到流） */
+        this._pending = [];
+    }
+
+    /**
+     * 查找字符串在字典中的 ID。
+     * @param {string} s
+     * @returns {number|null}  字典 ID，若不在字典中返回 null
+     */
+    lookup(s) {
+        return this._map.has(s) ? this._map.get(s) : null;
+    }
+
+    /**
+     * 尝试将字符串注册到字典，返回分配的 ID。
+     * 若已存在则返回现有 ID；若字典已满或字符串太短则返回 null。
+     * 新注册的条目会进入 _pending 列表，等待 flushDictEntries() 取出。
+     *
+     * @param {string} s
+     * @returns {number|null}  字典 ID，或 null（不入池）
+     */
+    register(s) {
+        if (typeof s !== 'string') return null;
+        if (s.length < MIN_POOL_STR_LEN) return null;
+        const existing = this._map.get(s);
+        if (existing !== undefined) return existing;
+        if (this._nextId > MAX_POOL_SIZE) return null;
+        const id = this._nextId++;
+        this._map.set(s, id);
+        this._pending.push({ id, str: s });
+        return id;
+    }
+
+    /**
+     * 批量预扫描：将事件批次中所有字符串字段提前注册到字典。
+     * 必须在 serializeBatch 之前调用，确保序列化时 lookup() 能命中。
+     *
+     * @param {Array<object>} events
+     */
+    scanBatch(events) {
+        for (const event of events) {
+            this._scanEvent(event);
+        }
+    }
+
+    /** @private */
+    _scanStr(s) {
+        if (typeof s === 'string') this.register(s);
+    }
+
+    /** @private */
+    _scanValue(v) {
+        if (typeof v === 'string') this._scanStr(v);
+        else if (v !== null && typeof v === 'object') {
+            // JSON 序列化后的字符串也可能重复（但跳过，避免提前序列化影响性能）
+        }
+    }
+
+    /** @private */
+    _scanEvent(event) {
+        const type = event.type;
+        switch (type) {
+            case 'SCRIPT_ENTER':
+                this._scanStr(event.file ?? '');
+                break;
+            case 'CALL_PRE':
+                this._scanStr(event.fn ?? '');
+                if (event.args) {
+                    for (const a of event.args) this._scanValue(a);
+                }
+                break;
+            case 'CALL':
+                this._scanStr(event.fn ?? '');
+                this._scanValue(event.result);
+                break;
+            case 'END_EXPR': {
+                const writes = event.writes ?? [];
+                const reads  = event.reads  ?? [];
+                const fields = event.fields ?? [];
+                for (const w of writes) {
+                    this._scanStr(w.name);
+                    this._scanValue(w.val);
+                }
+                for (const r of reads) {
+                    this._scanStr(r.name);
+                    this._scanValue(r.val);
+                }
+                for (const f of fields) {
+                    this._scanStr(f.base ?? '');
+                    this._scanStr(String(f.offset ?? ''));
+                    this._scanValue(f.val);
+                }
+                break;
+            }
+            case 'KEY_EVENT':
+                this._scanStr(event.text ?? '');
+                break;
+            case 'WRITE_VAR':
+            case 'READ_VAR_FULL':
+                this._scanStr(event.name ?? '');
+                this._scanValue(event.val);
+                break;
+        }
+    }
+
+    /**
+     * 取出并清空待写出的新字典条目。
+     * 返回格式与 EVENT_TYPE.DICT_ENTRY 的事件对象一致，
+     * 可直接传给 _serializeDictEntry() 序列化。
+     *
+     * @returns {Array<{id: number, str: string}>}
+     */
+    flushPending() {
+        if (this._pending.length === 0) return [];
+        const out = this._pending;
+        this._pending = [];
+        return out;
+    }
+
+    /** 字典当前条目数 */
+    get size() { return this._map.size; }
+
+    /** 当前字典内容（用于调试/测试） */
+    toMap() { return new Map(this._map); }
+}
+
+// ─── 事件序列化（无状态，无池化）────────────────────────────────────────────
 
 /**
  * 计算单条事件所需的 payload 字节数，返回序列化所需的中间结构。
  * 分两步（measure + write）避免两次 TextEncoder 调用。
  *
  * @param {object} event  标准化事件对象（字段见各 EVENT_TYPE 说明）
+ * @param {StringPool|null} [pool=null]  字符串池（非 null 时启用字典压缩）
  * @returns {{ payloadSize: number, _m: object }}  _m 为中间测量结果（供 writeEventPayload 使用）
  */
-function measureEvent(event) {
-    const { type, iid = 0, seq = 0 } = event;
+function measureEvent(event, pool = null) {
+    const { type } = event;
 
     switch (type) {
         case 'SCRIPT_ENTER': {
-            const { bytes: fnb, nb: fnBytes } = measureStr(event.file ?? '');
-            return { payloadSize: fnb, _m: { fnBytes } };
+            const fm = measureStr(event.file ?? '', pool);
+            return { payloadSize: strFieldBytes(fm), _m: { fm } };
         }
 
         case 'SCRIPT_EXIT': {
             const hasEx = event.exception !== undefined && event.exception !== null;
             if (!hasEx) return { payloadSize: 0, _m: { hasEx } };
-            const mv = measureValue(event.exception);
+            const mv = measureValue(event.exception, false, pool);
             return { payloadSize: 1 + mv.extraBytes, _m: { hasEx, mv, exVal: event.exception } };
         }
 
         case 'CALL_PRE': {
-            const fnName = (event.fn ?? '').slice(0, 255);
-            const { bytes: fnb, nb: fnBytes } = measureStr(fnName);
+            const fnm = measureStr((event.fn ?? '').slice(0, 255), pool);
             const args   = event.args ?? [];
             const argc   = Math.min(args.length, 8);  // 最多记录8个参数
             let argsSize = 0;
             const argMeasures = [];
             for (let i = 0; i < argc; i++) {
-                const mv = measureValue(args[i]);
+                const mv = measureValue(args[i], false, pool);
                 argsSize += 1 + mv.extraBytes;  // valueType + extra
                 argMeasures.push(mv);
             }
@@ -363,19 +629,17 @@ function measureEvent(event) {
             let thisSize = 0;
             let thisMv;
             if (hasThis) {
-                thisMv = measureValue(event.base);
+                thisMv = measureValue(event.base, false, pool);
                 thisSize = 1 + thisMv.extraBytes;
             }
-            // payload = fnName(u16+bytes) + argc(u8) + args + [this]
-            const payloadSize = fnb + 1 + argsSize + thisSize;
-            return { payloadSize, _m: { fnBytes, argc, argMeasures, args, hasThis, thisMv, base: event.base } };
+            const payloadSize = strFieldBytes(fnm) + 1 + argsSize + thisSize;
+            return { payloadSize, _m: { fnm, argc, argMeasures, args, hasThis, thisMv, base: event.base } };
         }
 
         case 'CALL': {
-            const fnName = (event.fn ?? '').slice(0, 255);
-            const { bytes: fnb, nb: fnBytes } = measureStr(fnName);
-            const mv = measureValue(event.result);
-            return { payloadSize: fnb + 1 + mv.extraBytes, _m: { fnBytes, mv, result: event.result } };
+            const fnm = measureStr((event.fn ?? '').slice(0, 255), pool);
+            const mv = measureValue(event.result, false, pool);
+            return { payloadSize: strFieldBytes(fnm) + 1 + mv.extraBytes, _m: { fnm, mv, result: event.result } };
         }
 
         case 'FUNCTION_ENTER':
@@ -384,57 +648,54 @@ function measureEvent(event) {
         case 'FUNCTION_EXIT': {
             const hasEx = !!(event.exception);
             if (!hasEx) return { payloadSize: 0, _m: { hasEx } };
-            const mv = measureValue(event.exception);
+            const mv = measureValue(event.exception, false, pool);
             return { payloadSize: 1 + mv.extraBytes, _m: { hasEx, mv, exVal: event.exception } };
         }
 
         case 'END_EXPR': {
-            // writes: [{name, val, omit?}]
-            // reads:  [{name, val, omit?}]
-            // fields: [{base, offset, val, isWrite}]
             const writes = event.writes ?? [];
             const reads  = event.reads  ?? [];
             const fields = event.fields ?? [];
             let size = 1 + 1 + 1;  // writeCount + readCount + fieldCount (all u8)
             const wm = [], rm = [], fm = [];
             for (const w of writes) {
-                const { bytes: nb, nb: nameBytes } = measureStr(w.name);
-                const mv = measureValue(w.val, w.omit === true);
-                size += nb + 1 + mv.extraBytes;
-                wm.push({ nameBytes, mv, val: w.val, omit: w.omit });
+                const nm = measureStr(w.name, pool);
+                const mv = measureValue(w.val, w.omit === true, pool);
+                size += strFieldBytes(nm) + 1 + mv.extraBytes;
+                wm.push({ nm, mv, val: w.val, omit: w.omit });
             }
             for (const r of reads) {
-                const { bytes: nb, nb: nameBytes } = measureStr(r.name);
-                const mv = measureValue(r.val, r.omit === true);
-                size += nb + 1 + mv.extraBytes;
-                rm.push({ nameBytes, mv, val: r.val, omit: r.omit });
+                const nm = measureStr(r.name, pool);
+                const mv = measureValue(r.val, r.omit === true, pool);
+                size += strFieldBytes(nm) + 1 + mv.extraBytes;
+                rm.push({ nm, mv, val: r.val, omit: r.omit });
             }
             for (const f of fields) {
-                const { bytes: bnb, nb: baseBytes } = measureStr(f.base ?? '');
-                const { bytes: onb, nb: offsetBytes } = measureStr(String(f.offset ?? ''));
-                const mv = measureValue(f.val);
-                size += bnb + onb + 1 + 1 + mv.extraBytes;  // base + offset + isWrite(u8) + val
-                fm.push({ baseBytes, offsetBytes, mv, val: f.val, isWrite: f.isWrite });
+                const bnm = measureStr(f.base ?? '', pool);
+                const onm = measureStr(String(f.offset ?? ''), pool);
+                const mv = measureValue(f.val, false, pool);
+                size += strFieldBytes(bnm) + strFieldBytes(onm) + 1 + 1 + mv.extraBytes;
+                fm.push({ bnm, onm, mv, val: f.val, isWrite: f.isWrite });
             }
             return { payloadSize: size, _m: { writes, reads, fields, wm, rm, fm } };
         }
 
         case 'KEY_EVENT': {
             const level = event.level === 'error' ? 2 : event.level === 'warn' ? 1 : 0;
-            const { bytes: tnb, nb: textBytes } = measureStr(event.text ?? '');
-            return { payloadSize: 1 + tnb, _m: { level, textBytes } };
+            const tm = measureStr(event.text ?? '', pool);
+            return { payloadSize: 1 + strFieldBytes(tm), _m: { level, tm } };
         }
 
         case 'WRITE_VAR': {
-            const { bytes: nb, nb: nameBytes } = measureStr(event.name ?? '');
-            const mv = measureValue(event.val);
-            return { payloadSize: nb + 1 + mv.extraBytes, _m: { nameBytes, mv, val: event.val } };
+            const nm = measureStr(event.name ?? '', pool);
+            const mv = measureValue(event.val, false, pool);
+            return { payloadSize: strFieldBytes(nm) + 1 + mv.extraBytes, _m: { nm, mv, val: event.val } };
         }
 
         case 'READ_VAR_FULL': {
-            const { bytes: nb, nb: nameBytes } = measureStr(event.name ?? '');
-            const mv = measureValue(event.val);
-            return { payloadSize: nb + 1 + mv.extraBytes, _m: { nameBytes, mv, val: event.val } };
+            const nm = measureStr(event.name ?? '', pool);
+            const mv = measureValue(event.val, false, pool);
+            return { payloadSize: strFieldBytes(nm) + 1 + mv.extraBytes, _m: { nm, mv, val: event.val } };
         }
 
         default:
@@ -453,10 +714,7 @@ function measureEvent(event) {
 function writePayload(view, offset, type, _m) {
     switch (type) {
         case 'SCRIPT_ENTER': {
-            view.setUint16(offset, _m.fnBytes.length, true);
-            offset += 2;
-            new Uint8Array(view.buffer, view.byteOffset + offset).set(_m.fnBytes);
-            offset += _m.fnBytes.length;
+            offset = writeStr(view, offset, _m.fm);
             break;
         }
 
@@ -468,19 +726,12 @@ function writePayload(view, offset, type, _m) {
         }
 
         case 'CALL_PRE': {
-            // fnName (u16 + bytes)
-            view.setUint16(offset, _m.fnBytes.length, true);
-            offset += 2;
-            new Uint8Array(view.buffer, view.byteOffset + offset).set(_m.fnBytes);
-            offset += _m.fnBytes.length;
-            // argc
+            offset = writeStr(view, offset, _m.fnm);
             view.setUint8(offset, _m.argc);
             offset += 1;
-            // args
             for (let i = 0; i < _m.argc; i++) {
                 offset = writeValue(view, offset, _m.argMeasures[i], _m.args[i]);
             }
-            // this（可选）
             if (_m.hasThis) {
                 offset = writeValue(view, offset, _m.thisMv, _m.base);
             }
@@ -488,10 +739,7 @@ function writePayload(view, offset, type, _m) {
         }
 
         case 'CALL': {
-            view.setUint16(offset, _m.fnBytes.length, true);
-            offset += 2;
-            new Uint8Array(view.buffer, view.byteOffset + offset).set(_m.fnBytes);
-            offset += _m.fnBytes.length;
+            offset = writeStr(view, offset, _m.fnm);
             offset = writeValue(view, offset, _m.mv, _m.result);
             break;
         }
@@ -507,28 +755,20 @@ function writePayload(view, offset, type, _m) {
         }
 
         case 'END_EXPR': {
-            view.setUint8(offset, _m.writes.length);   offset += 1;
-            view.setUint8(offset, _m.reads.length);    offset += 1;
-            view.setUint8(offset, _m.fields.length);   offset += 1;
+            view.setUint8(offset, _m.wm.length);   offset += 1;
+            view.setUint8(offset, _m.rm.length);   offset += 1;
+            view.setUint8(offset, _m.fm.length);   offset += 1;
             for (const w of _m.wm) {
-                view.setUint16(offset, w.nameBytes.length, true);  offset += 2;
-                new Uint8Array(view.buffer, view.byteOffset + offset).set(w.nameBytes);
-                offset += w.nameBytes.length;
+                offset = writeStr(view, offset, w.nm);
                 offset = writeValue(view, offset, w.mv, w.val);
             }
             for (const r of _m.rm) {
-                view.setUint16(offset, r.nameBytes.length, true);  offset += 2;
-                new Uint8Array(view.buffer, view.byteOffset + offset).set(r.nameBytes);
-                offset += r.nameBytes.length;
+                offset = writeStr(view, offset, r.nm);
                 offset = writeValue(view, offset, r.mv, r.val);
             }
             for (const f of _m.fm) {
-                view.setUint16(offset, f.baseBytes.length, true);  offset += 2;
-                new Uint8Array(view.buffer, view.byteOffset + offset).set(f.baseBytes);
-                offset += f.baseBytes.length;
-                view.setUint16(offset, f.offsetBytes.length, true);  offset += 2;
-                new Uint8Array(view.buffer, view.byteOffset + offset).set(f.offsetBytes);
-                offset += f.offsetBytes.length;
+                offset = writeStr(view, offset, f.bnm);
+                offset = writeStr(view, offset, f.onm);
                 view.setUint8(offset, f.isWrite ? 1 : 0);  offset += 1;
                 offset = writeValue(view, offset, f.mv, f.val);
             }
@@ -538,18 +778,13 @@ function writePayload(view, offset, type, _m) {
         case 'KEY_EVENT': {
             view.setUint8(offset, _m.level);
             offset += 1;
-            view.setUint16(offset, _m.textBytes.length, true);
-            offset += 2;
-            new Uint8Array(view.buffer, view.byteOffset + offset).set(_m.textBytes);
-            offset += _m.textBytes.length;
+            offset = writeStr(view, offset, _m.tm);
             break;
         }
 
         case 'WRITE_VAR':
         case 'READ_VAR_FULL': {
-            view.setUint16(offset, _m.nameBytes.length, true);  offset += 2;
-            new Uint8Array(view.buffer, view.byteOffset + offset).set(_m.nameBytes);
-            offset += _m.nameBytes.length;
+            offset = writeStr(view, offset, _m.nm);
             offset = writeValue(view, offset, _m.mv, _m.val);
             break;
         }
@@ -583,14 +818,44 @@ function computeTypeAndFlags(event) {
     return { typeByte, flagsByte };
 }
 
+// ─── DICT_ENTRY 事件序列化 ────────────────────────────────────────────────────
+
+/**
+ * 将单条 DICT_ENTRY 序列化为 ArrayBuffer。
+ * 格式：[12B 头][2B id][2B str_len][UTF-8 字节]
+ * @param {number} id   字典 ID（u16）
+ * @param {string} str  字符串内容
+ * @param {number} seq  序号
+ * @returns {ArrayBuffer}
+ */
+function serializeDictEntry(id, str, seq) {
+    const nb = encodeUtf8(str.length > 65533 ? str.slice(0, 65532) + '…' : str);
+    const payloadSize = 2 + 2 + nb.length;  // id(u16) + len(u16) + bytes
+    const totalSize   = EVENT_HEADER_SIZE + payloadSize;
+    const buf  = new ArrayBuffer(totalSize);
+    const view = new DataView(buf);
+    view.setUint8(0,   EVENT_TYPE.DICT_ENTRY);
+    view.setUint8(1,   0);  // flags
+    view.setUint32(2,  0, true);  // iid = 0（字典条目无对应 iid）
+    view.setUint32(6,  seq >>> 0, true);
+    view.setUint16(10, payloadSize, true);
+    view.setUint16(12, id, true);
+    view.setUint16(14, nb.length, true);
+    new Uint8Array(buf, 16).set(nb);
+    return buf;
+}
+
+// ─── 无状态公开 API（向后兼容）───────────────────────────────────────────────
+
 /**
  * 将单条事件序列化为 ArrayBuffer（含 12 字节头 + payload）。
+ * 无状态版本，不支持字典压缩。
  *
  * @param {object} event   标准化事件对象
  * @returns {ArrayBuffer}
  */
 export function serializeEvent(event) {
-    const { payloadSize, _m } = measureEvent(event);
+    const { payloadSize, _m } = measureEvent(event, null);
     const { typeByte, flagsByte } = computeTypeAndFlags(event);
     const totalSize = EVENT_HEADER_SIZE + payloadSize;
 
@@ -613,6 +878,7 @@ export function serializeEvent(event) {
 /**
  * 将事件批次序列化为单个 ArrayBuffer（事件紧密排列，无分隔符）。
  * 用于 NodeStreamBackend 的批次写入。
+ * 无状态版本，不支持字典压缩。
  *
  * @param {Array<object>} events
  * @returns {ArrayBuffer}
@@ -622,7 +888,7 @@ export function serializeBatch(events) {
     const measured = new Array(events.length);
     let totalSize = 0;
     for (let i = 0; i < events.length; i++) {
-        const m = measureEvent(events[i]);
+        const m = measureEvent(events[i], null);
         const { typeByte, flagsByte } = computeTypeAndFlags(events[i]);
         measured[i] = { ...m, typeByte, flagsByte };
         totalSize += EVENT_HEADER_SIZE + m.payloadSize;
@@ -681,16 +947,131 @@ export function isBinaryTrace(buf) {
         && bytes[3] === 0x31;
 }
 
+// ─── 有状态序列化器（Value Pool 版本）──────────────────────────────────────────
+
+/**
+ * EventSerializerWithPool — 带字典压缩的有状态事件序列化器。
+ *
+ * 内部持有一个 StringPool，对 serializeBatch() 的输出自动前置必要的
+ * DICT_ENTRY 事件（新字符串条目），解码器按顺序读取即可重建字典。
+ *
+ * 使用模式（NodeStreamBackend 集成）：
+ *
+ * ```js
+ * const serializer = new EventSerializerWithPool();
+ * // 写文件头（一次）
+ * stream.write(Buffer.from(serializer.createFileHeader()));
+ * // 每个 batch：
+ * const buffers = serializer.serializeBatch(batch);  // ArrayBuffer[]
+ * for (const buf of buffers) stream.write(Buffer.from(buf));
+ * ```
+ *
+ * 注意：序列化器是有状态的，不要在多个文件流之间共享同一实例。
+ * 每个输出文件/连接应创建独立实例。
+ */
+export class EventSerializerWithPool {
+    /**
+     * @param {object} [options]
+     * @param {number} [options.minStrLen=4]  最小入池字符串长度（覆盖 MIN_POOL_STR_LEN）
+     */
+    constructor(options = {}) {
+        this._pool    = new StringPool();
+        this._dictSeq = 0;  // DICT_ENTRY 事件独立序号（不影响业务事件 seq）
+        if (options.minStrLen !== undefined) {
+            // 暂存选项，目前 MIN_POOL_STR_LEN 为模块常量；
+            // 若需要实例级覆盖，可在此处扩展 StringPool
+        }
+    }
+
+    /** 返回内部字符串池（只读，用于测试/调试） */
+    get pool() { return this._pool; }
+
+    /**
+     * 创建文件头 ArrayBuffer（同无状态版本，为方便一站式调用提供）。
+     * @returns {ArrayBuffer}
+     */
+    createFileHeader() {
+        return createFileHeader();
+    }
+
+    /**
+     * 将事件批次序列化为一组 ArrayBuffer（含前置字典条目和压缩后的事件流）。
+     *
+     * 返回值是 **ArrayBuffer 数组**（而非单个 ArrayBuffer），原因：
+     * - 前置的 DICT_ENTRY 事件和业务事件分开存放，避免一次性大内存分配；
+     * - 调用方（NodeStreamBackend）可以用 writev / 多次 write 依次写出。
+     *
+     * @param {Array<object>} events  标准化事件数组（各字段含义同 serializeBatch）
+     * @returns {Array<ArrayBuffer>}  按顺序写出即可
+     */
+    serializeBatch(events) {
+        // 1. 预扫描：将 batch 中所有字符串注册到字典（产生 pending 条目）
+        this._pool.scanBatch(events);
+
+        // 2. 取出新字典条目，序列化为 DICT_ENTRY 事件
+        const pending = this._pool.flushPending();
+        const result  = [];
+
+        for (const { id, str } of pending) {
+            result.push(serializeDictEntry(id, str, ++this._dictSeq));
+        }
+
+        // 3. 序列化业务事件（使用池化 measure）
+        const measured = new Array(events.length);
+        let totalSize = 0;
+        for (let i = 0; i < events.length; i++) {
+            const m = measureEvent(events[i], this._pool);
+            const { typeByte, flagsByte } = computeTypeAndFlags(events[i]);
+            measured[i] = { ...m, typeByte, flagsByte };
+            totalSize += EVENT_HEADER_SIZE + m.payloadSize;
+        }
+
+        if (totalSize > 0) {
+            const buf  = new ArrayBuffer(totalSize);
+            const view = new DataView(buf);
+            let offset = 0;
+
+            for (let i = 0; i < events.length; i++) {
+                const { payloadSize, _m, typeByte, flagsByte } = measured[i];
+                const ev = events[i];
+
+                view.setUint8(offset,     typeByte);
+                view.setUint8(offset + 1, flagsByte);
+                view.setUint32(offset + 2, (ev.iid ?? 0) >>> 0, true);
+                view.setUint32(offset + 6, (ev.seq ?? 0) >>> 0, true);
+                view.setUint16(offset + 10, payloadSize, true);
+                offset += EVENT_HEADER_SIZE;
+
+                offset = writePayload(view, offset, ev.type, _m);
+            }
+
+            result.push(buf);
+        }
+
+        return result;
+    }
+
+    /** 返回压缩统计信息（用于调试/基准测试） */
+    getStats() {
+        return {
+            dictSize:   this._pool.size,
+            dictEntries: this._dictSeq,
+        };
+    }
+}
+
 // ─── 事件反序列化 ──────────────────────────────────────────────────────────────
 
 /**
  * 从 DataView 的指定 offset 处反序列化一条事件（含 12 字节头）。
+ * 支持字典引用（DICT_ENTRY 事件会自动更新传入的 dict）。
  *
  * @param {DataView} view
  * @param {number}   offset
+ * @param {Map<number,string>} [dict]  字符串字典（解码 STRING_REF / 0xFFFF 哨兵用，可复用）
  * @returns {{ event: object, nextOffset: number }}
  */
-export function deserializeEvent(view, offset) {
+export function deserializeEvent(view, offset, dict = null) {
     const typeByte  = view.getUint8(offset);
     const flagsByte = view.getUint8(offset + 1);
     const iid       = view.getUint32(offset + 2, true);
@@ -706,7 +1087,7 @@ export function deserializeEvent(view, offset) {
 
     switch (typeName) {
         case 'SCRIPT_ENTER': {
-            const r = readUtf8u16(view, pos);
+            const r = readStr(view, pos, dict);
             event.file = r.str;
             pos = r.end;
             break;
@@ -714,7 +1095,7 @@ export function deserializeEvent(view, offset) {
 
         case 'SCRIPT_EXIT': {
             if (flagsByte & FLAGS.HAS_EXCEPTION) {
-                const r = readValue(view, pos);
+                const r = readValue(view, pos, dict);
                 event.exception = r.value;
                 pos = r.end;
             }
@@ -724,19 +1105,19 @@ export function deserializeEvent(view, offset) {
         case 'CALL_PRE': {
             event.isConstructor = !!(flagsByte & FLAGS.IS_CONSTRUCTOR);
             event.isMethod      = !!(flagsByte & FLAGS.IS_METHOD);
-            const rfn = readUtf8u16(view, pos);
+            const rfn = readStr(view, pos, dict);
             event.fn = rfn.str;
             pos = rfn.end;
             const argc = view.getUint8(pos);
             pos += 1;
             event.args = [];
             for (let i = 0; i < argc; i++) {
-                const r = readValue(view, pos);
+                const r = readValue(view, pos, dict);
                 event.args.push(r.omitted ? undefined : r.value);
                 pos = r.end;
             }
             if (flagsByte & FLAGS.HAS_THIS) {
-                const r = readValue(view, pos);
+                const r = readValue(view, pos, dict);
                 event.base = r.value;
                 pos = r.end;
             }
@@ -744,10 +1125,10 @@ export function deserializeEvent(view, offset) {
         }
 
         case 'CALL': {
-            const rfn = readUtf8u16(view, pos);
+            const rfn = readStr(view, pos, dict);
             event.fn = rfn.str;
             pos = rfn.end;
-            const r = readValue(view, pos);
+            const r = readValue(view, pos, dict);
             event.result = r.omitted ? undefined : r.value;
             pos = r.end;
             break;
@@ -760,7 +1141,7 @@ export function deserializeEvent(view, offset) {
 
         case 'FUNCTION_EXIT': {
             if (flagsByte & FLAGS.HAS_EXCEPTION) {
-                const r = readValue(view, pos);
+                const r = readValue(view, pos, dict);
                 event.exception = r.value;
                 pos = r.end;
             }
@@ -776,27 +1157,27 @@ export function deserializeEvent(view, offset) {
             event.reads  = [];
             event.fields = [];
             for (let i = 0; i < writeCount; i++) {
-                const rn = readUtf8u16(view, pos);
+                const rn = readStr(view, pos, dict);
                 pos = rn.end;
-                const rv = readValue(view, pos);
+                const rv = readValue(view, pos, dict);
                 pos = rv.end;
                 event.writes.push({ name: rn.str, value: rv.value, omitted: rv.omitted });
             }
             for (let i = 0; i < readCount; i++) {
-                const rn = readUtf8u16(view, pos);
+                const rn = readStr(view, pos, dict);
                 pos = rn.end;
-                const rv = readValue(view, pos);
+                const rv = readValue(view, pos, dict);
                 pos = rv.end;
                 event.reads.push({ name: rn.str, value: rv.value, omitted: rv.omitted });
             }
             for (let i = 0; i < fieldCount; i++) {
-                const rb = readUtf8u16(view, pos);
+                const rb = readStr(view, pos, dict);
                 pos = rb.end;
-                const ro = readUtf8u16(view, pos);
+                const ro = readStr(view, pos, dict);
                 pos = ro.end;
                 const isWrite = view.getUint8(pos) !== 0;
                 pos += 1;
-                const rv = readValue(view, pos);
+                const rv = readValue(view, pos, dict);
                 pos = rv.end;
                 event.fields.push({ base: rb.str, offset: ro.str, isWrite, value: rv.value, omitted: rv.omitted });
             }
@@ -806,18 +1187,33 @@ export function deserializeEvent(view, offset) {
         case 'KEY_EVENT': {
             const levelByte = view.getUint8(pos);
             pos += 1;
-            const rt = readUtf8u16(view, pos);
+            const rt = readStr(view, pos, dict);
             pos = rt.end;
             event.level = levelByte === 2 ? 'error' : levelByte === 1 ? 'warn' : 'info';
             event.text  = rt.str;
             break;
         }
 
+        case 'DICT_ENTRY': {
+            // 自动更新 dict：[id u16][str_len u16][UTF-8]
+            const id     = view.getUint16(pos, true);
+            pos += 2;
+            const strLen = view.getUint16(pos, true);
+            pos += 2;
+            const bytes  = new Uint8Array(view.buffer, pos, strLen);
+            const str    = td ? td.decode(bytes) : Buffer.from(bytes).toString('utf8');
+            pos += strLen;
+            if (dict) dict.set(id, str);
+            event.id  = id;
+            event.str = str;
+            break;
+        }
+
         case 'WRITE_VAR':
         case 'READ_VAR_FULL': {
-            const rn = readUtf8u16(view, pos);
+            const rn = readStr(view, pos, dict);
             pos = rn.end;
-            const rv = readValue(view, pos);
+            const rv = readValue(view, pos, dict);
             pos = rv.end;
             event.name  = rn.str;
             event.value = rv.value;
@@ -831,6 +1227,7 @@ export function deserializeEvent(view, offset) {
 /**
  * 遍历整个二进制 trace Buffer，逐条调用回调。
  * 跳过文件头（FILE_HEADER_SIZE 字节）。
+ * 自动维护字典状态（支持 DICT_ENTRY 事件，解码后续 STRING_REF）。
  *
  * @param {ArrayBuffer|Buffer} buf
  * @param {function(event: object, index: number): void} callback
@@ -840,9 +1237,10 @@ export function iterateBinary(buf, callback) {
     const view = new DataView(ab);
     let offset = FILE_HEADER_SIZE;
     let index  = 0;
+    const dict = new Map();  // 字符串字典，在 DICT_ENTRY 事件中自动填充
 
     while (offset + EVENT_HEADER_SIZE <= ab.byteLength) {
-        const { event, nextOffset } = deserializeEvent(view, offset);
+        const { event, nextOffset } = deserializeEvent(view, offset, dict);
         callback(event, index++);
         offset = nextOffset;
         // 防止解析错误导致死循环
@@ -860,5 +1258,3 @@ export function deserializeAll(buf) {
     iterateBinary(buf, ev => events.push(ev));
     return events;
 }
-
-

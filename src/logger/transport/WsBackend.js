@@ -38,7 +38,7 @@
  *     服务端 → 客户端：[u32 batchId LE]  （4 字节 ack）
  */
 
-import { serializeBatch } from '../../encoding/EventSerializer.js';
+import { serializeBatch, EventSerializerWithPool } from '../../encoding/EventSerializer.js';
 import { createDiagLogger, isDebugEnabled, DOMAIN } from '../diagnostics.js';
 
 const log = createDiagLogger(DOMAIN.BACKEND_WS);
@@ -51,6 +51,7 @@ export class WsBackend {
      * @param {'main'|'worker'|'sab'} [options.mode='worker']  运行模式
      * @param {string}  [options.url='ws://127.0.0.1:9229/trace']  服务端地址
      * @param {'binary'} [options.format='binary']    消息格式（仅支持 binary/JTB1）
+     * @param {boolean} [options.usePool=false]  启用字典压缩（Value Pool），仅 main 模式支持
      *
      * === 'main' 模式专属选项 ===
      * @param {number}  [options.windowSize=4]     未确认批次数上限（背压窗口）
@@ -109,6 +110,9 @@ export class WsBackend {
     close()          { return this._impl.close(); }
 
     get stats()      { return this._impl.stats; }
+
+    /** 返回字典压缩统计（仅在 mode='main' && usePool=true 时有意义） */
+    getPoolStats()   { return this._impl.getPoolStats ? this._impl.getPoolStats() : null; }
 }
 
 // ── 主线程实现（原 WsBackend）──────────────────────────────────────────────────
@@ -133,6 +137,7 @@ class _MainTransport {
             connectTimeoutMs    = 10000,
             autoConnect         = true,
             replayOnReconnect   = true,
+            usePool             = false,
         } = options;
 
         this._url               = url;
@@ -143,6 +148,9 @@ class _MainTransport {
         this._retryMaxMs        = retryMaxMs;
         this._connectTimeoutMs  = connectTimeoutMs;
         this._replayOnReconnect = replayOnReconnect;
+
+        // 字典压缩（仅 main 模式，因为 worker/sab 模式的 ArrayBuffer 是独立帧）
+        this._poolSerializer    = usePool ? new EventSerializerWithPool() : null;
 
         this._ws                = null;
         this._state             = _MainState.DISCONNECTED;
@@ -357,12 +365,32 @@ class _MainTransport {
 
     _serialize(batchId, batch) {
         // 只支持二进制格式（JTB1）
+        if (this._poolSerializer) {
+            // 字典压缩：serializeBatch 返回 ArrayBuffer[]（DICT_ENTRY 事件 + 业务事件）
+            // 将所有部分拼接成单帧：[4B batchId][DICT_ENTRY...][业务事件...]
+            const parts   = this._poolSerializer.serializeBatch(batch);
+            let totalSize = 4;
+            for (const p of parts) totalSize += p.byteLength;
+            const out  = new ArrayBuffer(totalSize);
+            const view = new DataView(out);
+            view.setUint32(0, batchId, true);
+            let pos = 4;
+            for (const p of parts) {
+                new Uint8Array(out, pos).set(new Uint8Array(p));
+                pos += p.byteLength;
+            }
+            return out;
+        }
         const batchBuf = serializeBatch(batch);
         const out      = new ArrayBuffer(4 + batchBuf.byteLength);
         const view     = new DataView(out);
         view.setUint32(0, batchId, true);
         new Uint8Array(out, 4).set(new Uint8Array(batchBuf));
         return out;
+    }
+
+    getPoolStats() {
+        return this._poolSerializer ? this._poolSerializer.getStats() : null;
     }
 
     _sendRaw(data) {

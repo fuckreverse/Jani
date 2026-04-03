@@ -413,13 +413,17 @@ _doInit() 完成  →  _flushPreInitQueue()
 | `0x06` | `FUNCTION_EXIT` | 若有异常：`[exception_val]` |
 | `0x07` | `END_EXPR` | `[wCount u8][rCount u8][fCount u8]` 后跟三组条目 |
 | `0x08` | `KEY_EVENT` | `[level u8][text u16+UTF8]` |
-| `0x09` | `WRITE_VAR` | `[name u16+UTF8][val]` |
-| `0x0A` | `READ_VAR_FULL` | `[name u16+UTF8][val]` |
+| `0x0A` | `DICT_ENTRY` | `[dictSeq u32][id u16][str u16+UTF8]`（字典压缩条目，见下文）|
+| `0x0B` | `WRITE_VAR` | `[name u16+UTF8][val]` |
+| `0x0C` | `READ_VAR_FULL` | `[name u16+UTF8][val]` |
 
 `END_EXPR` 是最高频的事件类型，编码了一条表达式语句的所有读写操作：
 - **writes**：`[name u16+UTF8][val]` × wCount
 - **reads**：`[name u16+UTF8][val]` × rCount（val 可能是 `OMITTED`）
 - **fields**：`[base u16+UTF8][offset u16+UTF8][isWrite u8][val]` × fCount
+
+`DICT_ENTRY` 是字典压缩条目（见下文「字典压缩」节），在使用 `EventSerializerWithPool` 时，
+每个首次出现的高频字符串会先以 `DICT_ENTRY` 形式写入字典，后续出现则替换为 `VALUE_TYPE.STRING_REF`（2 字节 ID）引用，大幅压缩重复字符串的体积。
 
 #### flags 位掩码（FLAGS）
 
@@ -449,6 +453,7 @@ _doInit() 完成  →  _flushPreInitQueue()
 | `0x07` | `STRING` | u16 长度 + UTF-8 字节（最长 256 字符，超限截断加 `…`） |
 | `0x08` | `OBJECT` | u16 长度 + JSON UTF-8 字节（最长 256 字符） |
 | `0x09` | `FUNCTION` | u8 名称长度 + ASCII 字节（最长 255） |
+| `0x0A` | `STRING_REF` | u16 字典 ID（需在对应 `DICT_ENTRY` 中查找实际字符串） |
 
 #### 值省略（FAI 优化）
 
@@ -460,13 +465,17 @@ _doInit() 完成  →  _flushPreInitQueue()
 
 ```js
 import {
-    // 序列化
+    // 序列化（无状态）
     serializeEvent,       // 单条事件 → ArrayBuffer（含 12B 头 + payload）
     serializeBatch,       // 事件数组 → ArrayBuffer（紧密排列，无分隔符）
     createFileHeader,     // 创建 8 字节文件头（含魔数和版本）
 
+    // 序列化（有状态，字典压缩）
+    StringPool,               // 字符串池（追踪高频字符串，生成 DICT_ENTRY 事件）
+    EventSerializerWithPool,  // 有状态序列化器，自动插入 DICT_ENTRY 并用 STRING_REF 引用
+
     // 反序列化
-    deserializeEvent,     // 从 DataView offset 处读取一条事件
+    deserializeEvent,     // 从 DataView offset 处读取一条事件；可传 dict Map 用于 STRING_REF 解码
     deserializeAll,       // 整个 Buffer → 事件数组（跳过文件头）
     iterateBinary,        // 遍历整个 Buffer，逐条调用回调
 
@@ -512,11 +521,77 @@ for (const ev of events) {
 }
 ```
 
+### 字典压缩（Value Pool / Dictionary Compression）
+
+当同一字符串（变量名、属性名、文件名等）在 trace 中频繁重复出现时，可启用 **字典压缩** 模式，
+将重复字符串替换为 2 字节的整数 ID（`VALUE_TYPE.STRING_REF`），显著减少文件体积。
+
+#### 工作原理
+
+1. **写入侧**（`EventSerializerWithPool`）：
+   - 每个 `serializeBatch()` 调用前，`StringPool` 扫描本批次事件，统计字符串出现频次
+   - 满足阈值（默认：长度 ≥ 4 字节、至少出现过 2 次）的字符串注册到池，分配全局唯一 ID
+   - 新注册的字符串在当前批次**前**以 `DICT_ENTRY` 事件（`EVENT_TYPE = 0x0A`）写入
+   - 后续事件中该字符串的字段（name、base、offset 等）以 `VALUE_TYPE.STRING_REF`（1B 类型 + 2B ID）编码，代替原来的 `u16+UTF-8` 字节序列
+
+2. **读取侧**（`deserializeEvent` + `dict` 参数）：
+   - 解码时维护一个 `Map<id, string>` 字典
+   - 遇到 `DICT_ENTRY` 事件时将 `id → str` 写入字典（该事件不输出为用户可见事件）
+   - 遇到 `STRING_REF` 时从字典中查找，还原为原始字符串
+   - 离线工具（`trace-decode.mjs`、`trace-parse.mjs`）自动处理字典，对用户完全透明
+
+#### 使用方式
+
+**写入侧（NodeStreamBackend 启用压缩）**：
+
+```js
+const backend = new NodeStreamBackend({
+    path:    'jalangi-trace.bin',
+    usePool: true,   // 启用字典压缩（EventSerializerWithPool）
+});
+```
+
+**写入侧（WsBackend 主线程模式启用压缩）**：
+
+```js
+// 仅 mode='main' 支持 usePool；mode='worker'/'sab' 不支持（帧通信限制）
+const backend = new WsBackend({ url, mode: 'main', format: 'binary', usePool: true });
+// 查看压缩统计
+console.log(backend.getPoolStats()); // { dictSize, totalStrings, totalRefs, savedBytes, ... }
+```
+
+**读取侧（手动解码，支持字典）**：
+
+```js
+import { deserializeEvent, EVENT_TYPE } from '../../encoding/EventSerializer.js';
+import { readFileSync } from 'node:fs';
+
+const buf = readFileSync('trace.bin');
+const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+const dict = new Map();   // 维护字典状态
+let offset = 8;           // 跳过文件头
+while (offset < view.byteLength) {
+    const { event, nextOffset } = deserializeEvent(view, offset, dict);
+    offset = nextOffset;
+    if (event.type === 'DICT_ENTRY') continue; // 字典条目已自动写入 dict，跳过输出
+    // 此时 event 中所有字符串字段已自动还原
+    console.log(event);
+}
+```
+
+#### 压缩效果
+
+字典压缩对高频重复字符串（如变量名 `myLongVarName`、属性名 `prototype`）效果最显著。
+典型场景（有效字符串长度 8 字节、出现 100 次）：
+- 未压缩：每次 `2B(len) + 8B(data)` = 10 字节，合计 1000 字节
+- 压缩后：`DICT_ENTRY` 一次 `~14B` + 每次引用 `1B(type) + 2B(id)` = 3 字节，合计 ~314 字节，节省约 69%
+
 ### 体积对比
 
 | 格式 | 典型字节/条事件 | 备注 |
 |------|----------------|------|
-| JTB1 二进制 | 12～30 B | 无分隔符，整数用 i32，常量值无附加字节 |
+| JTB1 二进制（无压缩）| 12～30 B | 无分隔符，整数用 i32，常量值无附加字节 |
+| JTB1 二进制（usePool=true）| 9～20 B | 高频字符串以 3B `STRING_REF` 代替，节省约 30～60% |
 | NDJSON（旧格式） | 100～300 B | 每条一行 JSON，字段名全文本 |
 
 ---
@@ -619,6 +694,7 @@ const backend = new NodeStreamBackend({
     highWaterMark: 65536,                 // WriteStream 缓冲上限（字节）
     autoFlush:     false,                 // 每批后调用 flush（增加 syscall）
     smap:          null,                  // 初始 smap 对象（可后续通过 setSmap 更新）
+    usePool:       false,                 // 启用字典压缩（EventSerializerWithPool），减少重复字符串体积
 });
 ```
 
@@ -647,23 +723,26 @@ await backend.close();      // 自动写出 jalangi-trace.smap.json
 ```js
 import { WsBackend } from '../../logger/transport/WsBackend.js';
 
-// 主线程模式（调试用）
-const backend = new WsBackend({ url, mode: 'main',   format: 'binary' });
+// 主线程模式（调试用；支持 usePool 字典压缩）
+const backend = new WsBackend({ url, mode: 'main',   format: 'binary', usePool: false });
 
-// Worker 模式（默认，推荐高频 trace）
+// Worker 模式（默认，推荐高频 trace；不支持 usePool）
 const backend = new WsBackend({ url, mode: 'worker', format: 'binary' });
 
-// SAB 模式（零拷贝，需 COOP/COEP；不满足时自动降级 worker）
+// SAB 模式（零拷贝，需 COOP/COEP；不满足时自动降级 worker；不支持 usePool）
 const backend = new WsBackend({ url, mode: 'sab',    format: 'binary', slotDataBytes: 65536 });
 ```
 
 **三种模式对比**：
 
-| 模式 | 原实现 | 主线程开销 | 依赖 | 适用场景 |
-|------|--------|-----------|------|----------|
-| `main` | `WsBackend` | 高（`ws.send` 在主线程） | 无 | 调试、低频 |
-| `worker` | `WsWorkerBackend` | 极低（`postMessage` 微秒级） | Web Worker | 高频 trace（推荐） |
-| `sab` | `WsSabBackend` | 最低（`Atomics.store` 纳秒级） | COOP/COEP + SAB | 极高频，主线程繁忙 |
+| 模式 | 原实现 | 主线程开销 | 依赖 | 适用场景 | usePool |
+|------|--------|-----------|------|----------|---------|
+| `main` | `WsBackend` | 高（`ws.send` 在主线程） | 无 | 调试、低频 | ✅ 支持 |
+| `worker` | `WsWorkerBackend` | 极低（`postMessage` 微秒级） | Web Worker | 高频 trace（推荐） | ❌ 不支持 |
+| `sab` | `WsSabBackend` | 最低（`Atomics.store` 纳秒级） | COOP/COEP + SAB | 极高频，主线程繁忙 | ❌ 不支持 |
+
+> **注**：`usePool` 仅对 `mode='main'` 有效；`worker`/`sab` 模式通过帧通信传输序列化后的数据，
+> 无法在跨帧传输中维护有状态的字典，因此不支持字典压缩。
 
 **背压控制（滑动窗口 ACK）**：
 - 服务端每收到一批次返回 ACK（二进制：4 字节 batchId；或 JSON：`{ type:'ack', batchId }`）

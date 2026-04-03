@@ -79,10 +79,16 @@ classDiagram
     }
 
     class SMemory {
-        +getShadowObjectOfObject(obj)
+        +getShadowObjectOfObject(val)
         +getIDFromShadowObjectOrFrame(shadow)
+        +getActualObjectOrFunctionFromShadowObjectOrFrame(shadow)
+        +getShadowObject(obj, prop, isGetField)
         +getShadowFrame(varName)
-        +getOriginalObject(id)
+        +getFrame(name)
+        +defineFunction(f)
+        +initialize(name)
+        +functionEnter(f)
+        +functionReturn()
     }
 
     JalangiSandbox --|> JalangiRuntime : 继承
@@ -317,7 +323,7 @@ const host = new HookDispatcher({
 
 ## SMemory — 影子内存
 
-`SMemory` 为每个 JavaScript 对象、函数和活动帧维护一个"影子对象"和唯一 ID，
+`SMemory` 为每个 JavaScript 对象、函数和活动帧维护一个"影子记录"（shadow record）和唯一 ID，
 使分析插件可以将任意元数据附加到 JS 对象上，而不修改原对象本身。
 
 ```js
@@ -335,30 +341,43 @@ J$.analysis.use(new SMemoryPlugin(smemory));
 > 所有环境下语义一致。若 `J$.analysis` 已是 `HookDispatcher`（支持 `.use()`），
 > 则以插件方式集成（不覆盖现有分析）；否则直接赋值（兼容旧式单一分析）。
 
+### 透明性设计（WeakMap 方案）
+
+**旧方案的副作用**：旧版 `SMemory` 通过 `Object.defineProperty` 将 `*J$O*`、`*J$A*`、`*J$F*` 等特殊属性直接写到目标对象/函数上，导致：
+
+1. `Object.getOwnPropertyNames(obj)` 返回结果包含框架属性名 → 被分析代码可感知插桩存在
+2. `Object.freeze(obj)` / `Object.seal(obj)` 后 `defineProperty` 抛异常被吞掉，影子对象静默创建失败 → 分析工具拿不到 ID
+3. 每次 `defineProperty` 触发 V8 Hidden Class 分裂 → 所有被分析对象 JIT 降级
+
+**现方案**：改用三个 WeakMap，完全不向目标对象/函数写任何属性：
+
+| WeakMap | 键 | 值 | 替代的旧属性 |
+|---------|----|----|------------|
+| `_shadowMap` | 目标对象 / 函数 | `{ _id, _actual }` | `*J$O*`（影子引用）+ `*J$A*`（原始对象反查） |
+| `_fnDefFrameMap` | 函数对象 | 定义时的帧 | 函数上的 `*J$F*`（`defineFunction` 时写入） |
+| `_frameParentMap` | 帧对象（内部） | 父帧 | 帧对象上的 `*J$F*`（`functionEnter` 时写入） |
+
+三个 WeakMap 的键类型语义完全不同，不会混淆。所有操作均通过 `NativeProxy.$wmGet/$wmSet/$wmHas` 访问，防止用户代码 monkey-patch `WeakMap.prototype` 后引发钩子递归。
+
 ### 主要 API
 
 ```js
-// 获取对象的影子对象（自动创建）
+// 获取对象的影子记录（自动创建；frozen/sealed 对象同样有效）
+// 返回格式：{ _id: number, _actual: object }
 const shadow = smemory.getShadowObjectOfObject(obj);
 
-// 获取影子对象/帧的唯一 ID
+// 获取影子记录的唯一 ID（读取 shadow._id）
 const id = smemory.getIDFromShadowObjectOrFrame(shadow);
 
-// 获取当前活动帧的影子帧
-const frame = smemory.getShadowFrame(varName);
+// 从影子记录反查原始对象（读取 shadow._actual）
+const orig = smemory.getActualObjectOrFunctionFromShadowObjectOrFrame(shadow);
 
-// 通过 ID 反向查找原始对象
-const orig = smemory.getOriginalObject(id);
-```
+// 获取属性所在对象的影子记录（用于 getField / putField 回调）
+const { owner, isProperty } = smemory.getShadowObject(obj, prop, /* isGetField */ true);
+// owner 是属性所在对象的影子记录（{ _id, _actual }）
 
-### 影子对象属性键
-
-影子内存使用特殊的隐藏属性键存储元数据，避免与用户代码冲突：
-
-```
-*J$O*   → 影子对象引用
-*J$F*   → 影子帧标记
-*J$A*   → 原始对象反向引用
+// 获取变量所在活动帧的影子记录
+const frameShadow = smemory.getShadowFrame(varName);
 ```
 
 ## CallID 机制与 Shadow Frame（轻量变量读取）

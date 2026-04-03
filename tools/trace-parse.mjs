@@ -428,12 +428,15 @@ function decodeBinaryBuffer(buf, opts, emit) {
     const view = new DataView(ab);
     let offset = FILE_HEADER_SIZE;
 
+    // 字典解压：DICT_ENTRY 事件写入此 Map，后续 STRING_REF / 0xFFFF 哨兵引用它
+    const dict = new Map();
+
     const allEvents = resolveValues ? [] : null;
 
     while (offset + EVENT_HEADER_SIZE <= ab.byteLength) {
         let result;
         try {
-            result = deserializeEvent(view, offset);
+            result = deserializeEvent(view, offset, dict);
         } catch (err) {
             process.stderr.write(`[trace-parse] decode error at offset ${offset}: ${err.message}\n`);
             break;
@@ -441,6 +444,10 @@ function decodeBinaryBuffer(buf, opts, emit) {
         const { event, nextOffset } = result;
         if (nextOffset <= offset) break;
         offset = nextOffset;
+
+        // DICT_ENTRY 是字典控制事件，deserializeEvent 已自动更新 dict，跳过输出
+        if (event.type === 'DICT_ENTRY') continue;
+
         stats.total++;
 
         if (smapMap) injectSmapInfo(event, smapMap);
