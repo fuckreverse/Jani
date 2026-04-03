@@ -2,14 +2,14 @@
 /**
  * trace-render.mjs — 将结构化 NDJSON 渲染为各种展示格式
  *
- * 接收 trace-decode.mjs 输出的结构化 NDJSON，按指定风格渲染后输出到 stdout。
+ * 接收 trace-parse.mjs 输出的结构化 NDJSON，按指定风格渲染后输出到 stdout。
  *
  * 用法：
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format tree
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format block
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format pipe
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format flat
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format tree
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format block
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format pipe
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format flat
  *   node tools/trace-render.mjs --format tree parsed.ndjson
  *
  * 选项：
@@ -23,10 +23,11 @@
  *   block  #region/#endregion 折叠块（VS Code 任意文件可折叠）
  *   pipe   ASCII pipe 符号（| 数量 = 调用深度），纯 ASCII 适合工具链
  *
- * 注意：tree / block / pipe 格式需要完整的 CALL_PRE/CALL 对才能正确重建层次；
+ * 注意：tree / block / pipe 格式统一以 CALL_PRE/CALL 对推导调用深度；
+ *       FUNCTION_ENTER/FUNCTION_EXIT 不参与深度计算（避免双重计数），仅作附加信息输出。
  *       若上游 trace-filter 过滤掉了部分事件，深度重建可能不完整（这是预期行为）。
  *
- * 输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
+ * 输入格式：trace-parse.mjs 输出的 NDJSON（JTB1 事件类型）
  *   事件类型：SCRIPT_ENTER, SCRIPT_EXIT, CALL_PRE, CALL, FUNCTION_ENTER,
  *             FUNCTION_EXIT, END_EXPR, KEY_EVENT, WRITE_VAR, READ_VAR_FULL
  */
@@ -199,12 +200,12 @@ class BlockRenderer {
             case 'FUNCTION_ENTER': {
                 const fn  = record.fn ?? '(anonymous)';
                 const ind = this._indent(depth);
-                return `[${fmtSeq(seq)}] ${ind}// #region [${fmtRc(rc)}] FUNC ${fn}`;
+                return `[${fmtSeq(seq)}] ${ind}//   → ${fn} enter  [${fmtRc(rc)}]`;
             }
             case 'FUNCTION_EXIT': {
                 const ind = this._indent(depth);
                 const ex  = record.exception != null ? ` (exception)` : '';
-                return `[${fmtSeq(seq)}] ${ind}// #endregion FUNC_EXIT${ex}  [${fmtRc(rc)}]`;
+                return `[${fmtSeq(seq)}] ${ind}//   ← exit${ex}  [${fmtRc(rc)}]`;
             }
             case 'END_EXPR': {
                 const src = record.srcText ?? record.src ?? `(iid=${record.iid})`;
@@ -401,7 +402,15 @@ function createRenderer(format) {
 
 // ── 深度追踪器 ─────────────────────────────────────────────────────────────────
 //
-// 从 CALL_PRE/CALL 事件对实时维护当前调用深度，供渲染器使用。
+// 统一使用 CALL_PRE/CALL 事件对维护当前调用深度，供渲染器使用。
+//
+// 设计原则：
+//   - CALL_PRE 表示"即将进入调用"，深度在渲染后 +1
+//   - CALL 表示"调用已返回"，深度先 -1 再渲染
+//   - FUNCTION_ENTER / FUNCTION_EXIT 不参与深度计算：
+//     它们是被调者视角，不覆盖 native 函数，且与 CALL_PRE/CALL 总是成对出现在同一调用内，
+//     两套事件混用会导致深度双重计数（bug 根源）。
+//
 // 注意：若输入流经过 trace-filter 过滤，可能缺少部分配对，深度可能偏差（符合预期）。
 
 class DepthTracker {
@@ -411,22 +420,18 @@ class DepthTracker {
 
     /** 在渲染前调用，返回此事件应使用的深度 */
     depthFor(record) {
-        // 进入调用：CALL_PRE（调用前）或 FUNCTION_ENTER（函数体内）
+        // 进入调用：CALL_PRE — 先用当前深度渲染，再递增
         if (record.type === 'CALL_PRE') {
             const d = this._depth;
             this._depth++;
             return d;
         }
-        // 退出调用：CALL（完成后返回值）
+        // 退出调用：CALL — 先递减，再用新深度渲染
         if (record.type === 'CALL') {
             this._depth = Math.max(0, this._depth - 1);
             return this._depth;
         }
-        // FUNCTION_EXIT 也减少深度
-        if (record.type === 'FUNCTION_EXIT') {
-            this._depth = Math.max(0, this._depth - 1);
-            return this._depth;
-        }
+        // FUNCTION_ENTER / FUNCTION_EXIT 不影响深度，作为附加信息按当前深度渲染
         return this._depth;
     }
 }
@@ -438,8 +443,8 @@ function printHelp() {
 trace-render.mjs — 将结构化 NDJSON 渲染为各种展示格式
 
 用法：
-  node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs
-  node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format tree
+  node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs
+  node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format tree
   node tools/trace-render.mjs --format block parsed.ndjson
 
 选项：
@@ -452,27 +457,28 @@ trace-render.mjs — 将结构化 NDJSON 渲染为各种展示格式
   --help            显示帮助信息
 
 输入格式：
-  trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
+  trace-parse.mjs 输出的 NDJSON（JTB1 事件类型）
   事件类型：SCRIPT_ENTER, SCRIPT_EXIT, CALL_PRE, CALL,
             FUNCTION_ENTER, FUNCTION_EXIT, END_EXPR, KEY_EVENT
 
 示例：
   # 以树形格式查看完整调用链
-  node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format tree
+  node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format tree
 
   # 带 smap 解析源码位置后渲染
-  node tools/trace-decode.mjs trace.bin --smap trace.smap.json | node tools/trace-render.mjs --format tree
+  node tools/trace-parse.mjs trace.bin --smap trace.smap.json | node tools/trace-render.mjs --format tree
 
   # 先过滤再渲染
-  node tools/trace-decode.mjs trace.bin \\
+  node tools/trace-parse.mjs trace.bin \\
     | node tools/trace-filter.mjs --type CALL_PRE \\
     | node tools/trace-render.mjs --format pipe
 
   # 生成 VS Code 可折叠的 block 格式
-  node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format block > trace.log
+  node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format block > trace.log
 
 注意：
-  tree / block / pipe 格式根据 CALL_PRE/CALL 配对实时推导调用深度。
+  tree / block / pipe 格式统一以 CALL_PRE/CALL 配对实时推导调用深度。
+  FUNCTION_ENTER/FUNCTION_EXIT 不参与深度计算，按当前深度平铺输出。
   若输入已被 trace-filter 过滤（破坏了配对），层次可能不完整，这是预期行为。
 `);
 }

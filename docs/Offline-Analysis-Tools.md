@@ -13,7 +13,7 @@
 
 | 工具 | 功能 |
 |------|------|
-| `trace-decode.mjs` | 将 JTB1 二进制 `.bin` 文件解码为结构化 NDJSON（核心入口） |
+| `trace-parse.mjs` | 将 JTB1 二进制 `.bin` 文件解码为结构化 NDJSON（核心入口） |
 | `trace-parse.mjs` | 兼容层：解析旧文本 trace 或 `.bin` 文件，统一输出结构化 NDJSON |
 | `trace-render.mjs` | 将结构化 NDJSON 渲染为 flat / tree / block / pipe 展示格式 |
 | `trace-filter.mjs` | 按类型、seq 范围、行号、函数名、变量等条件过滤 |
@@ -27,7 +27,7 @@
 ```
 ExecutionTrace 插件 / WsBackend / NodeStreamBackend
     ↓ trace.bin（JTB1 二进制格式）+ trace.smap.json（IID 源码位置映射）
-trace-decode.mjs  [--smap] [--resolve-values]
+trace-parse.mjs  [--smap] [--resolve-values]
     ↓ parsed.ndjson（结构化 NDJSON，JTB1 事件类型）
 trace-filter.mjs  ─→  trace-render.mjs      ← 展示格式转换（flat/tree/block/pipe）
                   ─→  trace-hot-lines.mjs
@@ -42,14 +42,14 @@ trace-filter.mjs  ─→  trace-render.mjs      ← 展示格式转换（flat/tr
 所有工具从 **stdin** 或文件读取，结果写到 **stdout**，统计摘要写到 **stderr**，可任意串联：
 
 ```bash
-node tools/trace-decode.mjs trace.bin \
+node tools/trace-parse.mjs trace.bin \
   | node tools/trace-filter.mjs --type CALL_PRE --fn decode* \
   | node tools/trace-call-tree.mjs --summary
 ```
 
 ---
 
-## 2. trace-decode.mjs — 二进制解码（核心入口）
+## 2. trace-parse.mjs — 二进制解码（核心入口）
 
 将 JTB1 二进制 `.bin` 文件解码为结构化 NDJSON，是处理链的起点。
 
@@ -67,7 +67,7 @@ node tools/trace-decode.mjs trace.bin \
 
 当 trace 文件由 `NodeStreamBackend({ usePool: true })` 或 `WsBackend({ mode: 'main', usePool: true })` 写入时，
 文件中会包含 `DICT_ENTRY`（事件类型 `0x0A`）条目和 `STRING_REF` 值引用。
-`trace-decode.mjs` 在解码过程中**自动维护字典状态**：
+`trace-parse.mjs` 在解码过程中**自动维护字典状态**：
 
 - 遇到 `DICT_ENTRY` 时将 `id → string` 写入内部字典，该事件**不输出**到 NDJSON
 - 遇到 `STRING_REF` 时从字典中查找，将字段值**自动还原**为原始字符串
@@ -92,16 +92,16 @@ node tools/trace-decode.mjs trace.bin \
 
 ```bash
 # 基本解码
-node tools/trace-decode.mjs trace.bin
+node tools/trace-parse.mjs trace.bin
 
 # 注入 smap，还原源码位置（line/col/srcText）
-node tools/trace-decode.mjs trace.bin --smap trace.smap.json
+node tools/trace-parse.mjs trace.bin --smap trace.smap.json
 
 # 追溯省略值 + 统计输出
-node tools/trace-decode.mjs trace.bin --smap trace.smap.json --resolve-values --stats
+node tools/trace-parse.mjs trace.bin --smap trace.smap.json --resolve-values --stats
 
 # 管道到 render
-node tools/trace-decode.mjs trace.bin --smap trace.smap.json | node tools/trace-render.mjs --format tree
+node tools/trace-parse.mjs trace.bin --smap trace.smap.json | node tools/trace-render.mjs --format tree
 ```
 
 ---
@@ -110,10 +110,10 @@ node tools/trace-decode.mjs trace.bin --smap trace.smap.json | node tools/trace-
 
 `trace-parse.mjs` 兼容两种输入格式，自动检测：
 
-1. **JTB1 二进制文件（`.bin`）**：委托给 `trace-decode.mjs` 内部逻辑解码，支持 `--smap` 选项
+1. **JTB1 二进制文件（`.bin`）**：内置 JTB1 解码器，支持 `--smap` 选项
 2. **旧文本格式 trace 行**：手动解析器（热路径，无正则），输出统一结构化 NDJSON
 
-对于 `.bin` 文件建议直接使用 `trace-decode.mjs`；`trace-parse.mjs` 主要用于处理历史文本格式。
+`trace-parse.mjs` 是统一入口，`.bin` 和旧文本格式均可直接使用；旧文本格式由专用解析路径处理。
 
 ### 支持的文本输入格式
 
@@ -159,7 +159,7 @@ node tools/trace-decode.mjs trace.bin --smap trace.smap.json | node tools/trace-
 
 ### 字典压缩透明解码（二进制模式）
 
-在二进制模式（`.bin` 文件）下，`trace-parse.mjs` 与 `trace-decode.mjs` 采用相同的字典维护逻辑：
+在二进制模式（`.bin` 文件）下，`trace-parse.mjs` 内置字典维护逻辑：
 自动识别并处理 `DICT_ENTRY` 事件和 `STRING_REF` 引用，对用户完全透明。
 
 ### 用法
@@ -180,7 +180,7 @@ node tools/trace-parse.mjs trace.ndjson > parsed.ndjson
 
 ## 4. trace-render.mjs — 展示格式渲染
 
-将结构化 NDJSON（`trace-decode.mjs` 的输出）渲染为人类可读的展示格式。
+将结构化 NDJSON（`trace-parse.mjs` 的输出）渲染为人类可读的展示格式。
 
 ### 格式说明
 
@@ -188,7 +188,7 @@ node tools/trace-parse.mjs trace.ndjson > parsed.ndjson
 |------|------|----------|
 | `flat`（默认）| 平铺流式，无缩进 | 管道组合、程序消费 |
 | `tree` | Unicode 树形符号（┬ 进入 / └ 退出 / │ 延续线）| 人眼阅读调用链 |
-| `block` | `#region`/`#endregion` 折叠块 | VS Code 中打开可折叠查看 |
+| `block` | `#region`/`#endregion` 折叠块（对应 CALL_PRE/CALL 事件对）；`FUNCTION_ENTER`/`FUNCTION_EXIT` 以注释行内嵌 | VS Code 中打开可折叠查看 |
 | `pipe` | ASCII `|` 符号（数量 = 调用深度）| 纯 ASCII 终端/工具链 |
 
 ### 选项
@@ -203,19 +203,19 @@ node tools/trace-parse.mjs trace.ndjson > parsed.ndjson
 
 ```bash
 # 默认 flat 格式
-node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs
+node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs
 
 # 树形格式（适合人眼阅读调用链）
-node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format tree
+node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format tree
 
 # 生成 VS Code 可折叠的 block 格式
-node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format block > trace.log
+node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format block > trace.log
 
 # ASCII pipe 格式
-node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format pipe
+node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format pipe
 
 # 先过滤再渲染（只看 decode 相关调用的树形视图）
-node tools/trace-decode.mjs trace.bin --smap trace.smap.json \
+node tools/trace-parse.mjs trace.bin --smap trace.smap.json \
   | node tools/trace-filter.mjs --fn "*decode*" \
   | node tools/trace-render.mjs --format tree
 ```
@@ -238,7 +238,7 @@ node tools/trace-decode.mjs trace.bin --smap trace.smap.json \
 
 ## 5. trace-filter.mjs — 条件过滤
 
-对结构化 NDJSON（`trace-decode.mjs` 的输出）按多种条件过滤，条件可叠加。
+对结构化 NDJSON（`trace-parse.mjs` 的输出）按多种条件过滤，条件可叠加。
 
 ### 过滤条件
 
@@ -257,19 +257,19 @@ node tools/trace-decode.mjs trace.bin --smap trace.smap.json \
 
 ```bash
 # 只看函数调用前置事件
-node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --type CALL_PRE
+node tools/trace-parse.mjs trace.bin | node tools/trace-filter.mjs --type CALL_PRE
 
 # 提取 seq 100~200 的片段
-node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --seq 100-200
+node tools/trace-parse.mjs trace.bin | node tools/trace-filter.mjs --seq 100-200
 
 # 找到所有涉及变量 result 的行
-node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --has-var result
+node tools/trace-parse.mjs trace.bin | node tools/trace-filter.mjs --has-var result
 
 # 找名字含 decode 的函数调用，过滤内部变量
-node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --type CALL_PRE --fn "*decode*" --no-internal
+node tools/trace-parse.mjs trace.bin | node tools/trace-filter.mjs --type CALL_PRE --fn "*decode*" --no-internal
 
 # 找函数 fact 的递归调用
-node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --fn fact
+node tools/trace-parse.mjs trace.bin | node tools/trace-filter.mjs --fn fact
 ```
 
 ---
@@ -290,10 +290,10 @@ node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --fn fact
 
 ```bash
 # 默认 Top-10 热点行
-node tools/trace-decode.mjs trace.bin --smap trace.smap.json | node tools/trace-hot-lines.mjs
+node tools/trace-parse.mjs trace.bin --smap trace.smap.json | node tools/trace-hot-lines.mjs
 
 # Top-5，展示类型分布
-node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs --top 5 --by-type
+node tools/trace-parse.mjs trace.bin | node tools/trace-hot-lines.mjs --top 5 --by-type
 ```
 
 **输出样例：**
@@ -327,16 +327,16 @@ node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs --top 5 -
 
 ```bash
 # 完整调用树
-node tools/trace-decode.mjs trace.bin | node tools/trace-call-tree.mjs
+node tools/trace-parse.mjs trace.bin | node tools/trace-call-tree.mjs
 
 # 限制深度为 4 层
-node tools/trace-decode.mjs trace.bin | node tools/trace-call-tree.mjs --depth 4
+node tools/trace-parse.mjs trace.bin | node tools/trace-call-tree.mjs --depth 4
 
 # JSON 结构输出
-node tools/trace-decode.mjs trace.bin | node tools/trace-call-tree.mjs --json
+node tools/trace-parse.mjs trace.bin | node tools/trace-call-tree.mjs --json
 
 # 只看 fact 函数的调用子树
-node tools/trace-decode.mjs trace.bin \
+node tools/trace-parse.mjs trace.bin \
   | node tools/trace-filter.mjs --fn fact \
   | node tools/trace-call-tree.mjs
 ```
@@ -375,13 +375,13 @@ node tools/trace-decode.mjs trace.bin \
 
 ```bash
 # 追踪变量 key 的全部读写历史
-node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --var key
+node tools/trace-parse.mjs trace.bin | node tools/trace-var-timeline.mjs --var key
 
 # 追踪多个变量
-node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --var x,y,result
+node tools/trace-parse.mjs trace.bin | node tools/trace-var-timeline.mjs --var x,y,result
 
 # 只看写入（赋值轨迹）
-node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --var key --writes
+node tools/trace-parse.mjs trace.bin | node tools/trace-var-timeline.mjs --var key --writes
 ```
 
 **输出样例：**
@@ -423,13 +423,13 @@ seq      | 行号    | 变量            | 类型        | 值
 
 ```bash
 # 提取 seq 1000~2000 的片段
-node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs 1000-2000
+node tools/trace-parse.mjs trace.bin | node tools/trace-range-extract.mjs 1000-2000
 
 # 提取 seq=5000 前后各 100 条（共 201 条上下文）
-node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs --context 100 5000
+node tools/trace-parse.mjs trace.bin | node tools/trace-range-extract.mjs --context 100 5000
 
 # 以文本格式查看（更易人眼阅读）
-node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs --context 20 --src 5000
+node tools/trace-parse.mjs trace.bin | node tools/trace-range-extract.mjs --context 20 --src 5000
 ```
 
 ---
@@ -440,7 +440,7 @@ node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs --con
 
 ```bash
 # 步骤 1：解码二进制 trace，注入源码位置
-node tools/trace-decode.mjs trace.bin --smap trace.smap.json > parsed.ndjson
+node tools/trace-parse.mjs trace.bin --smap trace.smap.json > parsed.ndjson
 
 # 步骤 2：找热点行，定位关键函数
 cat parsed.ndjson | node tools/trace-hot-lines.mjs --top 20
@@ -461,7 +461,7 @@ cat parsed.ndjson | node tools/trace-range-extract.mjs --context 30 8421 \
 
 ```bash
 # 只看函数调用，汇总统计
-node tools/trace-decode.mjs trace.bin \
+node tools/trace-parse.mjs trace.bin \
   | node tools/trace-filter.mjs --type CALL_PRE --no-internal \
   | node tools/trace-call-tree.mjs --summary
 ```
@@ -470,17 +470,17 @@ node tools/trace-decode.mjs trace.bin \
 
 ```bash
 # 找所有涉及属性 "width" 的语句（需 END_EXPR 事件）
-node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --has-var width
+node tools/trace-parse.mjs trace.bin | node tools/trace-filter.mjs --has-var width
 
 # 配合时序追踪查看变化过程
-node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --var width
+node tools/trace-parse.mjs trace.bin | node tools/trace-var-timeline.mjs --var width
 ```
 
 ### 三段管道：decode → filter → render
 
 ```bash
 # fact 递归调用树
-node tools/trace-decode.mjs trace.bin --smap trace.smap.json \
+node tools/trace-parse.mjs trace.bin --smap trace.smap.json \
   | node tools/trace-filter.mjs --fn fact \
   | node tools/trace-render.mjs --format tree
 ```
@@ -493,7 +493,7 @@ node tools/trace-decode.mjs trace.bin --smap trace.smap.json \
 
 在浏览器端通过 `WsBackend` 将事件流实时推送给 `trace-server`，服务端落地为相同格式的 `.bin` 文件。
 
-`trace-decode.mjs` 将二进制事件解码为统一结构化 NDJSON，事件类型为 JTB1 枚举（`CALL_PRE`/`CALL`/`END_EXPR` 等），供下游工具统一消费：
+`trace-parse.mjs` 将二进制事件解码为统一结构化 NDJSON，事件类型为 JTB1 枚举（`CALL_PRE`/`CALL`/`END_EXPR` 等），供下游工具统一消费：
 
 - `writes`/`reads`/`fields`：结构化变量读写数组（`END_EXPR` 事件）
 - `fn`/`args`/`result`：函数调用信息（`CALL_PRE`/`CALL` 事件）

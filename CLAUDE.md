@@ -19,7 +19,7 @@ src/runtime/      运行时钩子框架（JalangiSandbox / HookDispatcher / SMem
 src/logger/       日志系统（RingBuffer / LogManager / 多后端）→ 详见 docs/Logger-System.md
 src/preprocess/   预处理（反混淆 / 语法降级）→ 详见 docs/Preprocessing.md
 src/plugins/      示例分析插件（ExecutionTrace / dlint / tutorial / coverage 等）→ 详见 docs/Analysis-Plugins.md
-tools/            离线 Trace 后处理工具链（trace-decode / render / filter / call-tree 等）→ 详见 docs/Offline-Analysis-Tools.md
+tools/            离线 Trace 后处理工具链（trace-parse / render / filter / call-tree 等）→ 详见 docs/Offline-Analysis-Tools.md
 test/             测试套件（unit / integration）→ 详见 docs/Testing-System.md
 docs/             全量文档索引，见下方「文档索引」
 ```
@@ -109,7 +109,7 @@ npm run test:unit / test:integration / test:logging  # 分组
 | DOC-08 | [`docs/Analysis-Plugins.md`](docs/Analysis-Plugins.md) | `src/plugins/` 示例插件 |
 | DOC-09 | [`docs/Scope-Aware-Instrumentation.md`](docs/Scope-Aware-Instrumentation.md) | 作用域感知插桩技术设计 |
 | DOC-10 | [`docs/CLI-Reference.md`](docs/CLI-Reference.md) | CLI 工具完整参考（jalangi / preprocess / 后处理工具链）|
-| DOC-11 | [`docs/Offline-Analysis-Tools.md`](docs/Offline-Analysis-Tools.md) | `tools/` 离线分析工具集（trace-decode / render / filter / hot-lines / call-tree 等）|
+| DOC-11 | [`docs/Offline-Analysis-Tools.md`](docs/Offline-Analysis-Tools.md) | `tools/` 离线分析工具集（trace-parse / render / filter / hot-lines / call-tree 等）|
 | DOC-12 | [`docs/Testing-System.md`](docs/Testing-System.md) | `test/` 测试体系结构、方法、TODO |
 | DOC-13 | [`docs/Dynamic-Analysis-Design-Philosophy.md`](docs/Dynamic-Analysis-Design-Philosophy.md) | 动态分析框架设计哲学与核心概念 |
 | DOC-14 | [`docs/Code-Issues.md`](docs/Code-Issues.md) | 已知代码问题与待修复 Bug 记录 |

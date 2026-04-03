@@ -10,10 +10,10 @@
  *
  * 输出格式（二进制事件流，.bin 文件）：
  *   运行时直接输出 EventSerializer 定义的紧凑二进制格式（12 字节头 + payload），
- *   所有文本渲染交由后处理工具（trace-decode.mjs → trace-render.mjs）完成。
+ *   所有文本渲染交由后处理工具（trace-parse.mjs → trace-render.mjs）完成。
  *
  * 工具链示例：
- *   node tools/trace-decode.mjs trace.bin --smap trace.smap.json | node tools/trace-render.mjs --format tree
+ *   node tools/trace-parse.mjs trace.bin --smap trace.smap.json | node tools/trace-render.mjs --format tree
  *
  * 源码映射：
  *   trace 文件本身不包含位置信息（line:col）和源码文本，

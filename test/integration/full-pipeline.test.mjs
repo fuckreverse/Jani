@@ -6,7 +6,7 @@
  *
  *   ┌─────────────┐    ┌──────────────┐    ┌──────────────────┐    ┌──────────────────┐
  *   │ 原始源码     │──▶│ 预处理        │──▶│ 插桩 + vm 执行    │──▶│ 后处理工具链      │
- *   │ all-syntax  │    │ preprocessCode│    │ esnstrument +    │    │ trace-decode     │
+ *   │ all-syntax  │    │ preprocessCode│    │ esnstrument +    │    │ trace-parse      │
  *   │ .js         │    │ (deobfuscate) │    │ JalangiSandbox   │    │ trace-render     │
  *   └─────────────┘    └──────────────┘    │ ExecutionTrace   │    │ trace-filter     │
  *                                           └──────────────────┘    │ trace-hot-lines  │
@@ -49,7 +49,7 @@ const ROOT       = resolve(__dirname, '..', '..');
 
 const FIXTURE    = join(ROOT, 'test', 'fixtures', 'all-syntax.js');
 const JALANGI    = join(ROOT, 'bin', 'jalangi.mjs');
-const DECODE     = join(ROOT, 'tools', 'trace-decode.mjs');
+const DECODE     = join(ROOT, 'tools', 'trace-parse.mjs');
 const RENDER     = join(ROOT, 'tools', 'trace-render.mjs');
 const FILTER     = join(ROOT, 'tools', 'trace-filter.mjs');
 const HOTLINES   = join(ROOT, 'tools', 'trace-hot-lines.mjs');
@@ -305,7 +305,7 @@ describe('全流程集成测试（Node.js 后端）', () => {
             // close() 内部会 flush + 关闭后端（TraceLogger 无公开 flush() 方法）
             await logger.close();
 
-            // 保存 API 生成的 smap 文件，供 Step 4 trace-decode --smap 使用
+            // 保存 API 生成的 smap 文件，供 Step 4 trace-parse --smap 使用
             // （API 生成的 trace.bin 与 CLI 生成的 smap.json 的 iid 不同，需要配套的 smap）
             // instrSMapObj 是从 instrumentCode 返回值中解构的 sourceMapObject
             const smapObj = instrSMapObj ? buildSmapJson(instrSMapObj) : { iids: {}, version: 1 };
@@ -463,15 +463,15 @@ describe('全流程集成测试（Node.js 后端）', () => {
     });
 
     // ────────────────────────────────────────────────────────────────────────
-    // STEP 4: 后处理 — trace-decode（二进制 → NDJSON）
+    // STEP 4: 后处理 — trace-parse（二进制 → NDJSON）
     // ────────────────────────────────────────────────────────────────────────
 
-    describe('Step 4: 后处理 — trace-decode', () => {
+    describe('Step 4: 后处理 — trace-parse', () => {
 
-        test('trace-decode 将 .bin 解码为 NDJSON（exit 0）', () => {
+        test('trace-parse 将 .bin 解码为 NDJSON（exit 0）', () => {
             const r = run(`node ${DECODE} ${TRACE_BIN} > ${TRACE_NDJSON}`);
             assert.equal(r.status, 0,
-                `trace-decode 失败（exit ${r.status}):\n  stderr: ${r.stderr}`);
+                `trace-parse 失败（exit ${r.status}):\n  stderr: ${r.stderr}`);
         });
 
         test('NDJSON 文件有效且事件条数足够', () => {
@@ -493,14 +493,14 @@ describe('全流程集成测试（Node.js 后端）', () => {
             assert.ok(types.has('FUNCTION_EXIT'),  '缺少 FUNCTION_EXIT');
         });
 
-        test('trace-decode 携带 --smap 成功注入位置信息', () => {
+        test('trace-parse 携带 --smap 成功注入位置信息', () => {
             // Step 3 通过 API 生成了 trace.bin，需要使用配套的 API smap 文件
             // CLI 生成的 smap (SMAP_FILE) 与 API trace (TRACE_BIN) 的 iid 可能不匹配
             // 优先使用 API 配套 smap；若不存在则使用 CLI smap
             const smapToUse = existsSync(API_SMAP_FILE) ? API_SMAP_FILE : SMAP_FILE;
             const outWithSmap = join(TMP_DIR, 'trace-with-smap.ndjson');
             const r = run(`node ${DECODE} ${TRACE_BIN} --smap ${smapToUse} > ${outWithSmap}`);
-            assert.equal(r.status, 0, `trace-decode --smap 失败: ${r.stderr}`);
+            assert.equal(r.status, 0, `trace-parse --smap 失败: ${r.stderr}`);
 
             const events   = readNdjson(outWithSmap);
             // 有些事件类型（SCRIPT_ENTER, FUNCTION_ENTER 等）有 iid，应映射到行号
@@ -515,7 +515,7 @@ describe('全流程集成测试（Node.js 后端）', () => {
             }
         });
 
-        test('trace-decode --stats 向 stderr 输出 total= 统计', () => {
+        test('trace-parse --stats 向 stderr 输出 total= 统计', () => {
             const r = run(`node ${DECODE} ${TRACE_BIN} --stats > /dev/null`);
             assert.equal(r.status, 0);
             assert.ok(r.stderr.includes('total='),
@@ -935,7 +935,7 @@ describe('全流程集成测试（Node.js 后端）', () => {
 
     describe('Step 11: 边缘案例与容错', () => {
 
-        test('trace-decode 对无效魔数文件应非零退出并报错', () => {
+        test('trace-parse 对无效魔数文件应非零退出并报错', () => {
             const badBin = join(TMP_DIR, 'invalid.bin');
             writeFileSync(badBin, Buffer.from([0x00, 0x01, 0x02, 0x03]));
             const r = run(`node ${DECODE} ${badBin}`);
@@ -943,7 +943,7 @@ describe('全流程集成测试（Node.js 后端）', () => {
             assert.ok(r.stderr.length > 0, '应有错误输出');
         });
 
-        test('trace-decode --pretty 输出包含缩进', () => {
+        test('trace-parse --pretty 输出包含缩进', () => {
             const prettyOut = join(TMP_DIR, 'trace-pretty.json');
             // 截取前 2000 字节避免输出过大
             const r = run(

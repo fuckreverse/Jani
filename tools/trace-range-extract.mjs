@@ -3,12 +3,12 @@
  * trace-range-extract.mjs — seq 区间快速提取
  *
  * 用法：
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs 100-200
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs 100+
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs --before 50 --after 50 100
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-range-extract.mjs 100-200
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-range-extract.mjs 100+
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-range-extract.mjs --before 50 --after 50 100
  *   node tools/trace-range-extract.mjs --help
  *
- * 输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
+ * 输入格式：trace-parse.mjs 输出的 NDJSON（JTB1 事件类型）
  *
  * 输出：
  *   指定范围内的 trace 行
@@ -25,11 +25,11 @@ function printHelp() {
 trace-range-extract.mjs — seq 区间快速提取
 
 用法：
-  node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs 100-200
-  node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs 100+
-  node tools/trace-decode.mjs trace.bin | node tools/trace-range-extract.mjs --before 50 --after 50 100
+  node tools/trace-parse.mjs trace.bin | node tools/trace-range-extract.mjs 100-200
+  node tools/trace-parse.mjs trace.bin | node tools/trace-range-extract.mjs 100+
+  node tools/trace-parse.mjs trace.bin | node tools/trace-range-extract.mjs --before 50 --after 50 100
 
-输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
+输入格式：trace-parse.mjs 输出的 NDJSON（JTB1 事件类型）
 
 选项：
   --before N    提取目标 seq 之前 N 条记录

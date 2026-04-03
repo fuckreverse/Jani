@@ -538,7 +538,7 @@ for (const ev of events) {
    - 解码时维护一个 `Map<id, string>` 字典
    - 遇到 `DICT_ENTRY` 事件时将 `id → str` 写入字典（该事件不输出为用户可见事件）
    - 遇到 `STRING_REF` 时从字典中查找，还原为原始字符串
-   - 离线工具（`trace-decode.mjs`、`trace-parse.mjs`）自动处理字典，对用户完全透明
+   - 离线工具（`trace-parse.mjs`）自动处理字典，对用户完全透明
 
 #### 使用方式
 
@@ -901,7 +901,7 @@ const tracer = new TraceLogger({ nodeFile: 'trace.bin' });
 await tracer.init();
 // ... 分析运行 ...
 await tracer.close();
-// 解码文件：node tools/trace-decode.mjs trace.bin --smap trace.smap.json
+// 解码文件：node tools/trace-parse.mjs trace.bin --smap trace.smap.json
 ```
 
 ### 场景二：浏览器高频插桩，实时传输到 trace server
@@ -1138,11 +1138,11 @@ traces/trace_20260314_153043_456_002.bin   ← 第 2 个连接（页面刷新后
 
 ```bash
 # 解码并以树形格式渲染
-node tools/trace-decode.mjs traces/trace_*.bin | node tools/trace-render.mjs --format tree
+node tools/trace-parse.mjs traces/trace_*.bin | node tools/trace-render.mjs --format tree
 
 # 过滤特定事件类型
-node tools/trace-decode.mjs traces/trace_*.bin | node tools/trace-filter.mjs --type CALL_PRE
+node tools/trace-parse.mjs traces/trace_*.bin | node tools/trace-filter.mjs --type CALL_PRE
 
 # 带 smap 解析源码位置
-node tools/trace-decode.mjs traces/trace_*.bin --smap traces/trace_*.smap.json
+node tools/trace-parse.mjs traces/trace_*.bin --smap traces/trace_*.smap.json
 ```

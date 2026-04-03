@@ -26,8 +26,8 @@
  *
  * 输出格式（二进制 JTB1）：
  *   文件 = [魔数 8B 文件头][事件1: 12B头 + payload][事件2: 12B头 + payload]...
- *   可用 trace-decode.mjs 解码：
- *     node tools/trace-decode.mjs trace.bin --smap trace.smap.json
+ *   可用 trace-parse.mjs 解码：
+ *     node tools/trace-parse.mjs trace.bin --smap trace.smap.json
  *
  * smap.json 写出：
  *   若构造时提供了 smap（通过 setSmap(smapObj) 或 options.smap），

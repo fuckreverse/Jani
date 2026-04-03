@@ -3,12 +3,12 @@
  * trace-var-timeline.mjs — 变量值时序追踪
  *
  * 用法：
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --var x
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --var x,y,z
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --all --limit 50
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-var-timeline.mjs --var x
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-var-timeline.mjs --var x,y,z
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-var-timeline.mjs --all --limit 50
  *   node tools/trace-var-timeline.mjs --help
  *
- * 输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
+ * 输入格式：trace-parse.mjs 输出的 NDJSON（JTB1 事件类型）
  *   - END_EXPR：写/读变量（writes=[{name,value}], reads=[{name,value,omitted?}], fields=[{base,offset,isWrite,value}]）
  *   - WRITE_VAR：单独写入变量（name, value）
  *   - READ_VAR_FULL：单独读取变量（name, value）
@@ -156,11 +156,11 @@ function printHelp() {
 trace-var-timeline.mjs — 变量值时序追踪
 
 用法：
-  node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --var x
-  node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --var x,y,z
-  node tools/trace-decode.mjs trace.bin | node tools/trace-var-timeline.mjs --all --limit 50
+  node tools/trace-parse.mjs trace.bin | node tools/trace-var-timeline.mjs --var x
+  node tools/trace-parse.mjs trace.bin | node tools/trace-var-timeline.mjs --var x,y,z
+  node tools/trace-parse.mjs trace.bin | node tools/trace-var-timeline.mjs --all --limit 50
 
-输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
+输入格式：trace-parse.mjs 输出的 NDJSON（JTB1 事件类型）
 
 选项：
   --var NAMES   追踪指定变量（逗号分隔）

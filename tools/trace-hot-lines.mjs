@@ -3,12 +3,12 @@
  * trace-hot-lines.mjs — 热点代码行统计
  *
  * 用法：
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs --top 20
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs --by-type
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-hot-lines.mjs
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-hot-lines.mjs --top 20
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-hot-lines.mjs --by-type
  *   node tools/trace-hot-lines.mjs --help
  *
- * 输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
+ * 输入格式：trace-parse.mjs 输出的 NDJSON（JTB1 事件类型）
  *   事件类型：CALL_PRE, CALL, FUNCTION_ENTER, FUNCTION_EXIT,
  *             END_EXPR, SCRIPT_ENTER, SCRIPT_EXIT, KEY_EVENT 等
  *
@@ -58,11 +58,11 @@ function printHelp() {
 trace-hot-lines.mjs — 热点代码行统计
 
 用法：
-  node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs
-  node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs --top 20
-  node tools/trace-decode.mjs trace.bin | node tools/trace-hot-lines.mjs --by-type
+  node tools/trace-parse.mjs trace.bin | node tools/trace-hot-lines.mjs
+  node tools/trace-parse.mjs trace.bin | node tools/trace-hot-lines.mjs --top 20
+  node tools/trace-parse.mjs trace.bin | node tools/trace-hot-lines.mjs --by-type
 
-输入格式：trace-decode.mjs 输出的 NDJSON（JTB1 事件类型）
+输入格式：trace-parse.mjs 输出的 NDJSON（JTB1 事件类型）
 
 选项：
   --top N       显示前 N 个热点行（默认 10）

@@ -21,7 +21,7 @@
  *   文件名格式：trace_<YYYYMMDD>_<HHmmss>_<ms>_<seq>.bin
  *
  * 后处理：
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format tree
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format tree
  */
 
 import { createServer }   from 'node:http';
@@ -76,7 +76,7 @@ Options:
     trace_<YYYYMMDD>_<HHmmss>_<ms>_<seq>.bin
 
 后处理：
-  node tools/trace-decode.mjs trace.bin | node tools/trace-render.mjs --format tree
+  node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format tree
 `);
     process.exit(0);
 }
@@ -254,7 +254,7 @@ wss.on('connection', (ws, req) => {
         console.log(`[server] Client disconnected: ${clientAddr} (code=${code}, active: ${stats.connections})`);
         outStream.end(() => {
             console.log(`[server]   → Trace saved: ${traceFile} (${eventCount} events)`);
-            console.log(`[server]   → Decode with: node tools/trace-decode.mjs ${traceFile}`);
+            console.log(`[server]   → Decode with: node tools/trace-parse.mjs ${traceFile}`);
         });
     });
 

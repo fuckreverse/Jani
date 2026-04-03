@@ -2,6 +2,11 @@
 /**
  * trace-parse.mjs — 将 trace 文件转换为结构化 NDJSON
  *
+ * ⚠️  迁移说明：trace-decode.mjs 已废弃并删除，所有用法请替换为本文件。
+ *    旧：node tools/trace-decode.mjs trace.bin [--smap ...] [--resolve-values] [--stats]
+ *    新：node tools/trace-parse.mjs  trace.bin [--smap ...] [--resolve-values] [--stats]
+ *    参数完全兼容，无需修改其他选项。
+ *
  * 支持两种输入格式（自动检测）：
  *   1. JTB1 二进制 trace 文件（.bin）— 直接解码，输出量小，无需正则解析
  *   2. 文本格式 trace 行（旧格式）— 手动解析器（热路径）
@@ -379,42 +384,71 @@ function injectSmapInfo(event, smapMap) {
 }
 
 /**
- * 追溯 OMITTED 值（值省略优化的逆操作）：
- *   第一遍建立 writeIid → writes 映射，第二遍填充 omitted reads。
- * @param {object[]} events
- * @param {Map}      smapMap
+ * 第一遍扫描：从 DataView 中提取所有 END_EXPR write 值，建立 iid → writes 映射。
+ * 只保留 write 数据（内存占用远小于全量事件），其他事件类型直接跳过。
+ *
+ * @param {DataView} view
+ * @param {Map}      dict      字典压缩 Map（与第二遍共享同一份即可，第一遍解码会重建）
+ * @returns {Map<number, Array<{name: string, value: *}>>}  iid → writes
  */
-function resolveOmittedValues(events, smapMap) {
+function collectWriteValues(view, dict) {
     const writeValues = new Map();
-    for (const ev of events) {
-        if (ev.type === 'END_EXPR' && ev.writes) {
-            for (const w of ev.writes) {
-                if (!writeValues.has(ev.iid)) writeValues.set(ev.iid, []);
-                writeValues.get(ev.iid).push({ name: w.name, value: w.value });
-            }
+    let offset = FILE_HEADER_SIZE;
+
+    while (offset + EVENT_HEADER_SIZE <= view.byteLength) {
+        let result;
+        try {
+            result = deserializeEvent(view, offset, dict);
+        } catch {
+            break;
+        }
+        const { event, nextOffset } = result;
+        if (nextOffset <= offset) break;
+        offset = nextOffset;
+
+        if (event.type === 'DICT_ENTRY') continue;
+        if (event.type !== 'END_EXPR' || !event.writes) continue;
+
+        for (const w of event.writes) {
+            if (!writeValues.has(event.iid)) writeValues.set(event.iid, []);
+            writeValues.get(event.iid).push({ name: w.name, value: w.value });
         }
     }
-    for (const ev of events) {
-        if (ev.type === 'END_EXPR' && ev.reads) {
-            for (const r of ev.reads) {
-                if (!r.omitted) continue;
-                const entry = smapMap.get(ev.iid);
-                if (!entry?.defIid) continue;
-                const writes = writeValues.get(entry.defIid);
-                if (!writes) continue;
-                const match = writes.find(w => w.name === r.name);
-                if (match !== undefined) {
-                    r.value = match.value;
-                    r.resolvedFromDefIid = entry.defIid;
-                    delete r.omitted;
-                }
-            }
+
+    return writeValues;
+}
+
+/**
+ * 对单条事件就地回填 omitted reads（流式，无需全量缓存）。
+ *
+ * @param {object} event
+ * @param {Map}    smapMap
+ * @param {Map}    writeValues   由 collectWriteValues() 预先构建
+ */
+function resolveEventOmitted(event, smapMap, writeValues) {
+    if (event.type !== 'END_EXPR' || !event.reads) return;
+    for (const r of event.reads) {
+        if (!r.omitted) continue;
+        const entry = smapMap.get(event.iid);
+        if (!entry?.defIid) continue;
+        const writes = writeValues.get(entry.defIid);
+        if (!writes) continue;
+        const match = writes.find(w => w.name === r.name);
+        if (match !== undefined) {
+            r.value = match.value;
+            r.resolvedFromDefIid = entry.defIid;
+            delete r.omitted;
         }
     }
 }
 
 /**
  * 解码 JTB1 二进制 Buffer，逐事件调用 emit()。
+ *
+ * 当 resolveValues=true 时采用两遍流式策略，避免全量事件驻留内存：
+ *   第一遍：仅提取 END_EXPR write 值，建立 iid → writes 映射（内存 O(write 事件数)）
+ *   第二遍：正常流式解码并 emit，遇到 omitted read 时就地回填
+ *
  * @param {Buffer}   buf
  * @param {object}   opts  { smapMap?, resolveValues?, pretty? }
  * @param {function} emit  (jsonLine: string) => void
@@ -426,12 +460,18 @@ function decodeBinaryBuffer(buf, opts, emit) {
 
     const ab   = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
     const view = new DataView(ab);
-    let offset = FILE_HEADER_SIZE;
 
+    // ── 第一遍（仅在 resolveValues 时）：提取所有 write 值 ──────────────────
+    let writeValues = null;
+    if (resolveValues) {
+        // 第一遍用独立 dict，避免状态污染第二遍
+        writeValues = collectWriteValues(view, new Map());
+    }
+
+    // ── 第二遍（或唯一一遍）：流式解码并输出 ───────────────────────────────
     // 字典解压：DICT_ENTRY 事件写入此 Map，后续 STRING_REF / 0xFFFF 哨兵引用它
     const dict = new Map();
-
-    const allEvents = resolveValues ? [] : null;
+    let offset = FILE_HEADER_SIZE;
 
     while (offset + EVENT_HEADER_SIZE <= ab.byteLength) {
         let result;
@@ -452,20 +492,17 @@ function decodeBinaryBuffer(buf, opts, emit) {
 
         if (smapMap) injectSmapInfo(event, smapMap);
 
+        // 统计 omitted（回填前计数）
         if (event.reads) {
             for (const r of event.reads) { if (r.omitted) stats.omitted++; }
         }
 
-        if (resolveValues) {
-            allEvents.push(event);
-        } else {
-            emitBinaryEvent(event, pretty, emit);
+        // 就地回填 omitted reads（流式，无需缓存整个事件数组）
+        if (resolveValues && writeValues) {
+            resolveEventOmitted(event, smapMap ?? new Map(), writeValues);
         }
-    }
 
-    if (resolveValues && allEvents) {
-        resolveOmittedValues(allEvents, smapMap ?? new Map());
-        for (const ev of allEvents) emitBinaryEvent(ev, pretty, emit);
+        emitBinaryEvent(event, pretty, emit);
     }
 
     return stats;

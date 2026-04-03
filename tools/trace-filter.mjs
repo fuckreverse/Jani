@@ -3,10 +3,10 @@
  * trace-filter.mjs — 按条件过滤结构化 trace 数据
  *
  * 用法：
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --type CALL_PRE
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --seq 100-200
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --line 10
- *   node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --fn fromCharCode
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-filter.mjs --type CALL_PRE
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-filter.mjs --seq 100-200
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-filter.mjs --line 10
+ *   node tools/trace-parse.mjs trace.bin | node tools/trace-filter.mjs --fn fromCharCode
  *   node tools/trace-filter.mjs --help
  *
  * 过滤条件（可组合）：
@@ -16,7 +16,7 @@
  *                     WRITE_VAR, READ_VAR_FULL
  *   --seq RANGE     seq 范围，如 100-200 或 100+
  *   --line N        只保留指定行号
- *   --fn PATTERN    函数名匹配（支持 * 通配符，适用于 CALL_PRE/CALL）
+ *   --fn PATTERN    函数名匹配（支持正则 /pat/flags 或 * 通配符，适用于 CALL_PRE/CALL）
  *   --has-var NAME  只保留涉及指定变量的行（适用于 END_EXPR/WRITE_VAR/READ_VAR_FULL）
  *   --has-call      只保留 CALL_PRE 事件
  *   --no-internal   过滤掉内部变量（以 _ 开头或过长的混淆变量名）
@@ -47,11 +47,24 @@ function parseRange(str) {
 }
 
 /**
- * 匹配模式（支持 * 通配符）
+ * Match a string against a pattern.
+ * Supports regex syntax  /pattern/flags  e.g. /^from/i
+ * or glob wildcard  e.g. from*
  */
 function matchPattern(str, pattern) {
     if (!pattern || pattern === '*') return true;
-    const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$');
+    // Regex syntax: /pattern/ or /pattern/flags
+    const reMatch = pattern.match(/^\/(.+)\/([gimsuy]*)$/);
+    if (reMatch) {
+        try {
+            return new RegExp(reMatch[1], reMatch[2]).test(str);
+        } catch {
+            // 正则语法错误，退回字面匹配
+            return str === pattern;
+        }
+    }
+    // 通配符：* 转为 .*
+    const regex = new RegExp('^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
     return regex.test(str);
 }
 
@@ -110,9 +123,9 @@ function printHelp() {
 trace-filter.mjs — 按条件过滤结构化 trace 数据
 
 用法：
-  node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --type CALL_PRE
-  node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --seq 100-200
-  node tools/trace-decode.mjs trace.bin | node tools/trace-filter.mjs --fn fromCharCode
+  node tools/trace-parse.mjs trace.bin | node tools/trace-filter.mjs --type CALL_PRE
+  node tools/trace-parse.mjs trace.bin | node tools/trace-filter.mjs --seq 100-200
+  node tools/trace-parse.mjs trace.bin | node tools/trace-filter.mjs --fn fromCharCode
 
 过滤条件（可组合）：
   --type TYPE       事件类型（JTB1 格式）：
@@ -121,7 +134,7 @@ trace-filter.mjs — 按条件过滤结构化 trace 数据
                       WRITE_VAR, READ_VAR_FULL
   --seq RANGE       seq 范围，如 100-200 或 100+
   --line N          只保留指定行号
-  --fn PATTERN      函数名匹配（支持 * 通配符，适用于 CALL_PRE/CALL）
+  --fn PATTERN      函数名匹配（支持正则 /pat/flags 或 * 通配符，适用于 CALL_PRE/CALL）
   --has-var NAME    只保留涉及指定变量的行（适用于 END_EXPR/WRITE_VAR/READ_VAR_FULL）
   --has-call        只保留 CALL_PRE 事件（函数调用）
   --no-internal     过滤掉内部变量（以 _ 开头或混淆变量名）

@@ -155,7 +155,7 @@ export class LogManager {
      */
     async flush() {
         log.debug(`flush() called — ring.size=${this._ring.size}`);
-        await this._doFlush();
+        await this._drainAll();
     }
 
     /**

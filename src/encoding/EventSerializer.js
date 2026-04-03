@@ -448,11 +448,26 @@ const MIN_POOL_STR_LEN = 4;
 const MAX_POOL_SIZE = 65535;
 
 /**
- * StringPool — 字符串字典压缩状态机。
+ * LRU 淘汰阈值：当 _map 条目数达到此值时，在下一次 register() 时
+ * 淘汰最久未访问的 LRU_EVICT_COUNT 条，为新条目腾出空间。
+ * 设为 MAX_POOL_SIZE * 0.9，给 ID 空间保留 10% 余量用于新条目。
+ */
+const LRU_EVICT_THRESHOLD = Math.floor(MAX_POOL_SIZE * 0.9);   // ~58981
+const LRU_EVICT_COUNT     = Math.floor(MAX_POOL_SIZE * 0.1);   // ~6553 每次淘汰 10%
+
+/**
+ * StringPool — 字符串字典压缩状态机，带 LRU 淘汰。
  *
  * 每个 EventSerializerWithPool 实例持有一个 StringPool。
  * 使用方在序列化每个 batch 之前，调用 registerBatch() 将 batch 中所有字符串提前
  * 注册到字典，然后调用 flushDictEntries() 取出需要写出的新 DICT_ENTRY 事件列表。
+ *
+ * LRU 淘汰策略：
+ *   - _map 中每个条目同时存在于 _lruOrder（插入顺序 Map，key=string，value=id）中
+ *   - lookup/register 命中时将条目移到 _lruOrder 末尾（最近使用）
+ *   - 当条目数达到 LRU_EVICT_THRESHOLD 时，批量淘汰最旧的 LRU_EVICT_COUNT 条
+ *   - 被淘汰的条目 ID 不再复用（避免与流中已写出的 DICT_ENTRY 冲突），
+ *     后续相同字符串会被重新 register 并分配新 ID
  *
  * 线程安全：单线程使用，不需要锁。
  */
@@ -460,24 +475,43 @@ export class StringPool {
     constructor() {
         /** string → id */
         this._map = new Map();
+        /**
+         * LRU 顺序追踪：insertion-order Map，key=string，最旧的在迭代器头部。
+         * 命中时：delete + re-set 移到末尾。
+         */
+        this._lruOrder = new Map();
         /** 下一个可用 ID */
         this._nextId = 1;
         /** 本轮新注册的条目（待 flush 到流） */
         this._pending = [];
+        /** 累计淘汰次数（用于调试/监控） */
+        this._evictions = 0;
     }
 
+    /** 已注册条目数 */
+    get size() { return this._map.size; }
+
+    /** 累计淘汰条目数 */
+    get evictions() { return this._evictions; }
+
     /**
-     * 查找字符串在字典中的 ID。
+     * 查找字符串在字典中的 ID，同时更新 LRU 顺序。
      * @param {string} s
      * @returns {number|null}  字典 ID，若不在字典中返回 null
      */
     lookup(s) {
-        return this._map.has(s) ? this._map.get(s) : null;
+        const id = this._map.get(s);
+        if (id === undefined) return null;
+        // 更新 LRU：移到末尾（最近使用）
+        this._lruOrder.delete(s);
+        this._lruOrder.set(s, id);
+        return id;
     }
 
     /**
      * 尝试将字符串注册到字典，返回分配的 ID。
-     * 若已存在则返回现有 ID；若字典已满或字符串太短则返回 null。
+     * 若已存在则返回现有 ID（并更新 LRU）；若字符串太短则返回 null。
+     * 当条目数达到 LRU_EVICT_THRESHOLD 时先执行淘汰再分配新 ID。
      * 新注册的条目会进入 _pending 列表，等待 flushDictEntries() 取出。
      *
      * @param {string} s
@@ -487,12 +521,38 @@ export class StringPool {
         if (typeof s !== 'string') return null;
         if (s.length < MIN_POOL_STR_LEN) return null;
         const existing = this._map.get(s);
-        if (existing !== undefined) return existing;
+        if (existing !== undefined) {
+            // 命中：更新 LRU
+            this._lruOrder.delete(s);
+            this._lruOrder.set(s, existing);
+            return existing;
+        }
+        // 达到淘汰阈值：驱逐最旧的 LRU_EVICT_COUNT 条
+        if (this._map.size >= LRU_EVICT_THRESHOLD) {
+            this._evict(LRU_EVICT_COUNT);
+        }
+        // ID 耗尽（淘汰后 _nextId 继续增长，不复用旧 ID）
         if (this._nextId > MAX_POOL_SIZE) return null;
         const id = this._nextId++;
         this._map.set(s, id);
+        this._lruOrder.set(s, id);
         this._pending.push({ id, str: s });
         return id;
+    }
+
+    /**
+     * 淘汰最久未访问的 count 个条目。
+     * @private
+     */
+    _evict(count) {
+        let evicted = 0;
+        for (const [str] of this._lruOrder) {
+            if (evicted >= count) break;
+            this._map.delete(str);
+            this._lruOrder.delete(str);
+            evicted++;
+        }
+        this._evictions += evicted;
     }
 
     /**

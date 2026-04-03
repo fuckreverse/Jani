@@ -260,7 +260,7 @@ npm run test:logging
 | Step 1: 预处理 | 2 | `preprocessCode` API 成功运行写出文件、预处理后保留关键结构且不含插桩钩子 |
 | Step 2: CLI 插桩 | 4 | `jalangi instrument` exit 0、插桩文件含 `J$.` 和防重插桩标记、`smap.json` 含数字 IID 键和 `[sl,sc,el,ec]` 数组、`node --check` 语法检查通过 |
 | Step 3: API 插桩 + vm 执行 | 2 | 语义正确性全量验证（**51 个断言**，覆盖 ES5~ES2022 各特性）、trace.bin JTB1 魔数与规模验证 |
-| Step 4: trace-decode | 6 | 解码 NDJSON exit 0、事件条数与类型（含 FUNCTION_EXIT）、`--smap` 注入行号、`--stats` total 与行数一致 |
+| Step 4: trace-parse | 6 | 解码 NDJSON exit 0、事件条数与类型（含 FUNCTION_EXIT）、`--smap` 注入行号、`--stats` total 与行数一致 |
 | Step 5: trace-render | 7 | flat/tree/pipe/block 四种格式 exit 0 且有内容、行数数量级一致（允许 3×+100 差异）、block 含 `#region` |
 | Step 6: trace-filter | 4 | `--type CALL_PRE` 过滤纯净、`--has-call` 与 `--type CALL_PRE` 条数一致、`--fn fact` ≥5 次递归调用、`--seq` 范围过滤后事件数减少且 seq 合规 |
 | Step 7: trace-hot-lines | 3 | 统计有输出、`--top 5` 行数不超过全量+5、`--by-type` exit 0 |
