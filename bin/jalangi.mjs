@@ -231,19 +231,23 @@ function printHelp(sub = null) {
 仅支持 --target node。
 
 选项：
-  --analysis <file>    分析插件路径（可重复多次）
-  --init-param <k:v>   传给分析的初始参数（可重复，格式 key:value）
-  --source-type <t>    'script'（默认）
-  --sandbox-var <v>    沙盒变量名（默认 J$）
-  --random-var         随机生成沙盒变量名
-  --inline-iid         iid→位置 map 内联到插桩文件
-  --inline-source      原始源码内联到 source map
-  --no-write           不写插桩后的 .js 文件（仅在内存中插桩运行）
-  --debug              详细日志
-  --help / -h          显示此帮助
+  --analysis <file>      分析插件路径（可重复多次）
+  --execution-trace      启用内置 ExecutionTrace 插件，自动生成 .bin + .smap.json
+  --trace-file <path>    trace 输出路径（默认 jalangi-trace.bin，需 --execution-trace）
+  --init-param <k:v>     传给分析的初始参数（可重复，格式 key:value）
+  --source-type <t>      'script'（默认）
+  --sandbox-var <v>      沙盒变量名（默认 J$）
+  --random-var           随机生成沙盒变量名
+  --inline-iid           iid→位置 map 内联到插桩文件
+  --inline-source        原始源码内联到 source map
+  --no-write             不写插桩后的 .js 文件（仅在内存中插桩运行）
+  --debug                详细日志
+  --help / -h            显示此帮助
 
 示例：
   node bin/jalangi.mjs instrument-and-run tests/app.js
+  node bin/jalangi.mjs instrument-and-run --execution-trace tests/app.js
+  node bin/jalangi.mjs instrument-and-run --execution-trace --trace-file /tmp/out.bin tests/app.js
   node bin/jalangi.mjs instrument-and-run --analysis src/plugins/tutorial/LogAll.js tests/app.js
   node bin/jalangi.mjs instrument-and-run --no-write tests/app.js arg1 arg2
   node bin/jalangi.mjs instrument-and-run --init-param level:verbose tests/app.js
@@ -375,13 +379,15 @@ function parseRunOpts(argv) {
 /** 解析 instrument-and-run 子命令专有选项 */
 function parseInstrumentAndRunOpts(argv) {
     const opts = {
-        analyses:     [],
-        initParams:   {},
-        inlineIid:    false,
-        inlineSource: false,
-        noWrite:      false,
-        script:       null,
-        scriptArgs:   [],
+        analyses:       [],
+        initParams:     {},
+        inlineIid:      false,
+        inlineSource:   false,
+        noWrite:        false,
+        executionTrace: false,
+        traceFile:      null,
+        script:         null,
+        scriptArgs:     [],
     };
     let i = 0;
     for (; i < argv.length; i++) {
@@ -390,6 +396,8 @@ function parseInstrumentAndRunOpts(argv) {
         switch (a) {
             case '--help': case '-h': return null;
             case '--analysis':        opts.analyses.push(resolve(argv[++i])); break;
+            case '--execution-trace': opts.executionTrace = true; break;
+            case '--trace-file':      opts.traceFile = argv[++i]; break;
             case '--init-param': {
                 const kv  = argv[++i];
                 const idx = kv.indexOf(':');
@@ -1122,6 +1130,17 @@ async function cmdInstrumentAndRun(common, iarArgs) {
         _require(analysisPath);
     }
 
+    // ── 实例化内置 ExecutionTrace（--execution-trace）────────────────────────
+    if (iarOpts.executionTrace) {
+        const { ExecutionTraceAnalysis } = await import(`${ROOT_DIR}/src/plugins/ExecutionTrace.js`);
+        const traceFile = iarOpts.traceFile ?? 'jalangi-trace.bin';
+        // 构造函数会自动设置 sandbox.tracer = this._logger，
+        // 后续 Module._extensions 钩子里的 setSmap 依赖此赋值。
+        const etAnalysis = new ExecutionTraceAnalysis(sandbox, null, { nodeFile: traceFile });
+        sandbox.analysis.use(etAnalysis);
+        log.debug(`ExecutionTrace 已注册，输出: ${traceFile}`);
+    }
+
     // ── Module._extensions 钩子（对所有 require 的 .js 自动插桩）─────────────
     const Module = (await import('module')).default;
     const _origExtension = Module._extensions['.js'];
@@ -1193,6 +1212,23 @@ async function cmdInstrumentAndRun(common, iarArgs) {
     process.on('exit', () => {
         if (typeof sandbox.endExecution === 'function') sandbox.endExecution();
     });
+
+    // --execution-trace：在事件循环清空后（beforeExit）关闭 logger，
+    // 触发 NodeStreamBackend.close() → _writeSmapJson()。
+    // beforeExit 可以 await 异步操作，比 'exit' 更适合做 async 收尾。
+    if (iarOpts.executionTrace) {
+        process.on('beforeExit', async () => {
+            try {
+                const tracer = sandbox.tracer;
+                if (tracer && typeof tracer.close === 'function') {
+                    await tracer.close();
+                    log.debug('ExecutionTrace logger closed，smap.json 已写出');
+                }
+            } catch (err) {
+                log.warn('ExecutionTrace close error:', err.message);
+            }
+        });
+    }
 
     if (sandbox.analysis?.onReady) {
         sandbox.analysis.onReady(() => Module.Module.runMain(scriptPath, null, true));

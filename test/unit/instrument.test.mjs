@@ -500,12 +500,20 @@ describe('IID Source Map', () => {
         assert.equal(r.sourceMapObject.originalCodeFileName, 'myfile.js', '原始文件名应匹配');
     });
 
-    test('sourceMapObject 中 IID 对应行列信息为 4 元素数组', () => {
+    test('sourceMapObject 中 IID 对应行列信息为至少 4 元素数组（sl,sc,el,ec）', () => {
         const r = instr('var x = 3;', { inlineSourceMap: true });
         const entries = Object.entries(r.sourceMapObject).filter(([k]) => /^\d+$/.test(k));
         assert.ok(entries.length > 0, '应有 IID 映射条目');
         const [, loc] = entries[0];
-        assert.ok(Array.isArray(loc) && loc.length === 4, 'IID 位置应为 4 元素数组');
+        assert.ok(Array.isArray(loc) && loc.length >= 4, 'IID 位置应至少含 4 个元素');
+        // 前 4 个元素（sl, sc, el, ec）应为数字
+        for (let i = 0; i < 4; i++) {
+            assert.ok(typeof loc[i] === 'number', `loc[${i}] 应为数字，得到 ${typeof loc[i]}`);
+        }
+        // 第 5 个元素（srcText）若存在，应为字符串或 null/undefined
+        if (loc.length > 4 && loc[4] != null) {
+            assert.ok(typeof loc[4] === 'string', 'srcText（loc[4]）应为字符串');
+        }
     });
 
     test('inlineSource: true 时 sourceMapObject.code 包含原始源代码', () => {

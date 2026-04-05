@@ -1127,6 +1127,44 @@ function instrumentCode(options) {
     }
     if (inlineSource) sourceInfo.code = options.code;
 
+    // 填充 srcText：用行列坐标从原始代码切出每个 iid 对应的源码片段。
+    // 仅在提供了原始代码时执行（options.code 非空字符串）。
+    // iidSourceInfo 条目格式：[sl, sc, el, ec]（1-based 行，1-based 列）。
+    if (options.code) {
+        const NON_IID = new Set([
+            'nBranches', 'originalCodeFileName', 'instrumentedCodeFileName',
+            'url', 'evalSid', 'evalIid', 'code',
+        ]);
+        // 预切行，避免每个 iid 重复 split
+        const srcLines = options.code.split('\n');
+        for (const [key, entry] of Object.entries(sourceInfo)) {
+            if (NON_IID.has(key) || !Array.isArray(entry) || entry.length < 4) continue;
+            if (entry[4] != null) continue; // 已有 srcText，跳过
+            const [sl, sc, el, ec] = entry; // 1-based
+            const startLine = sl - 1; // 0-based
+            const endLine   = el - 1;
+            if (startLine < 0 || startLine >= srcLines.length) continue;
+            let text;
+            if (startLine === endLine) {
+                // 单行：直接切列范围（1-based → 0-based）
+                text = srcLines[startLine].slice(sc - 1, ec);
+            } else {
+                // 多行：首行从 sc 到末尾，中间行完整，末行到 ec
+                const parts = [srcLines[startLine].slice(sc - 1)];
+                for (let i = startLine + 1; i < endLine && i < srcLines.length; i++) {
+                    parts.push(srcLines[i]);
+                }
+                if (endLine < srcLines.length) {
+                    parts.push(srcLines[endLine].slice(0, ec));
+                }
+                text = parts.join('\n');
+            }
+            // 截断超长 srcText，避免 smap 体积膨胀
+            if (text.length > 200) text = text.slice(0, 200) + '…';
+            entry[4] = text.trim();
+        }
+    }
+
     const sourceMapString = JSON.stringify(sourceInfo);
 
     const tmp = {
