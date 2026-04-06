@@ -1,0 +1,24 @@
+{
+  "name": "jta-server",
+  "version": "1.0.0",
+  "description": "Jani Trace Analyzer — 本地 Web 分析平台（后端）",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs"
+  },
+  "dependencies": {
+    "@sqlite.org/sqlite-wasm": "^3.51.2-build8",
+    "better-sqlite3": "^9.6.0",
+    "cors": "^2.8.6",
+    "express": "^4.22.1",
+    "multer": "^1.4.5-lts.1",
+    "sql.js": "^1.14.1",
+    "uuid": "^9.0.1",
+    "ws": "^8.20.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
