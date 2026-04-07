@@ -1,19 +1,22 @@
 /**
  * routes/sessions.mjs — 分析会话 REST API
  *
- * POST /api/sessions              上传 .bin + .smap.json（可选）+ .js（可选），创建新会话
- * GET  /api/sessions              列出所有会话
- * GET  /api/sessions/:id          会话详情 + 插件状态
- * GET  /api/sessions/:id/events   查询事件（支持分页 + 过滤）
+ * POST /api/sessions                    上传 .bin + .smap.json（可选）+ .js（可选），创建新会话
+ * GET  /api/sessions                    列出所有会话
+ * GET  /api/sessions/:id                会话详情 + 插件状态
+ * GET  /api/sessions/:id/checkpoints    查询插件断点恢复状态
+ * GET  /api/sessions/:id/events         查询事件（支持分页 + 过滤）
+ * POST /api/sessions/:id/re-run         重新触发指定 phase 或插件列表的分析
+ * POST /api/sessions/:id/run-phase3     (向后兼容) 手动触发 Phase 3
+ * POST /api/sessions/:id/run-phase4     (向后兼容) 手动触发 Phase 4
  */
 
 import { Router } from 'express';
 import { existsSync, mkdirSync, copyFileSync } from 'fs';
-import { resolve } from 'path';
+import { resolve, basename } from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { fileURLToPath } from 'url';
 import * as db from '../db/Database.mjs';
-import { schedule, autoDiscover } from '../PluginEngine.mjs';
+import { schedule, autoDiscover, getCheckpoints, clearCheckpoints } from '../PluginEngine.mjs';
 
 const router = Router();
 const __dirname = resolve(new URL('.', import.meta.url).pathname);
@@ -21,6 +24,26 @@ const DATA_DIR = resolve(__dirname, '../data/sessions');
 
 // 确保数据目录存在
 mkdirSync(DATA_DIR, { recursive: true });
+
+// ── 分阶段插件定义 ─────────────────────────────────────────────────────────────
+
+/**
+ * Phase 1（基础解析，创建会话时立即执行）：F1-EventIndex（+F2 如有 smap）
+ * Phase 2（自动，Phase1 完成后继续后台执行）：F3 / F4 / A3
+ * Phase 3（手动按需）：A5 / A8 / I1 / I2
+ * Phase 4（手动按需）：A2 / A4 / A6 / A7 / I3 / I4
+ */
+const PHASE1_PLUGINS = ['F1-EventIndex'];
+const PHASE2_PLUGINS = ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'];
+const PHASE3_PLUGINS = ['A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer'];
+const PHASE4_PLUGINS = [
+    'A2-DataFlowGraph',
+    'A4-StringTracker',
+    'A6-FunctionSignatureInfer',
+    'A7-ObjectMutationTracker',
+    'I3-ObfuscationDetector',
+    'I4-AlgorithmSummarizer',
+];
 
 // ── POST /api/sessions ─────────────────────────────────────────────────────
 
@@ -65,36 +88,44 @@ router.post('/', async (req, res) => {
 
         const now = Date.now();
 
-        // 创建 session 记录
+        // 创建 session 记录（status = parsing：Phase 1 解析中）
         db.run(
             `INSERT INTO sessions (id, name, created_at, source_file, bin_path, smap_path, status, plugin_status)
-             VALUES (?, ?, ?, ?, ?, ?, 'processing', '{}')`,
+             VALUES (?, ?, ?, ?, ?, ?, 'parsing', '{}')`,
             sessionId, sessionName, now,
             sourceDest, binDest, smapDest
         );
 
-        // 确定要运行的插件
-        const plugins = ['F1-EventIndex', 'F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'];
-        if (smapDest) plugins.push('F2-SmapLoader');
+        const wsProgressBroadcast = req.app.get('wsProgressBroadcast');
 
-        // 异步触发插件（不等待）
+        // Phase 1：只跑基础解析（F1-EventIndex + 可选 F2-SmapLoader）
+        const phase1Plugins = [...PHASE1_PLUGINS];
+        if (smapDest) phase1Plugins.push('F2-SmapLoader');
+
+        // 异步执行 Phase 1，完成后自动触发 Phase 2
         autoDiscover().then(() =>
             schedule(sessionId, {
-                plugins,
+                plugins: phase1Plugins,
                 dataDir: sessionDir,
+                phase: 'phase1',
+                skipCompleted: true,
                 onProgress: (evt) => {
-                    // 进度通过 WebSocket 推送（在 server.mjs 中注册）
-                    req.app.get('wsProgressBroadcast')?.(sessionId, evt);
+                    wsProgressBroadcast?.(sessionId, evt);
+                    // Phase 1 全部完成后，自动后台调度 Phase 2
+                    if (evt.type === 'all_done' && evt.phase === 'phase1') {
+                        _schedulePhase2(sessionId, sessionDir, wsProgressBroadcast, !!smapDest);
+                    }
                 },
             })
         ).catch(e => {
-            console.error('[sessions] plugin schedule error:', e);
+            console.error('[sessions] phase1 schedule error:', e);
             db.run("UPDATE sessions SET status = 'failed' WHERE id = ?", sessionId);
+            wsProgressBroadcast?.(sessionId, { type: 'error', sessionId, message: e.message });
         });
 
         return res.status(201).json({
             sessionId,
-            status: 'processing',
+            status: 'parsing',
             smapAvailable: !!smapDest,
         });
 
@@ -103,6 +134,35 @@ router.post('/', async (req, res) => {
         return res.status(500).json({ error: e.message });
     }
 });
+
+/**
+ * 后台调度 Phase 2（在 Phase 1 完成后自动触发）
+ */
+async function _schedulePhase2(sessionId, sessionDir, wsProgressBroadcast, _hasSmap) {
+    try {
+        db.run("UPDATE sessions SET status = 'indexing' WHERE id = ?", sessionId);
+        wsProgressBroadcast?.(sessionId, {
+            type: 'phase_start',
+            sessionId,
+            phase: 'phase2',
+            plugins: PHASE2_PLUGINS,
+        });
+
+        await autoDiscover();
+        await schedule(sessionId, {
+            plugins: PHASE2_PLUGINS,
+            dataDir: sessionDir,
+            phase: 'phase2',
+            skipCompleted: true,
+            onProgress: (evt) => {
+                wsProgressBroadcast?.(sessionId, evt);
+            },
+        });
+    } catch (e) {
+        console.error('[sessions] phase2 schedule error:', e);
+        wsProgressBroadcast?.(sessionId, { type: 'error', sessionId, phase: 'phase2', message: e.message });
+    }
+}
 
 // ── GET /api/sessions ──────────────────────────────────────────────────────
 
@@ -143,6 +203,88 @@ router.get('/:id', (req, res) => {
         });
     } catch (e) {
         console.error('[GET /api/sessions/:id] error:', e);
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/checkpoints ─────────────────────────────────────
+
+router.get('/:id/checkpoints', (req, res) => {
+    try {
+        const { id } = req.params;
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const checkpoints = getCheckpoints(id);
+        res.json({ checkpoints });
+    } catch (e) {
+        console.error('[GET /api/sessions/:id/checkpoints] error:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── POST /api/sessions/:id/re-run ─────────────────────────────────────────
+// 重新触发分析（支持断点恢复 or 强制重跑）
+
+router.post('/:id/re-run', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const session = db.get('SELECT * FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const {
+            plugins,
+            phase = 'phase3',
+            forceRerun = false,
+        } = req.body ?? {};
+
+        // 确定要运行的插件列表
+        let targetPlugins;
+        if (plugins && Array.isArray(plugins) && plugins.length > 0) {
+            targetPlugins = plugins;
+        } else if (phase === 'phase1') {
+            targetPlugins = [...PHASE1_PLUGINS];
+            if (session.smap_path) targetPlugins.push('F2-SmapLoader');
+        } else if (phase === 'phase2') {
+            targetPlugins = [...PHASE2_PLUGINS];
+        } else if (phase === 'phase3') {
+            targetPlugins = [...PHASE3_PLUGINS];
+        } else if (phase === 'phase4') {
+            targetPlugins = [...PHASE4_PLUGINS];
+        } else {
+            return res.status(400).json({
+                error: 'Invalid phase. Use phase1/phase2/phase3/phase4 or provide explicit plugins list.',
+            });
+        }
+
+        // 强制重跑：清除指定插件的检查点
+        if (forceRerun) {
+            for (const pluginId of targetPlugins) {
+                clearCheckpoints(id, pluginId);
+            }
+        }
+
+        const sessionDir = resolve(DATA_DIR, id);
+        const wsProgressBroadcast = req.app.get('wsProgressBroadcast');
+
+        await autoDiscover();
+
+        schedule(id, {
+            plugins: targetPlugins,
+            dataDir: sessionDir,
+            phase,
+            skipCompleted: !forceRerun,
+            onProgress: (evt) => {
+                wsProgressBroadcast?.(id, evt);
+            },
+        }).catch(e => {
+            console.error('[re-run] schedule error:', e);
+            wsProgressBroadcast?.(id, { type: 'error', sessionId: id, message: e.message });
+        });
+
+        return res.json({ status: 'scheduled', plugins: targetPlugins, phase, forceRerun });
+    } catch (e) {
+        console.error('[POST /api/sessions/:id/re-run] error:', e);
         return res.status(500).json({ error: e.message });
     }
 });
@@ -551,14 +693,20 @@ router.post('/:id/run-phase3', async (req, res) => {
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: 'Session not found' });
 
-        const { plugins = ['A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer'] } = req.body ?? {};
+        const { plugins = PHASE3_PLUGINS, forceRerun = false } = req.body ?? {};
 
-        const { autoDiscover, schedule } = await import('../PluginEngine.mjs');
         await autoDiscover();
+
+        if (forceRerun) {
+            for (const pluginId of plugins) clearCheckpoints(id, pluginId);
+        }
 
         // 异步执行，不阻塞响应
         schedule(id, {
             plugins,
+            dataDir: resolve(DATA_DIR, id),
+            phase: 'phase3',
+            skipCompleted: !forceRerun,
             onProgress: (evt) => {
                 req.app.get('wsProgressBroadcast')?.(id, evt);
             },
@@ -566,7 +714,7 @@ router.post('/:id/run-phase3', async (req, res) => {
             console.error('[run-phase3] schedule error:', e);
         });
 
-        return res.json({ status: 'scheduled', plugins });
+        return res.json({ status: 'scheduled', plugins, phase: 'phase3' });
     } catch (e) {
         console.error('[POST /api/sessions/:id/run-phase3] error:', e);
         return res.status(500).json({ error: e.message });
@@ -582,21 +730,19 @@ router.post('/:id/run-phase4', async (req, res) => {
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
         if (!session) return res.status(404).json({ error: 'Session not found' });
 
-        const defaultPlugins = [
-            'A2-DataFlowGraph',
-            'A4-StringTracker',
-            'A6-FunctionSignatureInfer',
-            'A7-ObjectMutationTracker',
-            'I3-ObfuscationDetector',
-            'I4-AlgorithmSummarizer',
-        ];
-        const { plugins = defaultPlugins } = req.body ?? {};
+        const { plugins = PHASE4_PLUGINS, forceRerun = false } = req.body ?? {};
 
-        const { autoDiscover, schedule } = await import('../PluginEngine.mjs');
         await autoDiscover();
+
+        if (forceRerun) {
+            for (const pluginId of plugins) clearCheckpoints(id, pluginId);
+        }
 
         schedule(id, {
             plugins,
+            dataDir: resolve(DATA_DIR, id),
+            phase: 'phase4',
+            skipCompleted: !forceRerun,
             onProgress: (evt) => {
                 req.app.get('wsProgressBroadcast')?.(id, evt);
             },
@@ -604,7 +750,7 @@ router.post('/:id/run-phase4', async (req, res) => {
             console.error('[run-phase4] schedule error:', e);
         });
 
-        return res.json({ status: 'scheduled', plugins });
+        return res.json({ status: 'scheduled', plugins, phase: 'phase4' });
     } catch (e) {
         console.error('[POST /api/sessions/:id/run-phase4] error:', e);
         return res.status(500).json({ error: e.message });
@@ -876,6 +1022,63 @@ function groupBy(arr, key) {
         map[k].push(item);
     }
     return map;
+}
+
+/**
+ * 从已有的 bin/smap 文件路径创建会话（供内部调用，如 trace-import API）。
+ * @param {{ binPath: string, smapPath?: string|null, name?: string, wsProgressBroadcast?: Function }} opts
+ * @returns {Promise<string>} sessionId
+ */
+export async function createSession({ binPath, smapPath = null, name = null, wsProgressBroadcast = null }) {
+    const { copyFileSync: cpSync, mkdirSync: mkdSync } = await import('fs');
+    const { resolve: res, basename } = await import('path');
+    const { v4: uuid } = await import('uuid');
+
+    const sessionId  = uuid();
+    const sessionDir = res(DATA_DIR, sessionId);
+    mkdSync(sessionDir, { recursive: true });
+
+    const binDest  = res(sessionDir, basename(binPath));
+    cpSync(binPath, binDest);
+
+    let smapDest = null;
+    if (smapPath) {
+        smapDest = res(sessionDir, basename(smapPath));
+        cpSync(smapPath, smapDest);
+    }
+
+    const sessionName = name || basename(binPath).replace(/\.bin$/, '') || `session-${sessionId.slice(0, 8)}`;
+    const now = Date.now();
+
+    db.run(
+        `INSERT INTO sessions (id, name, created_at, source_file, bin_path, smap_path, status, plugin_status)
+         VALUES (?, ?, ?, ?, ?, ?, 'parsing', '{}')`,
+        sessionId, sessionName, now, null, binDest, smapDest
+    );
+
+    const phase1Plugins = [...PHASE1_PLUGINS];
+    if (smapDest) phase1Plugins.push('F2-SmapLoader');
+
+    autoDiscover().then(() =>
+        schedule(sessionId, {
+            plugins: phase1Plugins,
+            dataDir: sessionDir,
+            phase: 'phase1',
+            skipCompleted: true,
+            onProgress: (evt) => {
+                wsProgressBroadcast?.(sessionId, evt);
+                if (evt.type === 'all_done' && evt.phase === 'phase1') {
+                    _schedulePhase2(sessionId, sessionDir, wsProgressBroadcast, !!smapDest);
+                }
+            },
+        })
+    ).catch(e => {
+        console.error('[createSession] plugin schedule error:', e);
+        db.run("UPDATE sessions SET status = 'failed' WHERE id = ?", sessionId);
+        wsProgressBroadcast?.(sessionId, { type: 'error', sessionId, message: e.message });
+    });
+
+    return sessionId;
 }
 
 export default router;

@@ -1,7 +1,7 @@
 # Jani Trace Analyzer — 设计文档
 
-**版本：** v1.0（已实现）  
-**日期：** 2026-04-06  
+**版本：** v1.1（已实现）  
+**日期：** 2026-04-07  
 **目标：** 为 JS 动态 trace 提供一站式逆向分析平台，支持算法识别、污点追踪、签名还原等场景。
 
 ---
@@ -56,6 +56,7 @@ Jani 的插桩引擎已能产出高质量 trace（`.bin` + `.smap.json`），包
 │  │  sessions | events | writes | reads | fields | smap   │  │
 │  │  call_edges | taint_paths | var_lifetime | scopes      │  │
 │  │  value_patterns | bookmarks | fn_signatures | ...      │  │
+│  │  plugin_checkpoints（断点恢复 / 进度持久化）            │  │
 │  └────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -66,6 +67,7 @@ Jani 的插桩引擎已能产出高质量 trace（`.bin` + `.smap.json`），包
 |---|---|---|
 | 后端 | Node.js + Express | 与 Jani 同生态，无额外运行时 |
 | 数据库 | SQLite（**sql.js**，WASM 纯 JS 实现） | 沙箱环境无 gcc，无法编译 better-sqlite3 原生模块；sql.js 零编译依赖，内存 db + 批次末尾 flush 写盘，性能可接受 |
+| Trace 收集 | 内置 `/ws/trace` WebSocket 端点 | 原独立 `trace-server` 功能已集成进 JTA Server，无需单独启动 |
 | 前端 | Vue 3 + Vite | 轻量，组件化，易于实现代码编辑器集成 |
 | 代码高亮 | CodeMirror 6 | 支持行高亮、标注、交互点击 |
 | 图可视化 | Cytoscape.js | 适合 DAG/调用图渲染，纯前端 |
@@ -78,6 +80,17 @@ Jani 的插桩引擎已能产出高质量 trace（`.bin` + `.smap.json`），包
 ### 3.1 核心表结构
 
 ```sql
+-- 插件检查点（断点恢复 / 进度持久化）
+CREATE TABLE plugin_checkpoints (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL,
+    plugin_id   TEXT NOT NULL,
+    phase       TEXT,               -- 'phase1' / 'phase2' / 'manual' 等
+    completed_at INTEGER,           -- Unix timestamp (ms)
+    duration_ms  INTEGER,
+    UNIQUE (session_id, plugin_id)  -- 每个插件只保留一条最新检查点（INSERT OR REPLACE）
+);
+
 -- 分析会话（一次 trace 对应一个 session）
 CREATE TABLE sessions (
     id          TEXT PRIMARY KEY,   -- UUID
@@ -332,21 +345,50 @@ class AnalysisPlugin {
 ```
 上传完成
    ↓
-PluginEngine.schedule(sessionId)
+PluginEngine.schedule(sessionId, { phase: 'phase1', plugins: [F1], skipCompleted: true })
+   ↓
+查询 plugin_checkpoints → 跳过已完成的插件（断点恢复）
    ↓
 拓扑排序（按 deps 构建 DAG）
    ↓
 并发执行无依赖插件（F1、F2 同时跑）
    ↓
+每个插件完成 → writeCheckpoint() 持久化到 SQLite
+   ↓
 依赖满足后立即触发下一批
    ↓
-全部完成 → 通知 UI
+phase1 全部完成 → 通知 UI（type: 'all_done', phase: 'phase1'）
+   ↓
+自动调度 phase2（F2/F3/F4 等深度分析）在后台执行
 ```
 
 调度器维护插件注册表，支持：
 - **自动发现**：扫描 `plugins/` 目录自动加载
-- **手动触发**：用户在 UI 中选择插件单独重跑
-- **增量执行**：同一 session 重新上传新 trace 时，只重跑受影响的插件
+- **手动触发**：用户在 UI 中选择插件单独重跑（`POST /api/sessions/:id/re-run`）
+- **断点恢复**：`skipCompleted: true`（默认）时跳过已有检查点的插件，重启或中断后自动续跑
+- **强制重跑**：`POST /api/sessions/:id/re-run` 带 `forceRerun: true` 时清除检查点后全量重跑
+- **分阶段调度**：Phase1（F1 基础解析）→ 会话创建完成 → Phase2（F2/F3/F4 等深度分析）自动后台执行
+
+#### `schedule()` 选项
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `plugins` | `string[]` | 插件 ID 列表（默认全部已注册插件）|
+| `onProgress` | `Function` | 进度回调 `(event) => void` |
+| `dataDir` | `string` | 会话数据目录 |
+| `phase` | `string` | 阶段标记（`'phase1'`/`'phase2'`/`'manual'` 等）|
+| `skipCompleted` | `boolean` | 是否跳过已完成的插件（默认 `true`，断点恢复模式）|
+
+#### `onProgress` 事件类型
+
+| type | 说明 |
+|------|------|
+| `schedule_start` | 调度开始，携带 `toRun`、`skipped` 列表 |
+| `plugin_start` | 单个插件开始执行 |
+| `plugin_progress` | 插件内部进度更新（如 F1 处理事件数） |
+| `plugin_done` | 单个插件完成，携带 `durationMs` |
+| `plugin_error` | 插件执行失败 |
+| `all_done` | 当前 phase 全部插件完成 |
 
 ---
 
@@ -501,9 +543,10 @@ JTA 包含以下独立页面：
 
 | 页面 | 路由 | 说明 |
 |---|---|---|
-| 会话列表 | `/` | 所有分析会话，含状态概览 |
-| 会话详情 | `/sessions/:id` | 代码视图 + 事件列表 + 分析面板 |
+| 会话列表 | `/` | 所有分析会话，含状态概览；含进度抽屉（`ProgressDrawer`）|
+| 会话详情 | `/sessions/:id` | 代码视图 + 事件列表 + 分析面板；含内联进度条 |
 | **插桩工作台** | `/instrument` | 独立插桩页面，见 6.4 节 |
+| **Trace 监控** | `/trace` | WebSocket Trace 收集状态监控，见 6.6 节 |
 | 设置 | `/settings` | 数据目录、运行环境等 |
 
 ---
@@ -590,19 +633,24 @@ Cytoscape 渲染，节点=函数，边=调用关系，支持缩放/展开/搜索
 └─────────────────────────────────────────────────────────┘
 ```
 
-#### 三个核心操作
+#### 四个核心操作
 
 **① 插桩（立即预览）**
 - 点击"插桩"按钮，后端调用 `instrumentCode()` API
 - 右侧实时展示插桩后的完整代码（含 `J$.Se()`、`J$.X()` 等钩子调用）
 - 同时展示 smap 信息（iid 数量、覆盖行数）
+- 后端始终通过 `--output <path>` 显式指定输出路径，避免 `--target browser` 时的 in-place 覆盖问题
 
-**② 下载**
+**② 复制插桩后代码**
+- 点击"复制"按钮将插桩后代码复制到剪贴板（使用 `navigator.clipboard.writeText`，fallback `execCommand('copy')`）
+- 按钮有 2 秒视觉反馈（绿色 ✓ 状态）
+
+**③ 下载**
 - 下载插桩后 `.js` 文件
 - 下载 `.map.json`（source map）
 - 下载 `.smap.json`（含 srcText 的 iid 映射）
 
-**③ 在服务端运行 ▶**
+**④ 在服务端运行 ▶**
 - 仅在勾选 `--execution-trace` 时可用（其他情况置灰并提示）
 - 点击后：后端在 Node.js 沙箱中执行插桩后的代码
 - 实时 WebSocket 推送：stdout/stderr 输出流
@@ -613,8 +661,10 @@ Cytoscape 渲染，节点=函数，边=调用关系，支持缩放/展开/搜索
 
 ```
 POST /api/instrument
-    body: { code, filename, options: { inlineIid, inlineSource, executionTrace, noWrite, sandboxVar, sourceType, analyses[] } }
+    body: { code, filename, options: { inlineIid, inlineSource, executionTrace, noWrite,
+            sandboxVar, sourceType, analyses[], wsUrl?, wsSab? } }
     返回: { instrumentedCode, smapJson, mapJson }
+    说明：始终通过 --output 显式指定输出文件路径，browser target 不会 in-place 覆盖源文件
 
 POST /api/instrument/run
     body: { code, filename, options }
@@ -639,9 +689,13 @@ POST /api/instrument/run
 
 ---
 
-### 6.5 插件进度展示
+### 6.5 插件进度展示（ProgressDrawer）
 
-上传后，UI 实时显示插件执行进度：
+上传后，UI 实时显示插件执行进度。`ProgressDrawer.vue` 是一个侧边抽屉组件，提供：
+
+- **总体进度条**：已完成插件数 / 总插件数
+- **分阶段进度**：Phase1（基础解析）/ Phase2（深度分析）分组展示
+- **插件状态列表**：每个插件的运行状态和耗时
 
 ```
 ✅ F1 EventIndex      (1.2s,  52,341 events)
@@ -649,7 +703,33 @@ POST /api/instrument/run
 ✅ F3 CallGraphBuilder(0.8s,  1,203 calls)
 ⏳ A1 TaintTracker    (running...)
 ⏸  I1 CryptoDetector  (waiting for A3, A5)
+⬛ F4 VariableLifetime (skipped，已完成)
 ```
+
+**触发方式：**
+- 上传新 trace 后自动打开
+- 在会话列表页点击进行中会话旁的"⚡ 进度"按钮手动打开
+- 会话详情页顶部内联进度条实时更新（不需要打开侧边抽屉）
+
+**WebSocket 初始化消息**（`type: 'init'`）现在额外携带 `checkpoints` 字段，
+供抽屉初次打开时立即显示历史已完成插件的状态，无需等待下一轮事件推送。
+
+### 6.6 Trace 监控页面（TraceMonitor）
+
+路由 `/trace`，监控 JTA Server 内置的 WebSocket Trace 收集端点（`/ws/trace`）的实时状态：
+
+| 显示项 | 说明 |
+|--------|------|
+| 当前活跃连接数 | 正在收集 trace 的浏览器标签页数量 |
+| 已接收批次 | 累计接收的 WebSocket 消息批次 |
+| 已接收事件数 | 累计接收的 trace 事件数 |
+| 已接收数据量 | 累计接收的字节数（自动换算为 KB/MB/GB） |
+| 服务运行时间 | JTA Server 已运行时长 |
+| Trace 文件列表 | 按时间排序，显示文件名、大小、修改时间，可一键导入为分析会话 |
+
+**Trace 文件命名规则：** `trace_YYYYMMDD_HHmmss_mmm_NNN.bin`（包含时间戳和序号）
+
+每次 JTA Server 启动时自动清空 traces 目录中的旧 `.bin` / `.smap.json` 文件（可用 `--no-clear-traces` 参数关闭）。
 
 ---
 
@@ -675,12 +755,14 @@ GET  /api/instrument/run/:runId
 
 # ── 分析会话 ────────────────────────────────────────────
 POST /api/sessions
-    上传 .bin + .smap.json（可选）+ 原始 .js（可选），创建新会话，触发插件调度
+    上传 .bin + .smap.json（可选）+ 原始 .js（可选），创建新会话
     body: multipart/form-data { bin, smap?, source? }
     说明：
+      - 创建时先执行 Phase1（F1 EventIndex），会话立即返回；Phase2（F2/F3/F4）自动后台调度
       - .smap.json 为可选。缺失时 F2 SmapLoader 跳过，iid → 行列映射不可用，
         srcText 字段为空，但事件流（事件类型、writes/reads/fields）仍完整可用。
       - 原始 .js 为可选。有则显示在代码视图中，无则代码视图降级为纯事件列表。
+      - 上传文件大小限制：1 GB
     返回：{ sessionId, status: 'processing', smapAvailable: bool }
 
 GET  /api/sessions
@@ -688,6 +770,14 @@ GET  /api/sessions
 
 GET  /api/sessions/:id
     会话详情 + 插件执行状态
+
+POST /api/sessions/:id/re-run
+    重新运行分析插件（支持断点续跑或强制重跑）
+    body: { forceRerun?: boolean, phase?: 'phase2'|'phase3'|'phase4' }
+    说明：
+      - forceRerun=true 时清除检查点后全量重跑
+      - forceRerun=false（默认）时跳过已完成的插件（断点续跑）
+    返回：{ ok: true }
 
 GET  /api/sessions/:id/events?line=42&type=END_EXPR&limit=100&offset=0
     查询事件（支持多维过滤）
@@ -717,6 +807,20 @@ POST /api/sessions/:id/bookmarks
 
 DELETE /api/sessions/:id/bookmarks/:bid
     删除书签
+
+# ── Trace 收集 ──────────────────────────────────────────
+GET  /api/trace/stats
+    获取 WebSocket Trace 收集统计（连接数、批次数、事件数、字节数、运行时间）
+    返回：{ connections, batchesReceived, eventsReceived, bytesReceived, uptime, tracesDir }
+
+GET  /api/trace/files
+    列出 traces 目录中的 .bin 文件
+    返回：{ files: [{ name, size, mtime }] }（按 mtime 倒序）
+
+POST /api/trace/import
+    将 traces 目录中的 .bin 文件导入为新分析会话
+    body: { filename: 'trace_xxx.bin' }
+    返回：{ sessionId }
 ```
 
 ### 7.2 WebSocket
@@ -724,7 +828,15 @@ DELETE /api/sessions/:id/bookmarks/:bid
 ```
 WS /ws/sessions/:id/progress
     订阅插件执行进度（实时推送）
-    消息格式：{ plugin, status, progress, message }
+    连接后立即推送 init 消息（含 pluginStatus + checkpoints）
+    消息格式：
+      { type: 'init', sessionId, status, pluginStatus, checkpoints }
+      { type: 'schedule_start', phase, plugins, toRun, skipped }
+      { type: 'plugin_start', plugin, phase }
+      { type: 'plugin_progress', plugin, message, progress }
+      { type: 'plugin_done', plugin, phase, durationMs }
+      { type: 'plugin_error', plugin, message }
+      { type: 'all_done', phase, toRun, skipped }
 
 WS /ws/instrument/run/:ticket
     订阅服务端运行输出流
@@ -733,6 +845,12 @@ WS /ws/instrument/run/:ticket
       { type: 'stderr', data: '...' }
       { type: 'done',   sessionId: '...', exitCode: 0 }
       { type: 'error',  message: '...' }
+
+WS /ws/trace
+    浏览器端 Trace 收集（原 trace-server 功能，已集成进 JTA Server）
+    协议：二进制帧 [u32 batchId LE][事件流 bytes]
+    响应：ACK 帧 [u32 batchId LE]（4 字节）
+    说明：每次 JTA Server 启动创建新的 .bin 文件，收集完成后可通过 /api/trace/import 导入
 ```
 
 ---
@@ -745,55 +863,58 @@ Jani/
 │   └── jalangi.mjs           # 现有插桩入口
 ├── tools/
 │   ├── trace-parse.mjs        # 现有 CLI
-│   └── trace-render.mjs       # 现有 CLI
+│   └── trace-render.mjs       # 现有 CLI（新增 io 格式）
 ├── analyzer/                  # 🆕 JTA 主目录
-│   ├── server.mjs             # Express 服务入口
+│   ├── server.mjs             # Express 服务入口（默认端口 33000；内置 /ws/trace Trace 收集）
+│   ├── PluginEngine.mjs       # 插件调度器（含断点恢复、分阶段调度）
 │   ├── db/
-│   │   ├── schema.sql         # 表结构定义
+│   │   ├── schema.sql         # 表结构定义（含 plugin_checkpoints 表）
 │   │   └── Database.mjs       # SQLite 封装
-│   ├── engine/
-│   │   ├── PluginEngine.mjs   # 调度器
-│   │   └── AnalysisPlugin.mjs # 基类接口
-│   ├── plugins/
-│   │   ├── foundation/
-│   │   │   ├── F1-EventIndex.mjs
-│   │   │   ├── F2-SmapLoader.mjs
-│   │   │   ├── F3-CallGraphBuilder.mjs
-│   │   │   └── F4-VariableLifetime.mjs
-│   │   ├── analysis/
-│   │   │   ├── A1-TaintTracker.mjs
-│   │   │   ├── A2-DataFlowGraph.mjs
-│   │   │   ├── A3-HotPathAnalyzer.mjs
-│   │   │   ├── A4-StringTracker.mjs
-│   │   │   ├── A5-LoopDetector.mjs
-│   │   │   ├── A6-FunctionSignatureInfer.mjs
-│   │   │   └── A7-ObjectMutationTracker.mjs
-│   │   └── inference/
-│   │       ├── I1-CryptoDetector.mjs
-│   │       ├── I2-SignatureAnalyzer.mjs
-│   │       ├── I3-ObfuscationDetector.mjs
-│   │       └── I4-AlgorithmSummarizer.mjs
+│   ├── plugins/               # 所有分析插件（平铺，无子目录）
+│   │   ├── BasePlugin.mjs     # 插件基类
+│   │   ├── F1_EventIndex.mjs  # 基础：事件索引（BATCH_SIZE=5000，yield 让出事件循环）
+│   │   ├── F2_SmapLoader.mjs
+│   │   ├── F3_CallGraphBuilder.mjs
+│   │   ├── F4_VariableLifetime.mjs
+│   │   ├── A1_TaintTracker.mjs
+│   │   ├── A2_DataFlowGraph.mjs
+│   │   ├── A3_HotPathAnalyzer.mjs
+│   │   ├── A4_StringTracker.mjs
+│   │   ├── A5_LoopDetector.mjs
+│   │   ├── A6_FunctionSignatureInfer.mjs
+│   │   ├── A7_ObjectMutationTracker.mjs
+│   │   ├── A8_ValuePatternDetector.mjs
+│   │   ├── I1_CryptoDetector.mjs
+│   │   ├── I2_SignatureAnalyzer.mjs
+│   │   ├── I3_ObfuscationDetector.mjs
+│   │   └── I4_AlgorithmSummarizer.mjs
+│   ├── routes/
+│   │   ├── sessions.mjs       # 会话 API（含分阶段调度、re-run API）
+│   │   └── instrument.mjs     # 插桩 API（显式 --output，支持 wsUrl/wsSab）
 │   └── ui/                    # Vue 3 前端
 │       ├── index.html
 │       ├── src/
-│       │   ├── App.vue
+│       │   ├── App.vue        # 导航栏（含"Trace 监控"链接）
+│       │   ├── main.js        # 路由注册（新增 /trace）
 │       │   ├── components/
-│       │   │   ├── CodeViewer.vue         # CodeMirror 代码视图（只读，支持行高亮）
-│       │   │   ├── CodeEditor.vue         # CodeMirror 代码编辑器（插桩工作台用）
-│       │   │   ├── EventList.vue          # 事件列表
-│       │   │   ├── TaintGraph.vue         # Cytoscape 污点图
-│       │   │   ├── CallGraph.vue          # 调用图
-│       │   │   ├── HotPath.vue            # 热路径热力图
-│       │   │   ├── PluginStatus.vue       # 插件进度
-│       │   │   ├── InstrumentOptions.vue  # 插桩选项面板
-│       │   │   ├── RunConsole.vue         # 服务端运行输出（WS 流式）
-│       │   │   ├── ValueHistory.vue       # 变量值历史时间线
-│       │   │   └── BookmarkList.vue       # 书签面板
+│       │   │   ├── CodeViewer.vue
+│       │   │   ├── CodeEditor.vue
+│       │   │   ├── EventList.vue
+│       │   │   ├── TaintGraph.vue
+│       │   │   ├── CallGraph.vue
+│       │   │   ├── HotPath.vue
+│       │   │   ├── PluginStatus.vue
+│       │   │   ├── InstrumentOptions.vue
+│       │   │   ├── RunConsole.vue
+│       │   │   ├── ValueHistory.vue
+│       │   │   └── BookmarkList.vue
 │       │   └── views/
-│       │       ├── SessionList.vue
-│       │       ├── SessionDetail.vue
-│       │       └── InstrumentStudio.vue   # 插桩工作台（/instrument）
-│       └── vite.config.js
+│       │       ├── SessionList.vue       # 含进度抽屉集成、"⚡ 进度"按钮
+│       │       ├── SessionDetail.vue     # 含内联进度条
+│       │       ├── InstrumentStudio.vue  # 插桩工作台（含复制按钮、wsUrl/wsSab 选项）
+│       │       ├── ProgressDrawer.vue    # 分析进度侧边抽屉（新增）
+│       │       └── TraceMonitor.vue      # Trace 收集状态监控页（新增，路由 /trace）
+│       └── vite.config.js               # Vite 代理端口 → 33000
 ├── mcp/                       # 🆕 MCP Server 目录
 │   ├── jta-mcp-stdio.mjs      # stdio 传输（Claude Desktop / OpenClaw 本地直连）
 │   ├── jta-mcp-sse.mjs        # HTTP SSE 传输（远程访问，旧版兼容）
@@ -813,13 +934,16 @@ Jani/
 ## 9. 开发路线图
 
 ### Phase 1：基础骨架（MVP）✅ 已完成
-- [x] `analyzer/server.mjs`：Express + 文件上传
-- [x] `db/schema.sql` + `Database.mjs`（sql.js 实现，见 3.3 节）
-- [x] `PluginEngine.mjs`：拓扑排序 + 并发执行
+- [x] `analyzer/server.mjs`：Express + 文件上传（1 GB 限制，默认端口 33000）
+- [x] `db/schema.sql` + `Database.mjs`（sql.js 实现，见 3.3 节；含 `plugin_checkpoints` 表）
+- [x] `PluginEngine.mjs`：拓扑排序 + 并发执行 + **断点恢复** + **分阶段调度**
 - [x] F1 EventIndex + F2 SmapLoader
 - [x] 基础 REST API（上传 / 查询事件）
 - [x] UI：会话列表 + 事件列表 + 插件状态面板（Vue 3 + Vite，`ui/dist/` 已构建）
-- [x] **插桩工作台（完整）**：源码编辑 + 选项面板 + 插桩预览 + 服务端运行闭环（`/api/instrument` + `/api/instrument/run`）
+- [x] **插桩工作台（完整）**：源码编辑 + 选项面板 + 插桩预览 + **复制按钮** + 服务端运行闭环（`/api/instrument` + `/api/instrument/run`）
+- [x] **ProgressDrawer**：实时分析进度侧边抽屉，上传后自动打开
+- [x] **TraceMonitor 页面**（`/trace`）：WebSocket Trace 收集状态监控，含文件列表和一键导入
+- [x] **Trace Server 集成**：原独立 `trace-server` 已集成进 JTA Server（`/ws/trace` 端点）
 - [x] 端到端验证：插桩 → 上传 → Foundation 插件全部 done（`GET /api/health` + `GET /api/sessions` 正常响应）
 
 ### Phase 2：核心分析 ✅ 已完成
@@ -879,6 +1003,13 @@ Jani/
 | .smap.json 必填性 | 可选（降级处理） | 缺失时跳过 F2，iid 映射不可用，但事件流仍完整 |
 | TaintTracker 追踪范围 | writes + reads + fields + call return | 覆盖变量/属性/函数返回值，obj.key 和 arr[i] 不遗漏 |
 | InstrumentRunner 超时 | 30s kill + 3 并发 + 1MB 输出截断 | 防止恶意或无限循环代码耗尽资源 |
+| 上传文件大小限制 | 1 GB | 支持大型 JS 文件（原 200 MB 不够用） |
+| 断点恢复 | `plugin_checkpoints` SQLite 表 | 插件完成后立即持久化，重启/崩溃后续跑无需重跑已完成插件 |
+| 分阶段执行 | Phase1（F1）先跑，Phase2（F2/F3/F4）后台跑 | 会话快速创建（Phase1 完成即可），大 trace 深度分析不阻塞上传响应 |
+| Trace 收集集成 | trace-server 合并进 JTA Server（`/ws/trace`） | 简化部署，减少端口和进程管理；端口统一为 33000 |
+| WebSocket 多路径 | `wss.on('connection')` 内按 `pathname` 分发 | 单个 WS Server 支持 `/ws/sessions/:id/progress` + `/ws/instrument/run/:ticket` + `/ws/trace` |
+| F1 EventIndex 让出事件循环 | 每 `YIELD_EVERY_BATCHES` 批调用 `setImmediate` | 防止长时间同步处理阻塞主线程，使 WebSocket/HTTP 请求能及时响应 |
+| 插桩 browser target 输出 | 始终传 `--output <path>` | browser target 默认 in-place 覆盖源文件，显式指定路径确保后端能读到 `_jalangi_.js` |
 
 ---
 

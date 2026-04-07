@@ -36,6 +36,12 @@
           <span class="panel-title">插桩后代码（预览）</span>
           <div class="panel-actions">
             <span v-if="smapInfo" class="smap-stat">{{ smapInfo.iidCount }} iids</span>
+            <button
+              v-if="instrumentedCode"
+              class="btn-secondary btn-sm btn-copy"
+              :class="{ 'btn-copy-ok': copyOk }"
+              @click="copyInstrumented"
+            >{{ copyOk ? '✓ 已复制' : '复制' }}</button>
           </div>
         </div>
         <div v-if="instrumenting" class="loading panel-loading">
@@ -72,7 +78,8 @@
             </div>
             <div class="opt-field">
               <label>源码类型</label>
-              <select v-model="options.sourceType" style="width:120px">
+              <select v-model="options.sourceType" style="width:130px">
+                <option value="auto">auto（自动识别）</option>
                 <option value="script">script</option>
                 <option value="module">module</option>
               </select>
@@ -174,7 +181,12 @@
             <label class="checkbox-label">
               <input type="checkbox" v-model="options.noIdb" />
               <span>--no-idb</span>
-              <span class="opt-hint">不启用 IndexedDB（仅 console）</span>
+              <span class="opt-hint">不启用 IndexedDB</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" v-model="options.wsSab" />
+              <span>--ws-sab</span>
+              <span class="opt-hint">SharedArrayBuffer 零拷贝模式（需 COOP/COEP）</span>
             </label>
             <label class="checkbox-label">
               <input type="checkbox" v-model="options.minify" />
@@ -186,6 +198,11 @@
               <span>--deferred-load</span>
               <span class="opt-hint">延迟加载（需配合 --split-runtime）</span>
             </label>
+            <div class="opt-field" style="width:100%">
+              <label>--ws-url</label>
+              <input v-model="options.wsUrl" placeholder="ws://localhost:33000/ws/trace" style="width:320px;font-family:monospace;font-size:12px" />
+              <span class="opt-hint-inline">留空则禁用 WS</span>
+            </div>
           </div>
         </div>
       </div>
@@ -335,6 +352,28 @@ const instrumentedCode = ref('');
 const instrumenting    = ref(false);
 const instrumentError  = ref('');
 const smapInfo         = ref(null);  // { iidCount, smapJson }
+const copyOk           = ref(false);
+
+async function copyInstrumented() {
+    if (!instrumentedCode.value) return;
+    try {
+        await navigator.clipboard.writeText(instrumentedCode.value);
+        copyOk.value = true;
+        setTimeout(() => { copyOk.value = false; }, 2000);
+    } catch {
+        // fallback：execCommand
+        const ta = document.createElement('textarea');
+        ta.value = instrumentedCode.value;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        copyOk.value = true;
+        setTimeout(() => { copyOk.value = false; }, 2000);
+    }
+}
 
 const running            = ref(false);
 const runLog             = ref([]);
@@ -359,13 +398,15 @@ function toggleSection(name) {
 }
 
 // ── 插桩选项 ────────────────────────────────────────────────────────────────
+const DEFAULT_WS_URL = `ws://${location.host}/ws/trace`;
+
 const options = reactive({
     // 基础
     sandboxVar:   'J$',
-    sourceType:   'script',
-    target:       'node',
+    sourceType:   'auto',   // 'auto' | 'script' | 'module'
+    target:       'browser',
     randomVar:    false,
-    debug:        false,
+    debug:        true,
     // 输出
     inlineIid:    true,
     inlineSource: false,
@@ -377,7 +418,9 @@ const options = reactive({
     // 浏览器专属
     dbName:       '',
     storeName:    '',
-    noIdb:        false,
+    noIdb:        true,   // 默认禁用 IDB，纯 WS 模式
+    wsUrl:        DEFAULT_WS_URL,
+    wsSab:        true,   // 默认启用 SAB 模式
     minify:       false,
     deferredLoad: false,
     // 运行选项
@@ -485,12 +528,23 @@ function clearCode() {
     instrumentError.value = '';
 }
 
+// ── source-type 自动识别 ──────────────────────────────────────────────────────
+// 简单启发：包含顶层 import/export 语句则认为是 module
+function detectSourceType(src) {
+    // 去掉字符串和注释后检测，简化处理：直接正则粗判
+    return /^\s*(import\s|export\s)/m.test(src) ? 'module' : 'script';
+}
+
 // ── 构建请求体选项 ────────────────────────────────────────────────────────────
 function buildRequestOptions() {
+    const resolvedSourceType = options.sourceType === 'auto'
+        ? detectSourceType(code.value)
+        : options.sourceType;
+
     return {
         // 基础
         sandboxVar:    options.sandboxVar,
-        sourceType:    options.sourceType,
+        sourceType:    resolvedSourceType,
         target:        options.target,
         randomVar:     options.randomVar,
         debug:         options.debug,
@@ -506,6 +560,8 @@ function buildRequestOptions() {
         dbName:        options.dbName || undefined,
         storeName:     options.storeName || undefined,
         noIdb:         options.noIdb,
+        wsUrl:         options.wsUrl || undefined,
+        wsSab:         options.wsSab,
         minify:        options.minify,
         deferredLoad:  options.deferredLoad,
         // 运行
@@ -709,6 +765,15 @@ onUnmounted(() => {
     font-size: 12px;
     color: var(--success);
     font-family: monospace;
+}
+
+.btn-copy {
+    transition: all 0.15s;
+}
+.btn-copy-ok {
+    color: var(--success) !important;
+    border-color: rgba(34, 197, 94, 0.4) !important;
+    background: rgba(34, 197, 94, 0.08) !important;
 }
 
 .code-editor {

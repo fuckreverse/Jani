@@ -6,7 +6,10 @@
   "main": "server.mjs",
   "scripts": {
     "start": "node server.mjs",
-    "dev": "node --watch server.mjs"
+    "dev": "node --watch server.mjs",
+    "dev:ui": "cd ui && npm run dev",
+    "build:ui": "cd ui && npm run build",
+    "dev:full": "node --input-type=module --eval \"import{spawn}from'child_process';import{resolve,dirname}from'path';import{fileURLToPath}from'url';const d=dirname(fileURLToPath(import.meta.url));function run(cmd,args,cwd,tag){const c=spawn(cmd,args,{cwd,stdio:'pipe',shell:false});const pre=s=>s.replace(/^/gm,tag);c.stdout.on('data',b=>process.stdout.write(pre(b.toString())));c.stderr.on('data',b=>process.stderr.write(pre(b.toString())));c.on('exit',code=>{console.log(tag+'exited with '+code);process.exit(code??0)});return c;}const be=run('node',['--watch','server.mjs'],d,'[server] ');const fe=run('npm',['run','dev'],resolve(d,'ui'),'[vite]   ');process.on('SIGINT',()=>{be.kill();fe.kill();process.exit(0)});\""
   },
   "dependencies": {
     "@sqlite.org/sqlite-wasm": "^3.51.2-build8",
@@ -18,6 +21,6 @@
     "ws": "^8.20.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   }
 }

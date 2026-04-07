@@ -24,6 +24,8 @@
     "test:unit": "node --test test/unit/instrument.test.mjs test/unit/logging.test.mjs test/unit/native-proxy.test.mjs",
     "test:integration": "node --test test/integration/runtime.test.mjs test/integration/e2e.test.mjs test/integration/hooks.test.mjs test/integration/logging.test.mjs test/integration/execution-trace.test.mjs test/integration/dlint.test.mjs",
     "test:logging": "node --test test/unit/logging.test.mjs test/integration/logging.test.mjs",
+    "analyzer": "npm run dev:full --prefix analyzer",
+    "analyzer:prod": "cd analyzer && npm run build:ui && npm run start",
     "trace-server": "node tools/trace-server/server.mjs",
     "jalangi": "node bin/jalangi.mjs",
     "instrument": "node bin/jalangi.mjs instrument",
@@ -35,6 +37,9 @@
     "preprocess": "node bin/preprocess.mjs",
     "preprocess:full": "node bin/preprocess.mjs --preset full",
     "preprocess:transpile": "node bin/preprocess.mjs --preset transpile"
+  },
+  "engines": {
+    "node": ">=22.0.0"
   },
   "license": "Apache-2.0",
   "repository": {

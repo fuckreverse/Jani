@@ -15,7 +15,7 @@
 |------|------|
 | `trace-parse.mjs` | 将 JTB1 二进制 `.bin` 文件解码为结构化 NDJSON（核心入口） |
 | `trace-parse.mjs` | 兼容层：解析旧文本 trace 或 `.bin` 文件，统一输出结构化 NDJSON |
-| `trace-render.mjs` | 将结构化 NDJSON 渲染为 flat / tree / block / pipe 展示格式 |
+| `trace-render.mjs` | 将结构化 NDJSON 渲染为 flat / tree / block / pipe / io 展示格式 |
 | `trace-filter.mjs` | 按类型、seq 范围、行号、函数名、变量等条件过滤 |
 | `trace-hot-lines.mjs` | 统计代码行执行热点（Top-N 排行）|
 | `trace-call-tree.mjs` | 重建函数调用树，支持深度限制与汇总统计 |
@@ -29,7 +29,7 @@ ExecutionTrace 插件 / WsBackend / NodeStreamBackend
     ↓ trace.bin（JTB1 二进制格式）+ trace.smap.json（IID 源码位置映射）
 trace-parse.mjs  [--smap] [--resolve-values]
     ↓ parsed.ndjson（结构化 NDJSON，JTB1 事件类型）
-trace-filter.mjs  ─→  trace-render.mjs      ← 展示格式转换（flat/tree/block/pipe）
+trace-filter.mjs  ─→  trace-render.mjs      ← 展示格式转换（flat/tree/block/pipe/io）
                   ─→  trace-hot-lines.mjs
                   ─→  trace-call-tree.mjs
                   ─→  trace-var-timeline.mjs
@@ -190,12 +190,13 @@ node tools/trace-parse.mjs trace.ndjson > parsed.ndjson
 | `tree` | Unicode 树形符号（┬ 进入 / └ 退出 / │ 延续线）| 人眼阅读调用链 |
 | `block` | `#region`/`#endregion` 折叠块（对应 CALL_PRE/CALL 事件对）；`FUNCTION_ENTER`/`FUNCTION_EXIT` 以注释行内嵌 | VS Code 中打开可折叠查看 |
 | `pipe` | ASCII `|` 符号（数量 = 调用深度）| 纯 ASCII 终端/工具链 |
+| `io` | 语句级输入/输出变量快照：`; {"o":{写变量},"i":{读变量}}` | 数据流分析、逐语句追踪变量变化 |
 
 ### 选项
 
 | 选项 | 说明 |
 |------|------|
-| `--format FORMAT` | 输出格式：`flat`（默认）/ `tree` / `block` / `pipe` |
+| `--format FORMAT` | 输出格式：`flat`（默认）/ `tree` / `block` / `pipe` / `io` |
 | `--no-seq` | 不输出 seq 编号前缀 |
 | `--help` | 显示帮助信息 |
 
@@ -213,6 +214,14 @@ node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format bloc
 
 # ASCII pipe 格式
 node tools/trace-parse.mjs trace.bin | node tools/trace-render.mjs --format pipe
+
+# io 格式（语句输入/输出变量）— 建议配合 --smap 以还原源码位置
+node tools/trace-parse.mjs trace.bin --smap trace.smap.json | node tools/trace-render.mjs --format io
+
+# 只看语句行（过滤掉函数调用噪音），再以 io 格式渲染
+node tools/trace-parse.mjs trace.bin --smap trace.smap.json \
+  | node tools/trace-filter.mjs --type END_EXPR \
+  | node tools/trace-render.mjs --format io
 
 # 先过滤再渲染（只看 decode 相关调用的树形视图）
 node tools/trace-parse.mjs trace.bin --smap trace.smap.json \
@@ -233,6 +242,53 @@ node tools/trace-parse.mjs trace.bin --smap trace.smap.json \
 
 > **注意**：`tree` / `block` / `pipe` 格式根据 `CALL_PRE`/`CALL` 事件对实时推导调用深度。
 > 若输入已被 `trace-filter` 过滤（破坏了 CALL_PRE/CALL 配对），层次可能不完整，这是预期行为。
+
+### io 格式详解
+
+`io` 格式专为**语句级数据流分析**设计，重点展示每条表达式语句执行时的变量**输入快照**和**输出快照**：
+
+#### 行格式
+
+```
+[  seq] [ row:col] <源码文本> ; {"o":{写变量名:值,...},"i":{读变量名:值,...}}
+```
+
+#### 字段含义
+
+| 字段 | 来源 | 说明 |
+|------|------|------|
+| `o`（output）| `END_EXPR.writes` | 语句执行**后**写入的变量（赋值目标），含属性写入 |
+| `i`（input）| `END_EXPR.reads` | 语句执行**前**读取的变量（参与计算的输入），排除已出现在 `o` 中的变量名 |
+
+属性访问（`fields`）按方向分流：`isWrite=true` 归入 `o`，`isWrite=false` 归入 `i`；
+属性的 key 形如 `"base.offset"`（如 `"obj.length"`）。
+
+#### 示例输出
+
+```
+[     1] [     1:1] ▶ script: /path/to/file.js
+[     2] [     3:1] const a = 1               ; {"o":{"a":1},"i":{}}
+[     3] [     4:1] const b = 2               ; {"o":{"b":2},"i":{}}
+[     4] [     5:1] const c = a + b           ; {"o":{"c":3},"i":{"a":1,"b":2}}
+[     5] [     6:5] CALL console.log(1 args)  ; arg0=3
+[     6] [     6:5] RETN console.log          ; =undefined
+[     7] [     7:1] obj.x = c * 2             ; {"o":{"obj.x":6},"i":{"obj":{},"c":3}}
+```
+
+#### 与其他格式的对比
+
+| 格式 | 对 END_EXPR 的处理 | 调用深度缩进 |
+|------|-------------------|------------|
+| `flat` | `src {"w":{写},"r":{读}}` — 原始结构 | 无 |
+| `tree` | `src ; 写=值, 读=值` — 扁平文本 | 有（Unicode 树线） |
+| `io` | `src ; {"o":{写},"i":{读}}` — 区分输入/输出 | 无 |
+
+#### 适用场景
+
+- **数据流污点分析**：追踪某变量值如何从输入传播到输出
+- **逐语句调试**：快速定位某变量被赋值或读取的语句
+- **与 `trace-filter.mjs` 组合**：先过滤 `--type END_EXPR`，再以 `io` 格式渲染，排除函数调用噪音
+- **与 `trace-var-timeline.mjs` 互补**：`io` 按语句展示上下文，`trace-var-timeline` 按变量展示历史
 
 ---
 

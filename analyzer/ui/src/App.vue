@@ -9,6 +9,7 @@
       <nav class="navbar-nav">
         <router-link to="/" class="nav-link">会话列表</router-link>
         <router-link to="/instrument" class="nav-link">插桩工作台</router-link>
+        <router-link to="/trace" class="nav-link">Trace 监控</router-link>
       </nav>
     </header>
 

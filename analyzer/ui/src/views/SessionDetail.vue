@@ -1,29 +1,44 @@
 <template>
   <div class="session-detail">
+    <!-- 进度抽屉 -->
+    <ProgressDrawer
+      :visible="showProgressDrawer"
+      :session-id="sessionId"
+      :session-name="session?.name || ''"
+      @close="showProgressDrawer = false"
+      @view-session="showProgressDrawer = false"
+    />
+
     <!-- 顶部：会话信息 -->
     <div v-if="session" class="session-header card">
       <div class="header-left">
         <router-link to="/" class="back-btn">← 返回列表</router-link>
         <h1 class="session-title">{{ session.name || session.id.slice(0, 8) }}</h1>
         <div class="header-meta">
-          <span class="badge" :class="`badge-${session.status}`">{{ session.status }}</span>
+          <span class="badge" :class="`badge-${session.status}`">{{ statusLabel(session.status) }}</span>
           <span class="meta-text">{{ session.event_count?.toLocaleString('zh-CN') ?? 0 }} 条事件</span>
           <span class="meta-text">创建于 {{ formatDate(session.created_at) }}</span>
         </div>
       </div>
       <div class="header-right">
-        <!-- 插件状态 -->
-        <div v-if="pluginStatus && Object.keys(pluginStatus).length > 0" class="plugin-status-list">
-          <div
-            v-for="(status, id) in pluginStatus"
-            :key="id"
-            class="plugin-status-item"
-            :class="`status-${status}`"
-          >
-            <span class="plugin-icon">{{ statusIcon(status) }}</span>
-            <span class="plugin-id">{{ id }}</span>
-            <span class="plugin-state">{{ status }}</span>
+        <!-- 内联进度条（处理中时显示）-->
+        <div v-if="isAnalyzing" class="inline-progress" @click="showProgressDrawer = true">
+          <div class="inline-progress-bar">
+            <div class="inline-progress-fill" :style="{ width: inlineProgressPct + '%' }"></div>
           </div>
+          <span class="inline-progress-label">{{ inlineProgressPct }}% · {{ runningPlugin || '处理中' }}</span>
+          <span class="inline-progress-hint">点击查看详情 ›</span>
+        </div>
+        <!-- 就绪时，显示插件小点 + 进度按鈕 -->
+        <div v-else class="header-plugin-dots">
+          <div
+            v-for="(status, pid) in pluginStatus"
+            :key="pid"
+            class="plugin-dot"
+            :class="'plugin-dot-' + status"
+            :title="pid + ': ' + status"
+          ></div>
+          <button class="btn-show-progress" @click="showProgressDrawer = true">🔍 进度</button>
         </div>
       </div>
     </div>
@@ -641,9 +656,61 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
+import ProgressDrawer from './ProgressDrawer.vue';
 
 const route = useRoute();
 const sessionId = computed(() => route.params.id);
+
+// ─── 进度抽屉 ────────────────────────────────────────────────────────────────
+const showProgressDrawer = ref(false);
+
+// 插件进度状态（由 WS 驱动）
+const wsPluginStatus   = ref({});  // pluginId → 'pending'|'running'|'done'|'failed'|'skipped'
+const wsPluginDuration = ref({});  // pluginId → durationMs
+const wsSessionStatus  = ref(''); // 'processing'|'ready' etc.
+
+// 所有需要跟踪的插件（与 ProgressDrawer 保持一致）
+const ALL_PLUGIN_IDS = [
+    'F1-EventIndex', 'F2-SmapLoader',
+    'F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer',
+    'A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer',
+    'A2-DataFlowGraph', 'A4-StringTracker', 'A6-FunctionSignatureInfer',
+    'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer',
+];
+
+// 是否正在分析（有插件处于 running/pending 状态）
+const isAnalyzing = computed(() => {
+    const vals = Object.values(wsPluginStatus.value);
+    return vals.some(s => s === 'running' || s === 'pending') && wsSessionStatus.value !== 'ready';
+});
+
+// 当前正在运行的插件名
+const runningPlugin = computed(() => {
+    const entry = Object.entries(wsPluginStatus.value).find(([, s]) => s === 'running');
+    if (!entry) return '';
+    const labels = {
+        'F1-EventIndex': 'F1 事件索引', 'F2-SmapLoader': 'F2 源码映射',
+        'F3-CallGraphBuilder': 'F3 调用图', 'F4-VariableLifetime': 'F4 变量生命周期',
+        'A3-HotPathAnalyzer': 'A3 热路径', 'A5-LoopDetector': 'A5 循环检测',
+        'A8-ValuePatternDetector': 'A8 值模式', 'I1-CryptoDetector': 'I1 加密检测',
+        'I2-SignatureAnalyzer': 'I2 签名分析', 'A2-DataFlowGraph': 'A2 数据流',
+        'A4-StringTracker': 'A4 字符串', 'A6-FunctionSignatureInfer': 'A6 函数签名',
+        'A7-ObjectMutationTracker': 'A7 对象变异', 'I3-ObfuscationDetector': 'I3 混淆检测',
+        'I4-AlgorithmSummarizer': 'I4 算法汇总',
+    };
+    return labels[entry[0]] || entry[0];
+});
+
+// 内联进度百分比
+const inlineProgressPct = computed(() => {
+    const tracked = Object.keys(wsPluginStatus.value);
+    if (tracked.length === 0) return 0;
+    const done = tracked.filter(id => {
+        const s = wsPluginStatus.value[id];
+        return s === 'done' || s === 'skipped';
+    }).length;
+    return Math.round(done / tracked.length * 100);
+});
 
 // ─── 标签页 ──────────────────────────────────────────────────────────────
 
@@ -1051,26 +1118,78 @@ function onPhase3Done(pluginId) {
 
 // WebSocket 订阅进度
 let ws = null;
+let wsReconnectTimer = null;
+
+function handleDetailWsEvent(msg) {
+    // 更新内联进度状态
+    if (msg.type === 'init') {
+        wsSessionStatus.value = msg.status || '';
+        if (msg.pluginStatus) {
+            for (const [id, st] of Object.entries(msg.pluginStatus)) {
+                wsPluginStatus.value[id] = st;
+            }
+        }
+        if (msg.checkpoints) {
+            for (const cp of msg.checkpoints) {
+                wsPluginStatus.value[cp.plugin_id] = 'done';
+                if (cp.duration_ms) wsPluginDuration.value[cp.plugin_id] = cp.duration_ms;
+            }
+        }
+        // 首次加载会话
+        loadSession();
+
+    } else if (msg.type === 'schedule_start') {
+        for (const id of (msg.toRun || [])) wsPluginStatus.value[id] = 'pending';
+        for (const id of (msg.skipped || [])) wsPluginStatus.value[id] = 'skipped';
+
+    } else if (msg.type === 'phase_start') {
+        for (const id of (msg.plugins || [])) {
+            if (!wsPluginStatus.value[id]) wsPluginStatus.value[id] = 'pending';
+        }
+
+    } else if (msg.type === 'plugin_start') {
+        wsPluginStatus.value[msg.plugin] = 'running';
+        wsSessionStatus.value = 'processing';
+
+    } else if (msg.type === 'plugin_done') {
+        wsPluginStatus.value[msg.plugin] = 'done';
+        if (msg.durationMs) wsPluginDuration.value[msg.plugin] = msg.durationMs;
+        // 插件完成时刷新对应 Tab 数据
+        onPhase3Done(msg.plugin);
+        // 刷新会话信息（event_count 可能更新）
+        loadSession();
+
+    } else if (msg.type === 'plugin_failed') {
+        wsPluginStatus.value[msg.plugin] = 'failed';
+
+    } else if (msg.type === 'all_done') {
+        wsSessionStatus.value = 'ready';
+        loadSession();
+        if (events.value.length === 0) loadEvents();
+
+    } else if (msg.plugin && msg.status) {
+        // 兼容旧格式
+        wsPluginStatus.value[msg.plugin] = msg.status;
+        if (msg.durationMs) wsPluginDuration.value[msg.plugin] = msg.durationMs;
+        if (msg.status === 'done') {
+            onPhase3Done(msg.plugin);
+            loadSession();
+        }
+    }
+}
+
 function connectWs() {
     const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/sessions/${sessionId.value}/progress`;
     ws = new WebSocket(wsUrl);
     ws.onmessage = (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'init' || msg.sessionId === sessionId.value) {
-            loadSession();
-            if (session.value?.status === 'ready' && events.value.length === 0) {
-                loadEvents();
-            }
-            // Phase 3 插件完成时刷新对应标签
-            if (msg.status === 'done' && msg.plugin) {
-                onPhase3Done(msg.plugin);
-            }
-        }
+        try { handleDetailWsEvent(JSON.parse(e.data)); } catch { /* ignore */ }
     };
-    ws.onerror = () => {};
+    ws.onerror = () => ws?.close();
     ws.onclose = () => {
-        // 5s 后重连
-        setTimeout(connectWs, 5000);
+        // 非 ready 状态时 5s 后重连
+        if (wsSessionStatus.value !== 'ready') {
+            wsReconnectTimer = setTimeout(connectWs, 5000);
+        }
     };
 }
 
@@ -1095,6 +1214,10 @@ function statusIcon(s) {
     return { pending: '⏸', running: '⏳', done: '✅', failed: '❌' }[s] ?? '?';
 }
 
+function statusLabel(s) {
+    return { pending: '等待中', processing: '分析中', running: '运行中', ready: '就绪', failed: '失败', error: '错误' }[s] ?? s ?? '未知';
+}
+
 let refreshTimer = null;
 onMounted(async () => {
     await loadSession();
@@ -1104,6 +1227,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+    if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
     if (ws) { ws.onclose = null; ws.close(); }
     if (refreshTimer) clearInterval(refreshTimer);
 });
@@ -1553,4 +1677,94 @@ onUnmounted(() => {
 
 /* 对象读取行 */
 .row-read-op td { background: rgba(99,102,241,0.05) !important; }
+
+/* ─── header-right 区域 ────────────────────────────────────────────────────── */
+
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+}
+
+/* 内联进度条（分析中时显示）*/
+.inline-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    background: rgba(99, 102, 241, 0.08);
+    transition: background 0.15s;
+}
+.inline-progress:hover { background: rgba(99, 102, 241, 0.15); }
+
+.inline-progress-bar {
+    width: 80px;
+    height: 5px;
+    background: var(--bg-tertiary);
+    border-radius: 3px;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+.inline-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #3b82f6, #6366f1);
+    border-radius: 3px;
+    transition: width 0.4s ease;
+    animation: ppulse 1.5s ease-in-out infinite;
+}
+@keyframes ppulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+.inline-progress-label {
+    font-size: 11px;
+    color: #a5b4fc;
+    white-space: nowrap;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.inline-progress-hint {
+    font-size: 10px;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+/* 插件状态小圆点 + 进度按钮（就绪时显示）*/
+.header-plugin-dots {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.plugin-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.plugin-dot-done    { background: #22c55e; }
+.plugin-dot-running { background: #6366f1; animation: ppulse 1s infinite; }
+.plugin-dot-failed  { background: #ef4444; }
+.plugin-dot-pending { background: #475569; }
+.plugin-dot-skipped { background: #374151; }
+.plugin-dot-idle    { background: #1e2235; border: 1px solid #2d3148; }
+
+.btn-show-progress {
+    margin-left: 6px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.btn-show-progress:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
 </style>

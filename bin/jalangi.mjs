@@ -174,7 +174,7 @@ function printHelp(sub = null) {
   --db-name <n>        IndexedDB 数据库名（默认 jalangi-traces）
   --store-name <n>     ObjectStore 名（默认 execution-trace）
   --no-idb             不启用 IndexedDB（仅 console 输出 trace）
-  --ws-url <url>       WebSocket 服务地址（如 ws://127.0.0.1:9229/trace）
+  --ws-url <url>       WebSocket 服务地址（如 ws://127.0.0.1:33000/ws/trace）
                          不传则禁用 WS；可与 --no-idb 同时使用（纯 WS 模式）
   --ws-sab             开启 SharedArrayBuffer 环形缓冲区模式（需 COOP/COEP header）
                          主线程通过 Atomics.store 写入共享内存，Worker 端 Atomics.waitAsync 处理，
@@ -569,7 +569,6 @@ ${(() => {
     dbName:    ${JSON.stringify(opts.dbName)},
     storeName: ${JSON.stringify(opts.storeName)},
     ${opts.wsUrl ? `wsUrl: ${JSON.stringify(opts.wsUrl)},` : '// wsUrl not configured'}
-    ${opts.wsUrl ? "wsFormat: 'ndjson'," : '// wsFormat not configured'}
     ${opts.wsSab ? 'wsSab: true,' : '// wsSab not configured'}
     ${syncOpt}
 }`;

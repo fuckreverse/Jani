@@ -1,0 +1,468 @@
+<template>
+  <teleport to="body">
+    <transition name="drawer-fade">
+      <div v-if="visible" class="drawer-overlay" @click.self="$emit('close')">
+        <div class="progress-drawer" :class="{ 'drawer-open': visible }">
+          <!-- 头部 -->
+          <div class="drawer-header">
+            <div class="drawer-title-row">
+              <span class="drawer-icon">{{ overallIcon }}</span>
+              <div>
+                <div class="drawer-title">分析进度</div>
+                <div v-if="sessionName" class="drawer-subtitle">{{ sessionName }}</div>
+              </div>
+            </div>
+            <button class="drawer-close" @click="$emit('close')">✕</button>
+          </div>
+
+          <!-- 总进度条 -->
+          <div class="overall-progress">
+            <div class="progress-track">
+              <div class="progress-fill" :style="{ width: overallPercent + '%' }" :class="overallClass"></div>
+            </div>
+            <span class="progress-text">{{ doneCount }}/{{ totalCount }}</span>
+          </div>
+
+          <!-- 阶段列表 -->
+          <div class="phases-container">
+            <div v-for="phase in phases" :key="phase.id" class="phase-group">
+              <div class="phase-header" @click="phase.expanded = !phase.expanded">
+                <span class="phase-icon">{{ phaseIcon(phase) }}</span>
+                <span class="phase-label">{{ phase.label }}</span>
+                <span class="phase-badge" :class="phaseBadgeClass(phase)">{{ phaseSummary(phase) }}</span>
+                <span class="phase-chevron">{{ phase.expanded ? '▾' : '▸' }}</span>
+              </div>
+              <transition name="collapse">
+                <div v-if="phase.expanded" class="plugin-list">
+                  <div
+                    v-for="pid in phase.plugins"
+                    :key="pid"
+                    class="plugin-row"
+                    :class="'plugin-' + getPluginStatus(pid)"
+                  >
+                    <span class="plugin-status-icon">{{ pluginIcon(getPluginStatus(pid)) }}</span>
+                    <span class="plugin-name">{{ (PLUGIN_META[pid] || {}).label || pid }}</span>
+                    <span class="plugin-desc">{{ (PLUGIN_META[pid] || {}).desc || '' }}</span>
+                    <span v-if="getPluginDuration(pid)" class="plugin-duration">{{ formatDuration(getPluginDuration(pid)) }}</span>
+                    <span v-if="getPluginStatus(pid) === 'running'" class="plugin-spinner"></span>
+                  </div>
+                </div>
+              </transition>
+            </div>
+          </div>
+
+          <!-- 错误日志 -->
+          <div v-if="errors.length > 0" class="error-log">
+            <div class="error-log-title">⚠️ 错误</div>
+            <div v-for="(err, i) in errors" :key="i" class="error-item">{{ err }}</div>
+          </div>
+
+          <!-- 底部按钮 -->
+          <div class="drawer-footer">
+            <template v-if="isFinished">
+              <span class="finish-text">✅ 分析完成</span>
+              <button class="btn-view" @click="$emit('view-session')">查看详情 →</button>
+            </template>
+            <template v-else>
+              <span class="running-text">{{ statusText }}</span>
+            </template>
+          </div>
+        </div>
+      </div>
+    </transition>
+  </teleport>
+</template>
+
+<script setup>
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+
+// ── Props / Emits ─────────────────────────────────────────────────────────────
+const props = defineProps({
+    visible:     { type: Boolean, default: false },
+    sessionId:   { type: String,  default: null },
+    sessionName: { type: String,  default: '' },
+});
+const emit = defineEmits(['close', 'view-session']);
+
+// ── 插件元数据 ────────────────────────────────────────────────────────────────
+const PLUGIN_META = {
+    'F1-EventIndex':             { label: 'F1 事件索引',      desc: '解析 trace 二进制，建立事件索引' },
+    'F2-SmapLoader':             { label: 'F2 源码映射',      desc: '加载 .smap.json 源码位置信息' },
+    'F3-CallGraphBuilder':       { label: 'F3 调用图',        desc: '重建函数调用关系图' },
+    'F4-VariableLifetime':       { label: 'F4 变量生命周期',  desc: '统计变量读写次数和生命周期' },
+    'A3-HotPathAnalyzer':        { label: 'A3 热路径',        desc: '统计执行频率，检测循环' },
+    'A5-LoopDetector':           { label: 'A5 循环检测',      desc: '展开循环迭代，记录变量快照' },
+    'A8-ValuePatternDetector':   { label: 'A8 值模式',        desc: '检测高频魔术常数' },
+    'I1-CryptoDetector':         { label: 'I1 加密检测',      desc: '识别 AES/MD5/SHA 等加密算法' },
+    'I2-SignatureAnalyzer':      { label: 'I2 签名分析',      desc: '追踪签名/Token 计算路径' },
+    'A2-DataFlowGraph':          { label: 'A2 数据流图',      desc: '构建 def-use 数据流图' },
+    'A4-StringTracker':          { label: 'A4 字符串追踪',    desc: '识别 base64/hex/url 编码' },
+    'A6-FunctionSignatureInfer': { label: 'A6 函数签名',      desc: '推断函数纯函数性与参数类型' },
+    'A7-ObjectMutationTracker':  { label: 'A7 对象变异',      desc: '重建对象属性变化时间线' },
+    'I3-ObfuscationDetector':    { label: 'I3 混淆检测',      desc: '识别变量名混淆和控制流平坦化' },
+    'I4-AlgorithmSummarizer':    { label: 'I4 算法汇总',      desc: '生成综合分析报告' },
+};
+
+const PHASES_CONFIG = [
+    { id: 'phase1', label: 'Phase 1 · 基础解析', plugins: ['F1-EventIndex', 'F2-SmapLoader'] },
+    { id: 'phase2', label: 'Phase 2 · 索引构建', plugins: ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'] },
+    { id: 'phase3', label: 'Phase 3 · 深度分析', plugins: ['A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer'] },
+    { id: 'phase4', label: 'Phase 4 · 完整分析', plugins: ['A2-DataFlowGraph', 'A4-StringTracker', 'A6-FunctionSignatureInfer', 'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer'] },
+];
+
+// ── 状态 ─────────────────────────────────────────────────────────────────────
+const pluginStatusMap   = ref({});
+const pluginDurationMap = ref({});
+const sessionStatus     = ref('');
+const errors            = ref([]);
+const enabledPlugins    = ref(new Set());
+// 展开状态单独维护（避免修改常量）
+const phases = ref(PHASES_CONFIG.map((p, i) => ({ ...p, expanded: i < 2 })));
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+let ws = null;
+let reconnectTimer = null;
+
+function connectWs() {
+    if (!props.sessionId) return;
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ws/sessions/${props.sessionId}/progress`);
+    ws.onopen = () => {
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    };
+    ws.onmessage = (e) => {
+        try { handleWsEvent(JSON.parse(e.data)); } catch { /* ignore */ }
+    };
+    ws.onclose = () => {
+        if (!isFinished.value) reconnectTimer = setTimeout(connectWs, 3000);
+    };
+    ws.onerror = () => ws.close();
+}
+
+function disconnectWs() {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (ws) { ws.close(); ws = null; }
+}
+
+function handleWsEvent(evt) {
+    if (evt.type === 'init') {
+        sessionStatus.value = evt.status || '';
+        if (evt.pluginStatus) {
+            for (const [id, st] of Object.entries(evt.pluginStatus)) {
+                pluginStatusMap.value[id] = st;
+                enabledPlugins.value.add(id);
+            }
+        }
+        if (evt.checkpoints) {
+            for (const cp of evt.checkpoints) {
+                pluginStatusMap.value[cp.plugin_id] = 'done';
+                if (cp.duration_ms) pluginDurationMap.value[cp.plugin_id] = cp.duration_ms;
+                enabledPlugins.value.add(cp.plugin_id);
+            }
+        }
+        autoExpandActivePhases();
+
+    } else if (evt.type === 'schedule_start') {
+        for (const id of (evt.toRun || [])) { pluginStatusMap.value[id] = 'pending'; enabledPlugins.value.add(id); }
+        for (const id of (evt.skipped || [])) pluginStatusMap.value[id] = 'skipped';
+        autoExpandActivePhases();
+
+    } else if (evt.type === 'phase_start') {
+        for (const id of (evt.plugins || [])) {
+            if (!pluginStatusMap.value[id]) { pluginStatusMap.value[id] = 'pending'; enabledPlugins.value.add(id); }
+        }
+        expandPhase(evt.phase);
+
+    } else if (evt.type === 'plugin_start') {
+        pluginStatusMap.value[evt.plugin] = 'running';
+        sessionStatus.value = 'processing';
+
+    } else if (evt.type === 'plugin_done') {
+        pluginStatusMap.value[evt.plugin] = 'done';
+        if (evt.durationMs) pluginDurationMap.value[evt.plugin] = evt.durationMs;
+
+    } else if (evt.type === 'plugin_failed') {
+        pluginStatusMap.value[evt.plugin] = 'failed';
+        if (evt.error) errors.value.push(`${evt.plugin}: ${evt.error}`);
+
+    } else if (evt.type === 'all_done') {
+        sessionStatus.value = 'ready';
+
+    } else if (evt.type === 'error') {
+        if (evt.message) errors.value.push(evt.message);
+
+    } else if (evt.plugin && evt.status) {
+        // 兼容旧格式（无 type 字段）
+        pluginStatusMap.value[evt.plugin] = evt.status;
+        if (evt.durationMs) pluginDurationMap.value[evt.plugin] = evt.durationMs;
+        enabledPlugins.value.add(evt.plugin);
+    }
+}
+
+function expandPhase(phaseId) {
+    const p = phases.value.find(p => p.id === phaseId);
+    if (p) p.expanded = true;
+}
+
+function autoExpandActivePhases() {
+    for (const phase of phases.value) {
+        if (phase.plugins.some(id => pluginStatusMap.value[id])) phase.expanded = true;
+    }
+}
+
+// ── 计算属性 ─────────────────────────────────────────────────────────────────
+const ALL_PLUGINS = PHASES_CONFIG.flatMap(p => p.plugins);
+
+const trackedPlugins = computed(() =>
+    enabledPlugins.value.size > 0
+        ? [...enabledPlugins.value]
+        : ['F1-EventIndex', 'F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer']
+);
+
+const totalCount = computed(() => trackedPlugins.value.length);
+
+const doneCount = computed(() =>
+    trackedPlugins.value.filter(id => {
+        const st = pluginStatusMap.value[id];
+        return st === 'done' || st === 'skipped';
+    }).length
+);
+
+const overallPercent = computed(() =>
+    totalCount.value === 0 ? 0 : Math.round(doneCount.value / totalCount.value * 100)
+);
+
+const hasRunning = computed(() => Object.values(pluginStatusMap.value).some(s => s === 'running'));
+const hasFailed  = computed(() => Object.values(pluginStatusMap.value).some(s => s === 'failed'));
+
+const isFinished = computed(() =>
+    sessionStatus.value === 'ready' ||
+    (doneCount.value > 0 && doneCount.value >= totalCount.value && !hasRunning.value)
+);
+
+const overallClass = computed(() =>
+    hasFailed.value ? 'fill-failed' :
+    hasRunning.value ? 'fill-running' :
+    isFinished.value ? 'fill-done' : 'fill-pending'
+);
+
+const overallIcon = computed(() =>
+    hasFailed.value ? '❌' :
+    hasRunning.value ? '⚡' :
+    isFinished.value ? '✅' : '🔬'
+);
+
+const statusText = computed(() => {
+    if (hasRunning.value) return '分析进行中，请稍候…';
+    const pending = Object.entries(pluginStatusMap.value)
+        .filter(([, s]) => s === 'pending').map(([id]) => id);
+    if (pending.length) return `等待执行: ${pending.slice(0, 2).join(', ')}…`;
+    return '已调度，等待后端处理…';
+});
+
+function phaseIcon(phase) {
+    const sts = phase.plugins.map(id => pluginStatusMap.value[id]).filter(Boolean);
+    if (sts.some(s => s === 'failed'))  return '❌';
+    if (sts.some(s => s === 'running')) return '⚡';
+    if (sts.length && sts.every(s => s === 'done' || s === 'skipped')) return '✅';
+    if (sts.some(s => s === 'pending')) return '⏳';
+    return '○';
+}
+
+function phaseSummary(phase) {
+    const done = phase.plugins.filter(id => {
+        const s = pluginStatusMap.value[id];
+        return s === 'done' || s === 'skipped';
+    }).length;
+    return `${done}/${phase.plugins.length}`;
+}
+
+function phaseBadgeClass(phase) {
+    const icon = phaseIcon(phase);
+    return icon === '✅' ? 'badge-done'    :
+           icon === '⚡' ? 'badge-running' :
+           icon === '❌' ? 'badge-failed'  :
+           icon === '⏳' ? 'badge-pending' : 'badge-idle';
+}
+
+function getPluginStatus(id)   { return pluginStatusMap.value[id] || 'idle'; }
+function getPluginDuration(id) { return pluginDurationMap.value[id] || null; }
+
+function pluginIcon(status) {
+    const icons = { done: '✓', skipped: '↩', running: '…', failed: '✗', pending: '○', idle: '·' };
+    return icons[status] || '·';
+}
+
+function formatDuration(ms) {
+    if (!ms) return '';
+    return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+// ── 生命周期 ─────────────────────────────────────────────────────────────────
+watch(() => props.visible, (v) => {
+    if (v && props.sessionId) connectWs();
+    else disconnectWs();
+});
+
+watch(() => props.sessionId, (id) => {
+    disconnectWs();
+    pluginStatusMap.value = {};
+    pluginDurationMap.value = {};
+    errors.value = [];
+    enabledPlugins.value = new Set();
+    phases.value = PHASES_CONFIG.map((p, i) => ({ ...p, expanded: i < 2 }));
+    if (id && props.visible) connectWs();
+});
+
+onMounted(() => {
+    if (props.visible && props.sessionId) connectWs();
+});
+
+onUnmounted(() => disconnectWs());
+</script>
+
+<style scoped>
+.drawer-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 2000;
+    display: flex; align-items: flex-start; justify-content: flex-end;
+}
+
+.progress-drawer {
+    width: 380px; max-width: 95vw; height: 100vh;
+    background: var(--bg-primary, #0f1117);
+    border-left: 1px solid var(--border-color, #2d3148);
+    display: flex; flex-direction: column; overflow: hidden;
+    transform: translateX(100%);
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.drawer-open { transform: translateX(0); }
+
+.drawer-fade-enter-active, .drawer-fade-leave-active { transition: opacity 0.2s; }
+.drawer-fade-enter-from, .drawer-fade-leave-to { opacity: 0; }
+
+/* 头部 */
+.drawer-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-color, #2d3148);
+    flex-shrink: 0;
+}
+.drawer-title-row { display: flex; align-items: center; gap: 12px; }
+.drawer-icon { font-size: 22px; }
+.drawer-title { font-size: 15px; font-weight: 700; color: var(--text-primary, #e2e8f0); }
+.drawer-subtitle {
+    font-size: 11px; color: var(--text-muted, #64748b); margin-top: 2px;
+    max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.drawer-close {
+    background: transparent; border: none;
+    color: var(--text-muted, #64748b); font-size: 14px;
+    cursor: pointer; padding: 4px 8px; border-radius: 4px; transition: all .15s;
+}
+.drawer-close:hover { background: var(--bg-tertiary, #1e2235); color: var(--text-primary, #e2e8f0); }
+
+/* 总进度条 */
+.overall-progress {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border-color, #2d3148);
+    flex-shrink: 0;
+}
+.progress-track {
+    flex: 1; height: 6px;
+    background: var(--bg-tertiary, #1e2235);
+    border-radius: 3px; overflow: hidden;
+}
+.progress-fill { height: 100%; border-radius: 3px; transition: width .4s ease, background .3s; }
+.fill-running { background: linear-gradient(90deg, #3b82f6, #6366f1); animation: ppulse 1.5s ease-in-out infinite; }
+.fill-done    { background: #22c55e; }
+.fill-failed  { background: #ef4444; }
+.fill-pending { background: #475569; }
+@keyframes ppulse { 0%, 100% { opacity: 1; } 50% { opacity: .7; } }
+.progress-text { font-size: 11px; color: var(--text-muted, #64748b); min-width: 36px; text-align: right; }
+
+/* 阶段容器 */
+.phases-container { flex: 1; overflow-y: auto; padding: 8px 0; }
+.phase-group { border-bottom: 1px solid rgba(45, 49, 72, .5); }
+.phase-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 20px; cursor: pointer; user-select: none; transition: background .15s;
+}
+.phase-header:hover { background: var(--bg-secondary, #161b2e); }
+.phase-icon { font-size: 14px; }
+.phase-label { flex: 1; font-size: 12px; font-weight: 600; color: var(--text-primary, #e2e8f0); }
+.phase-badge { font-size: 10px; padding: 2px 6px; border-radius: 8px; font-weight: 600; }
+.badge-done    { background: rgba(34, 197, 94, .15);  color: #86efac; }
+.badge-running { background: rgba(99, 102, 241, .15); color: #a5b4fc; animation: bblink 1.2s infinite; }
+.badge-failed  { background: rgba(239, 68, 68, .15);  color: #fca5a5; }
+.badge-pending { background: rgba(71, 85, 105, .3);   color: #94a3b8; }
+.badge-idle    { background: rgba(71, 85, 105, .15);  color: #64748b; }
+@keyframes bblink { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+.phase-chevron { font-size: 10px; color: var(--text-muted, #64748b); }
+
+/* 插件行 */
+.plugin-list { padding: 4px 20px 10px 32px; }
+.plugin-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 8px; border-radius: 6px; margin-bottom: 2px;
+    font-size: 12px; transition: background .15s;
+}
+.plugin-row:hover { background: var(--bg-secondary, #161b2e); }
+.plugin-done    { color: #86efac; }
+.plugin-skipped { color: #64748b; }
+.plugin-running { color: #a5b4fc; background: rgba(99, 102, 241, .05); }
+.plugin-failed  { color: #fca5a5; }
+.plugin-pending { color: #94a3b8; }
+.plugin-idle    { color: #475569; }
+.plugin-status-icon { width: 14px; text-align: center; font-size: 11px; }
+.plugin-name {
+    font-weight: 600; min-width: 108px;
+    font-family: monospace; font-size: 11px;
+}
+.plugin-desc {
+    flex: 1; color: var(--text-muted, #64748b); font-size: 11px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.plugin-duration { font-size: 10px; color: var(--text-muted, #64748b); font-family: monospace; }
+.plugin-spinner {
+    display: inline-block; width: 10px; height: 10px;
+    border: 2px solid rgba(99, 102, 241, .3);
+    border-top-color: #6366f1;
+    border-radius: 50%; animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* 展开/折叠过渡 */
+.collapse-enter-active, .collapse-leave-active { transition: max-height .2s ease, opacity .2s; overflow: hidden; }
+.collapse-enter-from, .collapse-leave-to { max-height: 0; opacity: 0; }
+.collapse-enter-to, .collapse-leave-from { max-height: 600px; opacity: 1; }
+
+/* 错误日志 */
+.error-log {
+    margin: 8px 16px; padding: 10px 14px;
+    background: rgba(239, 68, 68, .08);
+    border: 1px solid rgba(239, 68, 68, .2);
+    border-radius: 8px; flex-shrink: 0;
+}
+.error-log-title { font-size: 11px; font-weight: 600; color: #fca5a5; margin-bottom: 6px; }
+.error-item { font-size: 11px; color: #fca5a5; font-family: monospace; line-height: 1.5; }
+
+/* 底部 */
+.drawer-footer {
+    padding: 14px 20px;
+    border-top: 1px solid var(--border-color, #2d3148);
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    flex-shrink: 0;
+}
+.finish-text  { font-size: 12px; color: #86efac; }
+.running-text { font-size: 12px; color: var(--text-muted, #64748b); }
+.btn-view {
+    padding: 7px 16px; border-radius: 6px;
+    border: 1px solid rgba(99, 102, 241, .4);
+    background: rgba(99, 102, 241, .15);
+    color: #a5b4fc; font-size: 12px; cursor: pointer; transition: all .15s;
+}
+.btn-view:hover { background: rgba(99, 102, 241, .25); }
+</style>

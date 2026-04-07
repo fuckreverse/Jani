@@ -22,6 +22,7 @@
  *   tree   Unicode 树形符号（┬ 进入 / └ 退出 / │ 延续线），按调用深度缩进
  *   block  #region/#endregion 折叠块（VS Code 任意文件可折叠）
  *   pipe   ASCII pipe 符号（| 数量 = 调用深度），纯 ASCII 适合工具链
+ *   io     输入/输出变量格式：[seq] [row:col] [src] ; {o:{写变量},i:{读变量}}
  *
  * 注意：tree / block / pipe 格式统一以 CALL_PRE/CALL 对推导调用深度；
  *       FUNCTION_ENTER/FUNCTION_EXIT 不参与深度计算（避免双重计数），仅作附加信息输出。
@@ -286,6 +287,66 @@ class PipeRenderer {
     }
 }
 
+/**
+ * IORenderer — 语句输入/输出变量格式
+ *
+ * 每条 END_EXPR 语句输出：
+ *   [seq] [row:col] [src] ; {o:{写变量},i:{读变量}}
+ *
+ * 字段说明：
+ *   o（output）：语句执行后写入的变量及其值（writes）
+ *   i（input） ：语句执行前读取的变量及其值（reads），排除已写入的变量
+ *
+ * 对于 CALL_PRE/CALL 等非语句事件，仍按 flat 格式输出（保留上下文可读性）。
+ * 若只想看语句行，可在上游使用 trace-filter.mjs --type END_EXPR 过滤。
+ */
+class IORenderer {
+    render(record, depth) {
+        const seq = record.seq ?? '';
+        const rc  = record.line != null ? `${record.line}:${record.col ?? 0}` : '?:?';
+
+        switch (record.type) {
+            case 'END_EXPR': {
+                const src = record.srcText ?? record.src ?? `(iid=${record.iid})`;
+                const kv  = _endExprKvIO(record);
+                return `[${fmtSeq(seq)}] [${fmtRc(rc)}] ${src}${kv ? ' ; ' + kv : ''}`;
+            }
+            case 'CALL_PRE': {
+                const desc = _callPreDesc(record);
+                const kv   = _callPreKv(record);
+                return `[${fmtSeq(seq)}] [${fmtRc(rc)}] CALL ${desc}${kv ? ' ; ' + kv : ''}`;
+            }
+            case 'CALL': {
+                const name = record.fn ?? '(anonymous)';
+                const v    = record.result !== undefined ? serialize(record.result) : '?';
+                return `[${fmtSeq(seq)}] [${fmtRc(rc)}] RETN ${name} ; =${v}`;
+            }
+            case 'FUNCTION_ENTER': {
+                const fn = record.fn ?? '(anonymous)';
+                return `[${fmtSeq(seq)}] [${fmtRc(rc)}] FUNC_ENTER ${fn}`;
+            }
+            case 'FUNCTION_EXIT': {
+                const ex = record.exception != null ? ` (exception)` : '';
+                return `[${fmtSeq(seq)}] [${fmtRc(rc)}] FUNC_EXIT${ex}`;
+            }
+            case 'SCRIPT_ENTER':
+                return `[${fmtSeq(seq)}] ▶ script: ${record.file ?? '?'}`;
+            case 'SCRIPT_EXIT': {
+                const ex = record.exception != null
+                    ? ` (exception: ${serialize(record.exception)})`
+                    : '';
+                return `[${fmtSeq(seq)}] ◀ script end${ex}`;
+            }
+            case 'KEY_EVENT': {
+                const level = record.level ?? 'info';
+                return `[${fmtSeq(seq)}] [${level.toUpperCase()}] ${record.text ?? ''}`;
+            }
+            default:
+                return JSON.stringify(record);
+        }
+    }
+}
+
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 
 /** 将值序列化为简短字符串（用于树形/pipe/block 展示） */
@@ -390,12 +451,65 @@ function _endExprKvFlat(record) {
     return str;
 }
 
+/**
+ * 从 END_EXPR 记录生成 {o:{写变量}, i:{读变量}} 格式的 JSON 字符串（用于 io 格式）。
+ *
+ * - o（output）：writes 中的变量及其值
+ * - i（input） ：reads 中的变量及其值（排除已在 o 中的变量）
+ *
+ * 属性访问（fields）按方向分别归入 o（写）或 i（读），
+ * key 为 "base.offset"（写）或 "base.offset"（读）。
+ */
+function _endExprKvIO(record) {
+    const o = {};
+    const i = {};
+
+    // 写变量 → o
+    if (record.writes?.length > 0) {
+        for (const w of record.writes) {
+            o[w.name] = w.value !== undefined ? w.value : (w.val !== undefined ? w.val : undefined);
+        }
+    }
+
+    // 读变量 → i（排除已写入的变量名）
+    if (record.reads?.length > 0) {
+        for (const r of record.reads) {
+            if (r.name in o) continue;
+            if (r.omitted) {
+                i[r.name] = '<omitted>';
+            } else {
+                i[r.name] = r.value !== undefined ? r.value : (r.val !== undefined ? r.val : undefined);
+            }
+        }
+    }
+
+    // 属性访问按方向分流
+    if (record.fields?.length > 0) {
+        for (const f of record.fields) {
+            const key = `${f.base ?? '?'}.${f.offset ?? '?'}`;
+            const val = f.value !== undefined ? f.value : (f.val !== undefined ? f.val : undefined);
+            if (f.isWrite) {
+                o[key] = val;
+            } else {
+                i[key] = val;
+            }
+        }
+    }
+
+    const hasO = Object.keys(o).length > 0;
+    const hasI = Object.keys(i).length > 0;
+    if (!hasO && !hasI) return '';
+
+    return JSON.stringify({ o: hasO ? o : {}, i: hasI ? i : {} });
+}
+
 /** 根据格式名创建渲染器 */
 function createRenderer(format) {
     switch (format) {
         case 'tree':  return new TreeRenderer();
         case 'block': return new BlockRenderer();
         case 'pipe':  return new PipeRenderer();
+        case 'io':    return new IORenderer();
         default:      return new FlatRenderer();
     }
 }
@@ -453,6 +567,7 @@ trace-render.mjs — 将结构化 NDJSON 渲染为各种展示格式
                       tree   Unicode 树形符号（┬ / └ / │）
                       block  #region/#endregion 折叠块（VS Code 可折叠）
                       pipe   ASCII pipe 符号（| 数量 = 调用深度）
+                      io     语句输入/输出变量：[seq] [row:col] [src] ; {o:{写变量},i:{读变量}}
   --no-seq          不输出 seq 编号前缀（保留选项，目前始终输出 seq）
   --help            显示帮助信息
 
@@ -468,6 +583,14 @@ trace-render.mjs — 将结构化 NDJSON 渲染为各种展示格式
   # 带 smap 解析源码位置后渲染
   node tools/trace-parse.mjs trace.bin --smap trace.smap.json | node tools/trace-render.mjs --format tree
 
+  # 输出语句级输入/输出变量（io 格式）
+  node tools/trace-parse.mjs trace.bin --smap trace.smap.json | node tools/trace-render.mjs --format io
+
+  # 只看语句行的输入输出，过滤掉函数调用噪音
+  node tools/trace-parse.mjs trace.bin --smap trace.smap.json \\
+    | node tools/trace-filter.mjs --type END_EXPR \\
+    | node tools/trace-render.mjs --format io
+
   # 先过滤再渲染
   node tools/trace-parse.mjs trace.bin \\
     | node tools/trace-filter.mjs --type CALL_PRE \\
@@ -480,6 +603,7 @@ trace-render.mjs — 将结构化 NDJSON 渲染为各种展示格式
   tree / block / pipe 格式统一以 CALL_PRE/CALL 配对实时推导调用深度。
   FUNCTION_ENTER/FUNCTION_EXIT 不参与深度计算，按当前深度平铺输出。
   若输入已被 trace-filter 过滤（破坏了配对），层次可能不完整，这是预期行为。
+  io 格式不参与调用深度计算，适合语句级数据流分析。
 `);
 }
 
@@ -494,7 +618,7 @@ async function main() {
     const fmtIdx = args.indexOf('--format');
     const format = fmtIdx >= 0 ? (args[fmtIdx + 1] ?? 'flat') : 'flat';
 
-    const validFormats = ['flat', 'tree', 'block', 'pipe'];
+    const validFormats = ['flat', 'tree', 'block', 'pipe', 'io'];
     if (!validFormats.includes(format)) {
         process.stderr.write(`错误：未知格式 "${format}"，可选值：${validFormats.join('、')}\n`);
         process.exit(1);

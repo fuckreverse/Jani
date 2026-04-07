@@ -6,7 +6,7 @@ Jani 提供两类命令行工具：**前端工具**（插桩与预处理）和**
 |------|----------|------|
 | `jalangi` | `bin/jalangi.mjs` | 插桩 / 运行 / 插桩并运行 |
 | `preprocess` | `bin/preprocess.mjs` | 反混淆 / 语法降级（插桩前的预处理） |
-| `trace-server` | `tools/trace-server/server.mjs` | 浏览器端 WebSocket Trace 收集服务器 |
+| `trace-server` | ~~`tools/trace-server/server.mjs`~~ → **已集成进 JTA Server** | 浏览器端 WebSocket Trace 收集（路由 `/ws/trace`，端口 33000）|
 | `trace-decode` | `tools/trace-decode.mjs` | 将 JTB1 二进制 `.bin` 文件解码为 NDJSON |
 | `trace-parse` | `tools/trace-parse.mjs` | 兼容层：解析旧文本 trace 或 `.bin`，统一输出 NDJSON |
 | `trace-render` | `tools/trace-render.mjs` | 将 NDJSON 渲染为 flat / tree / block / pipe 格式 |
@@ -74,7 +74,7 @@ node bin/jalangi.mjs instrument [选项] <输入文件>
 | `--db-name <n>` | `jalangi-traces` | IndexedDB 数据库名 |
 | `--store-name <n>` | `execution-trace` | IndexedDB ObjectStore 名 |
 | `--no-idb` | — | 禁用 IndexedDB，只通过 console 输出 trace |
-| `--ws-url <url>` | — | WebSocket 服务地址（如 `ws://127.0.0.1:9229/trace`），配合 `trace-server` 使用；不传则禁用 WS |
+| `--ws-url <url>` | — | WebSocket 服务地址（如 `ws://127.0.0.1:33000/ws/trace`），配合 JTA Server 的 `/ws/trace` 端点使用；不传则禁用 WS |
 | `--ws-sab` | — | 启用 SharedArrayBuffer 环形缓冲区（零拷贝模式，需服务器设置 COOP/COEP Header；不支持时自动降级为 postMessage） |
 | `--minify` | — | 压缩运行时 bundle（调用 rollup + terser）|
 | `--deferred-load` | — | 延迟加载模式（需配合 `--split-runtime`）：等待 IDB/WebSocket 后端 ready 后再加载插桩代码，消除启动时内存积压 |
@@ -181,39 +181,48 @@ node bin/preprocess.mjs [选项] <输入文件>
 
 ## 三、`trace-server` — 浏览器 Trace 收集服务器
 
-用于浏览器端插桩场景：浏览器通过 WebSocket 将 trace 事件实时上传，`trace-server` 接收并写入本地 `.bin` 文件。
+> ⚠️ **已集成**：独立的 `tools/trace-server/server.mjs` 已停止维护，其功能完整迁移到 **JTA Server**（`analyzer/server.mjs`）中。
+> 新的 Trace 收集端点为 `ws://localhost:33000/ws/trace`，随 JTA Server 启动自动可用，无需单独启动进程。
+
+### 新的使用方式
 
 ```bash
-node tools/trace-server/server.mjs [选项]
+# 启动 JTA Server（同时提供 trace 收集 + 分析 UI）
+node analyzer/server.mjs [--port 33000] [--traces-dir ./traces] [--no-clear-traces]
 ```
 
-### 选项
+### JTA Server 启动参数（与 Trace 收集相关）
 
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
-| `--port <number>` | `9229` | WebSocket 监听端口 |
-| `--out <dir>` | `traces` | 输出目录，每个连接写入独立 `.bin` 文件 |
-| `--clear` / `--no-clear` | ✅ 开启 | 启动时清空输出目录中的 `.bin` 和 `.smap.json` 文件 |
-| `--max-payload <MB>` | `0`（无限制）| 最大消息体积（MB）|
-| `--verbose` | — | 打印每个 batch 的接收日志 |
-| `--help` | — | 显示帮助 |
+| `--port <number>` | `33000` | HTTP/WS 监听端口 |
+| `--traces-dir <dir>` | `./traces`（相对 cwd）| Trace 文件输出目录 |
+| `--no-clear-traces` | — | 启动时不清空 traces 目录（默认清空 `.bin` 和 `.smap.json`）|
 
 ### 输出文件命名
 
 每个 WebSocket 连接生成一个独立 `.bin` 文件（JTB1 二进制格式）：
 
 ```
-traces/trace_<YYYYMMDD>_<HHmmss>_<ms>_<seq>.bin
+traces/trace_<YYYYMMDD>_<HHmmss>_<ms>_<NNN>.bin
 ```
 
-### HTTP 端点
-
-服务器同时在相同端口提供 HTTP 接口：
+### HTTP 端点（Trace 相关）
 
 | 端点 | 说明 |
 |------|------|
-| `GET /health` | 健康检查，返回连接数、事件数等运行时统计 |
-| `GET /stats` | 详细统计信息（JSON） |
+| `GET /api/trace/stats` | 收集统计：连接数、批次数、事件数、字节数、运行时间 |
+| `GET /api/trace/files` | 列出 traces 目录中的 `.bin` 文件（按 mtime 倒序）|
+| `POST /api/trace/import` | 将指定 `.bin` 文件导入为新分析会话 |
+| `GET /api/health` | 服务健康检查 |
+
+### WebSocket 端点
+
+| 端点 | 说明 |
+|------|------|
+| `ws://localhost:33000/ws/trace` | Trace 收集（原 `ws://localhost:9229/trace`）|
+| `ws://localhost:33000/ws/sessions/:id/progress` | 分析进度推送 |
+| `ws://localhost:33000/ws/instrument/run/:ticket` | 服务端运行输出流 |
 
 ---
 
@@ -318,7 +327,7 @@ node tools/trace-render.mjs [选项] parsed.ndjson
 
 | 选项 | 说明 |
 |------|------|
-| `--format FORMAT` | 输出格式：`flat`（默认）/ `tree` / `block` / `pipe` |
+| `--format FORMAT` | 输出格式：`flat`（默认）/ `tree` / `block` / `pipe` / `io` |
 | `--no-seq` | 不输出 seq 编号前缀 |
 | `--help` | 显示帮助信息 |
 
@@ -330,6 +339,7 @@ node tools/trace-render.mjs [选项] parsed.ndjson
 | `tree` | Unicode 树形符号（┬ 进入 / └ 退出 / │ 延续线）| 人眼阅读调用链 |
 | `block` | `#region`/`#endregion` 折叠块 | VS Code 中打开可折叠查看 |
 | `pipe` | ASCII `|` 符号（数量 = 调用深度）| 纯 ASCII 终端/工具链 |
+| `io` | `[seq] [row:col] [src] ; {o:{写变量}, i:{读变量}}` | 数据流分析、机器消费 |
 
 > **注意**：`tree` / `block` / `pipe` 格式根据 `CALL_PRE`/`CALL` 事件对实时推导调用深度。若输入已被 `trace-filter` 过滤（破坏了 CALL_PRE/CALL 配对），层次可能不完整，这是预期行为。
 
@@ -569,23 +579,23 @@ node bin/jalangi.mjs instrument-and-run \
 ### 场景 5：浏览器插桩 + 本地 Trace 收集
 
 ```bash
-# 第一步：启动 trace-server（先启动！）
-node tools/trace-server/server.mjs \
-  --port 9229 \
-  --out ./traces
+# 第一步：启动 JTA Server（已内置 trace 收集）
+node analyzer/server.mjs --port 33000 --traces-dir ./traces
 
 # 第二步：为浏览器生成插桩文件（内联模式）
 node bin/jalangi.mjs instrument \
   --target browser \
-  --ws-url ws://127.0.0.1:9229/trace \
+  --ws-url ws://127.0.0.1:33000/ws/trace \
   --output dist/app.inst.js \
   src/app.js
 
 # 第三步：把 dist/app.inst.js 替换掉网页中的 app.js 引用，刷新浏览器即可
-# trace 事件会自动通过 WebSocket 发到 trace-server，保存为 ./traces/trace_*.bin
+# trace 事件会自动通过 WebSocket 发到 JTA Server，保存为 ./traces/trace_*.bin
 
 # 第四步：离线分析 trace
 node tools/trace-decode.mjs traces/trace_*.bin | node tools/trace-render.mjs --format tree
+
+# 或在 JTA UI（http://localhost:33000/trace）中一键导入 trace 文件
 ```
 
 ---
@@ -597,7 +607,7 @@ node tools/trace-decode.mjs traces/trace_*.bin | node tools/trace-render.mjs --f
 node bin/jalangi.mjs instrument \
   --target browser \
   --split-runtime \
-  --ws-url ws://127.0.0.1:9229/trace \
+  --ws-url ws://127.0.0.1:33000/ws/trace \
   --minify \
   src/app.js
 # 输出：
@@ -618,7 +628,7 @@ node bin/jalangi.mjs instrument \
   --target browser \
   --split-runtime \
   --deferred-load \
-  --ws-url ws://127.0.0.1:9229/trace \
+  --ws-url ws://127.0.0.1:33000/ws/trace \
   src/app.js
 # 输出（文件名翻转）：
 #   src/app.js          ← 运行时 IIFE（替换原始文件，HTML 无需修改！）
@@ -719,8 +729,8 @@ node bin/jalangi.mjs instrument-and-run --help
 # preprocess 帮助
 node bin/preprocess.mjs --help
 
-# trace-server 帮助
-node tools/trace-server/server.mjs --help
+# JTA Server 帮助（已内置 trace 收集，无独立 trace-server）
+node analyzer/server.mjs --help
 
 # 后处理工具帮助
 node tools/trace-decode.mjs --help

@@ -9,6 +9,7 @@
  */
 
 import { openSync, readSync, fstatSync, closeSync } from 'fs';
+import { setImmediate as setImmediateAsync } from 'timers/promises';
 import { resolve } from 'path';
 import { createRequire } from 'module';
 import BasePlugin from './BasePlugin.mjs';
@@ -32,8 +33,10 @@ const WINDOW_SIZE = 32 * 1024 * 1024;
 const READ_CHUNK  = 16 * 1024 * 1024;
 // 窗口剩余低水位：低于此值时补充数据
 const REFILL_THRESHOLD = 1 * 1024 * 1024;
-// 每次 DB 事务提交的事件数
-const BATCH_SIZE = 2000;
+// 每次 DB 事务提交的事件数（越大写入越快，但每批占用事件循环时间越长）
+const BATCH_SIZE = 5000;
+// 每隔多少个 batch 让出一次事件循环（给进度推送、WebSocket 心跳等机会执行）
+const YIELD_EVERY_BATCHES = 1;
 
 export default class F1EventIndex extends BasePlugin {
     static id = 'F1-EventIndex';
@@ -122,6 +125,7 @@ export default class F1EventIndex extends BasePlugin {
         let readBatch  = [];
         let fieldBatch = [];
         let totalEvents = 0;
+        let batchCount  = 0;
         const dict = new Map();
 
         const flush = () => {
@@ -219,8 +223,14 @@ export default class F1EventIndex extends BasePlugin {
 
             if (eventBatch.length >= BATCH_SIZE) {
                 flush();
+                batchCount++;
                 const pct = Math.min(95, Math.floor(((windowStart + relOffset) / fileSize) * 90) + 5);
                 this.emitProgress(ctx, `已处理 ${totalEvents} 条事件...`, pct);
+                // 每 YIELD_EVERY_BATCHES 个 batch 让出事件循环一次，
+                // 防止长时间同步占用主线程导致 WebSocket/HTTP 请求无法响应。
+                if (batchCount % YIELD_EVERY_BATCHES === 0) {
+                    await setImmediateAsync();
+                }
             }
         }
 

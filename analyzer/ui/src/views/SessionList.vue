@@ -1,5 +1,14 @@
 <template>
   <div class="session-list">
+    <!-- 分析进度侧边抽屉 -->
+    <ProgressDrawer
+      :visible="showProgressDrawer"
+      :session-id="progressSessionId"
+      :session-name="progressSessionName"
+      @close="showProgressDrawer = false"
+      @view-session="goToSession"
+    />
+
     <div class="page-header">
       <div>
         <h1 class="page-title">分析会话</h1>
@@ -135,6 +144,12 @@
             :class="`plugin-dot-${status}`"
             :title="`${pluginId}: ${status}`"
           ></div>
+          <!-- 进行中时，显示「查看进度」按钮 -->
+          <button
+            v-if="['parsing','indexing','processing'].includes(session.status)"
+            class="btn-progress"
+            @click.stop="openProgress(session)"
+          >⚡ 进度</button>
         </div>
       </div>
     </div>
@@ -143,6 +158,10 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
+import { useRouter } from 'vue-router';
+import ProgressDrawer from './ProgressDrawer.vue';
+
+const router = useRouter();
 
 const sessions = ref([]);
 const loading  = ref(true);
@@ -152,6 +171,11 @@ const uploadError = ref('');
 
 const uploadForm = ref({ name: '', bin: null, smap: null, source: null });
 const dragging   = ref({ bin: false, smap: false, source: false });
+
+// 进度抽屉状态
+const showProgressDrawer  = ref(false);
+const progressSessionId   = ref(null);
+const progressSessionName = ref('');
 
 let refreshTimer = null;
 
@@ -194,19 +218,50 @@ async function submitUpload() {
         if (uploadForm.value.name)   formData.append('name',   uploadForm.value.name);
 
         const res = await fetch('/api/sessions', { method: 'POST', body: formData });
-        const data = await res.json();
+
+        // 安全解析 JSON：先检查 Content-Type，避免空响应体导致 "Unexpected end of JSON input"
+        const contentType = res.headers.get('content-type') || '';
+        let data = {};
+        if (contentType.includes('application/json')) {
+            data = await res.json();
+        } else if (!res.ok) {
+            throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        }
 
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+        // 先保存名称（重置 form 前）
+        const savedName = uploadForm.value.name || (uploadForm.value.bin?.name?.replace(/\.bin$/, '')) || '';
 
         showUploadDialog.value = false;
         uploadForm.value = { name: '', bin: null, smap: null, source: null };
         await loadSessions();
+
+        // 打开进度抽屉
+        progressSessionId.value   = data.sessionId;
+        progressSessionName.value = savedName || data.sessionId?.slice(0, 8) || '';
+        showProgressDrawer.value  = true;
 
     } catch (e) {
         uploadError.value = e.message;
     } finally {
         uploading.value = false;
     }
+}
+
+// 导航到会话详情
+function goToSession() {
+    if (progressSessionId.value) {
+        showProgressDrawer.value = false;
+        router.push(`/sessions/${progressSessionId.value}`);
+    }
+}
+
+// 打开进度抽屉（从卡片触发）
+function openProgress(session) {
+    progressSessionId.value   = session.id;
+    progressSessionName.value = session.name || session.id.slice(0, 8);
+    showProgressDrawer.value  = true;
 }
 
 // 工具函数
@@ -329,6 +384,24 @@ onUnmounted(() => {
 .plugin-dot-running  { background: #3b82f6; animation: pulse 1s infinite; }
 .plugin-dot-done     { background: #22c55e; }
 .plugin-dot-failed   { background: #ef4444; }
+.plugin-dot-skipped  { background: #64748b; }
+
+.btn-progress {
+    margin-left: auto;
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(99, 102, 241, .35);
+    background: rgba(99, 102, 241, .1);
+    color: #a5b4fc;
+    font-size: 10px;
+    cursor: pointer;
+    transition: all .15s;
+    flex-shrink: 0;
+}
+.btn-progress:hover {
+    background: rgba(99, 102, 241, .25);
+    border-color: rgba(99, 102, 241, .6);
+}
 
 @keyframes pulse {
     0%, 100% { opacity: 1; }

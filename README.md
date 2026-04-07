@@ -187,7 +187,7 @@ dataflow.js   pluginAnalyzer.js  ←←←←←←←←←  esnstrument.js
 | `@babel/preset-env` | `^7.29` | 按 Browserslist 目标自动选择语法降级变换 |
 | `ws` | `^8.19` | WebSocket 服务，供 Trace Server 和浏览器后端使用 |
 
-> **运行环境**：Node.js ≥ 18（原生 ESM 支持）；浏览器端插桩输出支持现代浏览器。
+> **运行环境**：Node.js ≥ 22（原生 ESM 支持）；浏览器端插桩输出支持现代浏览器。
 
 ---
 
@@ -195,8 +195,8 @@ dataflow.js   pluginAnalyzer.js  ←←←←←←←←←  esnstrument.js
 
 ### 要求
 
-- **Node.js ≥ 18**（需要原生 ESM 支持）
-- npm ≥ 9
+- **Node.js ≥ 22**（需要原生 ESM 支持）
+- npm ≥ 10
 
 ### 步骤
 

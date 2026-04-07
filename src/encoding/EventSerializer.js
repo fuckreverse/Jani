@@ -84,6 +84,29 @@
  *     const eventBuf   = serializer.serializeBatch(batch);  // 可能前置若干 DICT_ENTRY 事件
  */
 
+// ─── 原生方法快照（防止被插桩代码 monkey-patch 后触发钩子递归）─────────────────
+// 必须在模块加载时立即快照，此时被分析代码尚未运行。
+const _jsonStringify     = JSON.stringify;
+const _objDefineProperty = Object.defineProperty;
+const _objGetOwnPropDesc = Object.getOwnPropertyDescriptor;
+const _objGetPrototypeOf = Object.getPrototypeOf;
+
+// 预先快照所有内置原型上的原生 toJSON（Date 是唯一标准内置带 toJSON 的类型）。
+// 被分析代码运行后可能用插桩函数替换这些原型属性；我们在此记录快照，
+// 序列化时若检测到原型上的 toJSON 已非原生函数，才需要做遮蔽处理。
+// key: 原型对象, value: 原生 toJSON 函数引用
+const _nativeToJsonMap = new Map();
+for (const proto of [
+    Date.prototype,
+    // 以下类型通常没有 toJSON，但防御性地记录（值为 undefined 表示无）
+    // Number.prototype, Boolean.prototype 没有 toJSON，不需要
+]) {
+    const desc = _objGetOwnPropDesc(proto, 'toJSON');
+    if (desc && typeof desc.value === 'function') {
+        _nativeToJsonMap.set(proto, desc.value);
+    }
+}
+
 // ─── 魔数 & 版本 ──────────────────────────────────────────────────────────────
 
 /** 文件魔数：ASCII "JTB1" */
@@ -227,9 +250,37 @@ function measureValue(v, omit = false, pool = null) {
         const nb = encodeUtf8(v.length > 256 ? v.slice(0, 255) + '…' : v);
         return { vt: VALUE_TYPE.STRING, extraBytes: 2 + nb.length, strBytes: nb };
     }
-    // 对象
+    // 对象：使用快照的原生 JSON.stringify。
+    // 若对象原型链上的 toJSON 已被插桩代码替换（不再是原生函数），
+    // 临时在实例上遮蔽它，防止 JSON.stringify 调用插桩函数触发 Jalangi 钩子递归。
+    // 性能优化：
+    //   - 大多数对象是 plain object / Array，原型链上根本没有 toJSON → 零额外开销
+    //   - 只有 Date 等对象才需要检查；且只有当原型上的 toJSON 被替换后才需要遮蔽
+    //   - 检查路径：直接走 proto → _nativeToJsonMap 查表，O(1)，无 getOwnPropertyDescriptor
     let s;
-    try { s = JSON.stringify(v); } catch { s = '[object]'; }
+    try {
+        let shielded = false;
+        if (v !== null && typeof v === 'object') {
+            const proto = _objGetPrototypeOf(v);
+            const native = proto !== null ? _nativeToJsonMap.get(proto) : undefined;
+            if (native !== undefined) {
+                // 该原型本来有原生 toJSON；检查当前实例或原型上的 toJSON 是否还是原生版本
+                const ownDesc = _objGetOwnPropDesc(v, 'toJSON');
+                const current = ownDesc ? ownDesc.value : proto.toJSON;  // proto.toJSON 此时可能是插桩版
+                if (current !== native && ownDesc === undefined) {
+                    // 原型上的 toJSON 已被替换为插桩版，且实例上没有自有遮蔽 → 需要遮蔽
+                    try {
+                        _objDefineProperty(v, 'toJSON', { value: native, configurable: true, writable: true });
+                        shielded = true;
+                    } catch { /* frozen/sealed 对象无法遮蔽，序列化可能仍会调用插桩 toJSON，catch 兜底 */ }
+                }
+            }
+        }
+        s = _jsonStringify(v);
+        if (shielded) {
+            try { delete v.toJSON; } catch { /* 忽略 */ }
+        }
+    } catch { s = '[object]'; }
     if (s === undefined) s = '[object]';
     const nb = encodeUtf8(s.length > 256 ? s.slice(0, 255) + '…' : s);
     return { vt: VALUE_TYPE.OBJECT, extraBytes: 2 + nb.length, strBytes: nb };

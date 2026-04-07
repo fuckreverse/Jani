@@ -349,6 +349,20 @@ CREATE INDEX IF NOT EXISTS idx_var_lifetime_name   ON var_lifetime(session_id, n
 CREATE INDEX IF NOT EXISTS idx_bookmarks_session   ON bookmarks(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_run_tasks_status    ON run_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_smap_session        ON smap(session_id);
+
+-- ─── 插件检查点（断点恢复支持）───────────────────────────────────────────────
+-- 每个插件成功完成后写入一条记录；重新调度时跳过已有记录的插件
+-- phase: 'phase1' / 'phase3' / 'phase4' / 'manual'
+
+CREATE TABLE IF NOT EXISTS plugin_checkpoints (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL,
+    plugin_id   TEXT NOT NULL,
+    phase       TEXT,
+    completed_at INTEGER NOT NULL,
+    duration_ms  INTEGER,
+    UNIQUE (session_id, plugin_id)
+);
 CREATE INDEX IF NOT EXISTS idx_events_session_seq  ON events(session_id, id);
 CREATE INDEX IF NOT EXISTS idx_loop_iter_session   ON loop_iterations(session_id, loop_id);
 CREATE INDEX IF NOT EXISTS idx_value_patterns_session ON value_patterns(session_id);

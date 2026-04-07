@@ -59,7 +59,10 @@ Trace 门面（Facade）    logger/TraceLogger.js     高层 API，按环境选�
         │  push（同步，极低开销）
         ▼
     RingBuffer
-        │  积累到 flushThreshold 后 scheduleAsync → _doFlush()
+        │  积累到 flushThreshold 后 scheduleAsync → _doFlush()  ← 阈值触发
+        │  flushIntervalMs > 0 → setInterval → _doFlush()       ← 定时触发（WS 后端时自动启用 50ms）
+        │  外部调用 flush()                                      ← 手动触发
+        │  pagehide / SIGTERM → _drainAllSync() / close()       ← 退出触发
         ▼
   backend.write(batch)  ─── 可同时分发给多个后端 ───►
         ├── MemoryBackend        (测试)
@@ -201,12 +204,42 @@ const mgr = new LogManager({
     backends:                  [backend1, backend2],  // 后端列表
     capacity:                  65536,   // RingBuffer 初始容量
     flushThreshold:            512,     // 积累多少条触发异步 flush
-    flushIntervalMs:           0,       // 定时 flush 间隔（0 = 禁用）
+    flushIntervalMs:           0,       // 定时 flush 间隔（ms），0 = 禁用；见下文「定时 flush」
     drainBatchSize:            1024,    // 每次 drain 最多取多少条
-    autoClose:                 true,    // 是否自动绑定关闭钩子
+    autoClose:                 true,    // 是否自动绑定关闭钩子（pagehide/SIGTERM/SIGINT）
     forceSyncFlushThreshold:   0,       // 【验证用】累计 N 条后在 push() 中同步 flush（0 = 禁用）
 });
 ```
+
+### 定时 flush（`flushIntervalMs`）
+
+当 `flushIntervalMs > 0` 时，`LogManager` 会启动一个 `setInterval` 定期调用 `_doFlush()`：
+
+- **用途**：适合有 WebSocket 后端的场景。JS 密集执行期间事件不断写入 RingBuffer，但主线程不空闲——`queueMicrotask` 可能迟迟得不到执行；定时器保证每隔一定间隔（如 50ms）强制 drain 一次，避免 trace 数据全部积压到脚本结束后才一次性发送。
+- **Node.js 下自动 unref**：定时器调用了 `.unref()`，不会阻止 Node.js 进程退出。
+- **由 `TraceLogger` 自动管理**：`TraceLogger._doInit()` 检测到有 WebSocket 后端时，自动设置 `flushIntervalMs: 50`（用户可通过 `logManagerOptions.flushIntervalMs` 覆盖）；无 WS 后端时默认 0（禁用定时 flush）。
+- **关闭时**：`mgr.close()` 会调用 `clearInterval` 取消定时器，再做最终 drain。
+
+```
+有 WS 后端 → flushIntervalMs = 50ms（自动设置）
+无 WS 后端 → flushIntervalMs = 0（禁用，避免不必要的系统调用）
+```
+
+### 自动关闭钩子（`autoClose: true`）
+
+`autoClose` 为 `true`（默认）时，`LogManager` 在构造时自动绑定退出信号钩子，确保程序退出前不丢数据：
+
+| 环境 | 钩子 | 行为 |
+|------|------|------|
+| 浏览器 | `pagehide` + `beforeunload` | 先同步 `_drainAllSync()`（`writeSync`），再 fire-and-forget `close()` |
+| Node.js | `process.exit` | 同步 `_drainAllSync()`（最后防线，无 await） |
+| Node.js | `SIGTERM` / `SIGINT` | 异步 `await close()`（完整 flush + 关闭后端） |
+
+> **浏览器 `pagehide` 处理策略**：`pagehide`（比 `beforeunload` 更可靠，bfcache 下也会触发）时：
+> 1. 同步调用 `_drainAllSync()`：将 RingBuffer 剩余事件通过 `writeSync()` 推送给 Worker（WsBackend），Worker 会在同步帧内完成 `ws.send()`
+> 2. Fire-and-forget `close()`：给 Worker 时间把 `_sendQueue` 中的数据实际发出；页面生命周期延长约 600ms
+>
+> 对于纯异步后端（IDB），`pagehide` 时数据仍可能部分丢失——建议在 `endExecution` 中显式调用 `await tracer.close()`。
 
 ### 主要 API
 
@@ -290,7 +323,7 @@ const logger = new TraceLogger({
     useIdb:      true,                        // 是否启用 IndexedDB 后端
     dbName:      'jalangi-traces',
     storeName:   'execution-trace',
-    wsUrl:       'ws://localhost:9229/trace', // 可选：同时推送到 WebSocket
+    wsUrl:       'ws://localhost:33000/ws/trace', // 可选：同时推送到 JTA Server（或独立 trace-server 的 ws://localhost:9229/trace）
     wsSab:       false,    // 是否使用 SharedArrayBuffer 模式（需 COOP/COEP header）
     wsWorker:    true,     // 是否将 WebSocket 放入 Web Worker（推荐）
     wsFormat:    'binary', // 'binary'（高吞吐）或 'ndjson'（可读性）
@@ -316,6 +349,24 @@ wsUrl 已设置？
   └─ wsWorker=false     → WsBackend(mode='main')     主线程，调试用
 
 SAB 条件不满足时自动降级到 worker 模式（控制台 warn 提示）
+```
+
+### 定时 flush 自动策略
+
+`TraceLogger._doInit()` 在创建 `LogManager` 时，会根据**是否存在 WebSocket 后端**自动设置 `flushIntervalMs`：
+
+| 场景 | `flushIntervalMs` | 原因 |
+|------|-------------------|------|
+| 浏览器 + `wsUrl` 已设置 | `50`（ms）| 主线程密集执行时 `queueMicrotask` 可能延迟；定时 50ms flush 确保数据实时推送 |
+| 其他场景（无 WS 后端）| `0`（禁用）| Node.js 文件后端/IDB 不需要低延迟推送；关闭定时器减少系统调用 |
+
+用户可通过 `logManagerOptions.flushIntervalMs` 覆盖默认值：
+
+```js
+const tracer = new TraceLogger({
+    wsUrl: 'ws://localhost:33000/ws/trace',
+    logManagerOptions: { flushIntervalMs: 100 },  // 覆盖为 100ms
+});
 ```
 
 ### 主要 API
@@ -376,6 +427,35 @@ _doInit() 完成  →  _flushPreInitQueue()
 > - 离线分析模块、跨语言消费工具等
 
 **设计原则**：轻运行时，重后处理。运行时只写最小信息，所有格式化 / 渲染交由后处理工具完成。
+
+### 序列化安全：防 monkey-patch 递归
+
+`EventSerializer.js` 在**模块加载时立即快照原生方法**，以防止被分析代码对内置函数的 monkey-patch 触发 Jalangi 钩子递归（StackOverflow）：
+
+```
+模块加载时（被分析代码运行之前）：
+  _jsonStringify     = JSON.stringify       ← 快照 JSON.stringify
+  _objDefineProperty = Object.defineProperty
+  _objGetOwnPropDesc = Object.getOwnPropertyDescriptor
+  _objGetPrototypeOf = Object.getPrototypeOf
+  _nativeToJsonMap   = { Date.prototype → 原生 toJSON }  ← 快照原型上的原生 toJSON
+```
+
+**问题场景**：被分析代码可能把 `Date.prototype.toJSON` 替换为插桩版函数。当 `serializeBatch()` 调用 `JSON.stringify(someDate)` 时，`stringify` 内部会调用 `date.toJSON()`——若此时是插桩函数，则触发 Jalangi 的 `call` 钩子 → `serializer.serializeBatch()` → 再次调用 `JSON.stringify` → 无限递归。
+
+**解决方案**（在 `measureValue` 中）：
+1. 用快照的 `_objGetPrototypeOf` 获取对象原型
+2. 查 `_nativeToJsonMap`：该原型本来是否有原生 `toJSON`
+3. 若有且已被替换（检测到 `proto.toJSON !== nativeToJson`），临时在**实例**上遮蔽（`_objDefineProperty` 写入原生版本）
+4. 调用快照的 `_jsonStringify(v)` 序列化（使用原生 `JSON.stringify`）
+5. 删除实例上的临时遮蔽
+
+**性能优化**：
+- 大多数 plain object / Array 原型链上根本没有 `toJSON`，直接跳过，零额外开销
+- 只有 `Date` 等内置类型才进入检查路径，且只在原型 `toJSON` 已被替换后才遮蔽
+- 所有检查路径（`_nativeToJsonMap.get`、`_objGetOwnPropDesc`）均为 O(1)
+
+> **注意**：此快照必须在模块加载时立即执行（模块顶层代码）。若被分析代码在 `EventSerializer.js` 导入之前就修改了这些原型，快照将捕获到已被修改的版本——但实际上 Jalangi 总是在分析代码运行之前导入基础设施模块，因此这个时序是安全的。
 
 ### JTB1 二进制格式（Jani Trace Binary v1）
 
@@ -847,7 +927,7 @@ export function read(iid, name, val, isGlobal, isScriptLocal) {
 import { TraceLogger } from '../../logger/TraceLogger.js';
 
 const tracer = new TraceLogger({
-    wsUrl:    'ws://localhost:9229/trace',
+    wsUrl:    'ws://localhost:33000/ws/trace',  // JTA Server；独立 trace-server 用 ws://localhost:9229/trace
     wsWorker: true,
 });
 tracer.init();  // 不 await，事件自动缓冲
@@ -904,14 +984,24 @@ await tracer.close();
 // 解码文件：node tools/trace-parse.mjs trace.bin --smap trace.smap.json
 ```
 
-### 场景二：浏览器高频插桩，实时传输到 trace server
+### 场景二：浏览器高频插桩，实时传输到 JTA Server / trace server
 
 ```js
+// 方式 A：JTA Server（推荐，端口 33000，含 UI 可直接触发分析）
+// 服务端：npm run analyzer
+const tracer = new TraceLogger({
+    wsUrl:    'ws://localhost:33000/ws/trace',
+    wsWorker: true,     // 推荐：Worker 线程发送，不阻塞主线程
+    wsFormat: 'binary', // 高吞吐（JTB1）
+});
+tracer.init();
+
+// 方式 B：独立 trace server（轻量，无 UI）
 // 服务端：node tools/trace-server/server.mjs
 const tracer = new TraceLogger({
     wsUrl:    'ws://localhost:9229/trace',
-    wsWorker: true,     // 推荐：Worker 线程发送，不阻塞主线程
-    wsFormat: 'binary', // 高吞吐（JTB1）
+    wsWorker: true,
+    wsFormat: 'binary',
 });
 tracer.init();
 ```
@@ -920,7 +1010,7 @@ tracer.init();
 
 ```js
 const tracer = new TraceLogger({
-    wsUrl:   'ws://localhost:9229/trace',
+    wsUrl:   'ws://localhost:33000/ws/trace',
     wsSab:   true,   // 使用 SAB 零拷贝（WsBackend 内部 mode='sab'）
     // 若环境不支持 SAB，自动降级到 worker 模式
 });
@@ -1056,13 +1146,30 @@ const mgr = new LogManager({ backends: [new MyCustomBackend({ ... })] });
 
 ---
 
-## 15. Trace Server（`tools/trace-server/server.mjs`）
+## 15. Trace 接收服务
 
-Trace Server 是一个独立的 Node.js WebSocket 服务器，负责接收来自浏览器端 `WsBackend` 推送的 JTB1 二进制事件批次，并将其持久化到本地 `.bin` 文件。
+### 集成到 JTA Server（推荐）
+
+Trace 接收功能已集成到 **JTA Server**（`analyzer/server.mjs`），使用统一端口 **33000**，WebSocket 端点为 `/ws/trace`：
+
+```bash
+# 启动 JTA Server（同时提供 HTTP API、WebSocket 分析进度 + Trace 接收）
+npm run analyzer
+
+# 浏览器端 TraceLogger 连接
+const tracer = new TraceLogger({
+    wsUrl: 'ws://localhost:33000/ws/trace',
+    wsWorker: true,
+});
+```
+
+JTA Server 收到的 `.bin` 文件写入 `analyzer/data/uploads/` 目录，可在 JTA UI 中直接触发分析。
+
+### 独立 Trace Server（`tools/trace-server/server.mjs`）
+
+如需在不启动完整 JTA 的情况下独立接收 trace，可使用轻量独立服务器：
 
 > 依赖 `src/encoding/EventSerializer.js` 进行 JTB1 二进制帧解析。
-
-### 启动
 
 ```bash
 # 默认启动（端口 9229，输出目录 traces/，启动时清空目录中的旧 .bin 文件）
@@ -1078,7 +1185,7 @@ node tools/trace-server/server.mjs --no-clear
 node tools/trace-server/server.mjs --help
 ```
 
-### 命令行参数
+#### 命令行参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -1089,7 +1196,7 @@ node tools/trace-server/server.mjs --help
 | `--verbose` | 关闭 | 打印每个 batch 的接收日志（含目标文件名） |
 | `--help` | — | 显示帮助信息 |
 
-### 传输协议
+### 传输协议（两种服务通用）
 
 客户端（`WsBackend`）发送二进制帧，格式为：
 
@@ -1125,13 +1232,6 @@ traces/trace_20260314_153043_456_002.bin   ← 第 2 个连接（页面刷新后
 ...
 ```
 
-### HTTP 端点
-
-| 端点 | 说明 |
-|------|------|
-| `GET /health` | 健康检查，返回 `{ status: 'ok', ...stats }` |
-| `GET /stats` | 统计信息（连接数、批次数、事件数、字节数、错误数）|
-
 ### 后处理
 
 收到的 `.bin` 文件可直接用后处理工具链分析：
@@ -1145,4 +1245,8 @@ node tools/trace-parse.mjs traces/trace_*.bin | node tools/trace-filter.mjs --ty
 
 # 带 smap 解析源码位置
 node tools/trace-parse.mjs traces/trace_*.bin --smap traces/trace_*.smap.json
+
+# io 格式查看语句级输入/输出变量
+node tools/trace-parse.mjs traces/trace_*.bin --smap traces/trace_*.smap.json \
+  | node tools/trace-render.mjs --format io
 ```

@@ -324,8 +324,14 @@ export class LogManager {
         if (IS_BROWSER) {
             // pagehide 比 beforeunload 更可靠（在 bfcache 下也会触发）
             const handler = () => {
-                log.debug('auto-close: page unload — draining sync');
-                    this._drainAllSync();
+                log.debug('auto-close: page unload — draining sync then async close');
+                // 1. 同步把 RingBuffer 剩余事件 postMessage 给 WS Worker（writeSync）
+                this._drainAllSync();
+                // 2. 发起异步 close，给 Worker 时间把 _sendQueue 中的数据通过 ws.send 发出。
+                //    使用 keepalive fetch 延长页面生命周期（浏览器允许最多 ~600ms）：
+                //    如果后端支持 close()，fire-and-forget 即可；
+                //    页面关闭后 Worker 也会被终止，但 ws.send 通常在同步帧内完成。
+                this.close().catch(() => {});
             };
             if (typeof addEventListener === 'function') {
                 addEventListener('pagehide',     handler, { once: true });

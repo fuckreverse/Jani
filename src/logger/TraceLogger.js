@@ -35,7 +35,7 @@
  *   await logger.init();
  *
  *   // 浏览器（IDB + WebSocket）：
- *   const logger = new TraceLogger({ useIdb: true, wsUrl: 'ws://localhost:9229/trace' });
+ *   const logger = new TraceLogger({ useIdb: true, wsUrl: 'ws://localhost:33000/ws/trace' });
  *   await logger.init();
  *
  *   // Node.js（文件）：
@@ -252,15 +252,23 @@ export class TraceLogger {
 
         const { LogManager } = await import('./LogManager.js');
 
-        // ndjson 格式下，每条事件约 100~300 字节，64 条/batch 较合理；binary 格式 512 条/batch
+        // binary 格式：每批 512 条（每条 ~20 字节，512 条 ≈ 10KB，Worker ws.send 吞吐佳）
+        // ndjson 格式：每批 64 条（每条 ~200 字节，64 条 ≈ 12KB）
         // 用户通过 logManagerOptions.drainBatchSize 可覆盖。
         const wsFormat = this._opts.wsFormat;
         const defaultDrainBatchSize = wsFormat === 'ndjson' ? 64 : 512;
+
+        // 有 WS 后端时启用定时 flush（50ms），确保同步密集执行阶段产生的事件
+        // 能在主线程空闲时及时发出，而不是全部积压到脚本结束后再一次性 flush。
+        // 用户通过 logManagerOptions.flushIntervalMs 可覆盖（传 0 可禁用）。
+        const hasWsBackend = IS_BROWSER && !!this._opts.wsUrl;
+        const defaultFlushIntervalMs = hasWsBackend ? 50 : 0;
 
         this._mgr = new LogManager({
             backends,
             autoClose: true,
             drainBatchSize: defaultDrainBatchSize,
+            flushIntervalMs: defaultFlushIntervalMs,
             ...this._opts.logManagerOptions,
         });
 

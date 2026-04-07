@@ -40,10 +40,17 @@ router.post('/', async (req, res) => {
         const sourceFile = resolve(workDir, filename);
         writeFileSync(sourceFile, code, 'utf8');
 
+        // 确定输出文件路径（始终显式指定，避免 browser target 默认 in-place 覆盖原文件）
+        const baseName = filename.replace(/\.js$/, '');
+        const instrumentedPath = resolve(workDir, `${baseName}_jalangi_.js`);
+        const smapPath         = resolve(workDir, `${baseName}_jalangi_.smap.json`);
+        const mapPath          = resolve(workDir, `${baseName}_jalangi_.js.map`);
+
         // 构建 instrument 命令
         const args = [
             JALANGI_BIN,
             'instrument',
+            '--output', instrumentedPath,  // 显式指定输出路径
         ];
 
         // 通用选项
@@ -66,6 +73,8 @@ router.post('/', async (req, res) => {
             if (options.dbName)       args.push('--db-name', options.dbName);
             if (options.storeName)    args.push('--store-name', options.storeName);
             if (options.noIdb)        args.push('--no-idb');
+            if (options.wsUrl)        args.push('--ws-url', options.wsUrl);
+            if (options.wsSab)        args.push('--ws-sab');
             if (options.minify)       args.push('--minify');
             if (options.deferredLoad) args.push('--deferred-load');
         }
@@ -83,11 +92,6 @@ router.post('/', async (req, res) => {
         }
 
         // 读取插桩后的文件
-        const baseName = filename.replace(/\.js$/, '');
-        const instrumentedPath = resolve(workDir, `${baseName}_jalangi_.js`);
-        const smapPath         = resolve(workDir, `${baseName}_jalangi_.smap.json`);
-        const mapPath          = resolve(workDir, `${baseName}_jalangi_.js.map`);
-
         let instrumentedCode = '';
         let smapJson = null;
         let mapJson  = null;
