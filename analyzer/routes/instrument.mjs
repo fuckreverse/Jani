@@ -44,13 +44,31 @@ router.post('/', async (req, res) => {
         const args = [
             JALANGI_BIN,
             'instrument',
-            '--inline-iid', // 默认内联 iid（便于返回 smap）
         ];
 
+        // 通用选项
+        if (options.target)        args.push('--target', options.target);
+        if (options.sourceType)    args.push('--source-type', options.sourceType);
+        if (options.sandboxVar)    args.push('--sandbox-var', options.sandboxVar);
+        if (options.randomVar)     args.push('--random-var');
+        if (options.debug)         args.push('--debug');
+
+        // 输出选项
+        if (options.inlineIid !== false) args.push('--inline-iid'); // 默认内联 iid（便于返回 smap）
         if (options.inlineSource)  args.push('--inline-source');
         if (options.noSourceMap)   args.push('--no-source-map');
-        if (options.sandboxVar)    args.push('--sandbox-var', options.sandboxVar);
-        if (options.sourceType)    args.push('--source-type', options.sourceType);
+        if (options.vlcqSourceMap) args.push('--vlcq-source-map');
+        if (options.splitRuntime)  args.push('--split-runtime');
+        if (options.dryRun)        args.push('--dry-run');
+
+        // 浏览器专属选项（仅 target=browser 时生效）
+        if (options.target === 'browser') {
+            if (options.dbName)       args.push('--db-name', options.dbName);
+            if (options.storeName)    args.push('--store-name', options.storeName);
+            if (options.noIdb)        args.push('--no-idb');
+            if (options.minify)       args.push('--minify');
+            if (options.deferredLoad) args.push('--deferred-load');
+        }
 
         args.push(sourceFile);
 

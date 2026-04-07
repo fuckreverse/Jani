@@ -174,11 +174,31 @@ async function executeRun(runId, { code, filename, options, env, dataDir }) {
             '--trace-file', traceFile,
         ];
 
+        // 通用选项
+        if (options.target)       args.push('--target', options.target);
+        if (options.sourceType)   args.push('--source-type', options.sourceType);
+        if (options.sandboxVar)   args.push('--sandbox-var', options.sandboxVar);
+        if (options.randomVar)    args.push('--random-var');
+        if (options.debug)        args.push('--debug');
+
+        // instrument-and-run 支持的插桩选项
         if (options.inlineIid)    args.push('--inline-iid');
         if (options.inlineSource) args.push('--inline-source');
         if (options.noWrite)      args.push('--no-write');
-        if (options.sandboxVar)   args.push('--sandbox-var', options.sandboxVar);
-        if (options.sourceType)   args.push('--source-type', options.sourceType);
+
+        // 分析插件（可多个）
+        if (Array.isArray(options.analyses)) {
+            for (const a of options.analyses) {
+                if (a && a.trim()) args.push('--analysis', a.trim());
+            }
+        }
+
+        // 初始参数（可多个，格式 key:value）
+        if (Array.isArray(options.initParams)) {
+            for (const kv of options.initParams) {
+                if (kv && kv.trim()) args.push('--init-param', kv.trim());
+            }
+        }
 
         args.push(sourceFile);
 
