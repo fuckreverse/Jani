@@ -47,6 +47,14 @@
           @click="activeTab = tab.id"
         >{{ tab.label }}</button>
 
+        <!-- Phase 2 重跑按钮（F3/F4/A3 数据丢失时使用）-->
+        <button
+          class="tab-btn btn-run-phase2"
+          :disabled="phase2Running"
+          @click="runPhase2"
+          title="强制重新运行 F3 调用图 / F4 变量生命周期 / A3 热路径分析"
+        >{{ phase2Running ? '⏳ P2 分析中...' : '🔄 重跑 Phase 2' }}</button>
+
         <!-- Phase 3：手动触发按钮 -->
         <button
           class="tab-btn btn-run-phase3"
@@ -65,7 +73,7 @@
 
       <!-- Tab 内容区域（使用 v-show 保留已加载组件状态） -->
       <EventsTab      v-show="activeTab === 'events'"      ref="eventsTabRef"      :session-id="sessionId" />
-      <FunctionsTab   v-show="activeTab === 'functions'"   ref="functionsTabRef"   :session-id="sessionId" />
+      <FunctionsTab   v-show="activeTab === 'functions'"   ref="functionsTabRef"   :session-id="sessionId" :plugin-status="pluginStatus" />
       <LoopsTab       v-show="activeTab === 'loops'"       ref="loopsTabRef"       :session-id="sessionId" />
       <PatternsTab    v-show="activeTab === 'patterns'"    ref="patternsTabRef"    :session-id="sessionId" />
       <CryptoTab      v-show="activeTab === 'crypto'"      ref="cryptoTabRef"      :session-id="sessionId" />
@@ -195,9 +203,26 @@ const objmutTabRef      = ref(null);
 const obfuscationTabRef = ref(null);
 const summaryTabRef     = ref(null);
 
-// ─── Phase 3 / 4 触发按钮 ────────────────────────────────────────────────────
+// ─── Phase 2 / 3 / 4 触发按钮 ──────────────────────────────────────────────
+const phase2Running = ref(false);
 const phase3Running = ref(false);
 const phase4Running = ref(false);
+
+async function runPhase2() {
+    phase2Running.value = true;
+    try {
+        const res = await fetch(`/api/sessions/${sessionId.value}/re-run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phase: 'phase2', forceRerun: true }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (e) {
+        console.error('runPhase2 error:', e);
+        phase2Running.value = false;
+    }
+    setTimeout(() => { phase2Running.value = false; }, 3000);
+}
 
 async function runPhase3() {
     phase3Running.value = true;
@@ -247,6 +272,9 @@ async function loadSession() {
 // ─── 插件完成时通知对应 Tab 刷新 ──────────────────────────────────────────────
 function onPluginDone(pluginId) {
     const pluginTabMap = {
+        'F3-CallGraphBuilder':      () => functionsTabRef.value?.reload(),
+        'F4-VariableLifetime':      () => eventsTabRef.value?.reload(),
+        'A3-HotPathAnalyzer':       () => patternsTabRef.value?.reload(),
         'A5-LoopDetector':          () => loopsTabRef.value?.reload(),
         'A8-ValuePatternDetector':  () => patternsTabRef.value?.reload(),
         'I1-CryptoDetector':        () => cryptoTabRef.value?.reload(),
@@ -374,6 +402,12 @@ onUnmounted(() => {
     color: #a5b4fc !important;
     border-color: rgba(99,102,241,0.4) !important;
 }
+
+.btn-run-phase2 {
+    background: rgba(251,191,36,0.1); border-color: rgba(251,191,36,0.3); color: #fcd34d;
+}
+.btn-run-phase2:hover:not(:disabled) { background: rgba(251,191,36,0.2); }
+.btn-run-phase2:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .btn-run-phase3 {
     background: rgba(34,197,94,0.1); border-color: rgba(34,197,94,0.3); color: #86efac;

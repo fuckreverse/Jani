@@ -5,7 +5,15 @@
  * 输入：.bin 文件（JTB1 格式）
  * 输出：events、writes、reads、fields 表
  *
- * 采用 16MB 滑动窗口流式读取，避免大文件 OOM。
+ * 采用 32MB 滑动窗口流式读取，避免大文件 OOM。
+ *
+ * 性能优化：
+ *   - BATCH_SIZE = 50000：减少事务提交次数，大幅提升写入吞吐
+ *   - YIELD_EVERY_BATCHES = 10：减少事件循环让出频率
+ *   - DataView 只在窗口 compact 时重建，消除热路径 GC 压力
+ *   - serializeValue fast-path：基础类型跳过 try/catch（V8 JIT 友好）
+ *   - stmtXxx.run(...row) spread 传参：比数组传参快
+ *   - F1 运行期间临时关闭外键约束，消除每次 INSERT 的父表查找开销
  */
 
 import { openSync, readSync, fstatSync, closeSync } from 'fs';
@@ -32,14 +40,12 @@ const { FILE_HEADER_SIZE, EVENT_HEADER_SIZE, deserializeEvent, isBinaryTrace } =
 
 // 滑动窗口大小：32MB，保证单个超长事件也能容纳
 const WINDOW_SIZE = 32 * 1024 * 1024;
-// 每次从文件追加读取的块大小：16MB
-const READ_CHUNK  = 16 * 1024 * 1024;
 // 窗口剩余低水位：低于此值时补充数据
 const REFILL_THRESHOLD = 1 * 1024 * 1024;
-// 每次 DB 事务提交的事件数（越大写入越快，但每批占用事件循环时间越长）
-const BATCH_SIZE = 5000;
-// 每隔多少个 batch 让出一次事件循环（给进度推送、WebSocket 心跳等机会执行）
-const YIELD_EVERY_BATCHES = 1;
+// 每次 DB 事务提交的事件数：50000 条一批，大幅减少事务提交次数
+const BATCH_SIZE = 50000;
+// 每隔多少个 batch 让出一次事件循环（值越大吞吐越高，但每次 HTTP/WS 响应延迟越长）
+const YIELD_EVERY_BATCHES = 10;
 
 export default class F1EventIndex extends BasePlugin {
     static id = 'F1-EventIndex';
@@ -76,50 +82,37 @@ export default class F1EventIndex extends BasePlugin {
 
         const rawDb = db.raw();
 
-        // 批量写入（手动 BEGIN/COMMIT 事务，不通过 db.transaction() 以避免 flush）
-        // PreparedStatement 在每次 flushTx 内部 prepare + free，不跨越 await 边界，
-        // 避免两个并发 F1 实例共享同一份 Statement 句柄导致 "Statement closed" 错误。
-        const flushTx = (evts, wrs, rds, flds) => {
-            const stmtEvent = rawDb.prepare(
-                'INSERT OR IGNORE INTO events (id, session_id, type, iid, line, col, src_text) VALUES (?, ?, ?, ?, ?, ?, ?)'
-            );
-            const stmtWrite = rawDb.prepare(
-                'INSERT INTO writes (event_id, session_id, name, value, omitted) VALUES (?, ?, ?, ?, ?)'
-            );
-            const stmtRead = rawDb.prepare(
-                'INSERT INTO reads (event_id, session_id, name, value, omitted) VALUES (?, ?, ?, ?, ?)'
-            );
-            const stmtField = rawDb.prepare(
-                'INSERT INTO fields (event_id, session_id, base, offset, is_write, value, omitted) VALUES (?, ?, ?, ?, ?, ?, ?)'
-            );
-            rawDb.run('BEGIN');
-            try {
-                for (const e of evts) stmtEvent.run(e);
-                for (const w of wrs)  stmtWrite.run(w);
-                for (const r of rds)  stmtRead.run(r);
-                for (const f of flds) stmtField.run(f);
-                rawDb.run('COMMIT');
-            } catch (e) {
-                try { rawDb.run('ROLLBACK'); } catch (_) {}
-                throw e;
-            } finally {
-                stmtEvent.free();
-                stmtWrite.free();
-                stmtRead.free();
-                stmtField.free();
-            }
-        };
+        // 临时关闭外键约束：F1 是纯批量写入，不需要每次 INSERT 都查父表
+        rawDb.pragma('foreign_keys = OFF');
+
+        // prepare() 在循环外只做一次，避免重复编译 SQL
+        const stmtEvent = rawDb.prepare(
+            'INSERT OR IGNORE INTO events (id, session_id, type, iid, line, col, src_text) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        );
+        const stmtWrite = rawDb.prepare(
+            'INSERT INTO writes (event_id, session_id, name, value, omitted) VALUES (?, ?, ?, ?, ?)'
+        );
+        const stmtRead = rawDb.prepare(
+            'INSERT INTO reads (event_id, session_id, name, value, omitted) VALUES (?, ?, ?, ?, ?)'
+        );
+        const stmtField = rawDb.prepare(
+            'INSERT INTO fields (event_id, session_id, base, offset, is_write, value, omitted) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        );
+
+        // better-sqlite3 原生事务：spread 传参比数组传参快（跳过内部类型判断）
+        const flushTx = rawDb.transaction((evts, wrs, rds, flds) => {
+            for (const e of evts) stmtEvent.run(...e);
+            for (const w of wrs)  stmtWrite.run(...w);
+            for (const r of rds)  stmtRead.run(...r);
+            for (const f of flds) stmtField.run(...f);
+        });
 
         // ── 滑动窗口状态 ──────────────────────────────────────────────────────
-        // window: 始终保持 WINDOW_SIZE 大小的 Buffer
-        // windowStart: window[0] 在文件中的字节偏移
-        // windowLen: window 内有效数据的字节数
-        // relOffset: 当前事件在 window 中的偏移（相对于 window[0]）
         const window = Buffer.alloc(WINDOW_SIZE);
         let windowStart = FILE_HEADER_SIZE; // 跳过文件头
-        let windowLen = 0;
-        let filePos = FILE_HEADER_SIZE;     // 下次从文件读的位置
-        let relOffset = 0;                  // window 内当前偏移
+        let windowLen   = 0;
+        let filePos     = FILE_HEADER_SIZE; // 下次从文件读的位置
+        let relOffset   = 0;               // window 内当前偏移
 
         // 初始填充
         const initRead = Math.min(WINDOW_SIZE, fileSize - filePos);
@@ -127,6 +120,9 @@ export default class F1EventIndex extends BasePlugin {
             windowLen = readSync(fd, window, 0, initRead, filePos);
             filePos += windowLen;
         }
+
+        // DataView 复用：只在窗口 compact（relOffset 归零）后重建，消除热路径 GC 压力
+        let view = new DataView(window.buffer, window.byteOffset, windowLen);
 
         // ── 批次缓冲 ──────────────────────────────────────────────────────────
         let eventBatch = [];
@@ -136,6 +132,11 @@ export default class F1EventIndex extends BasePlugin {
         let totalEvents = 0;
         let batchCount  = 0;
         const dict = new Map();
+
+        // 速率统计
+        const startTime = Date.now();
+        let lastReportTime = startTime;
+        let lastReportEvents = 0;
 
         const flush = () => {
             if (eventBatch.length === 0) return;
@@ -148,36 +149,30 @@ export default class F1EventIndex extends BasePlugin {
 
         // ── 主解析循环 ────────────────────────────────────────────────────────
         while (true) {
-            // 剩余可用字节
             const remaining = windowLen - relOffset;
 
             // 补充数据：剩余低于阈值且文件还有数据
             if (remaining < REFILL_THRESHOLD && filePos < fileSize) {
-                // 把未处理部分移到 window 头部
                 if (relOffset > 0) {
+                    // compact：把未处理部分移到头部，然后重建 DataView
                     window.copyWithin(0, relOffset, windowLen);
-                    windowLen -= relOffset;
+                    windowLen  -= relOffset;
                     windowStart += relOffset;
-                    relOffset = 0;
+                    relOffset   = 0;
+                    // 窗口地址未变但有效长度改变，重建 DataView
+                    view = new DataView(window.buffer, window.byteOffset, windowLen);
                 }
-                // 填满 window
                 const toRead = Math.min(WINDOW_SIZE - windowLen, fileSize - filePos);
                 if (toRead > 0) {
                     const n = readSync(fd, window, windowLen, toRead, filePos);
                     windowLen += n;
-                    filePos += n;
+                    filePos   += n;
+                    // 数据追加后更新 DataView 有效长度
+                    view = new DataView(window.buffer, window.byteOffset, windowLen);
                 }
             }
 
-            // 再次检查是否有足够数据解析事件头
             if (windowLen - relOffset < EVENT_HEADER_SIZE) break;
-
-            // 构建 DataView（只覆盖 window 有效部分）
-            const ab = window.buffer.slice(
-                window.byteOffset,
-                window.byteOffset + windowLen
-            );
-            const view = new DataView(ab);
 
             let result;
             try {
@@ -190,7 +185,6 @@ export default class F1EventIndex extends BasePlugin {
 
             if (!result || result.nextOffset <= relOffset) break;
 
-            const advance = result.nextOffset - relOffset;
             relOffset = result.nextOffset;
 
             const { event } = result;
@@ -203,9 +197,9 @@ export default class F1EventIndex extends BasePlugin {
                 eventId,
                 sessionId,
                 event.type,
-                event.iid ?? null,
-                event.line ?? null,
-                event.col  ?? null,
+                event.iid   ?? null,
+                event.line  ?? null,
+                event.col   ?? null,
                 event.srcText ?? event.src_text ?? null,
             ]);
 
@@ -223,7 +217,7 @@ export default class F1EventIndex extends BasePlugin {
                 for (const f of event.fields) {
                     fieldBatch.push([
                         eventId, sessionId,
-                        f.base ?? null, f.offset ?? null,
+                        f.base   ?? null, f.offset ?? null,
                         f.isWrite ? 1 : 0,
                         serializeValue(f.value),
                         f.omitted ? 1 : 0,
@@ -234,10 +228,27 @@ export default class F1EventIndex extends BasePlugin {
             if (eventBatch.length >= BATCH_SIZE) {
                 flush();
                 batchCount++;
+
                 const pct = Math.min(95, Math.floor(((windowStart + relOffset) / fileSize) * 90) + 5);
-                this.emitProgress(ctx, `已处理 ${totalEvents} 条事件...`, pct);
-                // 每 YIELD_EVERY_BATCHES 个 batch 让出事件循环一次，
-                // 防止长时间同步占用主线程导致 WebSocket/HTTP 请求无法响应。
+
+                // 计算瞬时速率（近期 N 批的平均）
+                const now = Date.now();
+                const dtMs = now - lastReportTime;
+                const dtEvents = totalEvents - lastReportEvents;
+                const eventsPerSec = dtMs > 0 ? Math.round(dtEvents / dtMs * 1000) : 0;
+                lastReportTime   = now;
+                lastReportEvents = totalEvents;
+
+                const elapsed = ((now - startTime) / 1000).toFixed(1);
+                const rateStr = eventsPerSec > 0
+                    ? ` | ${(eventsPerSec / 1000).toFixed(0)}k ev/s`
+                    : '';
+                this.emitProgress(ctx,
+                    `已处理 ${(totalEvents / 1000).toFixed(0)}k 条事件${rateStr} | 耗时 ${elapsed}s`,
+                    pct,
+                    { eventsPerSec, totalEvents, elapsedMs: now - startTime }
+                );
+
                 if (batchCount % YIELD_EVERY_BATCHES === 0) {
                     await setImmediateAsync();
                 }
@@ -247,6 +258,9 @@ export default class F1EventIndex extends BasePlugin {
         flush();
         closeSync(fd);
 
+        // 恢复外键约束
+        rawDb.pragma('foreign_keys = ON');
+
         db.run('UPDATE sessions SET event_count = ? WHERE id = ?', totalEvents, sessionId);
 
         this.emitProgress(ctx, `完成，共 ${totalEvents} 条事件`, 100);
@@ -254,8 +268,17 @@ export default class F1EventIndex extends BasePlugin {
     }
 }
 
+/**
+ * 将运行时值序列化为 JSON 字符串存入 DB。
+ * fast-path：基础类型直接 JSON.stringify，跳过 try/catch（V8 JIT 友好）。
+ * 仅 object/function 类型才走 try/catch 防止循环引用抛出。
+ */
 function serializeValue(value) {
     if (value === undefined) return null;
     if (value === null) return 'null';
+    const t = typeof value;
+    if (t === 'number' || t === 'boolean') return JSON.stringify(value);
+    if (t === 'string') return JSON.stringify(value);
+    // object / function / symbol — 可能循环引用，走 try/catch
     try { return JSON.stringify(value); } catch { return String(value); }
 }

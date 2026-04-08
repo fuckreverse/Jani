@@ -1,6 +1,9 @@
 /**
  * PluginEngine.mjs — 插件调度器
  * 拓扑排序 + 串行/并发执行 + 进度回调 + 断点恢复
+ *
+ * 注：切换到 better-sqlite3 后，全局 DB 互斥锁已移除。
+ * better-sqlite3 使用同步 API，不存在 PreparedStatement 并发竞争问题。
  */
 
 import { resolve, dirname } from 'path';
@@ -16,20 +19,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 /** 全局插件注册表：id → 插件类 */
 const pluginRegistry = new Map();
 
-/**
- * 全局 DB 互斥锁：确保同一时刻只有一个插件在执行 DB 密集操作。
- * sql.js 是单例内存数据库，PreparedStatement 句柄在并发 async 插件之间
- * 会被交叉访问，导致 "Statement closed" 错误。
- */
-let _dbMutex = Promise.resolve();
-
-function acquireDbLock() {
-    let release;
-    const next = new Promise(resolve => { release = resolve; });
-    const wait = _dbMutex.then(() => release);
-    _dbMutex = next;
-    return wait; // resolves to the release() function
-}
+/** 是否已完成插件发现（只需执行一次） */
+let _discovered = false;
 
 /**
  * 注册插件类
@@ -43,9 +34,10 @@ export function registerPlugin(PluginClass) {
 }
 
 /**
- * 从 plugins/ 目录自动发现并加载所有插件
+ * 从 plugins/ 目录自动发现并加载所有插件（幂等，只在首次调用时执行）
  */
 export async function autoDiscover() {
+    if (_discovered) return;
     const pluginsDir = resolve(__dirname, 'plugins');
     let files;
     try {
@@ -66,6 +58,7 @@ export async function autoDiscover() {
             log.warn({ err: e, file }, `加载插件 ${file} 失败`);
         }
     }
+    _discovered = true;
 }
 
 /**
@@ -325,9 +318,6 @@ async function runPlugin(sessionId, pluginId, options = {}) {
 
     const startTime = Date.now();
 
-    // 获取 DB 互斥锁：防止多个并发插件同时操作 sql.js 单例
-    const releaseDbLock = await acquireDbLock();
-
     try {
         log.debug({ sessionId, pluginId }, `插件 ${pluginId} 开始执行`);
         emit({ type: 'plugin_start', plugin: pluginId, status: 'running', message: '开始执行...' });
@@ -344,12 +334,8 @@ async function runPlugin(sessionId, pluginId, options = {}) {
         log.info({ sessionId, pluginId, durationMs: duration }, `插件 ${pluginId} 执行完成 (${duration}ms)`);
         emit({ type: 'plugin_done', plugin: pluginId, status: 'done', durationMs: duration });
 
-        // 每个插件完成后持久化到磁盘（flush 只在 dirty 时才 export）
-        db.flush();
-
     } catch (e) {
         const duration = Date.now() - startTime;
-        // 打印完整错误信息（包含 stack）
         log.error({
             err: e,
             sessionId,
@@ -361,9 +347,6 @@ async function runPlugin(sessionId, pluginId, options = {}) {
 
         // 标记 session 失败
         db.run('UPDATE sessions SET status = ? WHERE id = ?', 'failed', sessionId);
-    } finally {
-        // 无论成功/失败，都释放 DB 锁，让下一个插件可以开始
-        releaseDbLock();
     }
 }
 

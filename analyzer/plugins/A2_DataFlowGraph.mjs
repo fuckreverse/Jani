@@ -1,9 +1,16 @@
 /**
  * A2_DataFlowGraph.mjs — 构建变量级 def-use 数据流图
  * 写入 dataflow_edges 表
+ *
+ * 性能优化：
+ *  - 预加载 event_id → {iid, line} Map，消除循环内 N 次 db.get
+ *  - 使用 prepared statement + 大 batch 事务写入
+ *  - batch_size 500 → 5000
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+
+const BATCH_SIZE = 5000;
 
 export default class A2DataFlowGraph extends BasePlugin {
     static id = 'A2-DataFlowGraph';
@@ -13,6 +20,7 @@ export default class A2DataFlowGraph extends BasePlugin {
 
     async run(ctx) {
         const { sessionId } = ctx;
+        const rawDb = db.raw();
 
         this.emitProgress(ctx, '清空旧数据...', 0);
         db.run('DELETE FROM dataflow_edges WHERE session_id = ?', [sessionId]);
@@ -23,33 +31,49 @@ export default class A2DataFlowGraph extends BasePlugin {
             [sessionId]
         );
 
-        this.emitProgress(ctx, '读取所有 reads...', 20);
+        this.emitProgress(ctx, '读取所有 reads...', 15);
         const reads = db.all(
             'SELECT event_id, name FROM reads WHERE session_id = ? AND name IS NOT NULL ORDER BY event_id ASC',
             [sessionId]
         );
 
-        // 建索引：varName → 所有 write event_id（按时间排序）
+        // ── 预加载所有涉及 read 事件的 iid/line，消除 N 次 db.get ────────────
+        this.emitProgress(ctx, '预加载事件元数据...', 25);
+        // 仅加载 reads 涉及的 event_id（通常数量远少于 events 总量）
+        const readEventIds = reads.map(r => r.event_id);
+        const eventMeta = new Map(); // event_id → {iid, line}
+
+        const CHUNK = 900;
+        for (let i = 0; i < readEventIds.length; i += CHUNK) {
+            const chunk = readEventIds.slice(i, i + CHUNK);
+            const ph = chunk.map(() => '?').join(',');
+            const rows = rawDb.prepare(
+                `SELECT id, iid, line FROM events WHERE session_id = ? AND id IN (${ph})`
+            ).all(sessionId, ...chunk);
+            for (const r of rows) eventMeta.set(r.id, { iid: r.iid, line: r.line });
+        }
+
+        // ── 建 write 索引：varName → [{event_id, value}] ────────────────────
+        this.emitProgress(ctx, '构建 def-use 边...', 35);
         const writeIndex = new Map(); // name → [{event_id, value}]
         for (const w of writes) {
             if (!writeIndex.has(w.name)) writeIndex.set(w.name, []);
             writeIndex.get(w.name).push({ event_id: w.event_id, value: w.value });
         }
 
-        this.emitProgress(ctx, '构建 def-use 边...', 40);
         let edges = [];
         let totalWritten = 0;
 
-        const flushEdges = () => {
+        const stmt = rawDb.prepare(
+            'INSERT INTO dataflow_edges (session_id, from_event_id, to_event_id, from_var, to_var, edge_type, iid, line) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        );
+        const flushEdges = rawDb.transaction((batch) => {
+            for (const e of batch) stmt.run(...e);
+        });
+
+        const flush = () => {
             if (edges.length === 0) return;
-            db.transaction(() => {
-                for (const e of edges) {
-                    db.run(
-                        'INSERT INTO dataflow_edges (session_id, from_event_id, to_event_id, from_var, to_var, edge_type, iid, line) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                        e
-                    );
-                }
-            });
+            flushEdges(edges);
             totalWritten += edges.length;
             edges = [];
         };
@@ -58,7 +82,7 @@ export default class A2DataFlowGraph extends BasePlugin {
             const defs = writeIndex.get(r.name);
             if (!defs) continue;
 
-            // 找最近一次在 r.event_id 之前的 write（二分查找）
+            // 找最近一次在 r.event_id 之前的 write（线性扫描，已排序）
             let bestDef = null;
             for (const d of defs) {
                 if (d.event_id < r.event_id) bestDef = d;
@@ -66,71 +90,81 @@ export default class A2DataFlowGraph extends BasePlugin {
             }
             if (!bestDef) continue;
 
-            // 获取 line/iid
-            const evt = db.get('SELECT iid, line FROM events WHERE id = ? AND session_id = ?', [r.event_id, sessionId]);
-
+            const meta = eventMeta.get(r.event_id);
             edges.push([
                 sessionId,
                 bestDef.event_id,
                 r.event_id,
-                r.name,    // from_var
-                r.name,    // to_var
+                r.name,
+                r.name,
                 'assign',
-                evt ? evt.iid : null,
-                evt ? evt.line : null,
+                meta?.iid ?? null,
+                meta?.line ?? null,
             ]);
 
-            if (edges.length >= 500) {
-                flushEdges();
+            if (edges.length >= BATCH_SIZE) {
+                flush();
                 this.emitProgress(ctx, `已写入 ${totalWritten} 条 assign 边...`, 55);
             }
         }
-        flushEdges();
+        flush();
 
-        // field 边
+        // ── field 边（批量加载 iid/line）─────────────────────────────────────
         this.emitProgress(ctx, '构建 field 边...', 70);
         const fields = db.all(
             'SELECT event_id, base, offset, value, is_write FROM fields WHERE session_id = ? LIMIT 5000',
             [sessionId]
         );
 
+        // 预加载 field event meta
+        const fieldEventIds = fields.map(f => f.event_id);
+        const fieldMeta = new Map();
+        for (let i = 0; i < fieldEventIds.length; i += CHUNK) {
+            const chunk = fieldEventIds.slice(i, i + CHUNK);
+            const ph = chunk.map(() => '?').join(',');
+            const rows = rawDb.prepare(
+                `SELECT id, iid, line FROM events WHERE session_id = ? AND id IN (${ph})`
+            ).all(sessionId, ...chunk);
+            for (const r of rows) fieldMeta.set(r.id, { iid: r.iid, line: r.line });
+        }
+
         for (const f of fields) {
             if (f.base === null || f.base === undefined) continue;
             if (f.offset === null || f.offset === undefined) continue;
 
             const varLabel = `${f.base}.${f.offset}`;
-            const evt = db.get('SELECT iid, line FROM events WHERE id = ? AND session_id = ?', [f.event_id, sessionId]);
+            const meta = fieldMeta.get(f.event_id);
 
             if (f.is_write) {
                 edges.push([
                     sessionId,
-                    f.event_id,    // from_event_id (writer)
-                    null,          // to_event_id
+                    f.event_id,
+                    null,
                     String(f.base),
                     varLabel,
                     'field_write',
-                    evt ? evt.iid : null,
-                    evt ? evt.line : null,
+                    meta?.iid ?? null,
+                    meta?.line ?? null,
                 ]);
             } else {
                 edges.push([
                     sessionId,
-                    null,          // from_event_id
-                    f.event_id,    // to_event_id (reader)
+                    null,
+                    f.event_id,
                     varLabel,
                     String(f.base),
                     'field_read',
-                    evt ? evt.iid : null,
-                    evt ? evt.line : null,
+                    meta?.iid ?? null,
+                    meta?.line ?? null,
                 ]);
             }
 
-            if (edges.length >= 500) {
-                flushEdges();
+            if (edges.length >= BATCH_SIZE) {
+                flush();
                 this.emitProgress(ctx, `已写入 field 边...`, 85);
             }
         }
-        flushEdges();
+        flush();
 
         const total = db.get('SELECT COUNT(*) as cnt FROM dataflow_edges WHERE session_id = ?', [sessionId]);
         const cnt = total ? total.cnt : 0;

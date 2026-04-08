@@ -41,10 +41,27 @@
                     :class="'plugin-' + getPluginStatus(pid)"
                   >
                     <span class="plugin-status-icon">{{ pluginIcon(getPluginStatus(pid)) }}</span>
-                    <span class="plugin-name">{{ (PLUGIN_META[pid] || {}).label || pid }}</span>
-                    <span class="plugin-desc">{{ (PLUGIN_META[pid] || {}).desc || '' }}</span>
-                    <span v-if="getPluginDuration(pid)" class="plugin-duration">{{ formatDuration(getPluginDuration(pid)) }}</span>
-                    <span v-if="getPluginStatus(pid) === 'running'" class="plugin-spinner"></span>
+                    <div class="plugin-main">
+                      <div class="plugin-top-row">
+                        <span class="plugin-name">{{ (PLUGIN_META[pid] || {}).label || pid }}</span>
+                        <span v-if="getPluginDuration(pid)" class="plugin-duration">{{ formatDuration(getPluginDuration(pid)) }}</span>
+                        <span v-if="getPluginStatus(pid) === 'running'" class="plugin-spinner"></span>
+                      </div>
+                      <!-- 运行中：进度条 + message -->
+                      <template v-if="getPluginStatus(pid) === 'running' && getPluginProgress(pid)">
+                        <div class="plugin-progress-track">
+                          <div class="plugin-progress-fill" :style="{ width: getPluginProgress(pid).pct + '%' }"></div>
+                        </div>
+                        <div class="plugin-progress-msg">
+                          <span class="plugin-msg-text">{{ getPluginProgress(pid).message }}</span>
+                          <span v-if="getPluginProgress(pid).eventsPerSec > 0" class="plugin-rate">
+                            {{ (getPluginProgress(pid).eventsPerSec / 1000).toFixed(0) }}k ev/s
+                          </span>
+                        </div>
+                      </template>
+                      <!-- 未运行：显示描述 -->
+                      <span v-else class="plugin-desc">{{ (PLUGIN_META[pid] || {}).desc || '' }}</span>
+                    </div>
                   </div>
                 </div>
               </transition>
@@ -113,6 +130,7 @@ const PHASES_CONFIG = [
 // ── 状态 ─────────────────────────────────────────────────────────────────────
 const pluginStatusMap   = ref({});
 const pluginDurationMap = ref({});
+const pluginProgressMap = ref({}); // pluginId → { pct, message, eventsPerSec, totalEvents }
 const sessionStatus     = ref('');
 const errors            = ref([]);
 const enabledPlugins    = ref(new Set());
@@ -175,11 +193,22 @@ function handleWsEvent(evt) {
 
     } else if (evt.type === 'plugin_start') {
         pluginStatusMap.value[evt.plugin] = 'running';
+        pluginProgressMap.value[evt.plugin] = { pct: 0, message: '开始执行...', eventsPerSec: 0, totalEvents: 0 };
         sessionStatus.value = 'processing';
+
+    } else if (evt.plugin && evt.status === 'running' && evt.message != null) {
+        // 插件内部进度更新（来自 emitProgress）
+        pluginProgressMap.value[evt.plugin] = {
+            pct:          evt.progress ?? pluginProgressMap.value[evt.plugin]?.pct ?? 0,
+            message:      evt.message,
+            eventsPerSec: evt.eventsPerSec ?? 0,
+            totalEvents:  evt.totalEvents  ?? 0,
+        };
 
     } else if (evt.type === 'plugin_done') {
         pluginStatusMap.value[evt.plugin] = 'done';
         if (evt.durationMs) pluginDurationMap.value[evt.plugin] = evt.durationMs;
+        delete pluginProgressMap.value[evt.plugin];
 
     } else if (evt.type === 'plugin_failed') {
         pluginStatusMap.value[evt.plugin] = 'failed';
@@ -287,6 +316,7 @@ function phaseBadgeClass(phase) {
 
 function getPluginStatus(id)   { return pluginStatusMap.value[id] || 'idle'; }
 function getPluginDuration(id) { return pluginDurationMap.value[id] || null; }
+function getPluginProgress(id) { return pluginProgressMap.value[id] || null; }
 
 function pluginIcon(status) {
     const icons = { done: '✓', skipped: '↩', running: '…', failed: '✗', pending: '○', idle: '·' };
@@ -308,6 +338,7 @@ watch(() => props.sessionId, (id) => {
     disconnectWs();
     pluginStatusMap.value = {};
     pluginDurationMap.value = {};
+    pluginProgressMap.value = {};
     errors.value = [];
     enabledPlugins.value = new Set();
     phases.value = PHASES_CONFIG.map((p, i) => ({ ...p, expanded: i < 2 }));
@@ -405,7 +436,7 @@ onUnmounted(() => disconnectWs());
 /* 插件行 */
 .plugin-list { padding: 4px 20px 10px 32px; }
 .plugin-row {
-    display: flex; align-items: center; gap: 8px;
+    display: flex; align-items: flex-start; gap: 8px;
     padding: 5px 8px; border-radius: 6px; margin-bottom: 2px;
     font-size: 12px; transition: background .15s;
 }
@@ -416,23 +447,47 @@ onUnmounted(() => disconnectWs());
 .plugin-failed  { color: #fca5a5; }
 .plugin-pending { color: #94a3b8; }
 .plugin-idle    { color: #475569; }
-.plugin-status-icon { width: 14px; text-align: center; font-size: 11px; }
+.plugin-status-icon { width: 14px; text-align: center; font-size: 11px; padding-top: 2px; flex-shrink: 0; }
+
+/* 插件主体：name 行 + 进度条 + desc */
+.plugin-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.plugin-top-row { display: flex; align-items: center; gap: 6px; }
 .plugin-name {
-    font-weight: 600; min-width: 108px;
-    font-family: monospace; font-size: 11px;
+    font-weight: 600; font-family: monospace; font-size: 11px; flex-shrink: 0;
 }
 .plugin-desc {
-    flex: 1; color: var(--text-muted, #64748b); font-size: 11px;
+    color: var(--text-muted, #64748b); font-size: 11px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.plugin-duration { font-size: 10px; color: var(--text-muted, #64748b); font-family: monospace; }
+.plugin-duration { font-size: 10px; color: var(--text-muted, #64748b); font-family: monospace; margin-left: auto; flex-shrink: 0; }
 .plugin-spinner {
-    display: inline-block; width: 10px; height: 10px;
+    display: inline-block; width: 10px; height: 10px; flex-shrink: 0;
     border: 2px solid rgba(99, 102, 241, .3);
     border-top-color: #6366f1;
     border-radius: 50%; animation: spin .8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* 插件内部进度条 */
+.plugin-progress-track {
+    height: 3px; background: rgba(99, 102, 241, .15);
+    border-radius: 2px; overflow: hidden;
+}
+.plugin-progress-fill {
+    height: 100%; background: linear-gradient(90deg, #3b82f6, #6366f1);
+    border-radius: 2px; transition: width .4s ease;
+}
+.plugin-progress-msg {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+}
+.plugin-msg-text {
+    font-size: 10px; color: var(--text-muted, #64748b);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;
+}
+.plugin-rate {
+    font-size: 10px; color: #6366f1; font-family: monospace;
+    flex-shrink: 0; font-weight: 600;
+}
 
 /* 展开/折叠过渡 */
 .collapse-enter-active, .collapse-leave-active { transition: max-height .2s ease, opacity .2s; overflow: hidden; }

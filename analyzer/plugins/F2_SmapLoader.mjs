@@ -39,11 +39,32 @@ export default class F2SmapLoader extends BasePlugin {
             throw new Error(`无法读取 .smap.json "${session.smap_path}": ${e.message}`);
         }
 
-        const iids = smapData.iids;
+        // 支持两种格式：
+        //   新格式（buildSmapJson 输出）：{ version, iids: { "8": [...], ... }, ... }
+        //   旧格式（直接导出 sourceInfo）：{ "8": [...], "16": [...], ... }（iid 作为顶层 key）
+        let iids = smapData.iids;
         if (!iids || typeof iids !== 'object') {
-            this.emitProgress(ctx, '.smap.json 中无 iids 字段，跳过', 100);
-            this.emitDone(ctx, { skipped: true, reason: 'no iids' });
-            return;
+            // 尝试旧格式：检测顶层是否有数字 key（代表 iid）且对应值为数组
+            const NON_IID_KEYS = new Set([
+                'nBranches', 'originalCodeFileName', 'instrumentedCodeFileName',
+                'url', 'evalSid', 'evalIid', 'code', 'version',
+            ]);
+            const firstNumericEntry = Object.entries(smapData).find(
+                ([k, v]) => !NON_IID_KEYS.has(k) && !isNaN(Number(k)) && Array.isArray(v)
+            );
+            if (firstNumericEntry) {
+                // 旧格式：过滤出所有 iid-like 条目（数字 key + 数组值）
+                iids = Object.fromEntries(
+                    Object.entries(smapData).filter(
+                        ([k, v]) => !NON_IID_KEYS.has(k) && !isNaN(Number(k)) && Array.isArray(v)
+                    )
+                );
+                this.emitProgress(ctx, '检测到旧格式 .map.json，自动兼容处理...', 5);
+            } else {
+                this.emitProgress(ctx, '.smap.json 中无 iids 字段，跳过', 100);
+                this.emitDone(ctx, { skipped: true, reason: 'no iids' });
+                return;
+            }
         }
 
         this.emitProgress(ctx, '写入 smap 表...', 10);

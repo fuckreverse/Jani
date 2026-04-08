@@ -53,13 +53,14 @@ export default class BasePlugin {
      * @param {string} message
      * @param {number} [progress] 0~100
      */
-    emitProgress(ctx, message, progress) {
+    emitProgress(ctx, message, progress, extra) {
         if (typeof ctx.emit === 'function') {
             ctx.emit({
                 plugin: this.constructor.id,
                 status: 'running',
                 message,
                 progress: progress ?? null,
+                ...(extra ?? {}),
             });
         }
     }

@@ -2,6 +2,10 @@
  * I3_ObfuscationDetector.mjs — 检测混淆特征
  * 检测变量名熵值、字符串解密函数特征、控制流平坦化
  * 写入 obfuscation_hints 表
+ *
+ * 性能优化：
+ *  - string_decoder 检测：用 GROUP BY + HAVING 子查询预筛选，
+ *    再一次批量取 return_value 样本，消除 N 次单行查询
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
@@ -34,6 +38,7 @@ export default class I3ObfuscationDetector extends BasePlugin {
 
     async run(ctx) {
         const { sessionId } = ctx;
+        const rawDb = db.raw();
 
         this.emitProgress(ctx, '清空旧数据...', 0);
         db.run('DELETE FROM obfuscation_hints WHERE session_id = ?', [sessionId]);
@@ -76,8 +81,10 @@ export default class I3ObfuscationDetector extends BasePlugin {
             ]);
         }
 
-        // ── 2. 字符串解密函数检测 ────────────────────────────────────────────
+        // ── 2. 字符串解密函数检测（优化：批量取 return_value，消除 N 次查询）──
         this.emitProgress(ctx, '检测字符串解密函数...', 40);
+
+        // 第一步：GROUP 筛选出候选函数（已有 HAVING 过滤）
         const callGroups = db.all(
             `SELECT fn_name, fn_iid, COUNT(*) as cnt, COUNT(DISTINCT return_value) as distinct_ret
              FROM call_edges
@@ -87,35 +94,53 @@ export default class I3ObfuscationDetector extends BasePlugin {
             [sessionId]
         );
 
-        for (const cg of callGroups) {
-            const retVals = db.all(
-                'SELECT return_value FROM call_edges WHERE session_id = ? AND fn_name = ? LIMIT 20',
-                [sessionId, cg.fn_name]
-            );
-            const strRets = retVals.filter(r => r.return_value && r.return_value.startsWith('"'));
-            if (strRets.length >= 3) {
-                hints.push([
-                    sessionId,
-                    'string_decoder',
-                    `函数 "${cg.fn_name}" 被调用 ${cg.cnt} 次，返回 ${cg.distinct_ret} 个不同字符串，疑似字符串解密函数`,
-                    cg.fn_iid,
-                    null,
-                    Math.min(0.4 + strRets.length * 0.1, 0.90),
-                ]);
+        if (callGroups.length > 0) {
+            // 第二步：一次批量取所有候选函数的 return_value 样本（最多 20 条/函数）
+            // 用 fn_name IN (...) 批量取，比 N 次单独查询快很多
+            const CHUNK = 900;
+            const fnNames = callGroups.map(cg => cg.fn_name).filter(Boolean);
+
+            // fn_name → return_value[]
+            const retValMap = new Map();
+            for (let i = 0; i < fnNames.length; i += CHUNK) {
+                const chunk = fnNames.slice(i, i + CHUNK);
+                const ph = chunk.map(() => '?').join(',');
+                const rows = rawDb.prepare(
+                    `SELECT fn_name, return_value FROM call_edges
+                     WHERE session_id = ? AND fn_name IN (${ph}) AND return_value IS NOT NULL
+                     LIMIT ${chunk.length * 20}`
+                ).all(sessionId, ...chunk);
+                for (const r of rows) {
+                    let arr = retValMap.get(r.fn_name);
+                    if (!arr) { arr = []; retValMap.set(r.fn_name, arr); }
+                    if (arr.length < 20) arr.push(r.return_value);
+                }
+            }
+
+            for (const cg of callGroups) {
+                const retVals = retValMap.get(cg.fn_name) || [];
+                const strRets = retVals.filter(r => r && r.startsWith('"'));
+                if (strRets.length >= 3) {
+                    hints.push([
+                        sessionId,
+                        'string_decoder',
+                        `函数 "${cg.fn_name}" 被调用 ${cg.cnt} 次，返回 ${cg.distinct_ret} 个不同字符串，疑似字符串解密函数`,
+                        cg.fn_iid,
+                        null,
+                        Math.min(0.4 + strRets.length * 0.1, 0.90),
+                    ]);
+                }
             }
         }
 
         // ── 3. 控制流平坦化检测 ──────────────────────────────────────────────
         this.emitProgress(ctx, '检测控制流平坦化...', 70);
-        // 特征：循环次数多，但循环体内 switch/比较语句多
-        // 代理指标：同一 iid 执行次数极多，且 writes 中存在大量数字赋值（状态机变量）
         const hotIids = db.all(
             'SELECT iid, count, line FROM iid_counts WHERE session_id = ? AND count >= 10 ORDER BY count DESC LIMIT 50',
             [sessionId]
         );
 
         if (hotIids.length > 0) {
-            // 检查是否有变量被频繁改写数字值（状态机特征）
             const numericWrites = db.all(
                 `SELECT w.name, COUNT(*) as cnt, COUNT(DISTINCT w.value) as distinct_vals
                  FROM writes w

@@ -584,14 +584,16 @@ router.get('/:id/functions', (req, res) => {
             ...params, minCallsN, limitN, offsetN
         );
 
-        // 总数（用于分页）
+        // 总数（用于分页）：用 CTE 对聚合结果再计数，完全避免相关子查询
         const totalRow = db.get(
-            `SELECT COUNT(DISTINCT fn_name) AS total
-             FROM call_edges
-             WHERE ${conditions.join(' AND ')}
-             AND (SELECT COUNT(*) FROM call_edges ce2
-                  WHERE ce2.session_id = call_edges.session_id
-                    AND ce2.fn_name = call_edges.fn_name) >= ?`,
+            `SELECT COUNT(*) AS total
+             FROM (
+               SELECT fn_name
+               FROM call_edges
+               WHERE ${conditions.join(' AND ')}
+               GROUP BY fn_name, fn_iid
+               HAVING COUNT(*) >= ?
+             )`,
             ...params, minCallsN
         );
 

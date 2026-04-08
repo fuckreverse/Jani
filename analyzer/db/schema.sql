@@ -54,39 +54,36 @@ CREATE TABLE IF NOT EXISTS events (
 -- ─── 变量写入 ────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS writes (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          INTEGER PRIMARY KEY,
     event_id    INTEGER NOT NULL,
     session_id  TEXT NOT NULL,
     name        TEXT,
     value       TEXT,
-    omitted     INTEGER DEFAULT 0,
-    FOREIGN KEY (event_id) REFERENCES events(id)
+    omitted     INTEGER DEFAULT 0
 );
 
 -- ─── 变量读取 ────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS reads (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          INTEGER PRIMARY KEY,
     event_id    INTEGER NOT NULL,
     session_id  TEXT NOT NULL,
     name        TEXT,
     value       TEXT,
-    omitted     INTEGER DEFAULT 0,
-    FOREIGN KEY (event_id) REFERENCES events(id)
+    omitted     INTEGER DEFAULT 0
 );
 
 -- ─── 属性读写 ────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS fields (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          INTEGER PRIMARY KEY,
     event_id    INTEGER NOT NULL,
     session_id  TEXT NOT NULL,
     base        TEXT,
     offset      TEXT,
     is_write    INTEGER,
     value       TEXT,
-    omitted     INTEGER DEFAULT 0,
-    FOREIGN KEY (event_id) REFERENCES events(id)
+    omitted     INTEGER DEFAULT 0
 );
 
 -- ─── 源码映射 ────────────────────────────────────────────────────────────────
@@ -363,9 +360,13 @@ CREATE TABLE IF NOT EXISTS iid_counts (
 CREATE INDEX IF NOT EXISTS idx_events_session_type ON events(session_id, type);
 CREATE INDEX IF NOT EXISTS idx_events_iid          ON events(session_id, iid);
 CREATE INDEX IF NOT EXISTS idx_writes_name         ON writes(session_id, name);
+CREATE INDEX IF NOT EXISTS idx_writes_event        ON writes(session_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_reads_name          ON reads(session_id, name);
+CREATE INDEX IF NOT EXISTS idx_reads_event         ON reads(session_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_fields_offset       ON fields(session_id, offset);
+CREATE INDEX IF NOT EXISTS idx_fields_event        ON fields(session_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_call_edges_session  ON call_edges(session_id);
+CREATE INDEX IF NOT EXISTS idx_call_edges_fn_name  ON call_edges(session_id, fn_name);
 CREATE INDEX IF NOT EXISTS idx_taint_session       ON taint_paths(session_id);
 CREATE INDEX IF NOT EXISTS idx_var_lifetime_name   ON var_lifetime(session_id, name);
 CREATE INDEX IF NOT EXISTS idx_bookmarks_session   ON bookmarks(session_id, seq);

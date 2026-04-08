@@ -28,7 +28,11 @@
     </div>
 
     <div v-if="fnExecLoading" class="loading"><div class="spinner"></div><span>加载中...</span></div>
-    <div v-else-if="fnExecList.length === 0" class="empty-state"><p>暂无函数数据（需先运行 F3 · CallGraphBuilder）</p></div>
+    <div v-else-if="fnExecList.length === 0" class="empty-state">
+      <p v-if="f3Status === 'done'">暂无函数数据（F3 已运行，但未找到调用记录。可尝试点击「🔄 重跑 Phase 2」按钮重新分析）</p>
+      <p v-else-if="f3Status === 'running' || f3Status === 'pending'">F3 · CallGraphBuilder 正在分析中，请稍候...</p>
+      <p v-else>暂无函数数据（需先运行 F3 · CallGraphBuilder，点击顶部「🔄 重跑 Phase 2」按钮）</p>
+    </div>
     <div v-else>
       <!-- 函数列表 -->
       <div class="fn-list">
@@ -155,12 +159,15 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive, computed, onMounted } from 'vue';
 import { truncate, formatValue, formatArgValue } from '../../composables/useSessionUtils.js';
 
 const props = defineProps({
-    sessionId: { type: String, required: true },
+    sessionId:    { type: String,  required: true },
+    pluginStatus: { type: Object,  default: () => ({}) },
 });
+
+const f3Status = computed(() => props.pluginStatus?.['F3-CallGraphBuilder'] ?? '');
 
 const fnExecList     = ref([]);
 const fnExecTotal    = ref(0);
