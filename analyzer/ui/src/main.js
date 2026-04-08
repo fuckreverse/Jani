@@ -7,6 +7,7 @@ import InstrumentStudio from './views/InstrumentStudio.vue';
 import TraceMonitor from './views/TraceMonitor.vue';
 import WorkspaceList from './views/WorkspaceList.vue';
 import WorkspaceDetail from './views/WorkspaceDetail.vue';
+import StorageAnalyzer from './views/StorageAnalyzer.vue';
 
 const routes = [
     { path: '/',                  component: SessionList,      name: 'home' },
@@ -15,6 +16,7 @@ const routes = [
     { path: '/trace',             component: TraceMonitor,     name: 'trace-monitor' },
     { path: '/workspaces',        component: WorkspaceList,    name: 'workspaces' },
     { path: '/workspaces/:id',    component: WorkspaceDetail,  name: 'workspace-detail' },
+    { path: '/storage',           component: StorageAnalyzer,  name: 'storage-analyzer' },
 ];
 
 const router = createRouter({

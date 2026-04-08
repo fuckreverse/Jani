@@ -1,7 +1,7 @@
 /**
  * routes/projects.mjs — 工作空间（Project）REST API
  *
- * POST   /api/projects                    上传原始 JS，创建工作空间并触发插桩
+ * POST   /api/projects                    上传原始 JS，创建工作空间并触发插桩（支持预处理）
  * GET    /api/projects                    列出所有工作空间
  * GET    /api/projects/:id                工作空间详情
  * DELETE /api/projects/:id                删除工作空间
@@ -40,7 +40,7 @@ const PHASE1_PLUGINS = ['F1-EventIndex'];
 const PHASE2_PLUGINS = ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'];
 
 // ── POST /api/projects ──────────────────────────────────────────────────────
-// 上传原始 JS 源码，创建工作空间，异步触发插桩
+// 上传原始 JS 源码，创建工作空间，异步触发（预处理+）插桩
 
 router.post('/', async (req, res) => {
     try {
@@ -71,6 +71,16 @@ router.post('/', async (req, res) => {
             } catch { /* 忽略解析失败 */ }
         }
 
+        // 预处理选项
+        let preprocess = null;
+        if (req.body?.preprocess) {
+            try {
+                preprocess = typeof req.body.preprocess === 'string'
+                    ? JSON.parse(req.body.preprocess)
+                    : req.body.preprocess;
+            } catch { /* 忽略解析失败 */ }
+        }
+
         const now = Date.now();
 
         // 写入数据库（status=instrumenting）
@@ -78,13 +88,13 @@ router.post('/', async (req, res) => {
             `INSERT INTO projects (id, name, created_at, source_file, status, instrument_options, updated_at)
              VALUES (?, ?, ?, ?, 'instrumenting', ?, ?)`,
             projectId, projectName, now, sourceDest,
-            JSON.stringify(options), now
+            JSON.stringify({ options, preprocess }), now
         );
 
         const wsProgressBroadcast = req.app.get('wsProgressBroadcast');
 
         // 异步插桩（不阻塞响应）
-        _runInstrumentation(projectId, projectDir, sourceDest, originalName, options, wsProgressBroadcast)
+        _runInstrumentation(projectId, projectDir, sourceDest, originalName, options, preprocess, wsProgressBroadcast)
             .catch(e => {
                 log.error({ err: e }, '[projects] instrumentation error:');
                 db.run(
@@ -141,8 +151,9 @@ router.get('/:id', (req, res) => {
         return res.json({
             ...row,
             sessions,
-            instrumented_size: fileSize(row.instrumented_path),
-            smap_size:         fileSize(row.smap_path),
+            instrumented_size:   fileSize(row.instrumented_path),
+            smap_size:           fileSize(row.smap_path),
+            preprocessed_size:   fileSize(row.preprocessed_path),
         });
     } catch (e) {
         log.error({ err: e }, '[GET /api/projects/:id] error:');
@@ -184,18 +195,28 @@ router.post('/:id/fork', async (req, res) => {
             } catch { /* 忽略解析失败 */ }
         }
 
+        // 预处理选项
+        let preprocess = null;
+        if (req.body?.preprocess) {
+            try {
+                preprocess = typeof req.body.preprocess === 'string'
+                    ? JSON.parse(req.body.preprocess)
+                    : req.body.preprocess;
+            } catch { /* 忽略解析失败 */ }
+        }
+
         const now = Date.now();
 
         db.run(
             `INSERT INTO projects (id, name, created_at, source_file, status, instrument_options, updated_at)
              VALUES (?, ?, ?, ?, 'instrumenting', ?, ?)`,
             projectId, projectName, now, sourceDest,
-            JSON.stringify(options), now
+            JSON.stringify({ options, preprocess }), now
         );
 
         const wsProgressBroadcast = req.app.get('wsProgressBroadcast');
 
-        _runInstrumentation(projectId, projectDir, sourceDest, originalName, options, wsProgressBroadcast)
+        _runInstrumentation(projectId, projectDir, sourceDest, originalName, options, preprocess, wsProgressBroadcast)
             .catch(e => {
                 log.error({ err: e }, '[projects/fork] instrumentation error:');
                 db.run(
@@ -275,11 +296,12 @@ router.post('/:id/sessions', async (req, res) => {
             copyFileSync(project.smap_path, smapDest);
         }
 
-        // 复制原始源码（可选，用于源码定位）
+        // 复制预处理后源码（优先）或原始源码（用于源码定位）
         let sourceDest = null;
-        if (project.source_file && existsSync(project.source_file)) {
-            sourceDest = resolve(sessionDir, basename(project.source_file));
-            copyFileSync(project.source_file, sourceDest);
+        const preferredSource = project.preprocessed_path || project.source_file;
+        if (preferredSource && existsSync(preferredSource)) {
+            sourceDest = resolve(sessionDir, basename(preferredSource));
+            copyFileSync(preferredSource, sourceDest);
         }
 
         const sessionName = req.body?.name
@@ -375,6 +397,26 @@ router.get('/:id/instrumented', (req, res) => {
     }
 });
 
+// ── GET /api/projects/:id/preprocessed ──────────────────────────────────────
+// 下载预处理后代码（若存在）
+
+router.get('/:id/preprocessed', (req, res) => {
+    try {
+        const { id } = req.params;
+        const project = db.get('SELECT * FROM projects WHERE id = ?', id);
+        if (!project) return res.status(404).json({ error: 'Project not found' });
+        if (!project.preprocessed_path || !existsSync(project.preprocessed_path)) {
+            return res.status(404).json({ error: 'Preprocessed file not found (preprocessing may not be enabled)' });
+        }
+
+        res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${basename(project.preprocessed_path)}"`);
+        res.send(readFileSync(project.preprocessed_path, 'utf8'));
+    } catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+});
+
 // ── GET /api/projects/:id/smap ───────────────────────────────────────────────
 // 下载 smap.json
 
@@ -411,18 +453,77 @@ router.get('/:id/progress', (req, res) => {
     }
 });
 
-// ── 内部：执行插桩 ──────────────────────────────────────────────────────────
+// ── 内部：执行（预处理+）插桩 ───────────────────────────────────────────────
 
-async function _runInstrumentation(projectId, projectDir, sourcePath, originalName, options, wsProgressBroadcast) {
+async function _runInstrumentation(projectId, projectDir, sourcePath, originalName, options, preprocess, wsProgressBroadcast) {
     wsProgressBroadcast?.(projectId, { type: 'instrument_start', projectId });
 
     const workDir = resolve(tmpdir(), `jta-proj-${projectId}`);
     mkdirSync(workDir, { recursive: true });
 
-    const baseName        = originalName.replace(/\.js$/, '');
+    const baseName         = originalName.replace(/\.js$/, '');
     const instrumentedPath = resolve(workDir, `${baseName}_jalangi_.js`);
     const smapPath         = resolve(workDir, `${baseName}_jalangi_.map.json`);
 
+    // ── 步骤 1：预处理（可选）────────────────────────────────────────────────
+    let sourceToInstrument = sourcePath;
+    let preprocessedDest   = null;
+
+    if (preprocess && preprocess.enabled) {
+        wsProgressBroadcast?.(projectId, { type: 'preprocess_start', projectId });
+        try {
+            const originalCode = readFileSync(sourcePath, 'utf8');
+            const { preprocessCode } = await import(`${JANI_ROOT}/src/preprocess/index.js`);
+
+            const {
+                preset,
+                deobfuscate    = {},
+                normalizeArrow = {},
+                sourceType     = 'script',
+            } = preprocess;
+
+            // 将 esXXXX 年份标识映射为 browserslist targets
+            const ES_YEAR_TARGETS = {
+                es2015: 'chrome 49',
+                es2017: 'chrome 58',
+                es2020: 'chrome 80',
+                es2022: 'chrome 103',
+            };
+            const rawTargets     = preprocess.transpile?.targets ?? 'es2015';
+            const resolvedTargets = ES_YEAR_TARGETS[rawTargets] ?? rawTargets;
+            const transpile      = { ...preprocess.transpile, targets: resolvedTargets };
+
+            const result = await preprocessCode(originalCode, {
+                preset,
+                deobfuscate,
+                transpile,
+                normalizeArrow,
+                sourceType,
+            });
+
+            // 将预处理后的代码写入工作目录
+            const preprocessedWorkPath = resolve(workDir, `${baseName}_preprocessed_.js`);
+            writeFileSync(preprocessedWorkPath, result.code, 'utf8');
+            sourceToInstrument = preprocessedWorkPath;
+
+            // 同时复制到项目目录（稳定路径）
+            preprocessedDest = resolve(projectDir, `${baseName}_preprocessed_.js`);
+            writeFileSync(preprocessedDest, result.code, 'utf8');
+
+            log.info(
+                { projectId, warnings: result.warnings?.length ?? 0 },
+                `[projects] preprocess done, warnings: ${result.warnings?.length ?? 0}`
+            );
+            wsProgressBroadcast?.(projectId, { type: 'preprocess_done', projectId });
+        } catch (e) {
+            log.error({ err: e }, '[projects] preprocess error:');
+            // 清理临时目录
+            try { rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
+            throw new Error(`预处理失败: ${e.message}`);
+        }
+    }
+
+    // ── 步骤 2：插桩 ─────────────────────────────────────────────────────────
     const args = [
         JALANGI_BIN,
         'instrument',
@@ -458,7 +559,7 @@ async function _runInstrumentation(projectId, projectDir, sourcePath, originalNa
         if (options.deferredLoad) args.push('--deferred-load');
     }
 
-    args.push(sourcePath);
+    args.push(sourceToInstrument);
 
     const result = await _spawnProcess('node', args, { cwd: JANI_ROOT });
 
@@ -491,9 +592,10 @@ async function _runInstrumentation(projectId, projectDir, sourcePath, originalNa
     const now = Date.now();
     db.run(
         `UPDATE projects
-         SET status='ready', instrumented_path=?, smap_path=?, iid_count=?, updated_at=?
+         SET status='ready', instrumented_path=?, preprocessed_path=?, smap_path=?, iid_count=?, updated_at=?
          WHERE id=?`,
         existsSync(destInstrumented) ? destInstrumented : null,
+        preprocessedDest ?? null,
         existsSync(destSmap)         ? destSmap         : null,
         iidCount, now, projectId
     );
@@ -502,7 +604,8 @@ async function _runInstrumentation(projectId, projectDir, sourcePath, originalNa
         type: 'instrument_done',
         projectId,
         iidCount,
-        smapAvailable: existsSync(destSmap),
+        smapAvailable:          existsSync(destSmap),
+        preprocessingApplied:   !!preprocessedDest,
     });
 }
 

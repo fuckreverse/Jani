@@ -138,7 +138,8 @@ function transformAst(object, visitorPost, visitorPre, context, noIgnore) {
             key === 'params'
         ) {
             newContext = CONTEXT.PARAMS;
-        } else if (type === 'ClassMethod' && key === 'params') {
+        } else if ((type === 'ClassMethod' || type === 'ObjectMethod') && key === 'params') {
+            // ObjectMethod 包含 getter/setter/普通方法，其 params 同样是绑定目标，不能插桩
             newContext = CONTEXT.PARAMS;
         } else if (context === CONTEXT.OEXP) {
             newContext = CONTEXT.OEXP2;

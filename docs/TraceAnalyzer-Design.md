@@ -87,10 +87,11 @@ CREATE TABLE projects (
     name            TEXT NOT NULL,
     created_at      INTEGER NOT NULL,
     source_file     TEXT,           -- 原始 JS 路径（服务端存储）
+    preprocessed_path TEXT,         -- 预处理后 JS 路径（可为 null，表示未启用预处理）
     instrumented_path TEXT,         -- 插桩后 JS 路径
     smap_path       TEXT,           -- smap.json 路径
     status          TEXT DEFAULT 'pending',  -- pending / instrumenting / ready / failed
-    instrument_options TEXT DEFAULT '{}',    -- 插桩时使用的选项（JSON）
+    instrument_options TEXT DEFAULT '{}',    -- 插桩时使用的选项（JSON，含 preprocess 子对象）
     iid_count       INTEGER DEFAULT 0,
     error_msg       TEXT,
     updated_at      INTEGER
@@ -566,6 +567,7 @@ JTA 包含以下独立页面：
 | 会话详情 | `/sessions/:id` | 代码视图 + 事件列表 + 分析面板；含内联进度条 |
 | **插桩工作台** | `/instrument` | 独立插桩页面，见 6.4 节 |
 | **Trace 监控** | `/trace` | WebSocket Trace 收集状态监控，见 6.6 节 |
+| **空间分析** | `/storage` | 扫描 data 目录、统计各类文件占用、提供一键清理建议；`StorageAnalyzer.vue` |
 
 ---
 
@@ -634,6 +636,12 @@ Cytoscape 渲染，节点=函数，边=调用关系，支持缩放/展开/搜索
 │   支持：粘贴 / 上传文件   │   点击"插桩"后实时更新        │
 │                          │                              │
 ├──────────────────────────┴──────────────────────────────┤
+│  ⚙ 预处理（可选，可折叠）                                │
+│  ☐ 启用   Preset: [反混淆 ▼]  源码类型: [script ▼]      │
+│  ▶ 反混淆选项（replaceVoid / foldConstants / ...）       │
+│  ▶ 箭头函数规范化选项                                     │
+│  ▶ 语法降级目标（ES2015 / ES2017 / ES2020 / ES2022）     │
+├──────────────────────────────────────────────────────────┤
 │  插桩选项                                                │
 │  ☐ --inline-iid      iid→位置 map 内联到插桩文件         │
 │  ☐ --inline-source   原始源码内联到 source map           │
@@ -647,15 +655,17 @@ Cytoscape 渲染，节点=函数，边=调用关系，支持缩放/展开/搜索
 │             适合网页 JS）                                 │
 │    - 仅插桩（不运行，只生成插桩后代码）                    │
 ├─────────────────────────────────────────────────────────┤
-│  [插桩]  [下载插桩后代码]  [在服务端运行 ▶]  [清空]       │
+│  [插桩]  [下载插桩后代码]  [⬇ 下载预处理代码]            │
+│  [在服务端运行 ▶]  [清空]                                │
 └─────────────────────────────────────────────────────────┘
 ```
 
-#### 四个核心操作
+#### 五个核心操作
 
 **① 插桩（立即预览）**
 - 点击"插桩"按钮，后端调用 `instrumentCode()` API
-- 右侧实时展示插桩后的完整代码（含 `J$.Se()`、`J$.X()` 等钩子调用）
+- 若启用预处理，后端先对源码做 AST 变换，再将变换后的代码送入插桩器
+- 右侧实时展示插桩后的完整代码（含 `J$.Se()`、`J$.X()` 等钩子调用）；若预处理已开启，右侧标题区显示"⚙ 已预处理"徽标
 - 同时展示 smap 信息（iid 数量、覆盖行数）
 - 后端始终通过 `--output <path>` 显式指定输出路径，避免 `--target browser` 时的 in-place 覆盖问题
 
@@ -665,27 +675,39 @@ Cytoscape 渲染，节点=函数，边=调用关系，支持缩放/展开/搜索
 
 **③ 下载**
 - 下载插桩后 `.js` 文件
+- 下载预处理后 `_preprocessed_.js` 文件（仅在启用预处理时出现）
 - 下载 `.map.json`（source map）
 - 下载 `.smap.json`（含 srcText 的 iid 映射）
 
 **④ 在服务端运行 ▶**
 - 仅在勾选 `--execution-trace` 时可用（其他情况置灰并提示）
-- 点击后：后端在 Node.js 沙箱中执行插桩后的代码
+- 点击后：后端在 Node.js 沙箱中执行插桩后的代码（若启用预处理，预处理在插桩前自动执行）
 - 实时 WebSocket 推送：stdout/stderr 输出流
 - 运行完成后：自动将生成的 `.bin` + `.smap.json` 导入新 session
 - 弹出提示："运行完成，已创建分析会话 [查看 →]"，一键跳转到会话详情页
+
+**⑤ 预处理选项面板（`PreprocessOptions.vue`，可折叠）**
+- 独立组件 `PreprocessOptions.vue`，通过 `ref` 方式嵌入 `InstrumentStudio`
+- 提供四种 **Preset**：
+  - `deobfuscate`：反混淆（逗号表达式拆分 + void 替换 + 常量折叠）
+  - `normalize-arrow`：箭头函数规范化（改善 Jalangi this 追踪）
+  - `transpile`：语法降级（Babel preset-env，iid 更细粒度）
+  - `full`：全流程（箭头规范化 → 反混淆 → 语法降级）
+- 反混淆子选项：`replaceVoid`、`foldConstants`、`splitSequence`（语义等价，安全绿点）；`simplifyBoolean`、`expandConditional`（结构改变，默认关闭）
+- 语法降级目标：`es2015`（Chrome ≥49）/ `es2017`（Chrome ≥58）/ `es2020`（Chrome ≥80）/ `es2022`（Chrome ≥103）；后端将年份标识映射为 browserslist 查询
 
 #### 后端 API
 
 ```
 POST /api/instrument
     body: { code, filename, options: { inlineIid, inlineSource, executionTrace, noWrite,
-            sandboxVar, sourceType, analyses[], wsUrl?, wsSab? } }
-    返回: { instrumentedCode, smapJson, mapJson }
+            sandboxVar, sourceType, analyses[], wsUrl?, wsSab? }, preprocess? }
+    preprocess: { enabled, preset, sourceType, deobfuscate?, normalizeArrow?, transpile? }
+    返回: { instrumentedCode, smapJson, mapJson, preprocessedCode?, preprocessStats?, preprocessWarnings? }
     说明：始终通过 --output 显式指定输出文件路径，browser target 不会 in-place 覆盖源文件
 
 POST /api/instrument/run
-    body: { code, filename, options }
+    body: { code, filename, options, env, preprocess? }
     返回: WebSocket ticket，通过 WS 推流 stdout/stderr + 完成后 sessionId
 ```
 
@@ -758,10 +780,11 @@ JTA Server 启动时**默认保留**旧 trace 文件，需显式传 `--clear-tra
 ```
 # ── 工作空间（Projects）─────────────────────────────────
 POST /api/projects
-    上传原始 JS，创建工作空间，异步触发插桩
+    上传原始 JS，创建工作空间，异步触发（预处理+）插桩
     body: multipart/form-data { source, name? }
-    options: JSON 字符串，支持 target/sourceType/sandboxVar/inlineIid/inlineSource/
-             wsUrl/wsSab（浏览器 target 时注入 projectId）等插桩选项
+    options:    JSON 字符串，支持 target/sourceType/sandboxVar/inlineIid/inlineSource/
+                wsUrl/wsSab（浏览器 target 时注入 projectId）等插桩选项
+    preprocess: JSON 字符串，预处理选项，见下方 preprocess 结构说明
     返回：{ projectId, status: 'instrumenting' }
 
 GET  /api/projects
@@ -770,7 +793,7 @@ GET  /api/projects
 
 GET  /api/projects/:id
     工作空间详情 + 关联会话列表
-    返回：{ ...project, sessions: [...], instrumented_size, smap_size }
+    返回：{ ...project, sessions: [...], instrumented_size, smap_size, preprocessed_size }
 
 DELETE /api/projects/:id
     删除工作空间（目录 + 数据库记录；关联会话的 project_id 置为 null，不删除会话本身）
@@ -778,7 +801,7 @@ DELETE /api/projects/:id
 
 POST /api/projects/:id/fork
     复用源文件重新插桩，创建新工作空间（无需再次上传文件）
-    body: { name?, options? }
+    body: { name?, options?, preprocess? }
     返回：{ projectId, status: 'instrumenting' }
 
 GET  /api/projects/:id/progress
@@ -788,18 +811,35 @@ GET  /api/projects/:id/progress
 GET  /api/projects/:id/instrumented
     下载插桩后代码（.js 文件）
 
+GET  /api/projects/:id/preprocessed
+    下载预处理后代码（`_preprocessed_.js`）；若未启用预处理，返回 404
+
 GET  /api/projects/:id/smap
     下载 smap.json
 
 POST /api/projects/:id/sessions
     上传 trace.bin，基于此工作空间的 smap 创建分析会话
     body: multipart/form-data { bin, name? }
-    说明：工作空间必须处于 ready 状态才能上传 trace
+    说明：工作空间必须处于 ready 状态才能上传 trace；
+          会话源码文件优先使用预处理后代码（preprocessed_path），回退到原始源码
     返回：{ sessionId, status: 'parsing', projectId, smapAvailable: bool }
 
 GET  /api/projects/:id/sessions
     列出该工作空间下的所有分析会话
     返回：[{ id, name, created_at, status, event_count, plugin_status }]
+
+# preprocess 选项结构（在 /api/projects POST/fork 和 /api/instrument POST/run 中均可使用）
+preprocess: {
+    enabled:       boolean,          -- 是否启用预处理
+    preset:        'deobfuscate' | 'normalize-arrow' | 'transpile' | 'full',
+    sourceType:    'script' | 'module',
+    deobfuscate?:  { replaceVoid?, foldConstants?, splitSequence?,
+                     simplifyBoolean?, expandConditional? },
+    normalizeArrow?: { preserveThis?, onlyExpression? },
+    transpile?:    { targets: 'es2015' | 'es2017' | 'es2020' | 'es2022' }
+                   -- 年份标识在后端被映射为 browserslist 查询
+                   -- es2015 → chrome 49 / es2017 → chrome 58 / es2020 → chrome 80 / es2022 → chrome 103
+}
 
 # ── 插桩工作台 ──────────────────────────────────────────
 POST /api/instrument
@@ -920,6 +960,46 @@ POST /api/trace/import
 GET  /api/health
     健康检查
     返回：{ status: 'ok', version, uptime }
+
+# ── 空间分析 ─────────────────────────────────────────────
+GET  /api/storage/stats
+    扫描 data 目录（uploads / sessions / projects），统计各分类文件占用，生成清理建议
+    返回：{
+        summary: {
+            totalSize, totalSizeStr,
+            breakdown: {
+                uploads:  { size, sizeStr, count },
+                sessions: { size, sizeStr, count },
+                projects: { size, sizeStr, count },
+                database: { size, sizeStr }
+            }
+        },
+        uploads:  [{ type, path, name, size, sizeStr, mtime, ageStr, orphan }],
+        sessions: [{ type, id, path, name, size, sizeStr, fileCount, status, eventCount,
+                     projectId, createdAt, mtime, ageStr, orphan }],
+        projects: [{ type, id, path, name, size, sizeStr, fileCount, status, iidCount,
+                     createdAt, mtime, ageStr, orphan }],
+        suggestions: [{
+            id, priority: 'high'|'medium'|'low'|'info', category, title, description,
+            savedSize, savedSizeStr,
+            items: [{ path, name?, id?, size, sizeStr, ageStr }]
+        }]
+    }
+    清理建议 ID 说明：
+        orphan-uploads   — 孤立 uploads 临时文件（未被任何 session/project 引用）
+        orphan-sessions  — 孤立 session 目录（目录存在但 DB 无记录）
+        orphan-projects  — 孤立 project 目录（同上）
+        failed-projects  — 插桩失败的工作空间
+        old-sessions     — 30 天未使用的大型会话（>1MB）
+        all-clean        — 无需清理（info 级别正面提示）
+
+POST /api/storage/delete
+    批量删除：uploads 孤立文件、session 目录、project 目录
+    body: { items: [{ type: 'upload'|'session_dir'|'project_dir', path, id? }] }
+    安全约束：path 必须在 data/ 目录内；不可删除 DB 文件本身
+    删除 session_dir 时同步删除 DB 中对应 sessions + plugin_checkpoints 记录
+    删除 project_dir 时同步删除 DB 中对应 projects 记录并将关联 sessions.project_id 置 null
+    返回：{ results: [{ ok, path, type, freedSize?, error? }], freed, freedStr, successCount, errorCount }
 ```
 
 ### 7.2 WebSocket
@@ -931,7 +1011,9 @@ WS /ws/projects/:id/progress
     消息格式：
       { type: 'init', projectId, status, iid_count, error_msg }
       { type: 'instrument_start', projectId }
-      { type: 'instrument_done', projectId, iidCount, smapAvailable }
+      { type: 'preprocess_start', projectId }          -- 预处理阶段开始（仅启用预处理时）
+      { type: 'preprocess_done',  projectId }          -- 预处理阶段完成
+      { type: 'instrument_done', projectId, iidCount, smapAvailable, preprocessingApplied }
       { type: 'error', projectId, message }
 
 WS /ws/sessions/:id/progress
@@ -1002,13 +1084,14 @@ Jani/
 │   │   └── I4_AlgorithmSummarizer.mjs
 │   ├── routes/
 │   │   ├── sessions.mjs       # 会话 API（含分阶段调度、re-run、delete、checkpoints API）
-│   │   ├── instrument.mjs     # 插桩 API（显式 --output，支持 wsUrl/wsSab）
-│   │   └── projects.mjs       # 工作空间 API（上传/插桩/fork/下载/关联会话）
+│   │   ├── instrument.mjs     # 插桩 API（显式 --output，支持 wsUrl/wsSab，支持预处理）
+│   │   ├── projects.mjs       # 工作空间 API（上传/插桩/fork/下载/关联会话，支持预处理）
+│   │   └── storage.mjs        # 空间分析 API（stats 统计 + delete 批量清理）
 │   └── ui/                    # Vue 3 前端
 │       ├── index.html
 │       ├── src/
-│       │   ├── App.vue        # 顶部导航（工作空间 / 会话 / 插桩工作台 / Trace 监控）
-│       │   ├── main.js        # 路由注册（/workspaces / /sessions / /instrument / /trace）
+│       │   ├── App.vue        # 顶部导航（工作空间 / 会话 / 插桩工作台 / Trace 监控 / 空间分析）
+│       │   ├── main.js        # 路由注册（/workspaces / /sessions / /instrument / /trace / /storage）
 │       │   ├── components/
 │       │   │   └── session/   # 会话详情标签页组件
 │       │   │       ├── CryptoTab.vue       # 加密检测标签页
@@ -1038,8 +1121,10 @@ Jani/
 │       │       ├── SessionDetail.vue       # 会话详情（/sessions/:id，多标签页分析）
 │       │       ├── InstrumentStudio.vue    # 插桩工作台（/instrument）
 │       │       ├── InstrumentOptions.vue   # 插桩选项面板（嵌入式组件）
+│       │       ├── PreprocessOptions.vue   # 预处理选项面板（嵌入式组件，可折叠）
 │       │       ├── ProgressDrawer.vue      # 分析进度侧边抽屉
-│       │       └── TraceMonitor.vue        # Trace 收集状态监控（/trace）
+│       │       ├── TraceMonitor.vue        # Trace 收集状态监控（/trace）
+│       │       └── StorageAnalyzer.vue     # 空间分析页（/storage）
 │       └── vite.config.js               # Vite 代理端口 → 33000
 │   ├── data/                  # 运行时生成的数据目录
 │   │   ├── jta.db             # SQLite 数据库（主库）
@@ -1095,7 +1180,7 @@ Jani/
 - [x] 后端 API：`/run-phase4`，A2/A4/A6/A7/I3/I4 全部 done
 - [x] 完整流程端到端验证通过（2026-04-05，7 行测试文件，15 条事件，全部插件 done）
 
-> **当前状态：** JTA 服务运行在 `http://localhost:33000`，全部 4 个阶段 17 个分析插件已完工，工作空间管理功能已实装。
+> **当前状态：** JTA 服务运行在 `http://localhost:33000`，全部 4 个阶段 17 个分析插件已完工，工作空间管理、预处理集成、空间分析功能均已实装。
 
 ### Phase 5：工作空间管理 ✅ 已完成
 - [x] `db/schema.sql` 新增 `projects` 表
@@ -1107,7 +1192,20 @@ Jani/
 - [x] `/api/trace/import` 支持 `projectId` 参数自动关联 smap 和源码
 - [x] `trace-server` 收集时通过 `?projectId=xxx` 自动记录来源工作空间
 
-### Phase 6：MCP Server
+### Phase 6：预处理集成 + 空间分析 ✅ 已完成
+- [x] `routes/instrument.mjs`：`/api/instrument` + `/api/instrument/run` 支持可选预处理（`preprocess` 字段）
+- [x] `routes/projects.mjs`：`POST /api/projects` + `POST /api/projects/:id/fork` 支持预处理选项；`GET /api/projects/:id/preprocessed` 端点下载预处理后代码；`GET /api/projects/:id` 返回 `preprocessed_size`；创建会话时优先使用预处理后代码（`preprocessed_path`）
+- [x] `db/Database.mjs`：迁移脚本自动为 `projects` 表添加 `preprocessed_path` 列
+- [x] `db/schema.sql`：`projects` 表新增 `preprocessed_path` 字段
+- [x] `routes/storage.mjs`（新文件）：`GET /api/storage/stats` 空间统计 + `POST /api/storage/delete` 批量清理；安全约束：路径限 data/ 目录，不可删除 DB 文件
+- [x] `server.mjs`：挂载 `/api/storage` 路由
+- [x] `ui/views/PreprocessOptions.vue`（新文件）：预处理选项面板，支持 4 种 Preset（deobfuscate / normalize-arrow / transpile / full）、反混淆子开关、语法降级目标选择
+- [x] `ui/views/InstrumentStudio.vue`：集成 `PreprocessOptions`，传递 preprocess 参数至 `/api/instrument` 和 `/api/instrument/run`；新增"⚙ 已预处理"标识和"下载预处理代码"按钮
+- [x] `ui/views/StorageAnalyzer.vue`（新文件）：空间分析页，展示空间占用总览、按类别分级清理建议，支持一键执行清理
+- [x] `ui/src/App.vue`：导航栏新增"空间分析"链接
+- [x] `ui/src/main.js`：注册 `/storage` 路由
+
+### Phase 7：MCP Server
 - [ ] `mcp/client.mjs`：JTA REST API HTTP 封装
 - [ ] `mcp/tools/` 所有 Tool 定义（参数 schema + 结果格式化）
 - [ ] `mcp/jta-mcp-stdio.mjs`：stdio 传输，供本地 Claude Desktop / OpenClaw 使用
@@ -1149,6 +1247,11 @@ Jani/
 | Trace 文件清空策略 | 默认保留，需显式 `--clear-traces` 才清空 | 避免启动时误删正在分析的 trace 文件；原 `--no-clear-traces` 参数已废弃 |
 | Trace 文件别名 | `_aliases.json` 元数据文件，不改磁盘文件名 | 文件名含时间戳已具唯一性，别名仅用于 UI 展示，不影响文件系统 |
 | Trace 文件→工作空间映射 | `_project_map.json` + WS `?projectId=` 参数 | 浏览器端收集的 trace 自动与工作空间关联，导入时无需手动指定 smap |
+| 预处理管线集成 | 插桩前可选运行 `preprocessCode()`，产物 `_preprocessed_.js` 持久化到工作空间目录 | 反混淆/语法降级后 iid 粒度更细，trace 分析效果更好；预处理代码同时作为会话源码定位的首选文件 |
+| 预处理 transpile 目标映射 | 前端 `esXXXX` 年份标识，后端映射为 browserslist 查询（`chrome 49/58/80/103`） | 用户无需了解 browserslist 语法；年份标识直观表达降级程度 |
+| 预处理默认关闭 | `preprocess.enabled = false`，UI 有明确开关 | 预处理会改变代码结构，对不需要的用户不应静默生效 |
+| 空间分析安全约束 | 删除 path 必须在 `data/` 目录内，不可删除 DB 文件，删除前二次检查 upload 引用 | 防止路径穿越攻击；不可逆操作须保守处理 |
+| 空间清理级联 | 删除 session_dir 时同步清理 DB + checkpoints；删除 project_dir 时 sessions.project_id 置 null 而非级联删除会话 | 会话数据有独立价值，仅解除工作空间关联，不连带删除 |
 
 ---
 

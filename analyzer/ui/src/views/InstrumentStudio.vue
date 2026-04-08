@@ -34,6 +34,7 @@
       <div class="panel panel-right card">
         <div class="panel-header">
           <span class="panel-title">插桩后代码（预览）</span>
+          <span v-if="preprocessedCode" class="preprocess-indicator" title="实际插桩的是预处理后的代码">⚙ 已预处理</span>
           <div class="panel-actions">
             <span v-if="smapInfo" class="smap-stat">{{ smapInfo.iidCount }} iids</span>
             <span v-if="instrumentedCode" class="smap-stat">{{ formatBytes(new TextEncoder().encode(instrumentedCode).length) }}</span>
@@ -62,6 +63,9 @@
       </div>
     </div>
 
+    <!-- 预处理选项（可选，启用后插桩前先对源码做 AST 变换） -->
+    <PreprocessOptions ref="preprocessRef" />
+
     <!-- 插桩选项（复用 InstrumentOptions 组件） -->
     <!-- 执行环境选项单独保留在此，因为它是 InstrumentStudio 专属的（工作空间不需要） -->
     <div class="env-bar card">
@@ -89,6 +93,9 @@
       </button>
       <button v-if="instrumentedCode" class="btn-secondary btn-action" @click="downloadInstrumented">
         ⬇ 下载插桩代码
+      </button>
+      <button v-if="preprocessedCode" class="btn-secondary btn-action" @click="downloadPreprocessed">
+        ⬇ 下载预处理代码
       </button>
       <button v-if="smapInfo" class="btn-secondary btn-action" @click="downloadSmap">
         ⬇ 下载 smap.json
@@ -127,6 +134,7 @@
 import { ref, computed, nextTick, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import InstrumentOptions from './InstrumentOptions.vue';
+import PreprocessOptions from './PreprocessOptions.vue';
 
 const router = useRouter();
 
@@ -136,6 +144,7 @@ const instrumentedCode = ref('');
 const instrumenting    = ref(false);
 const instrumentError  = ref('');
 const smapInfo         = ref(null);  // { iidCount, smapJson }
+const preprocessedCode = ref(null);  // 预处理后的代码（可为 null表示未启用预处理）
 const copyOk           = ref(false);
 
 async function copyInstrumented() {
@@ -166,8 +175,9 @@ const runError           = ref('');
 const completedSessionId = ref('');
 const consoleEl          = ref(null);
 
-const env        = ref('node');
-const optionsRef = ref(null);  // InstrumentOptions 组件引用
+const env           = ref('node');
+const optionsRef    = ref(null);  // InstrumentOptions 组件引用
+const preprocessRef = ref(null);  // PreprocessOptions 组件引用
 
 // ── 计算属性 ─────────────────────────────────────────────────────────────────
 let ws = null;
@@ -191,6 +201,7 @@ function clearCode() {
     instrumentedCode.value = '';
     smapInfo.value = null;
     instrumentError.value = '';
+    preprocessedCode.value = null;
 }
 
 // ── 构建请求体选项（委托给 InstrumentOptions 组件）────────────────────────────
@@ -205,15 +216,19 @@ async function doInstrument() {
     instrumentError.value = '';
     instrumentedCode.value = '';
     smapInfo.value = null;
+    preprocessedCode.value = null;
 
     try {
+        const preprocess = preprocessRef.value?.buildPreprocess() ?? null;
+
         const res = await fetch('/api/instrument', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                code: code.value,
-                filename: filename.value,
-                options: buildRequestOptions(),
+                code:       code.value,
+                filename:   filename.value,
+                options:    buildRequestOptions(),
+                preprocess: preprocess ?? null,
             }),
         });
         const data = await res.json();
@@ -221,6 +236,7 @@ async function doInstrument() {
 
         instrumentedCode.value = data.instrumentedCode || '';
         smapInfo.value = data.smapJson ? { iidCount: data.iidCount, smapJson: data.smapJson } : null;
+        preprocessedCode.value = data.preprocessedCode ?? null;
 
     } catch (e) {
         instrumentError.value = e.message;
@@ -239,14 +255,17 @@ async function doRun() {
     completedSessionId.value = '';
 
     try {
+        const preprocess = preprocessRef.value?.buildPreprocess() ?? null;
+
         const res = await fetch('/api/instrument/run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                code: code.value,
-                filename: filename.value,
-                options: { ...buildRequestOptions(), executionTrace: true },
-                env: env.value,
+                code:       code.value,
+                filename:   filename.value,
+                options:    { ...buildRequestOptions(), executionTrace: true },
+                env:        env.value,
+                preprocess: preprocess ?? null,
             }),
         });
         const data = await res.json();
@@ -316,6 +335,11 @@ function clearLog() {
 // ── 下载 ─────────────────────────────────────────────────────────────────────
 function downloadInstrumented() {
     download(instrumentedCode.value, filename.value.replace(/\.js$/, '') + '_jalangi_.js', 'text/javascript');
+}
+
+function downloadPreprocessed() {
+    if (!preprocessedCode.value) return;
+    download(preprocessedCode.value, filename.value.replace(/\.js$/, '') + '_preprocessed_.js', 'text/javascript');
 }
 
 function downloadSmap() {
@@ -396,6 +420,16 @@ onUnmounted(() => {
     font-size: 12px;
     color: var(--success);
     font-family: monospace;
+}
+
+.preprocess-indicator {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: rgba(139, 92, 246, 0.18);
+    color: #a78bfa;
+    font-family: monospace;
+    flex-shrink: 0;
 }
 
 .btn-copy {

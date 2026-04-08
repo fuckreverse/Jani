@@ -179,4 +179,19 @@ function _runMigrations(db) {
     if (sessionsCols.size > 0 && !sessionsCols.has('project_id')) {
         db.run('ALTER TABLE sessions ADD COLUMN project_id TEXT');
     }
+
+    // 列出 projects 表的现有列
+    const projectsCols = new Set();
+    try {
+        const stmt = db.prepare('PRAGMA table_info(projects)');
+        while (stmt.step()) {
+            const row = stmt.getAsObject();
+            projectsCols.add(row.name);
+        }
+        stmt.free();
+    } catch { /* table may not exist yet */ }
+
+    if (projectsCols.size > 0 && !projectsCols.has('preprocessed_path')) {
+        db.run('ALTER TABLE projects ADD COLUMN preprocessed_path TEXT');
+    }
 }

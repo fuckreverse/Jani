@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS projects (
     name            TEXT NOT NULL,
     created_at      INTEGER NOT NULL,
     source_file     TEXT,           -- 原始 JS 路径（服务端存储）
+    preprocessed_path TEXT,         -- 预处理后 JS 路径（可为 null，表示未启用预处理）
     instrumented_path TEXT,         -- 插桩后 JS 路径
     smap_path       TEXT,           -- smap.json 路径
     status          TEXT DEFAULT 'pending',  -- pending / instrumenting / ready / failed

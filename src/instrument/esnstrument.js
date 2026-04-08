@@ -201,7 +201,8 @@ function getContext(path) {
     if (
         ((pt === 'FunctionExpression' || pt === 'FunctionDeclaration' || pt === 'ArrowFunctionExpression')
             && key === 'params') ||
-        (pt === 'ClassMethod' && key === 'params')
+        (pt === 'ClassMethod'  && key === 'params') ||
+        (pt === 'ObjectMethod' && key === 'params')   // getter/setter/方法 的形参不能插桩
     ) {
         return CONTEXT.IGNORE;
     }
