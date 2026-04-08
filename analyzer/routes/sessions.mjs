@@ -12,7 +12,10 @@
  */
 
 import { Router } from 'express';
-import { existsSync, mkdirSync, copyFileSync } from 'fs';
+import { createLogger } from '../logger.mjs';
+
+const log = createLogger('sessions');
+import { existsSync, mkdirSync, copyFileSync, rmSync, statSync } from 'fs';
 import { resolve, basename } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import * as db from '../db/Database.mjs';
@@ -118,7 +121,7 @@ router.post('/', async (req, res) => {
                 },
             })
         ).catch(e => {
-            console.error('[sessions] phase1 schedule error:', e);
+            log.error({ err: e }, '[sessions] phase1 schedule error:');
             db.run("UPDATE sessions SET status = 'failed' WHERE id = ?", sessionId);
             wsProgressBroadcast?.(sessionId, { type: 'error', sessionId, message: e.message });
         });
@@ -130,7 +133,7 @@ router.post('/', async (req, res) => {
         });
 
     } catch (e) {
-        console.error('[POST /api/sessions] error:', e);
+        log.error({ err: e }, '[POST /api/sessions] error:');
         return res.status(500).json({ error: e.message });
     }
 });
@@ -159,7 +162,7 @@ async function _schedulePhase2(sessionId, sessionDir, wsProgressBroadcast, _hasS
             },
         });
     } catch (e) {
-        console.error('[sessions] phase2 schedule error:', e);
+        log.error({ err: e }, '[sessions] phase2 schedule error:');
         wsProgressBroadcast?.(sessionId, { type: 'error', sessionId, phase: 'phase2', message: e.message });
     }
 }
@@ -181,7 +184,7 @@ router.get('/', (req, res) => {
 
         return res.json(result);
     } catch (e) {
-        console.error('[GET /api/sessions] error:', e);
+        log.error({ err: e }, '[GET /api/sessions] error:');
         return res.status(500).json({ error: e.message });
     }
 });
@@ -197,12 +200,73 @@ router.get('/:id', (req, res) => {
             return res.status(404).json({ error: `Session ${id} not found` });
         }
 
+        // 获取文件元信息（大小）
+        const fileInfo = {};
+        const tryStatFile = (path, key) => {
+            if (!path) { fileInfo[key] = null; return; }
+            try {
+                const st = statSync(path);
+                fileInfo[key] = { path, name: basename(path), size: st.size, mtime: st.mtimeMs };
+            } catch {
+                fileInfo[key] = { path, name: basename(path), size: null, mtime: null, missing: true };
+            }
+        };
+        tryStatFile(session.bin_path,    'binFile');
+        tryStatFile(session.smap_path,   'smapFile');
+        tryStatFile(session.source_file, 'sourceFile');
+
+        // smap 条目数（是否已加载 smap）
+        const smapCount = session.smap_path
+            ? (db.get('SELECT COUNT(*) as cnt FROM smap WHERE session_id = ?', id)?.cnt ?? 0)
+            : 0;
+
         return res.json({
             ...session,
             plugin_status: safeParseJson(session.plugin_status, {}),
+            fileInfo,
+            smapCount,
         });
     } catch (e) {
-        console.error('[GET /api/sessions/:id] error:', e);
+        log.error({ err: e }, '[GET /api/sessions/:id] error:');
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+// ── DELETE /api/sessions/:id ──────────────────────────────────────────────
+
+router.delete('/:id', (req, res) => {
+    try {
+        const { id } = req.params;
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        // 删除会话目录（bin/smap/source 文件）
+        const sessionDir = resolve(DATA_DIR, id);
+        if (existsSync(sessionDir)) {
+            rmSync(sessionDir, { recursive: true, force: true });
+        }
+
+        // 删除所有关联的数据库记录
+        const TABLES_WITH_SESSION = [
+            'events', 'writes', 'reads', 'fields', 'smap',
+            'call_edges', 'taint_paths', 'var_lifetime', 'scopes',
+            'bookmarks', 'hot_iids', 'iid_counts', 'loops', 'loop_iterations',
+            'string_events', 'fn_signatures', 'object_timelines', 'value_patterns',
+            'crypto_hints', 'signature_paths', 'obfuscation_hints', 'analysis_summary',
+            'dataflow_edges', 'plugin_checkpoints',
+        ];
+        for (const table of TABLES_WITH_SESSION) {
+            try {
+                db.run(`DELETE FROM ${table} WHERE session_id = ?`, id);
+            } catch { /* 表不存在时忽略 */ }
+        }
+
+        // 删除 sessions 主记录
+        db.run('DELETE FROM sessions WHERE id = ?', id);
+
+        return res.json({ deleted: true });
+    } catch (e) {
+        log.error({ err: e }, '[DELETE /api/sessions/:id] error:');
         return res.status(500).json({ error: e.message });
     }
 });
@@ -218,7 +282,7 @@ router.get('/:id/checkpoints', (req, res) => {
         const checkpoints = getCheckpoints(id);
         res.json({ checkpoints });
     } catch (e) {
-        console.error('[GET /api/sessions/:id/checkpoints] error:', e);
+        log.error({ err: e }, '[GET /api/sessions/:id/checkpoints] error:');
         res.status(500).json({ error: e.message });
     }
 });
@@ -278,13 +342,33 @@ router.post('/:id/re-run', async (req, res) => {
                 wsProgressBroadcast?.(id, evt);
             },
         }).catch(e => {
-            console.error('[re-run] schedule error:', e);
+            log.error({ err: e }, '[re-run] schedule error:');
             wsProgressBroadcast?.(id, { type: 'error', sessionId: id, message: e.message });
         });
 
         return res.json({ status: 'scheduled', plugins: targetPlugins, phase, forceRerun });
     } catch (e) {
-        console.error('[POST /api/sessions/:id/re-run] error:', e);
+        log.error({ err: e }, '[POST /api/sessions/:id/re-run] error:');
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/event-types ────────────────────────────────────
+// 返回该会话存在的所有事件类型及其数量
+
+router.get('/:id/event-types', (req, res) => {
+    try {
+        const { id } = req.params;
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: `Session ${id} not found` });
+
+        const rows = db.all(
+            `SELECT type, COUNT(*) as cnt FROM events WHERE session_id = ? GROUP BY type ORDER BY cnt DESC`,
+            id
+        );
+        return res.json({ types: rows });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/event-types] error:');
         return res.status(500).json({ error: e.message });
     }
 });
@@ -297,6 +381,7 @@ router.get('/:id/events', (req, res) => {
         const {
             line,
             type,
+            types,       // 多选，逗号分隔，如 "CALL_PRE,CALL"
             varName,
             seqFrom,
             seqTo,
@@ -318,7 +403,17 @@ router.get('/:id/events', (req, res) => {
             conditions.push('e.line = ?');
             params.push(Number(line));
         }
-        if (type) {
+        // types 多选（优先），type 单选（向后兼容）
+        if (types) {
+            const typeList = types.split(',').map(t => t.trim()).filter(Boolean);
+            if (typeList.length === 1) {
+                conditions.push('e.type = ?');
+                params.push(typeList[0]);
+            } else if (typeList.length > 1) {
+                conditions.push(`e.type IN (${typeList.map(() => '?').join(',')})`);
+                params.push(...typeList);
+            }
+        } else if (type) {
             conditions.push('e.type = ?');
             params.push(type);
         }
@@ -373,37 +468,62 @@ router.get('/:id/events', (req, res) => {
             );
         }
 
+        // 若 events 中有行列为 null 但 iid 非 null 的事件，尝试通过 smap 补全
+        const nullLineEvents = events.filter(e => e.line == null && e.iid != null);
+        const smapMap = new Map();
+        if (nullLineEvents.length > 0) {
+            const iids = [...new Set(nullLineEvents.map(e => e.iid))];
+            const smapPlaceholders = iids.map(() => '?').join(',');
+            const smapRows = db.all(
+                `SELECT iid, sl, sc, el, ec, src_text FROM smap WHERE session_id = ? AND iid IN (${smapPlaceholders})`,
+                id, ...iids
+            );
+            for (const row of smapRows) {
+                smapMap.set(row.iid, row);
+            }
+        }
+
         // 按 event_id 分组
         const writesMap  = groupBy(writes,  'event_id');
         const readsMap   = groupBy(reads,   'event_id');
         const fieldsMap  = groupBy(fields,  'event_id');
 
         // 组合结果
-        const result = events.map(e => ({
-            seq:      e.seq,
-            type:     e.type,
-            iid:      e.iid,
-            line:     e.line,
-            col:      e.col,
-            srcText:  e.src_text,
-            writes:   (writesMap[e.seq] || []).map(w => ({
-                name:    w.name,
-                value:   safeParseJson(w.value),
-                omitted: !!w.omitted,
-            })),
-            reads:    (readsMap[e.seq] || []).map(r => ({
-                name:    r.name,
-                value:   safeParseJson(r.value),
-                omitted: !!r.omitted,
-            })),
-            fields:   (fieldsMap[e.seq] || []).map(f => ({
-                base:    f.base,
-                offset:  f.offset,
-                isWrite: !!f.is_write,
-                value:   safeParseJson(f.value),
-                omitted: !!f.omitted,
-            })),
-        }));
+        const result = events.map(e => {
+            // 若 line/col 为 null，尝试从 smap 补全
+            let line = e.line, col = e.col, srcText = e.src_text;
+            if (line == null && e.iid != null && smapMap.has(e.iid)) {
+                const sm = smapMap.get(e.iid);
+                line = sm.sl;
+                col  = sm.sc;
+                if (!srcText) srcText = sm.src_text;
+            }
+            return {
+                seq:      e.seq,
+                type:     e.type,
+                iid:      e.iid,
+                line,
+                col,
+                srcText,
+                writes:   (writesMap[e.seq] || []).map(w => ({
+                    name:    w.name,
+                    value:   safeParseJson(w.value),
+                    omitted: !!w.omitted,
+                })),
+                reads:    (readsMap[e.seq] || []).map(r => ({
+                    name:    r.name,
+                    value:   safeParseJson(r.value),
+                    omitted: !!r.omitted,
+                })),
+                fields:   (fieldsMap[e.seq] || []).map(f => ({
+                    base:    f.base,
+                    offset:  f.offset,
+                    isWrite: !!f.is_write,
+                    value:   safeParseJson(f.value),
+                    omitted: !!f.omitted,
+                })),
+            };
+        });
 
         return res.json({
             sessionId: id,
@@ -413,7 +533,122 @@ router.get('/:id/events', (req, res) => {
         });
 
     } catch (e) {
-        console.error('[GET /api/sessions/:id/events] error:', e);
+        log.error({ err: e }, '[GET /api/sessions/:id/events] error:');
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/functions ──────────────────────────────────────
+// 按 fn_name 聚合 call_edges，返回函数列表（调用次数、行号等）
+
+router.get('/:id/functions', (req, res) => {
+    try {
+        const { id } = req.params;
+        const {
+            search   = '',
+            minCalls = '1',
+            limit    = '100',
+            offset   = '0',
+        } = req.query;
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: `Session ${id} not found` });
+
+        const conditions = ['session_id = ?'];
+        const params = [id];
+
+        if (search) {
+            conditions.push('fn_name LIKE ?');
+            params.push(`%${search}%`);
+        }
+
+        const minCallsN = Math.max(1, Number(minCalls) || 1);
+        const limitN    = Math.min(Number(limit)  || 100, 500);
+        const offsetN   = Number(offset) || 0;
+
+        // 每个函数名聚合：调用次数、最小行号、call_seq 范围
+        const rows = db.all(
+            `SELECT
+                fn_name,
+                fn_iid,
+                COUNT(*)           AS call_count,
+                MIN(caller_line)   AS min_line,
+                MIN(depth)         AS min_depth,
+                MAX(depth)         AS max_depth
+             FROM call_edges
+             WHERE ${conditions.join(' AND ')}
+             GROUP BY fn_name, fn_iid
+             HAVING COUNT(*) >= ?
+             ORDER BY call_count DESC
+             LIMIT ? OFFSET ?`,
+            ...params, minCallsN, limitN, offsetN
+        );
+
+        // 总数（用于分页）
+        const totalRow = db.get(
+            `SELECT COUNT(DISTINCT fn_name) AS total
+             FROM call_edges
+             WHERE ${conditions.join(' AND ')}
+             AND (SELECT COUNT(*) FROM call_edges ce2
+                  WHERE ce2.session_id = call_edges.session_id
+                    AND ce2.fn_name = call_edges.fn_name) >= ?`,
+            ...params, minCallsN
+        );
+
+        return res.json({
+            functions: rows,
+            count: rows.length,
+            total: totalRow?.total ?? rows.length,
+        });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/functions] error:');
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/functions/:fnName/calls ─────────────────────────
+// 返回某函数名下所有调用记录（含参数、返回值、SEQ 范围）
+
+router.get('/:id/functions/:fnName/calls', (req, res) => {
+    try {
+        const { id, fnName } = req.params;
+        const { limit = '200', offset = '0' } = req.query;
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: `Session ${id} not found` });
+
+        const limitN  = Math.min(Number(limit)  || 200, 1000);
+        const offsetN = Number(offset) || 0;
+
+        const rows = db.all(
+            `SELECT id, call_seq, return_seq, caller_line, fn_name, fn_iid, args_json, return_value, depth
+             FROM call_edges
+             WHERE session_id = ? AND fn_name = ?
+             ORDER BY call_seq ASC
+             LIMIT ? OFFSET ?`,
+            id, fnName, limitN, offsetN
+        );
+
+        const total = db.get(
+            'SELECT COUNT(*) AS cnt FROM call_edges WHERE session_id = ? AND fn_name = ?',
+            id, fnName
+        )?.cnt ?? 0;
+
+        const result = rows.map(r => ({
+            id:           r.id,
+            callSeq:      r.call_seq,
+            returnSeq:    r.return_seq,
+            callerLine:   r.caller_line,
+            fnName:       r.fn_name,
+            fnIid:        r.fn_iid,
+            args:         safeParseJson(r.args_json, []),
+            returnValue:  safeParseJson(r.return_value, null),
+            depth:        r.depth,
+        }));
+
+        return res.json({ calls: result, count: result.length, total });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/functions/:fnName/calls] error:');
         return res.status(500).json({ error: e.message });
     }
 });
@@ -576,7 +811,7 @@ router.get('/:id/loop-iterations', (req, res) => {
 
         res.json({ loops, iterations: result, count: result.length });
     } catch (e) {
-        console.error('[GET /api/sessions/:id/loop-iterations] error:', e);
+        log.error({ err: e }, '[GET /api/sessions/:id/loop-iterations] error:');
         res.status(500).json({ error: e.message });
     }
 });
@@ -611,7 +846,7 @@ router.get('/:id/value-patterns', (req, res) => {
 
         res.json({ patterns: rows, count: rows.length });
     } catch (e) {
-        console.error('[GET /api/sessions/:id/value-patterns] error:', e);
+        log.error({ err: e }, '[GET /api/sessions/:id/value-patterns] error:');
         res.status(500).json({ error: e.message });
     }
 });
@@ -640,7 +875,7 @@ router.get('/:id/crypto-hints', (req, res) => {
 
         res.json({ hints: result, count: result.length });
     } catch (e) {
-        console.error('[GET /api/sessions/:id/crypto-hints] error:', e);
+        log.error({ err: e }, '[GET /api/sessions/:id/crypto-hints] error:');
         res.status(500).json({ error: e.message });
     }
 });
@@ -679,7 +914,7 @@ router.get('/:id/signature-paths', (req, res) => {
 
         res.json({ paths: result, count: result.length });
     } catch (e) {
-        console.error('[GET /api/sessions/:id/signature-paths] error:', e);
+        log.error({ err: e }, '[GET /api/sessions/:id/signature-paths] error:');
         res.status(500).json({ error: e.message });
     }
 });
@@ -711,12 +946,12 @@ router.post('/:id/run-phase3', async (req, res) => {
                 req.app.get('wsProgressBroadcast')?.(id, evt);
             },
         }).catch(e => {
-            console.error('[run-phase3] schedule error:', e);
+            log.error({ err: e }, '[run-phase3] schedule error:');
         });
 
         return res.json({ status: 'scheduled', plugins, phase: 'phase3' });
     } catch (e) {
-        console.error('[POST /api/sessions/:id/run-phase3] error:', e);
+        log.error({ err: e }, '[POST /api/sessions/:id/run-phase3] error:');
         return res.status(500).json({ error: e.message });
     }
 });
@@ -747,12 +982,12 @@ router.post('/:id/run-phase4', async (req, res) => {
                 req.app.get('wsProgressBroadcast')?.(id, evt);
             },
         }).catch(e => {
-            console.error('[run-phase4] schedule error:', e);
+            log.error({ err: e }, '[run-phase4] schedule error:');
         });
 
         return res.json({ status: 'scheduled', plugins, phase: 'phase4' });
     } catch (e) {
-        console.error('[POST /api/sessions/:id/run-phase4] error:', e);
+        log.error({ err: e }, '[POST /api/sessions/:id/run-phase4] error:');
         return res.status(500).json({ error: e.message });
     }
 });
@@ -797,7 +1032,7 @@ router.get('/:id/dataflow', (req, res) => {
 
         res.json({ edges, stats, count: edges.length });
     } catch (e) {
-        console.error('[GET /api/sessions/:id/dataflow] error:', e);
+        log.error({ err: e }, '[GET /api/sessions/:id/dataflow] error:');
         res.status(500).json({ error: e.message });
     }
 });
@@ -840,7 +1075,7 @@ router.get('/:id/strings', (req, res) => {
 
         res.json({ strings: rows, encodingStats, count: rows.length });
     } catch (e) {
-        console.error('[GET /api/sessions/:id/strings] error:', e);
+        log.error({ err: e }, '[GET /api/sessions/:id/strings] error:');
         res.status(500).json({ error: e.message });
     }
 });
@@ -887,7 +1122,7 @@ router.get('/:id/fn-signatures', (req, res) => {
 
         res.json({ signatures: result, summary, count: result.length });
     } catch (e) {
-        console.error('[GET /api/sessions/:id/fn-signatures] error:', e);
+        log.error({ err: e }, '[GET /api/sessions/:id/fn-signatures] error:');
         res.status(500).json({ error: e.message });
     }
 });
@@ -937,7 +1172,7 @@ router.get('/:id/object-timelines', (req, res) => {
 
         res.json({ timelines: rows, baseVarStats, count: rows.length });
     } catch (e) {
-        console.error('[GET /api/sessions/:id/object-timelines] error:', e);
+        log.error({ err: e }, '[GET /api/sessions/:id/object-timelines] error:');
         res.status(500).json({ error: e.message });
     }
 });
@@ -968,7 +1203,7 @@ router.get('/:id/obfuscation', (req, res) => {
             count: hints.length,
         });
     } catch (e) {
-        console.error('[GET /api/sessions/:id/obfuscation] error:', e);
+        log.error({ err: e }, '[GET /api/sessions/:id/obfuscation] error:');
         res.status(500).json({ error: e.message });
     }
 });
@@ -1001,7 +1236,7 @@ router.get('/:id/summary', (req, res) => {
             markdown: row.summary_md,
         });
     } catch (e) {
-        console.error('[GET /api/sessions/:id/summary] error:', e);
+        log.error({ err: e }, '[GET /api/sessions/:id/summary] error:');
         res.status(500).json({ error: e.message });
     }
 });
@@ -1029,8 +1264,15 @@ function groupBy(arr, key) {
  * @param {{ binPath: string, smapPath?: string|null, name?: string, wsProgressBroadcast?: Function }} opts
  * @returns {Promise<string>} sessionId
  */
-export async function createSession({ binPath, smapPath = null, name = null, wsProgressBroadcast = null }) {
-    const { copyFileSync: cpSync, mkdirSync: mkdSync } = await import('fs');
+export async function createSession({
+    binPath,
+    smapPath    = null,
+    sourcePath  = null,
+    projectId   = null,
+    name        = null,
+    wsProgressBroadcast = null,
+}) {
+    const { copyFileSync: cpSync, mkdirSync: mkdSync, existsSync: exSync } = await import('fs');
     const { resolve: res, basename } = await import('path');
     const { v4: uuid } = await import('uuid');
 
@@ -1047,13 +1289,20 @@ export async function createSession({ binPath, smapPath = null, name = null, wsP
         cpSync(smapPath, smapDest);
     }
 
+    // 复制源码文件（从工作空间关联过来时）
+    let sourceDest = null;
+    if (sourcePath && exSync(sourcePath)) {
+        sourceDest = res(sessionDir, basename(sourcePath));
+        cpSync(sourcePath, sourceDest);
+    }
+
     const sessionName = name || basename(binPath).replace(/\.bin$/, '') || `session-${sessionId.slice(0, 8)}`;
     const now = Date.now();
 
     db.run(
-        `INSERT INTO sessions (id, name, created_at, source_file, bin_path, smap_path, status, plugin_status)
-         VALUES (?, ?, ?, ?, ?, ?, 'parsing', '{}')`,
-        sessionId, sessionName, now, null, binDest, smapDest
+        `INSERT INTO sessions (id, name, created_at, source_file, bin_path, smap_path, status, plugin_status, project_id)
+         VALUES (?, ?, ?, ?, ?, ?, 'parsing', '{}', ?)`,
+        sessionId, sessionName, now, sourceDest, binDest, smapDest, projectId
     );
 
     const phase1Plugins = [...PHASE1_PLUGINS];
@@ -1073,7 +1322,7 @@ export async function createSession({ binPath, smapPath = null, name = null, wsP
             },
         })
     ).catch(e => {
-        console.error('[createSession] plugin schedule error:', e);
+        log.error({ err: e }, '[createSession] plugin schedule error:');
         db.run("UPDATE sessions SET status = 'failed' WHERE id = ?", sessionId);
         wsProgressBroadcast?.(sessionId, { type: 'error', sessionId, message: e.message });
     });

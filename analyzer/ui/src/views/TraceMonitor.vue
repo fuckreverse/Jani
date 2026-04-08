@@ -1,5 +1,14 @@
 <template>
   <div class="trace-monitor">
+    <!-- 分析进度侧边抽屉 -->
+    <ProgressDrawer
+      :visible="showProgressDrawer"
+      :session-id="progressSessionId"
+      :session-name="progressSessionName"
+      @close="showProgressDrawer = false"
+      @view-session="goToSession"
+    />
+
     <div class="page-header">
       <div>
         <h1 class="page-title">Trace 收集监控</h1>
@@ -100,43 +109,167 @@
       </svg>
     </div>
 
-    <!-- trace 文件列表（需后端支持，暂用 stats 里信息展示） -->
+    <!-- trace 文件列表（增强版） -->
     <div class="traces-card card">
       <div class="traces-header">
-        <span class="traces-title">Trace 文件列表</span>
-        <button class="btn-secondary btn-sm" @click="fetchFiles">刷新</button>
+        <div class="traces-header-left">
+          <span class="traces-title">Trace 文件列表</span>
+          <span class="traces-count" v-if="pagination.total > 0">共 {{ pagination.total }} 个</span>
+        </div>
+        <div class="traces-header-actions">
+          <input
+            v-model="searchQuery"
+            type="text"
+            class="search-input"
+            placeholder="搜索文件名或别名..."
+            @input="debouncedSearch"
+          />
+          <button class="btn-secondary btn-sm" @click="fetchFiles">刷新</button>
+        </div>
       </div>
+
       <div v-if="loadingFiles" class="loading"><div class="spinner"></div><span>加载中...</span></div>
       <div v-else-if="files.length === 0" class="empty-state">暂无 trace 文件</div>
-      <table v-else class="files-table">
-        <thead>
-          <tr>
-            <th>文件名</th>
-            <th>大小</th>
-            <th>修改时间</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="f in files" :key="f.name">
-            <td class="file-name">{{ f.name }}</td>
-            <td class="file-size">{{ fmtBytes(f.size) }}</td>
-            <td class="file-mtime">{{ fmtMtime(f.mtime) }}</td>
-            <td class="file-actions">
-              <button class="btn-secondary btn-xs" @click="importAsSession(f.name)" :disabled="f.importing">
-                {{ f.importing ? '导入中...' : '导入会话' }}
-              </button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+      <template v-else>
+        <!-- 批量操作栏 -->
+        <div class="batch-actions" v-if="selectedFiles.size > 0">
+          <span class="selected-count">已选 {{ selectedFiles.size }} 项</span>
+          <button class="btn-danger btn-sm" @click="batchDelete" :disabled="batchDeleting">
+            {{ batchDeleting ? '删除中...' : '批量删除' }}
+          </button>
+          <button class="btn-secondary btn-sm" @click="selectedFiles.clear()">取消选择</button>
+        </div>
+
+        <table class="files-table">
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" @change="toggleSelectAll" :checked="isAllSelected" /></th>
+              <th class="col-name">文件名 / 别名</th>
+              <th class="col-project">来源工作空间</th>
+              <th class="col-size">大小</th>
+              <th class="col-mtime">修改时间</th>
+              <th class="col-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="f in files" :key="f.name" :class="{ 'row-selected': selectedFiles.has(f.name) }">
+              <td class="col-check">
+                <input type="checkbox" :checked="selectedFiles.has(f.name)" @change="toggleSelect(f.name)" />
+              </td>
+              <td class="col-name">
+                <div class="file-name-cell">
+                  <span class="file-name">{{ f.name }}</span>
+                  <div class="alias-row" v-if="f.alias">
+                    <span class="alias-label">别名:</span>
+                    <span class="alias-value">{{ f.alias }}</span>
+                  </div>
+                  <!-- 内联编辑别名 -->
+                  <div class="alias-edit" v-if="editingFile === f.name">
+                    <input
+                      v-model="editingAlias"
+                      type="text"
+                      class="alias-input"
+                      placeholder="输入别名"
+                      @keydown.enter="saveAlias(f.name)"
+                      @keydown.esc="cancelEditAlias"
+                      ref="aliasInputRef"
+                    />
+                    <button class="btn-xs btn-primary" @click="saveAlias(f.name)">保存</button>
+                    <button class="btn-xs btn-secondary" @click="cancelEditAlias">取消</button>
+                  </div>
+                </div>
+              </td>
+              <td class="col-project">
+                <span v-if="f.projectName" class="project-tag" @click="goToProject(f.projectId)">
+                  {{ f.projectName }}
+                </span>
+                <span v-else class="text-muted">—</span>
+              </td>
+              <td class="col-size">{{ fmtBytes(f.size) }}</td>
+              <td class="col-mtime">{{ fmtMtime(f.mtime) }}</td>
+              <td class="col-actions">
+                <div class="action-btns">
+                  <button class="btn-xs btn-secondary" @click="startEditAlias(f)" title="设置别名">✏️</button>
+                  <button class="btn-xs btn-secondary" @click="downloadFile(f.name)" title="下载">⬇️</button>
+                  <button class="btn-xs btn-accent" @click="openImportDialog(f)" :disabled="f.importing" title="导入会话">
+                    {{ f.importing ? '...' : '📥' }}
+                  </button>
+                  <button class="btn-xs btn-danger" @click="confirmDelete(f.name)" title="删除">🗑</button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- 分页 -->
+        <div class="pagination" v-if="pagination.totalPages > 1">
+          <button class="btn-xs btn-secondary" :disabled="pagination.offset === 0" @click="goToPage(0)">«</button>
+          <button class="btn-xs btn-secondary" :disabled="pagination.offset === 0" @click="goToPage(pagination.offset - pagination.limit)">‹</button>
+          <span class="page-info">第 {{ currentPage }} / {{ pagination.totalPages }} 页</span>
+          <button class="btn-xs btn-secondary" :disabled="pagination.offset + pagination.limit >= pagination.total" @click="goToPage(pagination.offset + pagination.limit)">›</button>
+          <button class="btn-xs btn-secondary" :disabled="pagination.offset + pagination.limit >= pagination.total" @click="goToPage((pagination.totalPages - 1) * pagination.limit)">»</button>
+        </div>
+      </template>
+    </div>
+
+    <!-- 导入会话对话框 -->
+    <div v-if="showImportDialog" class="dialog-overlay" @click.self="showImportDialog = false">
+      <div class="dialog card">
+        <h2 class="dialog-title">导入为分析会话</h2>
+        <p class="dialog-hint">文件：<code>{{ importTarget?.name }}</code></p>
+
+        <div class="import-form">
+          <div class="form-field">
+            <label>会话名称（可选）</label>
+            <input v-model="importForm.sessionName" placeholder="留空则自动生成" />
+          </div>
+
+          <div class="form-field">
+            <label>关联工作空间（自动使用其 smap）</label>
+            <select v-model="importForm.projectId">
+              <option :value="null">不关联工作空间</option>
+              <option v-for="p in availableProjects" :key="p.id" :value="p.id">
+                {{ p.name }} {{ p.status === 'ready' ? '✓' : '(' + p.status + ')' }}
+              </option>
+            </select>
+            <p class="field-hint" v-if="importForm.projectId">
+              将使用该工作空间的 smap.json 进行源码映射
+            </p>
+          </div>
+        </div>
+
+        <div v-if="importError" class="upload-error">❌ {{ importError }}</div>
+
+        <div class="dialog-actions">
+          <button class="btn-secondary" @click="showImportDialog = false">取消</button>
+          <button class="btn-primary" :disabled="importing" @click="doImport">
+            {{ importing ? '导入中...' : '开始导入' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 删除确认对话框 -->
+    <div v-if="deleteTarget" class="dialog-overlay" @click.self="deleteTarget = null">
+      <div class="dialog card" style="max-width: 420px">
+        <h2 class="dialog-title">确认删除</h2>
+        <p>确定删除文件 <strong>{{ deleteTarget }}</strong> 吗？</p>
+        <p class="delete-hint">⚠️ 此操作不可撤销。对应的 .smap.json 文件也会被删除。</p>
+        <div class="dialog-actions">
+          <button class="btn-secondary" @click="deleteTarget = null">取消</button>
+          <button class="btn-danger" :disabled="deleting" @click="doDelete">
+            {{ deleting ? '删除中...' : '确认删除' }}
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
+import ProgressDrawer from './ProgressDrawer.vue';
 
 const router = useRouter();
 
@@ -144,22 +277,54 @@ const POLL_INTERVAL = 3000;
 const CHART_W = 600;
 const CHART_H = 60;
 const HISTORY_MAX = 60;
+const PAGE_SIZE = 20;
 
 const stats        = ref(null);
 const fetchError   = ref('');
 const lastFetch    = ref(null);
 const files        = ref([]);
 const loadingFiles = ref(false);
-const connecting   = ref(true);   // 启动时等待后端就绪
+const connecting   = ref(true);
+
+// 分页和搜索
+const pagination   = ref({ total: 0, offset: 0, limit: PAGE_SIZE, totalPages: 1 });
+const searchQuery  = ref('');
+let searchTimer    = null;
+
+// 多选
+const selectedFiles = ref(new Set());
+const batchDeleting = ref(false);
+
+// 别名编辑
+const editingFile  = ref(null);
+const editingAlias = ref('');
+const aliasInputRef = ref(null);
+
+// 导入会话
+const showImportDialog = ref(false);
+const importTarget     = ref(null);
+const importForm       = ref({ sessionName: '', projectId: null });
+const importing        = ref(false);
+const importError      = ref('');
+const availableProjects = ref([]);
+
+// 进度抽屉
+const showProgressDrawer  = ref(false);
+const progressSessionId   = ref(null);
+const progressSessionName = ref('');
+
+// 删除确认
+const deleteTarget = ref(null);
+const deleting     = ref(false);
 
 // 吞吐率历史（用于折线图）
-const history = ref([]);   // [{ t, eps }]
+const history = ref([]);
 let prevEvents = 0;
 let prevTime   = 0;
 let retryCount = 0;
-const MAX_SILENT_RETRIES = 8;  // 最多静默重试 8 次（~24s）后才显示错误
+const MAX_SILENT_RETRIES = 8;
 
-// 计算当前 ws 端点（dev 代理下 location.host = localhost:5173，直接用当前域名也能工作）
+// 计算当前 ws 端点
 const wsEndpoint = computed(() => `${location.host}/ws/trace`);
 
 // ── 状态计算 ──────────────────────────────────────────────────────────────────
@@ -194,6 +359,12 @@ const throughput = computed(() => {
     return `${fmtNum(Math.round(last.eps))} events/s`;
 });
 
+const currentPage = computed(() => Math.floor(pagination.value.offset / pagination.value.limit) + 1);
+
+const isAllSelected = computed(() => {
+    return files.value.length > 0 && files.value.every(f => selectedFiles.value.has(f.name));
+});
+
 // ── 折线图 ────────────────────────────────────────────────────────────────────
 const chartPoints = computed(() => {
     const h = history.value;
@@ -217,13 +388,11 @@ async function fetchStats() {
         const res = await fetch('/api/trace/stats');
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        // 成功：清除错误状态，标记已连接
         fetchError.value = '';
         connecting.value = false;
         retryCount = 0;
         lastFetch.value = new Date();
 
-        // 计算 eps
         const now = Date.now();
         if (prevTime > 0) {
             const dt  = (now - prevTime) / 1000;
@@ -238,45 +407,227 @@ async function fetchStats() {
     } catch (e) {
         retryCount++;
         if (retryCount > MAX_SILENT_RETRIES) {
-            // 超过静默重试次数后才显示错误
             connecting.value = false;
             fetchError.value = e.message;
         }
-        // 否则保持 connecting 状态，下次 poll 继续重试
     }
 }
 
 async function fetchFiles() {
     loadingFiles.value = true;
     try {
-        const res = await fetch('/api/trace/files');
+        const params = new URLSearchParams({
+            offset: pagination.value.offset,
+            limit: pagination.value.limit,
+        });
+        if (searchQuery.value.trim()) {
+            params.set('q', searchQuery.value.trim());
+        }
+
+        const res = await fetch(`/api/trace/files?${params}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         files.value = (data.files || []).map(f => ({ ...f, importing: false }));
+        pagination.value = {
+            total: data.total,
+            offset: data.offset,
+            limit: data.limit,
+            totalPages: Math.ceil(data.total / data.limit),
+        };
+        // 清理已选中的不在当前页的文件
+        const currentNames = new Set(files.value.map(f => f.name));
+        for (const name of selectedFiles.value) {
+            if (!currentNames.has(name)) selectedFiles.value.delete(name);
+        }
     } catch {
-        // 连接失败时保持 loading，等后端就绪后下次刷新
         if (!connecting.value) files.value = [];
     } finally {
         if (!connecting.value) loadingFiles.value = false;
     }
 }
 
-async function importAsSession(filename) {
-    const f = files.value.find(x => x.name === filename);
-    if (!f) return;
-    f.importing = true;
+function debouncedSearch() {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+        pagination.value.offset = 0;
+        fetchFiles();
+    }, 300);
+}
+
+function goToPage(offset) {
+    pagination.value.offset = Math.max(0, Math.min(offset, pagination.value.total - 1));
+    fetchFiles();
+}
+
+// ── 多选操作 ───────────────────────────────────────────────────────────────────
+function toggleSelectAll(e) {
+    if (e.target.checked) {
+        files.value.forEach(f => selectedFiles.value.add(f.name));
+    } else {
+        selectedFiles.value.clear();
+    }
+}
+
+function toggleSelect(name) {
+    if (selectedFiles.value.has(name)) {
+        selectedFiles.value.delete(name);
+    } else {
+        selectedFiles.value.add(name);
+    }
+}
+
+async function batchDelete() {
+    if (selectedFiles.value.size === 0) return;
+    if (!confirm(`确定删除选中的 ${selectedFiles.value.size} 个文件吗？`)) return;
+
+    batchDeleting.value = true;
+    try {
+        const res = await fetch('/api/trace/files/batch-delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ names: [...selectedFiles.value] }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+        // 从列表中移除已删除的文件
+        const deletedSet = new Set(data.deleted || []);
+        files.value = files.value.filter(f => !deletedSet.has(f.name));
+        selectedFiles.value.clear();
+        pagination.value.total -= deletedSet.size;
+    } catch (e) {
+        alert(`批量删除失败：${e.message}`);
+    } finally {
+        batchDeleting.value = false;
+    }
+}
+
+// ── 别名编辑 ───────────────────────────────────────────────────────────────────
+function startEditAlias(f) {
+    editingFile.value = f.name;
+    editingAlias.value = f.alias || '';
+    nextTick(() => {
+        if (aliasInputRef.value?.[0]) aliasInputRef.value[0].focus();
+    });
+}
+
+function cancelEditAlias() {
+    editingFile.value = null;
+    editingAlias.value = '';
+}
+
+async function saveAlias(filename) {
+    try {
+        const res = await fetch(`/api/trace/files/${encodeURIComponent(filename)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ alias: editingAlias.value.trim() }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+        const f = files.value.find(x => x.name === filename);
+        if (f) f.alias = data.alias;
+        editingFile.value = null;
+        editingAlias.value = '';
+    } catch (e) {
+        alert(`保存别名失败：${e.message}`);
+    }
+}
+
+// ── 下载 ───────────────────────────────────────────────────────────────────────
+function downloadFile(filename) {
+    const a = document.createElement('a');
+    a.href = `/api/trace/files/${encodeURIComponent(filename)}/download`;
+    a.download = filename;
+    a.click();
+}
+
+// ── 导入会话 ───────────────────────────────────────────────────────────────────
+async function loadProjects() {
+    try {
+        const res = await fetch('/api/projects');
+        if (!res.ok) return;
+        const data = await res.json();
+        availableProjects.value = (data.projects || data).filter(p => p.status === 'ready');
+    } catch { /* ignore */ }
+}
+
+function openImportDialog(f) {
+    importTarget.value = f;
+    importForm.value = { sessionName: '', projectId: null };
+    importError.value = '';
+    showImportDialog.value = true;
+    loadProjects();
+}
+
+async function doImport() {
+    if (!importTarget.value) return;
+    importing.value = true;
+    importError.value = '';
+
     try {
         const res = await fetch('/api/trace/import', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ filename }),
+            body: JSON.stringify({
+                filename: importTarget.value.name,
+                name: importForm.value.sessionName.trim() || undefined,
+                projectId: importForm.value.projectId || undefined,
+            }),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        router.push(`/sessions/${data.sessionId}`);
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+        showImportDialog.value = false;
+
+        // 打开进度抽屉
+        progressSessionId.value   = data.sessionId;
+        progressSessionName.value = importForm.value.sessionName || importTarget.value.name.replace(/\.bin$/, '');
+        showProgressDrawer.value  = true;
+
     } catch (e) {
-        alert(`导入失败：${e.message}`);
-        f.importing = false;
+        importError.value = e.message;
+    } finally {
+        importing.value = false;
+    }
+}
+
+function goToSession() {
+    if (progressSessionId.value) {
+        showProgressDrawer.value = false;
+        router.push(`/sessions/${progressSessionId.value}`);
+    }
+}
+
+function goToProject(projectId) {
+    if (projectId) {
+        router.push(`/workspaces/${projectId}`);
+    }
+}
+
+// ── 单个删除 ───────────────────────────────────────────────────────────────────
+function confirmDelete(filename) {
+    deleteTarget.value = filename;
+}
+
+async function doDelete() {
+    if (!deleteTarget.value) return;
+    deleting.value = true;
+    try {
+        const res = await fetch(`/api/trace/files/${encodeURIComponent(deleteTarget.value)}`, {
+            method: 'DELETE',
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+        files.value = files.value.filter(f => f.name !== deleteTarget.value);
+        pagination.value.total--;
+        deleteTarget.value = null;
+    } catch (e) {
+        alert(`删除失败：${e.message}`);
+    } finally {
+        deleting.value = false;
     }
 }
 
@@ -312,7 +663,6 @@ let timer = null;
 
 onMounted(() => {
     fetchStats();
-    // 后端就绪后立即拉一次文件列表
     const stopWatch = watch(connecting, (val) => {
         if (!val) { fetchFiles(); stopWatch(); }
     });
@@ -324,6 +674,7 @@ onMounted(() => {
 
 onUnmounted(() => {
     if (timer) clearInterval(timer);
+    if (searchTimer) clearTimeout(searchTimer);
 });
 </script>
 
@@ -513,11 +864,64 @@ onUnmounted(() => {
     justify-content: space-between;
     padding: 12px 16px;
     border-bottom: 1px solid var(--border-color);
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.traces-header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
 }
 
 .traces-title {
     font-size: 13px;
     font-weight: 600;
+}
+
+.traces-count {
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+
+.traces-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.search-input {
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 12px;
+    width: 200px;
+}
+
+.search-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+/* 批量操作栏 */
+.batch-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 16px;
+    background: rgba(99, 102, 241, 0.08);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.selected-count {
+    font-size: 12px;
+    color: var(--accent);
+    font-weight: 500;
 }
 
 .files-table {
@@ -528,7 +932,7 @@ onUnmounted(() => {
 
 .files-table th {
     text-align: left;
-    padding: 8px 16px;
+    padding: 8px 12px;
     font-size: 11px;
     font-weight: 600;
     color: var(--text-muted);
@@ -537,7 +941,7 @@ onUnmounted(() => {
 }
 
 .files-table td {
-    padding: 9px 16px;
+    padding: 10px 12px;
     border-bottom: 1px solid rgba(45,49,72,0.5);
     vertical-align: middle;
 }
@@ -550,29 +954,324 @@ onUnmounted(() => {
     background: var(--bg-tertiary);
 }
 
+.files-table tr.row-selected td {
+    background: rgba(99, 102, 241, 0.08);
+}
+
+.col-check { width: 36px; }
+.col-name { min-width: 200px; }
+.col-project { width: 120px; }
+.col-size { width: 90px; }
+.col-mtime { width: 150px; }
+.col-actions { width: 140px; }
+
+.file-name-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
 .file-name {
     font-family: monospace;
     font-size: 12px;
     color: var(--text-primary);
 }
 
-.file-size, .file-mtime {
-    font-family: monospace;
-    font-size: 12px;
-    color: var(--text-muted);
-    white-space: nowrap;
+.alias-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
 }
 
-.file-actions { width: 110px; }
+.alias-label {
+    color: var(--text-muted);
+}
 
+.alias-value {
+    color: var(--success);
+    font-weight: 500;
+}
+
+.alias-edit {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+}
+
+.alias-input {
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 11px;
+    width: 140px;
+}
+
+.project-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(99, 102, 241, 0.12);
+    color: var(--accent);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.project-tag:hover {
+    background: rgba(99, 102, 241, 0.22);
+}
+
+.text-muted {
+    color: var(--text-muted);
+}
+
+.action-btns {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.btn-xs {
+    padding: 3px 8px;
+    font-size: 11px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+.btn-xs:hover {
+    background: var(--bg-tertiary);
+}
+
+.btn-xs.btn-primary {
+    background: rgba(99, 102, 241, 0.15);
+    border-color: rgba(99, 102, 241, 0.3);
+    color: var(--accent);
+}
+
+.btn-xs.btn-accent {
+    background: rgba(99, 102, 241, 0.12);
+    border-color: rgba(99, 102, 241, 0.25);
+    color: #a5b4fc;
+}
+
+.btn-xs.btn-danger {
+    background: rgba(239, 68, 68, 0.1);
+    border-color: rgba(239, 68, 68, 0.25);
+    color: #f87171;
+}
+
+.btn-xs:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* 分页 */
+.pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px;
+    border-top: 1px solid var(--border-color);
+}
+
+.page-info {
+    font-size: 12px;
+    color: var(--text-muted);
+    min-width: 100px;
+    text-align: center;
+}
+
+/* ── 对话框 ──────────────────────────────────────────────────────── */
+.dialog-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.dialog {
+    width: min(520px, 96vw);
+    max-height: 90vh;
+    overflow-y: auto;
+    padding: 20px;
+}
+
+.dialog-title {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+
+.dialog-hint {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+}
+
+.import-form, .upload-form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.form-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.form-field label {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.form-field input, .form-field select {
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+.form-field input:focus, .form-field select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.field-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+.upload-error {
+    padding: 8px 12px;
+    background: rgba(239,68,68,0.1);
+    border-radius: 6px;
+    color: var(--danger);
+    font-size: 12px;
+}
+
+.dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 16px;
+}
+
+.delete-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 8px;
+    line-height: 1.5;
+}
+
+/* 按钮样式 */
 .btn-sm {
     padding: 4px 10px;
     font-size: 12px;
 }
 
-.btn-xs {
-    padding: 3px 9px;
-    font-size: 11px;
-    border-radius: 4px;
+.btn-primary {
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: 1px solid rgba(99, 102, 241, 0.35);
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--accent);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.btn-primary:hover {
+    background: rgba(99, 102, 241, 0.25);
+}
+
+.btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn-secondary {
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.btn-secondary:hover {
+    background: var(--bg-tertiary);
+}
+
+.btn-secondary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn-danger {
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.btn-danger:hover {
+    background: rgba(239, 68, 68, 0.25);
+}
+
+.btn-danger:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* loading */
+.loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 40px;
+    color: var(--text-muted);
+}
+
+.spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--border-color);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.empty-state {
+    text-align: center;
+    padding: 40px;
+    color: var(--text-muted);
+    font-size: 13px;
 }
 </style>

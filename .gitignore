@@ -4,3 +4,5 @@ et_*
 *~
 data
 *.ndjson
+*.bin
+*.db

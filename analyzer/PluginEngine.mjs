@@ -7,11 +7,29 @@ import { resolve, dirname } from 'path';
 import { readdirSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as db from './db/Database.mjs';
+import { createLogger } from './logger.mjs';
+
+const log = createLogger('PluginEngine');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /** 全局插件注册表：id → 插件类 */
 const pluginRegistry = new Map();
+
+/**
+ * 全局 DB 互斥锁：确保同一时刻只有一个插件在执行 DB 密集操作。
+ * sql.js 是单例内存数据库，PreparedStatement 句柄在并发 async 插件之间
+ * 会被交叉访问，导致 "Statement closed" 错误。
+ */
+let _dbMutex = Promise.resolve();
+
+function acquireDbLock() {
+    let release;
+    const next = new Promise(resolve => { release = resolve; });
+    const wait = _dbMutex.then(() => release);
+    _dbMutex = next;
+    return wait; // resolves to the release() function
+}
 
 /**
  * 注册插件类
@@ -45,7 +63,7 @@ export async function autoDiscover() {
                 registerPlugin(PluginClass);
             }
         } catch (e) {
-            console.warn(`[PluginEngine] 加载插件 ${file} 失败:`, e.message);
+            log.warn({ err: e, file }, `加载插件 ${file} 失败`);
         }
     }
 }
@@ -133,7 +151,7 @@ function writeCheckpoint(sessionId, pluginId, phase, durationMs) {
             sessionId, pluginId, phase || null, Date.now(), durationMs
         );
     } catch (e) {
-        console.warn('[PluginEngine] writeCheckpoint error:', e.message);
+        log.warn({ err: e }, 'writeCheckpoint error');
     }
 }
 
@@ -164,7 +182,7 @@ export function clearCheckpoints(sessionId, pluginId = null) {
             db.run('DELETE FROM plugin_checkpoints WHERE session_id = ?', sessionId);
         }
     } catch (e) {
-        console.warn('[PluginEngine] clearCheckpoints error:', e.message);
+        log.warn({ err: e }, 'clearCheckpoints error');
     }
 }
 
@@ -284,7 +302,7 @@ async function runPlugin(sessionId, pluginId, options = {}) {
     const PluginClass = pluginRegistry.get(pluginId);
 
     if (!PluginClass) {
-        console.warn(`[PluginEngine] 未知插件: ${pluginId}`);
+        log.warn({ pluginId }, `未知插件: ${pluginId}`);
         return;
     }
 
@@ -307,7 +325,11 @@ async function runPlugin(sessionId, pluginId, options = {}) {
 
     const startTime = Date.now();
 
+    // 获取 DB 互斥锁：防止多个并发插件同时操作 sql.js 单例
+    const releaseDbLock = await acquireDbLock();
+
     try {
+        log.debug({ sessionId, pluginId }, `插件 ${pluginId} 开始执行`);
         emit({ type: 'plugin_start', plugin: pluginId, status: 'running', message: '开始执行...' });
 
         const plugin = new PluginClass();
@@ -319,6 +341,7 @@ async function runPlugin(sessionId, pluginId, options = {}) {
         // 写入检查点（断点恢复）
         writeCheckpoint(sessionId, pluginId, phase, duration);
 
+        log.info({ sessionId, pluginId, durationMs: duration }, `插件 ${pluginId} 执行完成 (${duration}ms)`);
         emit({ type: 'plugin_done', plugin: pluginId, status: 'done', durationMs: duration });
 
         // 每个插件完成后持久化到磁盘（flush 只在 dirty 时才 export）
@@ -326,12 +349,21 @@ async function runPlugin(sessionId, pluginId, options = {}) {
 
     } catch (e) {
         const duration = Date.now() - startTime;
-        console.error(`[PluginEngine] 插件 ${pluginId} 执行失败:`, e);
+        // 打印完整错误信息（包含 stack）
+        log.error({
+            err: e,
+            sessionId,
+            pluginId,
+            durationMs: duration,
+        }, `插件 ${pluginId} 执行失败: ${e.message}`);
         updatePluginStatus(sessionId, pluginId, 'failed');
         emit({ type: 'plugin_failed', plugin: pluginId, status: 'failed', error: e.message, durationMs: duration });
 
         // 标记 session 失败
         db.run('UPDATE sessions SET status = ? WHERE id = ?', 'failed', sessionId);
+    } finally {
+        // 无论成功/失败，都释放 DB 锁，让下一个插件可以开始
+        releaseDbLock();
     }
 }
 
@@ -357,7 +389,7 @@ function updatePluginStatus(sessionId, pluginId, status) {
         ps[pluginId] = status;
         db.run('UPDATE sessions SET plugin_status = ? WHERE id = ?', JSON.stringify(ps), sessionId);
     } catch (e) {
-        console.warn('[PluginEngine] updatePluginStatus error:', e.message);
+        log.warn({ err: e }, 'updatePluginStatus error');
     }
 }
 

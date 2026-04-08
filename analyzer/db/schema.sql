@@ -2,6 +2,26 @@
 -- 版本：v1.0
 -- 说明：所有表和索引均在此定义，即使 Phase 1 暂不使用的表也包含在内
 
+-- ─── 工作空间（项目）─────────────────────────────────────────────────────────
+-- 每个 Project 绑定一份原始 JS + 插桩产物（instrumented code + smap），
+-- 后续只需上传 trace log 即可创建分析会话，无需重复插桩。
+
+CREATE TABLE IF NOT EXISTS projects (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    created_at      INTEGER NOT NULL,
+    source_file     TEXT,           -- 原始 JS 路径（服务端存储）
+    instrumented_path TEXT,         -- 插桩后 JS 路径
+    smap_path       TEXT,           -- smap.json 路径
+    status          TEXT DEFAULT 'pending',  -- pending / instrumenting / ready / failed
+    instrument_options TEXT DEFAULT '{}',    -- 插桩时使用的选项（JSON）
+    iid_count       INTEGER DEFAULT 0,
+    error_msg       TEXT,
+    updated_at      INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_projects_created ON projects(created_at DESC);
+
 -- ─── 分析会话 ────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -13,7 +33,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     smap_path   TEXT,
     event_count INTEGER DEFAULT 0,
     status      TEXT DEFAULT 'pending',
-    plugin_status TEXT DEFAULT '{}'
+    plugin_status TEXT DEFAULT '{}',
+    project_id  TEXT    -- 关联的工作空间（可为 null）
 );
 
 -- ─── 事件流（主表）──────────────────────────────────────────────────────────

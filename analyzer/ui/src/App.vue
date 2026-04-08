@@ -7,6 +7,7 @@
         <span class="brand-name">Jani Trace Analyzer</span>
       </div>
       <nav class="navbar-nav">
+        <router-link to="/workspaces" class="nav-link">工作空间</router-link>
         <router-link to="/" class="nav-link">会话列表</router-link>
         <router-link to="/instrument" class="nav-link">插桩工作台</router-link>
         <router-link to="/trace" class="nav-link">Trace 监控</router-link>

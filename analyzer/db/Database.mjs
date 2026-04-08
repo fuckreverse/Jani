@@ -55,6 +55,10 @@ export async function init(path) {
     // 建表（幂等 — CREATE TABLE IF NOT EXISTS）
     const schema = readFileSync(SCHEMA_PATH, 'utf8');
     _db.run(schema);
+
+    // ── 在线迁移：添加新列（旧 db 文件升级）────────────────────────────────
+    _runMigrations(_db);
+
     _dirty = false;
 }
 
@@ -156,5 +160,23 @@ export function close() {
         flush();
         _db.close();
         _db = null;
+    }
+}
+
+// ── 在线迁移（幂等）──────────────────────────────────────────────────────────
+function _runMigrations(db) {
+    // 列出 sessions 表的现有列
+    const sessionsCols = new Set();
+    try {
+        const stmt = db.prepare('PRAGMA table_info(sessions)');
+        while (stmt.step()) {
+            const row = stmt.getAsObject();
+            sessionsCols.add(row.name);
+        }
+        stmt.free();
+    } catch { /* table may not exist yet */ }
+
+    if (sessionsCols.size > 0 && !sessionsCols.has('project_id')) {
+        db.run('ALTER TABLE sessions ADD COLUMN project_id TEXT');
     }
 }

@@ -36,6 +36,8 @@
           <span class="panel-title">插桩后代码（预览）</span>
           <div class="panel-actions">
             <span v-if="smapInfo" class="smap-stat">{{ smapInfo.iidCount }} iids</span>
+            <span v-if="instrumentedCode" class="smap-stat">{{ formatBytes(new TextEncoder().encode(instrumentedCode).length) }}</span>
+            <span v-if="smapInfo?.smapJson" class="smap-stat">smap {{ formatBytes(JSON.stringify(smapInfo.smapJson).length) }}</span>
             <button
               v-if="instrumentedCode"
               class="btn-secondary btn-sm btn-copy"
@@ -60,235 +62,16 @@
       </div>
     </div>
 
-    <!-- 插桩选项（分区块折叠） -->
-    <div class="options-panel card">
-      <div class="options-panel-title">插桩选项</div>
-
-      <!-- ① 基础选项（默认展开） -->
-      <div class="section">
-        <div class="section-header" @click="toggleSection('basic')">
-          <span class="section-arrow" :class="{ open: sections.basic }">▶</span>
-          <span class="section-title">基础选项</span>
-        </div>
-        <div class="section-body" v-show="sections.basic">
-          <div class="options-grid">
-            <div class="opt-field">
-              <label>沙盒变量名</label>
-              <input v-model="options.sandboxVar" placeholder="J$" style="width:100px" />
-            </div>
-            <div class="opt-field">
-              <label>源码类型</label>
-              <select v-model="options.sourceType" style="width:130px">
-                <option value="auto">auto（自动识别）</option>
-                <option value="script">script</option>
-                <option value="module">module</option>
-              </select>
-            </div>
-            <div class="opt-field">
-              <label>执行环境 (env)</label>
-              <select v-model="env" style="width:120px">
-                <option value="node">Node.js</option>
-                <option value="jsdom">JSDOM</option>
-              </select>
-            </div>
-            <div class="opt-field">
-              <label>目标平台 (--target)</label>
-              <select v-model="options.target" style="width:120px">
-                <option value="node">node</option>
-                <option value="browser">browser</option>
-              </select>
-            </div>
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="options.randomVar" />
-              <span>--random-var</span>
-              <span class="opt-hint">随机生成沙盒变量名</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="options.debug" />
-              <span>--debug</span>
-              <span class="opt-hint">详细日志输出</span>
-            </label>
-          </div>
-        </div>
-      </div>
-
-      <!-- ② 输出选项 -->
-      <div class="section">
-        <div class="section-header" @click="toggleSection('output')">
-          <span class="section-arrow" :class="{ open: sections.output }">▶</span>
-          <span class="section-title">输出选项</span>
-        </div>
-        <div class="section-body" v-show="sections.output">
-          <div class="options-grid">
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="options.inlineIid" />
-              <span>--inline-iid</span>
-              <span class="opt-hint">iid→位置 map 内联到文件头</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="options.inlineSource" />
-              <span>--inline-source</span>
-              <span class="opt-hint">原始源码内联到 source map</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="options.noSourceMap" />
-              <span>--no-source-map</span>
-              <span class="opt-hint">不写 source map 文件</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="options.vlcqSourceMap" />
-              <span>--vlcq-source-map</span>
-              <span class="opt-hint">额外生成标准 Source Map v3</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="options.splitRuntime" />
-              <span>--split-runtime</span>
-              <span class="opt-hint">运行时与插桩代码分离输出</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="options.dryRun" />
-              <span>--dry-run</span>
-              <span class="opt-hint">只预览，不写文件</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="options.noWrite" />
-              <span>--no-write</span>
-              <span class="opt-hint">仅内存插桩（instrument-and-run）</span>
-            </label>
-          </div>
-        </div>
-      </div>
-
-      <!-- ③ 浏览器专属选项（仅 target=browser 时显示） -->
-      <div class="section" v-if="options.target === 'browser'">
-        <div class="section-header" @click="toggleSection('browser')">
-          <span class="section-arrow" :class="{ open: sections.browser }">▶</span>
-          <span class="section-title">浏览器专属选项</span>
-          <span class="section-badge">target=browser</span>
-        </div>
-        <div class="section-body" v-show="sections.browser">
-          <div class="options-grid">
-            <div class="opt-field">
-              <label>--db-name</label>
-              <input v-model="options.dbName" placeholder="jalangi-traces" style="width:180px" />
-              <span class="opt-hint-inline">IndexedDB 数据库名</span>
-            </div>
-            <div class="opt-field">
-              <label>--store-name</label>
-              <input v-model="options.storeName" placeholder="execution-trace" style="width:180px" />
-              <span class="opt-hint-inline">ObjectStore 名</span>
-            </div>
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="options.noIdb" />
-              <span>--no-idb</span>
-              <span class="opt-hint">不启用 IndexedDB</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="options.wsSab" />
-              <span>--ws-sab</span>
-              <span class="opt-hint">SharedArrayBuffer 零拷贝模式（需 COOP/COEP）</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="options.minify" />
-              <span>--minify</span>
-              <span class="opt-hint">压缩运行时 bundle</span>
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" v-model="options.deferredLoad" />
-              <span>--deferred-load</span>
-              <span class="opt-hint">延迟加载（需配合 --split-runtime）</span>
-            </label>
-            <div class="opt-field" style="width:100%">
-              <label>--ws-url</label>
-              <input v-model="options.wsUrl" placeholder="ws://localhost:33000/ws/trace" style="width:320px;font-family:monospace;font-size:12px" />
-              <span class="opt-hint-inline">留空则禁用 WS</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- ④ 插桩粒度控制 (Config) -->
-      <div class="section">
-        <div class="section-header" @click="toggleSection('config')">
-          <span class="section-arrow" :class="{ open: sections.config }">▶</span>
-          <span class="section-title">插桩粒度控制（Config）</span>
-          <span class="section-hint">null = 全量（默认），取消勾选 = 禁用该操作类型的插桩</span>
-        </div>
-        <div class="section-body" v-show="sections.config">
-          <div class="config-bar">
-            <span class="config-mode-label">模式：</span>
-            <label class="radio-label">
-              <input type="radio" v-model="configMode" value="full" />
-              <span>全量（不传 Config）</span>
-            </label>
-            <label class="radio-label">
-              <input type="radio" v-model="configMode" value="custom" />
-              <span>自定义</span>
-            </label>
-            <template v-if="configMode === 'custom'">
-              <button class="btn-secondary btn-xs" @click="selectAllConfig">全部开启</button>
-              <button class="btn-secondary btn-xs" @click="clearAllConfig">全部关闭</button>
-            </template>
-          </div>
-          <div v-if="configMode === 'custom'" class="config-grid">
-            <label v-for="key in configKeys" :key="key" class="checkbox-label config-item">
-              <input type="checkbox" v-model="jalangiConfig[key]" />
-              <span class="config-key">{{ key }}</span>
-              <span class="opt-hint">{{ configDesc[key] }}</span>
-            </label>
-          </div>
-        </div>
-      </div>
-
-      <!-- ⑤ 运行选项（analysis + init-param） -->
-      <div class="section">
-        <div class="section-header" @click="toggleSection('run')">
-          <span class="section-arrow" :class="{ open: sections.run }">▶</span>
-          <span class="section-title">运行选项（instrument-and-run）</span>
-        </div>
-        <div class="section-body" v-show="sections.run">
-          <!-- analysis 插件列表 -->
-          <div class="run-option-group">
-            <div class="run-option-label">
-              <span>--analysis 插件路径</span>
-              <button class="btn-secondary btn-xs" @click="addAnalysis">+ 添加</button>
-            </div>
-            <div v-for="(_, idx) in options.analyses" :key="idx" class="run-option-row">
-              <input
-                v-model="options.analyses[idx]"
-                placeholder="如 src/plugins/tutorial/LogAll.js"
-                class="run-option-input"
-              />
-              <button class="btn-danger btn-xs" @click="removeAnalysis(idx)">删除</button>
-            </div>
-            <div v-if="options.analyses.length === 0" class="run-option-empty">暂无分析插件（使用默认执行追踪）</div>
-          </div>
-
-          <!-- init-param 键值对列表 -->
-          <div class="run-option-group" style="margin-top:12px">
-            <div class="run-option-label">
-              <span>--init-param 初始参数</span>
-              <button class="btn-secondary btn-xs" @click="addInitParam">+ 添加</button>
-            </div>
-            <div v-for="(param, idx) in options.initParams" :key="idx" class="run-option-row">
-              <input
-                v-model="param.key"
-                placeholder="key"
-                class="run-option-input run-option-input-key"
-              />
-              <span class="run-param-colon">:</span>
-              <input
-                v-model="param.value"
-                placeholder="value"
-                class="run-option-input"
-              />
-              <button class="btn-danger btn-xs" @click="removeInitParam(idx)">删除</button>
-            </div>
-            <div v-if="options.initParams.length === 0" class="run-option-empty">暂无初始参数</div>
-          </div>
-        </div>
-      </div>
+    <!-- 插桩选项（复用 InstrumentOptions 组件） -->
+    <!-- 执行环境选项单独保留在此，因为它是 InstrumentStudio 专属的（工作空间不需要） -->
+    <div class="env-bar card">
+      <span class="env-label">执行环境 (env)</span>
+      <select v-model="env" style="width:120px">
+        <option value="node">Node.js</option>
+        <option value="jsdom">JSDOM</option>
+      </select>
     </div>
+    <InstrumentOptions ref="optionsRef" />
 
     <!-- 操作按钮 -->
     <div class="action-bar">
@@ -341,8 +124,9 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onUnmounted, reactive } from 'vue';
+import { ref, computed, nextTick, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
+import InstrumentOptions from './InstrumentOptions.vue';
 
 const router = useRouter();
 
@@ -382,131 +166,12 @@ const runError           = ref('');
 const completedSessionId = ref('');
 const consoleEl          = ref(null);
 
-const env = ref('node');
-
-// ── 折叠状态 ────────────────────────────────────────────────────────────────
-const sections = reactive({
-    basic:   true,    // 基础选项默认展开
-    output:  false,
-    browser: false,
-    config:  false,
-    run:     false,
-});
-
-function toggleSection(name) {
-    sections[name] = !sections[name];
-}
-
-// ── 插桩选项 ────────────────────────────────────────────────────────────────
-const DEFAULT_WS_URL = `ws://${location.host}/ws/trace`;
-
-const options = reactive({
-    // 基础
-    sandboxVar:   'J$',
-    sourceType:   'auto',   // 'auto' | 'script' | 'module'
-    target:       'browser',
-    randomVar:    false,
-    debug:        true,
-    // 输出
-    inlineIid:    true,
-    inlineSource: false,
-    noSourceMap:  false,
-    vlcqSourceMap: false,
-    splitRuntime: false,
-    dryRun:       false,
-    noWrite:      false,
-    // 浏览器专属
-    dbName:       '',
-    storeName:    '',
-    noIdb:        true,   // 默认禁用 IDB，纯 WS 模式
-    wsUrl:        DEFAULT_WS_URL,
-    wsSab:        true,   // 默认启用 SAB 模式
-    minify:       false,
-    deferredLoad: false,
-    // 运行选项
-    analyses:     [],
-    initParams:   [],   // [{ key: '', value: '' }, ...]
-});
-
-// ── JalangiConfig 粒度控制 ────────────────────────────────────────────────
-const configMode = ref('full');  // 'full' | 'custom'
-
-const configKeys = [
-    'INSTR_READ',
-    'INSTR_WRITE',
-    'INSTR_GETFIELD',
-    'INSTR_PUTFIELD',
-    'INSTR_BINARY',
-    'INSTR_UNARY',
-    'INSTR_LITERAL',
-    'INSTR_INIT',
-    'INSTR_CONDITIONAL',
-    'INSTR_TRY_CATCH_ARGUMENTS',
-    'INSTR_END_EXPRESSION',
-    'INSTR_INVOKE',
-    'INSTR_RETURN',
-    'INSTR_THROW',
-    'INSTR_FORIN',
-    'ENABLE_SAMPLING',
-];
-
-const configDesc = {
-    INSTR_READ:                '变量读取',
-    INSTR_WRITE:               '变量写入',
-    INSTR_GETFIELD:            '属性读取',
-    INSTR_PUTFIELD:            '属性写入',
-    INSTR_BINARY:              '二元运算',
-    INSTR_UNARY:               '一元运算',
-    INSTR_LITERAL:             '字面量',
-    INSTR_INIT:                '变量声明初始化',
-    INSTR_CONDITIONAL:         '条件表达式/switch',
-    INSTR_TRY_CATCH_ARGUMENTS: '函数/脚本 try-catch 包裹',
-    INSTR_END_EXPRESSION:      '表达式语句末尾',
-    INSTR_INVOKE:              '函数/方法调用',
-    INSTR_RETURN:              'return 语句',
-    INSTR_THROW:               'throw 语句',
-    INSTR_FORIN:               'for-in 循环',
-    ENABLE_SAMPLING:           '采样模式',
-};
-
-// 初始化全开
-const jalangiConfig = reactive(
-    Object.fromEntries(configKeys.map(k => [k, true]))
-);
-
-function selectAllConfig() {
-    for (const k of configKeys) jalangiConfig[k] = true;
-}
-function clearAllConfig() {
-    for (const k of configKeys) jalangiConfig[k] = false;
-}
-
-// 构建 config 对象（传给后端）
-function buildConfig() {
-    if (configMode.value === 'full') return null;
-    const cfg = {};
-    for (const k of configKeys) {
-        cfg[k] = jalangiConfig[k];
-    }
-    return cfg;
-}
-
-// ── analysis / init-param 动态列表 ─────────────────────────────────────────
-function addAnalysis() {
-    options.analyses.push('');
-}
-function removeAnalysis(idx) {
-    options.analyses.splice(idx, 1);
-}
-function addInitParam() {
-    options.initParams.push({ key: '', value: '' });
-}
-function removeInitParam(idx) {
-    options.initParams.splice(idx, 1);
-}
+const env        = ref('node');
+const optionsRef = ref(null);  // InstrumentOptions 组件引用
 
 // ── 计算属性 ─────────────────────────────────────────────────────────────────
 let ws = null;
+// optionsRef.buildOptions(sourceCode) 由 InstrumentOptions 组件提供
 
 const lineCount = computed(() => code.value ? code.value.split('\n').length : 0);
 const byteCount = computed(() => new TextEncoder().encode(code.value).length);
@@ -528,50 +193,9 @@ function clearCode() {
     instrumentError.value = '';
 }
 
-// ── source-type 自动识别 ──────────────────────────────────────────────────────
-// 简单启发：包含顶层 import/export 语句则认为是 module
-function detectSourceType(src) {
-    // 去掉字符串和注释后检测，简化处理：直接正则粗判
-    return /^\s*(import\s|export\s)/m.test(src) ? 'module' : 'script';
-}
-
-// ── 构建请求体选项 ────────────────────────────────────────────────────────────
+// ── 构建请求体选项（委托给 InstrumentOptions 组件）────────────────────────────
 function buildRequestOptions() {
-    const resolvedSourceType = options.sourceType === 'auto'
-        ? detectSourceType(code.value)
-        : options.sourceType;
-
-    return {
-        // 基础
-        sandboxVar:    options.sandboxVar,
-        sourceType:    resolvedSourceType,
-        target:        options.target,
-        randomVar:     options.randomVar,
-        debug:         options.debug,
-        // 输出
-        inlineIid:     options.inlineIid,
-        inlineSource:  options.inlineSource,
-        noSourceMap:   options.noSourceMap,
-        vlcqSourceMap: options.vlcqSourceMap,
-        splitRuntime:  options.splitRuntime,
-        dryRun:        options.dryRun,
-        noWrite:       options.noWrite,
-        // 浏览器专属（只在 browser 模式有意义，后端自行判断）
-        dbName:        options.dbName || undefined,
-        storeName:     options.storeName || undefined,
-        noIdb:         options.noIdb,
-        wsUrl:         options.wsUrl || undefined,
-        wsSab:         options.wsSab,
-        minify:        options.minify,
-        deferredLoad:  options.deferredLoad,
-        // 运行
-        analyses:      options.analyses.filter(a => a.trim()),
-        initParams:    options.initParams
-            .filter(p => p.key.trim())
-            .map(p => `${p.key.trim()}:${p.value}`),
-        // Config 粒度控制
-        jalangiConfig: buildConfig(),
-    };
+    return optionsRef.value?.buildOptions(code.value) ?? {};
 }
 
 // ── 插桩 ────────────────────────────────────────────────────────────────────
@@ -710,6 +334,13 @@ function download(content, name, type) {
     URL.revokeObjectURL(url);
 }
 
+function formatBytes(n) {
+    if (!n) return '0 B';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
 onUnmounted(() => {
     if (ws) { ws.onclose = null; ws.close(); }
 });
@@ -829,205 +460,19 @@ onUnmounted(() => {
     background: rgba(239,68,68,0.08);
 }
 
-/* 选项面板 */
-.options-panel {
-    margin-bottom: 16px;
-    padding: 0;
-    overflow: hidden;
-}
-
-.options-panel-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-primary);
-    padding: 14px 16px 10px;
-    border-bottom: 1px solid var(--border-color);
-}
-
-/* 折叠区块 */
-.section {
-    border-bottom: 1px solid var(--border-color);
-}
-.section:last-child {
-    border-bottom: none;
-}
-
-.section-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 16px;
-    cursor: pointer;
-    user-select: none;
-    background: var(--bg-secondary);
-    transition: background 0.15s;
-}
-.section-header:hover {
-    background: var(--bg-tertiary);
-}
-
-.section-arrow {
-    font-size: 10px;
-    color: var(--text-muted);
-    transition: transform 0.2s;
-    display: inline-block;
-}
-.section-arrow.open {
-    transform: rotate(90deg);
-}
-
-.section-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-.section-badge {
-    font-size: 11px;
-    padding: 1px 7px;
-    border-radius: 10px;
-    background: rgba(59,130,246,0.18);
-    color: #60a5fa;
-    font-family: monospace;
-}
-
-.section-hint {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-left: auto;
-}
-
-.section-body {
-    padding: 12px 16px 14px;
-}
-
-.options-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 14px 24px;
-    align-items: flex-start;
-}
-
-.checkbox-label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    cursor: pointer;
-    font-size: 13px;
-    color: var(--text-primary);
-}
-
-.checkbox-label input[type="checkbox"] {
-    width: auto;
-}
-
-.opt-hint {
-    font-size: 11px;
-    color: var(--text-muted);
-}
-
-.opt-hint-inline {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-top: 2px;
-}
-
-.opt-field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-}
-
-.opt-field label {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-bottom: 0;
-}
-
-/* Config 粒度控制 */
-.config-bar {
+/* 执行环境选择条 */
+.env-bar {
     display: flex;
     align-items: center;
     gap: 12px;
-    margin-bottom: 12px;
-    flex-wrap: wrap;
-}
-
-.config-mode-label {
-    font-size: 12px;
-    color: var(--text-muted);
-}
-
-.radio-label {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 13px;
-    cursor: pointer;
-    color: var(--text-primary);
-}
-
-.config-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-    gap: 8px 16px;
-}
-
-.config-item {
-    padding: 4px 0;
-}
-
-.config-key {
-    font-family: monospace;
-    font-size: 12px;
-    color: var(--text-primary);
-}
-
-/* 运行选项 */
-.run-option-group {
+    padding: 10px 16px;
     margin-bottom: 4px;
 }
 
-.run-option-label {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-muted);
-    margin-bottom: 8px;
-}
-
-.run-option-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 6px;
-}
-
-.run-option-input {
-    flex: 1;
-    padding: 5px 10px;
-    font-size: 12px;
-    font-family: monospace;
-}
-
-.run-option-input-key {
-    flex: 0 0 140px;
-    min-width: 80px;
-}
-
-.run-param-colon {
-    font-size: 14px;
-    color: var(--text-muted);
-    flex-shrink: 0;
-}
-
-.run-option-empty {
+.env-label {
     font-size: 12px;
     color: var(--text-muted);
-    font-style: italic;
-    padding: 4px 0;
+    white-space: nowrap;
 }
 
 /* 操作按钮 */
@@ -1065,29 +510,6 @@ onUnmounted(() => {
 .btn-sm {
     padding: 4px 10px;
     font-size: 12px;
-}
-
-.btn-xs {
-    padding: 2px 8px;
-    font-size: 11px;
-    border-radius: 4px;
-    cursor: pointer;
-    border: 1px solid var(--border-color);
-    background: var(--bg-tertiary);
-    color: var(--text-primary);
-    transition: background 0.15s;
-}
-.btn-xs:hover {
-    background: var(--bg-secondary);
-}
-
-.btn-danger {
-    background: rgba(239,68,68,0.12);
-    color: #f87171;
-    border-color: rgba(239,68,68,0.25);
-}
-.btn-danger:hover {
-    background: rgba(239,68,68,0.22);
 }
 
 /* 运行输出控制台 */

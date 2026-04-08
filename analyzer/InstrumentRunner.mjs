@@ -16,6 +16,9 @@ import { tmpdir } from 'os';
 import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import * as db from './db/Database.mjs';
+import { createLogger } from './logger.mjs';
+
+const log = createLogger('InstrumentRunner');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -134,7 +137,7 @@ export function startRun(params) {
 
     // 异步执行（不阻塞返回）
     executeRun(runId, { code, filename, options, env, dataDir }).catch(e => {
-        console.error(`[InstrumentRunner] run ${runId} error:`, e);
+        log.error({ err: e, runId }, `Run ${runId} 执行异常`);
     });
 
     return runId;
@@ -202,6 +205,8 @@ async function executeRun(runId, { code, filename, options, env, dataDir }) {
 
         args.push(sourceFile);
 
+        log.info({ runId, filename, env }, `启动子进程: ${filename}`);
+        log.debug({ runId, cmd: `node ${args.join(' ')}` }, 'Spawn command');
         broadcast(runId, { type: 'stdout', data: `$ node ${args.join(' ')}\n` });
 
         // 启动子进程
@@ -258,6 +263,7 @@ async function executeRun(runId, { code, filename, options, env, dataDir }) {
 
         // 检查超时
         if (exitCode === null) {
+            log.warn({ runId, filename, timeoutMs: TIMEOUT_MS }, `Run ${runId} 超时 (${TIMEOUT_MS / 1000}s)`);
             db.run(
                 `UPDATE run_tasks SET status = 'timeout', stdout = ?, stderr = ?, duration_ms = ?, error_msg = ? WHERE id = ?`,
                 stdoutBuf, stderrBuf, duration,
@@ -294,6 +300,16 @@ async function executeRun(runId, { code, filename, options, env, dataDir }) {
             runId
         );
 
+        if (exitCode === 0) {
+            log.info({ runId, filename, durationMs: duration, sessionId }, `Run ${runId} 成功 (${duration}ms)`);
+        } else {
+            log.warn({ runId, filename, exitCode, durationMs: duration }, `Run ${runId} 失败 (exit=${exitCode})`);
+            // stderr 有内容时输出，便于排查
+            if (stderrBuf.trim()) {
+                log.warn({ runId }, `Stderr:\n${stderrBuf.slice(0, 2000)}`);
+            }
+        }
+
         broadcast(runId, {
             type: 'done',
             exitCode,
@@ -303,6 +319,7 @@ async function executeRun(runId, { code, filename, options, env, dataDir }) {
 
     } catch (e) {
         const duration = Date.now() - startTime;
+        log.error({ err: e, runId, filename }, `Run ${runId} 内部异常`);
         db.run(
             `UPDATE run_tasks SET status = 'failed', error_msg = ?, duration_ms = ? WHERE id = ?`,
             e.message, duration, runId
@@ -363,7 +380,7 @@ async function createSessionFromRun({ runId, workDir, sourceFile, traceFile, sma
             plugins: ['F1-EventIndex', 'F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer', smapDest ? 'F2-SmapLoader' : null].filter(Boolean),
             dataDir: sessionDir,
         })
-    ).catch(e => console.error('[InstrumentRunner] plugin schedule error:', e));
+    ).catch(e => log.error({ err: e, sessionId }, 'Plugin schedule error'));
 
     return sessionId;
 }

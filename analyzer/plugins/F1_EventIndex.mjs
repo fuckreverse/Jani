@@ -14,6 +14,9 @@ import { resolve } from 'path';
 import { createRequire } from 'module';
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { createLogger } from '../logger.mjs';
+
+const log = createLogger('F1-EventIndex');
 
 const require = createRequire(import.meta.url);
 const JANI_ROOT = resolve(new URL('.', import.meta.url).pathname, '../../');
@@ -71,33 +74,39 @@ export default class F1EventIndex extends BasePlugin {
 
         this.emitProgress(ctx, '流式解析事件...', 5);
 
-        // 预编译 INSERT 语句（sql.js：stmt.run([params]) = bind+step+reset 一体）
         const rawDb = db.raw();
-        const insertEvent = rawDb.prepare(
-            'INSERT OR IGNORE INTO events (id, session_id, type, iid, line, col, src_text) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        );
-        const insertWrite = rawDb.prepare(
-            'INSERT INTO writes (event_id, session_id, name, value, omitted) VALUES (?, ?, ?, ?, ?)'
-        );
-        const insertRead = rawDb.prepare(
-            'INSERT INTO reads (event_id, session_id, name, value, omitted) VALUES (?, ?, ?, ?, ?)'
-        );
-        const insertField = rawDb.prepare(
-            'INSERT INTO fields (event_id, session_id, base, offset, is_write, value, omitted) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        );
 
         // 批量写入（手动 BEGIN/COMMIT 事务，不通过 db.transaction() 以避免 flush）
+        // PreparedStatement 在每次 flushTx 内部 prepare + free，不跨越 await 边界，
+        // 避免两个并发 F1 实例共享同一份 Statement 句柄导致 "Statement closed" 错误。
         const flushTx = (evts, wrs, rds, flds) => {
+            const stmtEvent = rawDb.prepare(
+                'INSERT OR IGNORE INTO events (id, session_id, type, iid, line, col, src_text) VALUES (?, ?, ?, ?, ?, ?, ?)'
+            );
+            const stmtWrite = rawDb.prepare(
+                'INSERT INTO writes (event_id, session_id, name, value, omitted) VALUES (?, ?, ?, ?, ?)'
+            );
+            const stmtRead = rawDb.prepare(
+                'INSERT INTO reads (event_id, session_id, name, value, omitted) VALUES (?, ?, ?, ?, ?)'
+            );
+            const stmtField = rawDb.prepare(
+                'INSERT INTO fields (event_id, session_id, base, offset, is_write, value, omitted) VALUES (?, ?, ?, ?, ?, ?, ?)'
+            );
             rawDb.run('BEGIN');
             try {
-                for (const e of evts) insertEvent.run(e);
-                for (const w of wrs)  insertWrite.run(w);
-                for (const r of rds)  insertRead.run(r);
-                for (const f of flds) insertField.run(f);
+                for (const e of evts) stmtEvent.run(e);
+                for (const w of wrs)  stmtWrite.run(w);
+                for (const r of rds)  stmtRead.run(r);
+                for (const f of flds) stmtField.run(f);
                 rawDb.run('COMMIT');
             } catch (e) {
                 try { rawDb.run('ROLLBACK'); } catch (_) {}
                 throw e;
+            } finally {
+                stmtEvent.free();
+                stmtWrite.free();
+                stmtRead.free();
+                stmtField.free();
             }
         };
 
@@ -174,7 +183,8 @@ export default class F1EventIndex extends BasePlugin {
             try {
                 result = deserializeEvent(view, relOffset, dict);
             } catch (e) {
-                console.warn(`F1_EventIndex: decode error at file offset ${windowStart + relOffset}: ${e.message}`);
+                log.warn({ err: e, fileOffset: windowStart + relOffset, sessionId },
+                    `Decode error at file offset ${windowStart + relOffset}: ${e.message}`);
                 break;
             }
 
@@ -236,12 +246,6 @@ export default class F1EventIndex extends BasePlugin {
 
         flush();
         closeSync(fd);
-
-        // 释放预编译语句（sql.js 用 free()）
-        insertEvent.free();
-        insertWrite.free();
-        insertRead.free();
-        insertField.free();
 
         db.run('UPDATE sessions SET event_count = ? WHERE id = ?', totalEvents, sessionId);
 

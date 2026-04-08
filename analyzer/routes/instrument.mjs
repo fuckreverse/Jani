@@ -7,6 +7,9 @@
  */
 
 import { Router } from 'express';
+import { createLogger } from '../logger.mjs';
+
+const log = createLogger('instrument');
 import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from 'fs';
 import { resolve } from 'path';
 import { tmpdir } from 'os';
@@ -43,7 +46,7 @@ router.post('/', async (req, res) => {
         // 确定输出文件路径（始终显式指定，避免 browser target 默认 in-place 覆盖原文件）
         const baseName = filename.replace(/\.js$/, '');
         const instrumentedPath = resolve(workDir, `${baseName}_jalangi_.js`);
-        const smapPath         = resolve(workDir, `${baseName}_jalangi_.smap.json`);
+        const smapPath         = resolve(workDir, `${baseName}_jalangi_.map.json`);
         const mapPath          = resolve(workDir, `${baseName}_jalangi_.js.map`);
 
         // 构建 instrument 命令
@@ -61,7 +64,7 @@ router.post('/', async (req, res) => {
         if (options.debug)         args.push('--debug');
 
         // 输出选项
-        if (options.inlineIid !== false) args.push('--inline-iid'); // 默认内联 iid（便于返回 smap）
+        if (options.inlineIid) args.push('--inline-iid');
         if (options.inlineSource)  args.push('--inline-source');
         if (options.noSourceMap)   args.push('--no-source-map');
         if (options.vlcqSourceMap) args.push('--vlcq-source-map');
@@ -120,7 +123,7 @@ router.post('/', async (req, res) => {
         });
 
     } catch (e) {
-        console.error('[POST /api/instrument] error:', e);
+        log.error({ err: e }, '[POST /api/instrument] error:');
         return res.status(500).json({ error: e.message });
     }
 });
@@ -146,7 +149,7 @@ router.post('/run', async (req, res) => {
         return res.status(202).json({ runId });
 
     } catch (e) {
-        console.error('[POST /api/instrument/run] error:', e);
+        log.error({ err: e }, '[POST /api/instrument/run] error:');
         return res.status(500).json({ error: e.message });
     }
 });
@@ -175,7 +178,7 @@ router.get('/run/:runId', (req, res) => {
         });
 
     } catch (e) {
-        console.error('[GET /api/instrument/run/:runId] error:', e);
+        log.error({ err: e }, '[GET /api/instrument/run/:runId] error:');
         return res.status(500).json({ error: e.message });
     }
 });

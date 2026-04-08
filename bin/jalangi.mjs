@@ -813,15 +813,11 @@ async function cmdInstrument(common, instrArgs) {
             code:             originalCode,
             origCodeFileName: inputPath,
             instCodeFileName: outPath,
-            // 浏览器内联模式（非 split）或 deferred-load 模式：
-            //   iid map 必须内联进插桩代码——插桩代码是动态加载的，
-            //   运行时无法自动读取外部 .map.json，必须随代码一起携带位置信息。
-            inlineSourceMap: (target === 'browser' && (!instrOpts.splitRuntime || instrOpts.deferredLoad))
-                ? true
-                : instrOpts.inlineIid,
-            inlineSource: (target === 'browser' && (!instrOpts.splitRuntime || instrOpts.deferredLoad))
-                ? true
-                : instrOpts.inlineSource,
+            // iid map 内联由用户显式控制（--inline-iid），不再对 browser target 强制内联。
+            // 历史上曾强制内联，是因为运行时需要位置信息做即时诊断（iidToLocation）；
+            // 现已改为离线分析阶段通过 .map.json 文件解析，运行时只需 J$.iids 含文件名即可。
+            inlineSourceMap: instrOpts.inlineIid,
+            inlineSource:    instrOpts.inlineSource,
             sourceType: common.sourceType,
             isEval:     false,
         });
