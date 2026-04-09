@@ -614,7 +614,7 @@ router.get('/:id/functions', (req, res) => {
 router.get('/:id/functions/:fnName/calls', (req, res) => {
     try {
         const { id, fnName } = req.params;
-        const { limit = '200', offset = '0' } = req.query;
+        const { limit = '200', offset = '0', fnIid } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: `Session ${id} not found` });
@@ -622,18 +622,27 @@ router.get('/:id/functions/:fnName/calls', (req, res) => {
         const limitN  = Math.min(Number(limit)  || 200, 1000);
         const offsetN = Number(offset) || 0;
 
+        // 支持按 fn_iid 精确过滤，避免同名不同位置的函数调用混在一起
+        const conditions = ['session_id = ?', 'fn_name = ?'];
+        const baseParams = [id, fnName];
+        if (fnIid !== undefined && fnIid !== '') {
+            conditions.push('fn_iid = ?');
+            baseParams.push(Number(fnIid));
+        }
+        const where = conditions.join(' AND ');
+
         const rows = db.all(
             `SELECT id, call_seq, return_seq, caller_line, fn_name, fn_iid, args_json, return_value, depth
              FROM call_edges
-             WHERE session_id = ? AND fn_name = ?
+             WHERE ${where}
              ORDER BY call_seq ASC
              LIMIT ? OFFSET ?`,
-            id, fnName, limitN, offsetN
+            ...baseParams, limitN, offsetN
         );
 
         const total = db.get(
-            'SELECT COUNT(*) AS cnt FROM call_edges WHERE session_id = ? AND fn_name = ?',
-            id, fnName
+            `SELECT COUNT(*) AS cnt FROM call_edges WHERE ${where}`,
+            ...baseParams
         )?.cnt ?? 0;
 
         const result = rows.map(r => ({

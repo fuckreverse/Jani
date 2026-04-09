@@ -1,6 +1,10 @@
 /**
  * A4_StringTracker.mjs — 追踪字符串赋值，识别编码类型
  * 写入 string_events 表
+ *
+ * 性能优化：
+ *  - 使用 rawDb prepared statement + 单事务批量写入（避免循环内重复 prepare）
+ *  - 直接在 SQL 层过滤字符串类型，减少 JS 端处理量
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
@@ -27,29 +31,36 @@ export default class A4StringTracker extends BasePlugin {
 
     async run(ctx) {
         const { sessionId } = ctx;
+        const rawDb = db.raw();
 
         this.emitProgress(ctx, '清空旧数据...', 0);
-        db.run('DELETE FROM string_events WHERE session_id = ?', [sessionId]);
+        rawDb.prepare('DELETE FROM string_events WHERE session_id = ?').run(sessionId);
 
         this.emitProgress(ctx, '提取字符串 writes...', 5);
 
-        // 找所有 value 是字符串类型（以双引号包裹）的 write
-        const strWrites = db.all(
+        // 找所有 value 是字符串类型（以双引号包裹）的 write（JOIN events 取 line/iid）
+        const strWrites = rawDb.prepare(
             `SELECT w.event_id, w.name, w.value, e.line, e.iid
              FROM writes w
              JOIN events e ON w.event_id = e.id AND e.session_id = w.session_id
              WHERE w.session_id = ?
                AND w.value IS NOT NULL
                AND w.value LIKE '"%"'
-             LIMIT 10000`,
-            [sessionId]
-        );
+             LIMIT 10000`
+        ).all(sessionId);
 
         this.emitProgress(ctx, `分析 ${strWrites.length} 个字符串写入...`, 30);
 
+        // prepared statement + 单事务批量写入
+        const stmt = rawDb.prepare(
+            'INSERT INTO string_events (session_id, event_id, value, var_name, line, iid, encoding_hint) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        );
+        const insertBatch = rawDb.transaction((rows) => {
+            for (const row of rows) stmt.run(row);
+        });
+
         const rows = [];
         for (const sw of strWrites) {
-            // 去除首尾引号
             let rawVal = sw.value || '';
             if (rawVal.startsWith('"') && rawVal.endsWith('"')) {
                 rawVal = rawVal.slice(1, -1);
@@ -67,17 +78,7 @@ export default class A4StringTracker extends BasePlugin {
         }
 
         this.emitProgress(ctx, `写入 ${rows.length} 条字符串事件...`, 70);
-
-        if (rows.length > 0) {
-            db.transaction(() => {
-                for (const row of rows) {
-                    db.run(
-                        'INSERT INTO string_events (session_id, event_id, value, var_name, line, iid, encoding_hint) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                        row
-                    );
-                }
-            });
-        }
+        if (rows.length > 0) insertBatch(rows);
 
         this.emitProgress(ctx, `完成，${rows.length} 个字符串事件`, 100);
         this.emitDone(ctx, { stringCount: rows.length });

@@ -7,12 +7,17 @@
 
     <!-- 筛选栏 -->
     <div class="filter-bar" style="margin-bottom:14px; flex-wrap:wrap; gap:8px">
-      <input
-        v-model="fnExecSearch"
-        placeholder="搜索函数名..."
-        style="width:200px"
-        @keyup.enter="loadFnExec(true)"
-      />
+      <div class="search-box">
+        <span class="search-icon">🔍</span>
+        <input
+          v-model="fnExecSearch"
+          placeholder="按函数名搜索..."
+          class="search-input"
+          @keyup.enter="loadFnExec(true)"
+          @input="onSearchInput"
+        />
+        <button v-if="fnExecSearch" class="search-clear" @click="clearSearch" title="清空搜索">✕</button>
+      </div>
       <label class="filter-label" style="gap:4px">
         最少调用次数
         <input
@@ -24,12 +29,13 @@
         />
       </label>
       <button class="btn-primary" @click="loadFnExec(true)">查询</button>
-      <button class="btn-secondary" @click="clearFnExecFilters">清空</button>
+      <button class="btn-secondary" @click="clearFnExecFilters">重置</button>
     </div>
 
     <div v-if="fnExecLoading" class="loading"><div class="spinner"></div><span>加载中...</span></div>
     <div v-else-if="fnExecList.length === 0" class="empty-state">
-      <p v-if="f3Status === 'done'">暂无函数数据（F3 已运行，但未找到调用记录。可尝试点击「🔄 重跑 Phase 2」按钮重新分析）</p>
+      <p v-if="fnExecSearch">未找到匹配 "<strong>{{ fnExecSearch }}</strong>" 的函数</p>
+      <p v-else-if="f3Status === 'done'">暂无函数数据（F3 已运行，但未找到调用记录。可尝试点击「🔄 重跑 Phase 2」按钮重新分析）</p>
       <p v-else-if="f3Status === 'running' || f3Status === 'pending'">F3 · CallGraphBuilder 正在分析中，请稍候...</p>
       <p v-else>暂无函数数据（需先运行 F3 · CallGraphBuilder，点击顶部「🔄 重跑 Phase 2」按钮）</p>
     </div>
@@ -45,9 +51,13 @@
           <div class="fn-header" @click="toggleFnExpand(fn)">
             <span class="fn-expand-icon">{{ fnExpandedKey(fn) && expandedFns.has(fnExpandedKey(fn)) ? '▾' : '▸' }}</span>
             <code class="fn-name-text">{{ fn.fn_name || '(anonymous)' }}</code>
+            <!-- 同名函数：显示位置标签以区分 -->
+            <span v-if="isDuplicateName(fn)" class="fn-location-badge" :title="`iid=${fn.fn_iid}`">
+              {{ fn.min_line ? `@line ${fn.min_line}` : `@iid ${fn.fn_iid}` }}
+            </span>
             <span class="fn-call-badge">{{ fn.call_count }} 次调用</span>
-            <span v-if="fn.min_line" class="text-muted" style="font-size:11px">line {{ fn.min_line }}</span>
-            <span v-if="fn.fn_iid" class="text-muted" style="font-size:11px">iid={{ fn.fn_iid }}</span>
+            <span v-if="fn.min_line && !isDuplicateName(fn)" class="text-muted" style="font-size:11px">line {{ fn.min_line }}</span>
+            <span v-if="fn.fn_iid && !isDuplicateName(fn)" class="text-muted" style="font-size:11px">iid={{ fn.fn_iid }}</span>
             <span class="text-muted" style="font-size:11px">深度 {{ fn.min_depth }}~{{ fn.max_depth }}</span>
           </div>
 
@@ -139,10 +149,25 @@
                 </div>
               </div>
 
-              <!-- 调用记录分页 -->
-              <div v-if="fnCallsTotal[fnExpandedKey(fn)] > (fnCallsMap[fnExpandedKey(fn)] || []).length" class="pagination" style="margin-top:8px; padding-top:8px">
-                <span class="page-info">显示 {{ (fnCallsMap[fnExpandedKey(fn)] || []).length }} / {{ fnCallsTotal[fnExpandedKey(fn)] }} 条</span>
-                <button class="btn-secondary" @click="loadMoreCalls(fn)">加载更多</button>
+              <!-- 调用记录分页（上一页/下一页） -->
+              <div v-if="fnCallsTotal[fnExpandedKey(fn)] > FN_CALLS_PAGE" class="calls-pagination">
+                <span class="page-info">
+                  第 {{ fnCallsPage[fnExpandedKey(fn)] || 1 }} /
+                  {{ Math.ceil(fnCallsTotal[fnExpandedKey(fn)] / FN_CALLS_PAGE) }} 页
+                  · 共 {{ fnCallsTotal[fnExpandedKey(fn)] }} 条
+                </span>
+                <div class="page-nav">
+                  <button
+                    class="btn-secondary btn-page"
+                    :disabled="(fnCallsPage[fnExpandedKey(fn)] || 1) <= 1"
+                    @click="prevCallsPage(fn)"
+                  >‹ 上一页</button>
+                  <button
+                    class="btn-secondary btn-page"
+                    :disabled="(fnCallsPage[fnExpandedKey(fn)] || 1) >= Math.ceil(fnCallsTotal[fnExpandedKey(fn)] / FN_CALLS_PAGE)"
+                    @click="nextCallsPage(fn)"
+                  >下一页 ›</button>
+                </div>
               </div>
             </div>
           </div>
@@ -150,9 +175,59 @@
       </div>
 
       <!-- 函数列表分页 -->
-      <div v-if="fnExecTotal > fnExecList.length" class="pagination">
-        <span class="page-info">已显示 {{ fnExecList.length }} / {{ fnExecTotal }} 个函数</span>
-        <button class="btn-secondary" @click="loadMoreFns">加载更多</button>
+      <div v-if="fnExecTotal > 0" class="pagination">
+        <div class="page-summary">共 {{ fnExecTotal }} 个 · 每页 {{ FN_EXEC_PAGE }}</div>
+
+        <div class="page-controls">
+          <button
+            class="btn-page btn-secondary"
+            :disabled="fnExecPage <= 1"
+            @click="gotoFnPage(1)"
+            title="第一页"
+          >«</button>
+          <button
+            class="btn-page btn-secondary"
+            :disabled="fnExecPage <= 1"
+            @click="gotoFnPage(fnExecPage - 1)"
+          >‹ 上一页</button>
+
+          <template v-for="p in visiblePages" :key="'pg-' + p">
+            <span v-if="p === '...'" class="page-ellipsis">…</span>
+            <button
+              v-else
+              class="btn-page"
+              :class="p === fnExecPage ? 'btn-page-active' : 'btn-secondary'"
+              @click="gotoFnPage(p)"
+            >{{ p }}</button>
+          </template>
+
+          <button
+            class="btn-page btn-secondary"
+            :disabled="fnExecPage >= fnExecTotalPages"
+            @click="gotoFnPage(fnExecPage + 1)"
+          >下一页 ›</button>
+          <button
+            class="btn-page btn-secondary"
+            :disabled="fnExecPage >= fnExecTotalPages"
+            @click="gotoFnPage(fnExecTotalPages)"
+            title="最后一页"
+          >»</button>
+        </div>
+
+        <!-- 跳转到某页 -->
+        <div class="page-jump">
+          <span class="page-jump-label">跳转到</span>
+          <input
+            v-model.number="jumpPage"
+            type="number"
+            :min="1"
+            :max="fnExecTotalPages"
+            class="page-jump-input"
+            @keyup.enter="doJumpPage"
+          />
+          <span class="page-jump-label">页</span>
+          <button class="btn-page btn-secondary" @click="doJumpPage">GO</button>
+        </div>
       </div>
     </div>
   </div>
@@ -171,18 +246,72 @@ const f3Status = computed(() => props.pluginStatus?.['F3-CallGraphBuilder'] ?? '
 
 const fnExecList     = ref([]);
 const fnExecTotal    = ref(0);
+
+// 检测当前页中是否有同名函数（用于展示位置区分标签）
+const duplicateNames = computed(() => {
+    const seen = new Set();
+    const dupes = new Set();
+    for (const fn of fnExecList.value) {
+        const name = fn.fn_name || '(anonymous)';
+        if (seen.has(name)) dupes.add(name);
+        else seen.add(name);
+    }
+    return dupes;
+});
+
+function isDuplicateName(fn) {
+    return duplicateNames.value.has(fn.fn_name || '(anonymous)');
+}
 const fnExecLoading  = ref(false);
 const fnExecSearch   = ref('');
 const fnExecMinCalls = ref(1);
-const fnExecOffset   = ref(0);
+const fnExecPage     = ref(1);
 const FN_EXEC_PAGE   = 50;
+
+// 搜索防抖（400ms）
+let searchTimer = null;
+function onSearchInput() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => loadFnExec(true), 400);
+}
+
+function clearSearch() {
+    fnExecSearch.value = '';
+    loadFnExec(true);
+}
+
+// 总页数
+const fnExecTotalPages = computed(() => Math.max(1, Math.ceil(fnExecTotal.value / FN_EXEC_PAGE)));
+
+// 页码列表（智能省略）
+const visiblePages = computed(() => {
+    const total = fnExecTotalPages.value;
+    const cur   = fnExecPage.value;
+    if (total <= 7) {
+        return Array.from({ length: total }, (_, i) => i + 1);
+    }
+    if (cur <= 4) {
+        return [1, 2, 3, 4, 5, '...', total];
+    }
+    if (cur >= total - 3) {
+        return [1, '...', total - 4, total - 3, total - 2, total - 1, total];
+    }
+    return [1, '...', cur - 1, cur, cur + 1, '...', total];
+});
+
+const jumpPage = ref(1);
+
+function doJumpPage() {
+    const p = Math.max(1, Math.min(fnExecTotalPages.value, Math.round(jumpPage.value) || 1));
+    gotoFnPage(p);
+}
 
 const expandedFns   = reactive(new Set());
 const expandedCalls = reactive(new Set());
 
 const fnCallsMap     = reactive({});
 const fnCallsTotal   = reactive({});
-const fnCallsOffset  = reactive({});
+const fnCallsPage    = reactive({});
 const fnCallsLoading = reactive({});
 const FN_CALLS_PAGE  = 30;
 
@@ -194,23 +323,25 @@ function fnExpandedKey(fn) {
 }
 
 async function loadFnExec(reset = false) {
-    if (reset) fnExecOffset.value = 0;
+    if (reset) {
+        fnExecPage.value = 1;
+        jumpPage.value   = 1;
+        expandedFns.clear();
+        expandedCalls.clear();
+    }
     fnExecLoading.value = true;
     try {
+        const offset = (fnExecPage.value - 1) * FN_EXEC_PAGE;
         const params = new URLSearchParams({
             limit:    FN_EXEC_PAGE,
-            offset:   fnExecOffset.value,
+            offset,
             minCalls: fnExecMinCalls.value || 1,
         });
         if (fnExecSearch.value.trim()) params.set('search', fnExecSearch.value.trim());
         const res = await fetch(`/api/sessions/${props.sessionId}/functions?${params}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        if (reset) {
-            fnExecList.value = data.functions || [];
-        } else {
-            fnExecList.value.push(...(data.functions || []));
-        }
+        fnExecList.value  = data.functions || [];
         fnExecTotal.value = data.total ?? (data.functions?.length ?? 0);
     } catch (e) {
         console.error('loadFnExec error:', e);
@@ -220,13 +351,18 @@ async function loadFnExec(reset = false) {
 }
 
 function clearFnExecFilters() {
-    fnExecSearch.value = '';
+    fnExecSearch.value   = '';
     fnExecMinCalls.value = 1;
     loadFnExec(true);
 }
 
-async function loadMoreFns() {
-    fnExecOffset.value += FN_EXEC_PAGE;
+async function gotoFnPage(page) {
+    const p = Math.max(1, Math.min(fnExecTotalPages.value, page));
+    if (p === fnExecPage.value) return;
+    fnExecPage.value = p;
+    jumpPage.value   = p;
+    expandedFns.clear();
+    expandedCalls.clear();
     await loadFnExec(false);
 }
 
@@ -244,23 +380,23 @@ async function toggleFnExpand(fn) {
 
 async function loadFnCalls(fn, reset = false) {
     const key = fnExpandedKey(fn);
-    if (reset) fnCallsOffset[key] = 0;
+    if (reset) fnCallsPage[key] = 1;
     fnCallsLoading[key] = true;
     try {
+        const page   = fnCallsPage[key] || 1;
+        const offset = (page - 1) * FN_CALLS_PAGE;
         const params = new URLSearchParams({
             limit:  FN_CALLS_PAGE,
-            offset: fnCallsOffset[key] || 0,
+            offset,
         });
+        // 传 fn_iid 确保只查该函数定义处的调用，避免同名函数混在一起
+        if (fn.fn_iid != null) params.set('fnIid', fn.fn_iid);
         const res = await fetch(
             `/api/sessions/${props.sessionId}/functions/${encodeURIComponent(fn.fn_name)}/calls?${params}`
         );
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        if (reset || !fnCallsMap[key]) {
-            fnCallsMap[key] = data.calls || [];
-        } else {
-            fnCallsMap[key].push(...(data.calls || []));
-        }
+        fnCallsMap[key]   = data.calls || [];
         fnCallsTotal[key] = data.total ?? (data.calls?.length ?? 0);
     } catch (e) {
         console.error('loadFnCalls error:', e);
@@ -269,9 +405,20 @@ async function loadFnCalls(fn, reset = false) {
     }
 }
 
-async function loadMoreCalls(fn) {
-    const key = fnExpandedKey(fn);
-    fnCallsOffset[key] = (fnCallsOffset[key] || 0) + FN_CALLS_PAGE;
+async function prevCallsPage(fn) {
+    const key  = fnExpandedKey(fn);
+    const page = fnCallsPage[key] || 1;
+    if (page <= 1) return;
+    fnCallsPage[key] = page - 1;
+    await loadFnCalls(fn, false);
+}
+
+async function nextCallsPage(fn) {
+    const key     = fnExpandedKey(fn);
+    const page    = fnCallsPage[key] || 1;
+    const maxPage = Math.ceil((fnCallsTotal[key] || 0) / FN_CALLS_PAGE);
+    if (page >= maxPage) return;
+    fnCallsPage[key] = page + 1;
     await loadFnCalls(fn, false);
 }
 
@@ -321,11 +468,136 @@ onMounted(() => loadFnExec(true));
 .filter-label { font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
 .text-muted { color: var(--text-muted); }
 
-/* 分页 */
-.pagination { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-color); }
-.page-info { font-size: 12px; color: var(--text-muted); }
+/* 搜索框 */
+.search-box {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+.search-icon {
+    position: absolute;
+    left: 8px;
+    font-size: 13px;
+    pointer-events: none;
+    opacity: 0.6;
+}
+.search-input {
+    width: 220px;
+    padding-left: 28px !important;
+    padding-right: 26px;
+}
+.search-clear {
+    position: absolute;
+    right: 6px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 0 2px;
+    line-height: 1;
+    opacity: 0.7;
+    transition: opacity 0.12s;
+}
+.search-clear:hover { opacity: 1; color: var(--danger, #f87171); }
 
-/* 函数列表 */
+/* ── 分页 ────────────────────────────────────────────────────────────── */
+.pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-color);
+    flex-wrap: wrap;
+}
+.calls-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-color);
+}
+.page-summary { font-size: 12px; color: var(--text-muted); flex-shrink: 0; white-space: nowrap; }
+.page-info    { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+
+.page-controls {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-wrap: wrap;
+    justify-content: center;
+}
+.page-nav {
+    display: flex;
+    gap: 4px;
+}
+
+/* 通用页码按钮 */
+.btn-page {
+    min-width: 32px;
+    height: 28px;
+    padding: 0 8px;
+    font-size: 12px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+    line-height: 1;
+    white-space: nowrap;
+}
+.btn-page:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    border-color: rgba(99,102,241,0.45);
+}
+.btn-page:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+.btn-page-active {
+    background: rgba(99,102,241,0.2) !important;
+    border-color: rgba(99,102,241,0.6) !important;
+    color: #a5b4fc !important;
+    font-weight: 600;
+    cursor: default;
+}
+.page-ellipsis {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    height: 28px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+/* 跳转输入 */
+.page-jump {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+}
+.page-jump-label { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+.page-jump-input {
+    width: 50px;
+    height: 28px;
+    padding: 0 6px;
+    font-size: 12px;
+    text-align: center;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+.page-jump-input:focus { outline: none; border-color: rgba(99,102,241,0.5); }
+
+/* ── 函数列表 ─────────────────────────────────────────────────────────── */
 .fn-list { display: flex; flex-direction: column; gap: 4px; }
 .fn-item { border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; background: var(--bg-secondary); }
 .fn-header {
@@ -338,6 +610,12 @@ onMounted(() => loadFnExec(true));
 .fn-call-badge {
     display: inline-block; padding: 1px 7px; border-radius: 10px;
     background: rgba(99,102,241,0.15); color: #a5b4fc; font-size: 11px; font-weight: 600; flex-shrink: 0;
+}
+.fn-location-badge {
+    display: inline-block; padding: 1px 7px; border-radius: 4px;
+    background: rgba(245,158,11,0.15); color: #fcd34d;
+    font-size: 11px; font-family: monospace; flex-shrink: 0;
+    border: 1px solid rgba(245,158,11,0.25);
 }
 
 /* 二级：调用容器 */

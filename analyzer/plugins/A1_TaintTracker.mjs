@@ -1,11 +1,16 @@
 /**
  * A1_TaintTracker.mjs — BFS 污点追踪
  * 由 API POST /api/sessions/:id/taint 手动触发
+ *
+ * 性能优化：
+ *  - 预加载该 session 的全量 writes/reads 索引到内存
+ *  - BFS 期间零 DB 查询，完全内存化
+ *  - 写入使用 rawDb prepared statement + 单事务
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
 
-const MAX_HOPS = 10;
+const MAX_HOPS  = 10;
 const MAX_NODES = 500;
 
 export default class A1TaintTracker extends BasePlugin {
@@ -16,6 +21,7 @@ export default class A1TaintTracker extends BasePlugin {
 
     async run(ctx) {
         const { sessionId, sourceVar, sourceEventId, direction = 'forward' } = ctx;
+        const rawDb = db.raw();
 
         if (!sourceVar && !sourceEventId) {
             throw new Error('A1-TaintTracker: sourceVar or sourceEventId required');
@@ -23,50 +29,90 @@ export default class A1TaintTracker extends BasePlugin {
 
         this.emitProgress(ctx, `开始${direction === 'forward' ? '正向' : '反向'}污点追踪...`, 0);
 
-        // 清除该 session 的旧污点路径（如果 sourceVar 相同）
+        // 清除旧数据
         if (sourceVar) {
-            db.run('DELETE FROM taint_paths WHERE session_id = ? AND source_var = ?', [sessionId, sourceVar]);
+            rawDb.prepare('DELETE FROM taint_paths WHERE session_id = ? AND source_var = ?').run(sessionId, sourceVar);
         }
 
-        const paths = direction === 'forward'
-            ? await this._forwardBFS(sessionId, sourceVar, sourceEventId, ctx)
-            : await this._backwardBFS(sessionId, sourceVar, sourceEventId, ctx);
+        // ── 预加载 writes 索引：name → [{event_id}] ASC ──────────────────────
+        this.emitProgress(ctx, '预加载 writes 索引...', 5);
+        const writesNameIndex = new Map(); // name → event_id[] (ASC)
+        const writesEventIndex = new Map(); // event_id → name[]
+        {
+            const rows = rawDb.prepare(
+                'SELECT event_id, name FROM writes WHERE session_id = ? AND name IS NOT NULL ORDER BY event_id ASC'
+            ).all(sessionId);
+            for (const r of rows) {
+                let byName = writesNameIndex.get(r.name);
+                if (!byName) { byName = []; writesNameIndex.set(r.name, byName); }
+                byName.push(r.event_id);
 
-        // 写入 taint_paths
-        db.transaction(() => {
+                let byEvt = writesEventIndex.get(r.event_id);
+                if (!byEvt) { byEvt = []; writesEventIndex.set(r.event_id, byEvt); }
+                byEvt.push(r.name);
+            }
+        }
+
+        // ── 预加载 reads 索引：name → event_id[] ASC，event_id → name[] ──────
+        this.emitProgress(ctx, '预加载 reads 索引...', 10);
+        const readsNameIndex  = new Map(); // name → event_id[] (ASC)
+        const readsEventIndex = new Map(); // event_id → name[]
+        {
+            const rows = rawDb.prepare(
+                'SELECT event_id, name FROM reads WHERE session_id = ? AND name IS NOT NULL ORDER BY event_id ASC'
+            ).all(sessionId);
+            for (const r of rows) {
+                let byName = readsNameIndex.get(r.name);
+                if (!byName) { byName = []; readsNameIndex.set(r.name, byName); }
+                byName.push(r.event_id);
+
+                let byEvt = readsEventIndex.get(r.event_id);
+                if (!byEvt) { byEvt = []; readsEventIndex.set(r.event_id, byEvt); }
+                byEvt.push(r.name);
+            }
+        }
+
+        this.emitProgress(ctx, `索引已加载，开始 BFS...`, 15);
+
+        const paths = direction === 'forward'
+            ? this._forwardBFS(sessionId, sourceVar, sourceEventId, ctx, writesNameIndex, writesEventIndex, readsNameIndex)
+            : this._backwardBFS(sessionId, sourceVar, sourceEventId, ctx, writesNameIndex, readsNameIndex, readsEventIndex);
+
+        // ── 写入 taint_paths（prepared statement + 单事务）──────────────────
+        const stmt = rawDb.prepare(
+            `INSERT INTO taint_paths (session_id, source_event_id, sink_event_id, path_json, source_var, sink_var, hop_count)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+        );
+        rawDb.transaction(() => {
             for (const path of paths) {
-                db.run(
-                    `INSERT INTO taint_paths (session_id, source_event_id, sink_event_id, path_json, source_var, sink_var, hop_count)
-                     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                    [
-                        sessionId,
-                        path.sourceEventId,
-                        path.sinkEventId,
-                        JSON.stringify(path.eventIds),
-                        sourceVar ?? null,
-                        path.sinkVar ?? null,
-                        path.eventIds.length - 1,
-                    ]
+                stmt.run(
+                    sessionId,
+                    path.sourceEventId,
+                    path.sinkEventId,
+                    JSON.stringify(path.eventIds),
+                    sourceVar ?? null,
+                    path.sinkVar ?? null,
+                    path.eventIds.length - 1,
                 );
             }
-        });
+        })();
 
         this.emitProgress(ctx, `追踪完成，发现 ${paths.length} 条路径`, 100);
         this.emitDone(ctx, { pathCount: paths.length, paths });
     }
 
-    async _forwardBFS(sessionId, sourceVar, sourceEventId, ctx) {
-        const paths = [];
+    /**
+     * 正向 BFS（零 DB 查询，完全内存化）
+     */
+    _forwardBFS(sessionId, sourceVar, sourceEventId, ctx, writesNameIndex, writesEventIndex, readsNameIndex) {
+        const paths   = [];
         const visited = new Set();
 
         // 起点：sourceVar 的所有 write 事件
         let frontier = [];
         if (sourceVar) {
-            const writeEvts = db.all(
-                'SELECT event_id FROM writes WHERE session_id = ? AND name = ?',
-                [sessionId, sourceVar]
-            );
-            frontier = writeEvts.map(w => ({ eventId: w.event_id, var: sourceVar, pathSoFar: [w.event_id] }));
+            const writeEvts = writesNameIndex.get(sourceVar) || [];
+            frontier = writeEvts.map(eid => ({ eventId: eid, var: sourceVar, pathSoFar: [eid] }));
         } else if (sourceEventId) {
             frontier = [{ eventId: sourceEventId, var: null, pathSoFar: [sourceEventId] }];
         }
@@ -79,48 +125,52 @@ export default class A1TaintTracker extends BasePlugin {
                 if (visited.has(key)) continue;
                 visited.add(key);
 
-                // 找该事件的 write 变量，再找哪些事件 read 了这些变量
-                const writtenVars = db.all('SELECT name FROM writes WHERE event_id = ? AND session_id = ?', [node.eventId, sessionId]);
-
-                for (const wv of writtenVars) {
-                    if (!wv.name) continue;
-                    // 找后续 read 该变量的事件（seq > node.eventId）
-                    const readEvts = db.all(
-                        'SELECT event_id FROM reads WHERE session_id = ? AND name = ? AND event_id > ?',
-                        [sessionId, wv.name, node.eventId]
-                    );
-
-                    for (const re of readEvts) {
-                        const newPath = [...node.pathSoFar, re.event_id];
+                // 该事件写了哪些变量
+                const writtenVars = writesEventIndex.get(node.eventId) || [];
+                for (const varName of writtenVars) {
+                    if (!varName) continue;
+                    // 找后续 read 该变量的事件（event_id > node.eventId）
+                    const allReadEvts = readsNameIndex.get(varName) || [];
+                    // 二分找第一个 > node.eventId
+                    let lo = 0, hi = allReadEvts.length;
+                    while (lo < hi) {
+                        const mid = (lo + hi) >>> 1;
+                        if (allReadEvts[mid] <= node.eventId) lo = mid + 1;
+                        else hi = mid;
+                    }
+                    for (let i = lo; i < allReadEvts.length; i++) {
+                        const reId = allReadEvts[i];
+                        const newPath = [...node.pathSoFar, reId];
                         paths.push({
                             sourceEventId: node.pathSoFar[0],
-                            sinkEventId: re.event_id,
-                            sinkVar: wv.name,
-                            eventIds: newPath,
+                            sinkEventId:   reId,
+                            sinkVar:       varName,
+                            eventIds:      newPath,
                         });
-                        nextFrontier.push({ eventId: re.event_id, var: wv.name, pathSoFar: newPath });
+                        nextFrontier.push({ eventId: reId, var: varName, pathSoFar: newPath });
+                        if (paths.length >= MAX_NODES * 10) break; // 安全上限
                     }
                 }
             }
 
             frontier = nextFrontier;
-            this.emitProgress(ctx, `hop ${hop + 1}，已发现 ${paths.length} 条路径`, Math.min(90, 10 + hop * 10));
+            this.emitProgress(ctx, `hop ${hop + 1}，已发现 ${paths.length} 条路径`, Math.min(90, 15 + hop * 8));
         }
 
         return paths;
     }
 
-    async _backwardBFS(sessionId, sourceVar, sourceEventId, ctx) {
-        const paths = [];
+    /**
+     * 反向 BFS（零 DB 查询，完全内存化）
+     */
+    _backwardBFS(sessionId, sourceVar, sourceEventId, ctx, writesNameIndex, readsNameIndex, readsEventIndex) {
+        const paths   = [];
         const visited = new Set();
 
         let frontier = [];
         if (sourceVar) {
-            const readEvts = db.all(
-                'SELECT event_id FROM reads WHERE session_id = ? AND name = ?',
-                [sessionId, sourceVar]
-            );
-            frontier = readEvts.map(r => ({ eventId: r.event_id, var: sourceVar, pathSoFar: [r.event_id] }));
+            const readEvts = readsNameIndex.get(sourceVar) || [];
+            frontier = readEvts.map(eid => ({ eventId: eid, var: sourceVar, pathSoFar: [eid] }));
         } else if (sourceEventId) {
             frontier = [{ eventId: sourceEventId, var: null, pathSoFar: [sourceEventId] }];
         }
@@ -133,31 +183,38 @@ export default class A1TaintTracker extends BasePlugin {
                 if (visited.has(key)) continue;
                 visited.add(key);
 
-                // 找该事件之前 write 了同名变量的事件
-                const readVars = db.all('SELECT name FROM reads WHERE event_id = ? AND session_id = ?', [node.eventId, sessionId]);
-
-                for (const rv of readVars) {
-                    if (!rv.name) continue;
-                    const writeEvts = db.all(
-                        'SELECT event_id FROM writes WHERE session_id = ? AND name = ? AND event_id < ?',
-                        [sessionId, rv.name, node.eventId]
-                    );
-
-                    for (const we of writeEvts) {
-                        const newPath = [we.event_id, ...node.pathSoFar];
+                // 该事件读了哪些变量
+                const readVars = readsEventIndex.get(node.eventId) || [];
+                for (const varName of readVars) {
+                    if (!varName) continue;
+                    // 找在 node.eventId 之前 write 该变量的事件
+                    const allWriteEvts = writesNameIndex.get(varName) || [];
+                    // 二分找最后一个 < node.eventId
+                    let lo = 0, hi = allWriteEvts.length - 1, lastIdx = -1;
+                    while (lo <= hi) {
+                        const mid = (lo + hi) >>> 1;
+                        if (allWriteEvts[mid] < node.eventId) { lastIdx = mid; lo = mid + 1; }
+                        else hi = mid - 1;
+                    }
+                    // 取最近的若干写（最多3个，避免路径爆炸）
+                    for (let i = Math.max(0, lastIdx - 2); i <= lastIdx; i++) {
+                        if (i < 0) continue;
+                        const weId = allWriteEvts[i];
+                        const newPath = [weId, ...node.pathSoFar];
                         paths.push({
-                            sourceEventId: we.event_id,
-                            sinkEventId: node.pathSoFar[node.pathSoFar.length - 1],
-                            sinkVar: sourceVar,
-                            eventIds: newPath,
+                            sourceEventId: weId,
+                            sinkEventId:   node.pathSoFar[node.pathSoFar.length - 1],
+                            sinkVar:       sourceVar,
+                            eventIds:      newPath,
                         });
-                        nextFrontier.push({ eventId: we.event_id, var: rv.name, pathSoFar: newPath });
+                        nextFrontier.push({ eventId: weId, var: varName, pathSoFar: newPath });
+                        if (paths.length >= MAX_NODES * 10) break;
                     }
                 }
             }
 
             frontier = nextFrontier;
-            this.emitProgress(ctx, `hop ${hop + 1}，已发现 ${paths.length} 条路径`, Math.min(90, 10 + hop * 10));
+            this.emitProgress(ctx, `hop ${hop + 1}，已发现 ${paths.length} 条路径`, Math.min(90, 15 + hop * 8));
         }
 
         return paths;

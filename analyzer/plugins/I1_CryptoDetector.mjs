@@ -1133,14 +1133,15 @@ export default class I1CryptoDetector extends BasePlugin {
         this.emitProgress(ctx, `写入 ${hints.length} 个加密提示...`, 85);
 
         if (hints.length > 0) {
-            db.transaction(() => {
+            const rawDb = db.raw();
+            const stmt = rawDb.prepare(
+                'INSERT INTO crypto_hints (session_id, algorithm, confidence, evidence, iid, line, fn_name) VALUES (?, ?, ?, ?, ?, ?, ?)'
+            );
+            rawDb.transaction(() => {
                 for (const h of hints) {
-                    db.run(
-                        'INSERT INTO crypto_hints (session_id, algorithm, confidence, evidence, iid, line, fn_name) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                        [sessionId, h.algorithm, h.confidence, h.evidence, h.iid, h.line, h.fn_name]
-                    );
+                    stmt.run(sessionId, h.algorithm, h.confidence, h.evidence, h.iid, h.line, h.fn_name);
                 }
-            });
+            })();
         }
 
         this.emitProgress(ctx, `完成，检测到 ${hints.length} 个算法特征`, 100);

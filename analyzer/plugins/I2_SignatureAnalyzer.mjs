@@ -59,21 +59,7 @@ export default class I2SignatureAnalyzer extends BasePlugin {
         this.emitProgress(ctx, '查找签名相关字段...', 10);
 
         // ── 预加载：把所有需要的 writes/fields 命中一次性取出 ────────────────
-        // 为每个 field 分别 JOIN 一次，合并所有命中行（UNION ALL）
-        const placeholders = SIGNATURE_FIELDS.map(() => '?').join(',');
-        const likePatterns = SIGNATURE_FIELDS.map(f => `%${f}%`);
-
-        // writes 命中（精确 + like，最多 20 条/字段）
-        const writeHitsAll = rawDb.prepare(
-            `SELECT w.event_id, w.name AS field_name_matched, w.value, e.line, e.iid
-             FROM writes w
-             JOIN events e ON w.event_id = e.id AND e.session_id = w.session_id
-             WHERE w.session_id = ?
-               AND (w.name IN (${placeholders}) OR w.name LIKE ANY (SELECT value FROM json_each(?)))
-             LIMIT 500`
-        );
-        // sqlite 不支持 LIKE ANY，改为逐字段查询后在 JS 合并
-        // 用一次 SQL 取所有 writes，然后 JS 过滤（避免 12 次独立查询）
+        // 用一次 SQL 取所有 writes，然后 JS 侧过滤（避免逐字段多次查询）
         const allWrites = rawDb.prepare(
             `SELECT w.event_id, w.name, w.value, e.line, e.iid
              FROM writes w

@@ -213,6 +213,30 @@ export default class F1EventIndex extends BasePlugin {
                     readBatch.push([eventId, sessionId, r.name ?? null, serializeValue(r.value), r.omitted ? 1 : 0]);
                 }
             }
+
+            // CALL_PRE 事件：把 event.fn（被调函数名）写入 reads 表（name='callee'）
+            // F3_CallGraphBuilder 依赖此字段来识别函数名；若缺失则降级为 fn@<iid>
+            if (event.type === 'CALL_PRE') {
+                if (event.fn) {
+                    readBatch.push([eventId, sessionId, 'callee', JSON.stringify(event.fn), 0]);
+                }
+                // 把参数列表写入 writes 表（name='arg0','arg1',...），F3 读取 args 时依赖此数据
+                if (event.args?.length > 0) {
+                    const argc = Math.min(event.args.length, 8);
+                    for (let i = 0; i < argc; i++) {
+                        const v = event.args[i];
+                        writeBatch.push([eventId, sessionId, `arg${i}`, serializeValue(v), v === undefined ? 1 : 0]);
+                    }
+                }
+            }
+
+            // CALL 事件：把返回值写入 writes 表（name='return'）
+            // F3_CallGraphBuilder 依赖此字段（retMap）填充 call_edges.return_value
+            if (event.type === 'CALL') {
+                // result===undefined 表示被 omitted（值太大被截断），仍写一行以标记存在
+                const omitted = event.result === undefined ? 1 : 0;
+                writeBatch.push([eventId, sessionId, 'return', serializeValue(event.result), omitted]);
+            }
             if (event.fields?.length > 0) {
                 for (const f of event.fields) {
                     fieldBatch.push([
