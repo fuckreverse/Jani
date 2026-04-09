@@ -10,6 +10,7 @@
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { TYPE } from '../db/EventTypeCode.mjs';
 
 const BATCH_SIZE = 10000;
 
@@ -29,7 +30,7 @@ export default class F3CallGraphBuilder extends BasePlugin {
         // ── Step 1: 一次性读取所有 CALL_PRE 和 CALL 事件 ──────────────────────
         this.emitProgress(ctx, '读取调用事件...', 3);
         const callEvents = rawDb.prepare(
-            "SELECT id, type, iid, line FROM events WHERE session_id = ? AND type IN ('CALL_PRE', 'CALL') ORDER BY id ASC"
+            `SELECT id, type, iid FROM events WHERE session_id = ? AND type IN (${TYPE.CALL_PRE}, ${TYPE.CALL}) ORDER BY id ASC`
         ).all(sessionId);
 
         if (callEvents.length === 0) {
@@ -42,8 +43,8 @@ export default class F3CallGraphBuilder extends BasePlugin {
         const callPreSet = new Set();
         const callSet    = new Set();
         for (const e of callEvents) {
-            if (e.type === 'CALL_PRE') callPreSet.add(e.id);
-            else                        callSet.add(e.id);
+            if (e.type === TYPE.CALL_PRE) callPreSet.add(e.id);
+            else                          callSet.add(e.id);
         }
 
         this.emitProgress(ctx,
@@ -94,6 +95,15 @@ export default class F3CallGraphBuilder extends BasePlugin {
             argsMap.set(id, JSON.stringify(arr));
         }
 
+        // ── Step 3.5: 预加载 smap iid→line（caller_line 来源）──────────────────
+        const smapLineMap = new Map(); // iid → sl (start line)
+        {
+            const rows = rawDb.prepare(
+                'SELECT iid, sl FROM smap WHERE session_id = ?'
+            ).all(sessionId);
+            for (const r of rows) smapLineMap.set(r.iid, r.sl);
+        }
+
         this.emitProgress(ctx, '配对调用栈，构建调用图...', 40);
 
         // ── Step 4: 内存配对 CALL_PRE / CALL ──────────────────────────────────────
@@ -121,17 +131,17 @@ export default class F3CallGraphBuilder extends BasePlugin {
         for (const evt of callEvents) {
             processed++;
 
-            if (evt.type === 'CALL_PRE') {
+            if (evt.type === TYPE.CALL_PRE) {
                 stack.push({
                     call_seq:    evt.id,
-                    caller_line: evt.line,
+                    caller_line: smapLineMap.get(evt.iid) ?? null,
                     fn_iid:      evt.iid,
                     fn_name:     calleeMap.get(evt.id) ?? `fn@${evt.iid || 'unknown'}`,
                     args_json:   argsMap.get(evt.id) ?? '[]',
                     depth:       depth++,
                 });
 
-            } else if (evt.type === 'CALL') {
+            } else if (evt.type === TYPE.CALL) {
                 if (stack.length === 0) { depth = Math.max(0, depth - 1); continue; }
                 const frame = stack.pop();
                 depth = Math.max(0, depth - 1);

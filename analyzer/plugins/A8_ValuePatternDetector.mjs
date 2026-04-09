@@ -289,26 +289,7 @@ export default class A8ValuePatternDetector extends BasePlugin {
 
         this.emitProgress(ctx, '清空旧数据...', 0);
 
-        // 迁移兼容：确保表有 var_name、line 列
-        try {
-            db.exec(`
-                DROP TABLE IF EXISTS value_patterns;
-                CREATE TABLE IF NOT EXISTS value_patterns (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id      TEXT NOT NULL,
-                    value_hash      TEXT,
-                    count           INTEGER DEFAULT 0,
-                    first_seq       INTEGER,
-                    iid             INTEGER,
-                    var_name        TEXT,
-                    line            INTEGER,
-                    matched_constant TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_value_patterns_session ON value_patterns(session_id);
-            `);
-        } catch (e) {
-            db.run('DELETE FROM value_patterns WHERE session_id = ?', [sessionId]);
-        }
+        db.run('DELETE FROM value_patterns WHERE session_id = ?', [sessionId]);
 
         this.emitProgress(ctx, '扫描 writes 值...', 5);
 
@@ -360,7 +341,7 @@ export default class A8ValuePatternDetector extends BasePlugin {
             const chunk = firstSeqIds.slice(i, i + CHUNK);
             const ph = chunk.map(() => '?').join(',');
             const rows = rawDb.prepare(
-                `SELECT id, iid, line FROM events WHERE session_id = ? AND id IN (${ph})`
+                `SELECT id, iid FROM events WHERE session_id = ? AND id IN (${ph})`
             ).all(sessionId, ...chunk);
             for (const r of rows) eventMetaMap.set(r.id, { iid: r.iid, line: r.line });
         }

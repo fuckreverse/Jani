@@ -22,6 +22,7 @@ import { resolve } from 'path';
 import { createRequire } from 'module';
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { encodeType, TYPE } from '../db/EventTypeCode.mjs';
 import { createLogger } from '../logger.mjs';
 
 const log = createLogger('F1-EventIndex');
@@ -46,6 +47,10 @@ const REFILL_THRESHOLD = 1 * 1024 * 1024;
 const BATCH_SIZE = 50000;
 // 每隔多少个 batch 让出一次事件循环（值越大吞吐越高，但每次 HTTP/WS 响应延迟越长）
 const YIELD_EVERY_BATCHES = 10;
+
+// value_index 配置
+const VI_MAX_SAME = 50;   // 同一值最多记录 50 条（防止循环变量爆炸）
+const VI_MAX_STR  = 256;  // 字符串截断长度
 
 export default class F1EventIndex extends BasePlugin {
     static id = 'F1-EventIndex';
@@ -73,6 +78,7 @@ export default class F1EventIndex extends BasePlugin {
         }
 
         this.emitProgress(ctx, '清理旧数据...', 2);
+        db.run('DELETE FROM value_index WHERE session_id = ?', sessionId);
         db.run('DELETE FROM fields WHERE session_id = ?', sessionId);
         db.run('DELETE FROM reads  WHERE session_id = ?', sessionId);
         db.run('DELETE FROM writes WHERE session_id = ?', sessionId);
@@ -87,7 +93,7 @@ export default class F1EventIndex extends BasePlugin {
 
         // prepare() 在循环外只做一次，避免重复编译 SQL
         const stmtEvent = rawDb.prepare(
-            'INSERT OR IGNORE INTO events (id, session_id, type, iid, line, col, src_text) VALUES (?, ?, ?, ?, ?, ?, ?)'
+            'INSERT OR IGNORE INTO events (id, session_id, type, iid) VALUES (?, ?, ?, ?)'
         );
         const stmtWrite = rawDb.prepare(
             'INSERT INTO writes (event_id, session_id, name, value, omitted) VALUES (?, ?, ?, ?, ?)'
@@ -98,13 +104,20 @@ export default class F1EventIndex extends BasePlugin {
         const stmtField = rawDb.prepare(
             'INSERT INTO fields (event_id, session_id, base, offset, is_write, value, omitted) VALUES (?, ?, ?, ?, ?, ?, ?)'
         );
+        const stmtVI = rawDb.prepare(
+            'INSERT OR IGNORE INTO value_index (session_id, event_id, val_type, val_num, val_str, var_name, source) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        );
+
+        // value_index 去重计数器：val_key → count（防止同一值无限写入）
+        const viCount = new Map(); // `${val_type}:${val_key}` → number
 
         // better-sqlite3 原生事务：spread 传参比数组传参快（跳过内部类型判断）
-        const flushTx = rawDb.transaction((evts, wrs, rds, flds) => {
+        const flushTx = rawDb.transaction((evts, wrs, rds, flds, vis) => {
             for (const e of evts) stmtEvent.run(...e);
             for (const w of wrs)  stmtWrite.run(...w);
             for (const r of rds)  stmtRead.run(...r);
             for (const f of flds) stmtField.run(...f);
+            for (const v of vis)  stmtVI.run(...v);
         });
 
         // ── 滑动窗口状态 ──────────────────────────────────────────────────────
@@ -129,6 +142,7 @@ export default class F1EventIndex extends BasePlugin {
         let writeBatch = [];
         let readBatch  = [];
         let fieldBatch = [];
+        let viBatch    = [];
         let totalEvents = 0;
         let batchCount  = 0;
         const dict = new Map();
@@ -140,11 +154,40 @@ export default class F1EventIndex extends BasePlugin {
 
         const flush = () => {
             if (eventBatch.length === 0) return;
-            flushTx(eventBatch, writeBatch, readBatch, fieldBatch);
+            flushTx(eventBatch, writeBatch, readBatch, fieldBatch, viBatch);
             eventBatch = [];
             writeBatch = [];
             readBatch  = [];
             fieldBatch = [];
+            viBatch    = [];
+        };
+
+        /** 尝试将一个值加入 value_index 批次（去重 + 类型化） */
+        const pushVI = (eventId, rawVal, varName, source) => {
+            if (rawVal == null || rawVal === 'null' || rawVal === 'undefined') return;
+            const t = typeof rawVal === 'string' ? rawVal : String(rawVal);
+            let val_type, val_num, val_str;
+            if (t === 'true' || t === 'false') {
+                val_type = 'bool'; val_num = null; val_str = t;
+            } else {
+                const n = Number(t);
+                if (!isNaN(n) && t.trim() !== '') {
+                    val_type = 'num'; val_num = n; val_str = null;
+                } else {
+                    // 字符串：去掉 JSON 引号包裹
+                    let s = t;
+                    if (s.startsWith('"') && s.endsWith('"')) {
+                        try { s = JSON.parse(s); } catch { /* keep raw */ }
+                    }
+                    if (s.length === 0 || s.length > VI_MAX_STR) return; // 太短或太长不索引
+                    val_type = 'str'; val_num = null; val_str = s.substring(0, VI_MAX_STR);
+                }
+            }
+            const key = `${val_type}:${val_type === 'num' ? val_num : val_str}`;
+            const cnt = viCount.get(key) ?? 0;
+            if (cnt >= VI_MAX_SAME) return;
+            viCount.set(key, cnt + 1);
+            viBatch.push([sessionId, eventId, val_type, val_num, val_str, varName ?? null, source]);
         };
 
         // ── 主解析循环 ────────────────────────────────────────────────────────
@@ -188,7 +231,7 @@ export default class F1EventIndex extends BasePlugin {
             relOffset = result.nextOffset;
 
             const { event } = result;
-            if (event.type === 'DICT_ENTRY') continue;
+            if (event.type === 'DICT_ENTRY') continue;  // 不写入 events 表
 
             totalEvents++;
             const eventId = event.seq;
@@ -196,21 +239,22 @@ export default class F1EventIndex extends BasePlugin {
             eventBatch.push([
                 eventId,
                 sessionId,
-                event.type,
-                event.iid   ?? null,
-                event.line  ?? null,
-                event.col   ?? null,
-                event.srcText ?? event.src_text ?? null,
+                encodeType(event.type),  // INTEGER 编码，节省存储 + 加速比较
+                event.iid ?? null,
             ]);
 
             if (event.writes?.length > 0) {
                 for (const w of event.writes) {
-                    writeBatch.push([eventId, sessionId, w.name ?? null, serializeValue(w.value), w.omitted ? 1 : 0]);
+                    const sv = serializeValue(w.value);
+                    writeBatch.push([eventId, sessionId, w.name ?? null, sv, w.omitted ? 1 : 0]);
+                    if (!w.omitted) pushVI(eventId, sv, w.name, 'write');
                 }
             }
             if (event.reads?.length > 0) {
                 for (const r of event.reads) {
-                    readBatch.push([eventId, sessionId, r.name ?? null, serializeValue(r.value), r.omitted ? 1 : 0]);
+                    const sv = serializeValue(r.value);
+                    readBatch.push([eventId, sessionId, r.name ?? null, sv, r.omitted ? 1 : 0]);
+                    if (!r.omitted) pushVI(eventId, sv, r.name, 'read');
                 }
             }
 

@@ -36,46 +36,29 @@ export default class I2SignatureAnalyzer extends BasePlugin {
 
         this.emitProgress(ctx, '清空旧数据...', 0);
 
-        // 迁移兼容：确保表结构正确
-        try {
-            db.exec(`
-                DROP TABLE IF EXISTS signature_paths;
-                CREATE TABLE IF NOT EXISTS signature_paths (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id      TEXT NOT NULL,
-                    field_name      TEXT,
-                    sink_event_id   INTEGER,
-                    path_json       TEXT,
-                    summary         TEXT,
-                    input_vars      TEXT,
-                    hops            INTEGER
-                );
-                CREATE INDEX IF NOT EXISTS idx_sig_paths_session ON signature_paths(session_id);
-            `);
-        } catch (e) {
-            db.run('DELETE FROM signature_paths WHERE session_id = ?', [sessionId]);
-        }
+        db.run('DELETE FROM signature_paths WHERE session_id = ?', [sessionId]);
 
         this.emitProgress(ctx, '查找签名相关字段...', 10);
 
         // ── 预加载：把所有需要的 writes/fields 命中一次性取出 ────────────────
         // 用一次 SQL 取所有 writes，然后 JS 侧过滤（避免逐字段多次查询）
+        // line 已从 events 移除（Phase D），改 JOIN smap 获取
         const allWrites = rawDb.prepare(
-            `SELECT w.event_id, w.name, w.value, e.line, e.iid
+            `SELECT w.event_id, w.name, w.value, s.sl AS line, e.iid
              FROM writes w
-             JOIN events e ON w.event_id = e.id AND e.session_id = w.session_id
+             JOIN events e ON w.event_id = e.id
+             LEFT JOIN smap s ON s.session_id = w.session_id AND s.iid = e.iid
              WHERE w.session_id = ?
-               AND w.name IS NOT NULL
-             LIMIT 50000`
+               AND w.name IS NOT NULL`
         ).all(sessionId);
 
         const allFieldWrites = rawDb.prepare(
-            `SELECT f.event_id, f.offset AS name, f.value, e.line, e.iid
+            `SELECT f.event_id, f.offset AS name, f.value, s.sl AS line, e.iid
              FROM fields f
-             JOIN events e ON f.event_id = e.id AND e.session_id = f.session_id
+             JOIN events e ON f.event_id = e.id
+             LEFT JOIN smap s ON s.session_id = f.session_id AND s.iid = e.iid
              WHERE f.session_id = ? AND f.is_write = 1
-               AND f.offset IS NOT NULL
-             LIMIT 20000`
+               AND f.offset IS NOT NULL`
         ).all(sessionId);
 
         // JS 过滤：匹配签名字段
@@ -121,13 +104,21 @@ export default class I2SignatureAnalyzer extends BasePlugin {
             arr.push(w.event_id);
         }
 
-        // 预加载 event_id → line（用于 _buildSummary）
+        // 预加载 event_id → line（line 已从 events 移除，改从 smap 按 iid 查）
         this.emitProgress(ctx, '预加载事件行号...', 35);
         const eventLineMap = new Map();
-        const allEvLines = rawDb.prepare(
-            'SELECT id, line FROM events WHERE session_id = ?'
-        ).all(sessionId);
-        for (const e of allEvLines) eventLineMap.set(e.id, e.line);
+        {
+            // 先取所有事件的 iid，再 JOIN smap 取 sl
+            const evRows = rawDb.prepare(
+                'SELECT id, iid FROM events WHERE session_id = ?'
+            ).all(sessionId);
+            const smapLine = new Map();
+            {
+                const smRows = rawDb.prepare('SELECT iid, sl FROM smap WHERE session_id = ?').all(sessionId);
+                for (const r of smRows) smapLine.set(r.iid, r.sl);
+            }
+            for (const e of evRows) eventLineMap.set(e.id, smapLine.get(e.iid) ?? null);
+        }
 
         // ── 逐字段追踪 ────────────────────────────────────────────────────────
         this.emitProgress(ctx, '反向追踪签名路径...', 45);

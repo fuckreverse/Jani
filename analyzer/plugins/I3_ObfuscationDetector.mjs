@@ -142,16 +142,15 @@ export default class I3ObfuscationDetector extends BasePlugin {
 
         if (hotIids.length > 0) {
             const numericWrites = db.all(
-                `SELECT w.name, COUNT(*) as cnt, COUNT(DISTINCT w.value) as distinct_vals
-                 FROM writes w
-                 JOIN events e ON w.event_id = e.id AND e.session_id = w.session_id
-                 WHERE w.session_id = ? AND w.value IS NOT NULL
-                   AND w.value NOT LIKE '"%"'
-                   AND w.value NOT LIKE 'null'
-                   AND w.value NOT LIKE 'undefined'
-                   AND w.value NOT LIKE 'true'
-                   AND w.value NOT LIKE 'false'
-                 GROUP BY w.name
+                `SELECT name, COUNT(*) as cnt, COUNT(DISTINCT value) as distinct_vals
+                 FROM writes
+                 WHERE session_id = ? AND value IS NOT NULL
+                   AND value NOT LIKE '"%"'
+                   AND value NOT LIKE 'null'
+                   AND value NOT LIKE 'undefined'
+                   AND value NOT LIKE 'true'
+                   AND value NOT LIKE 'false'
+                 GROUP BY name
                  HAVING cnt >= 5 AND distinct_vals >= 3`,
                 [sessionId]
             );

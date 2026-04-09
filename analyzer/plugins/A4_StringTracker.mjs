@@ -39,14 +39,15 @@ export default class A4StringTracker extends BasePlugin {
         this.emitProgress(ctx, '提取字符串 writes...', 5);
 
         // 找所有 value 是字符串类型（以双引号包裹）的 write（JOIN events 取 line/iid）
+        // line 已从 events 移除（Phase D），改 LEFT JOIN smap 获取
         const strWrites = rawDb.prepare(
-            `SELECT w.event_id, w.name, w.value, e.line, e.iid
+            `SELECT w.event_id, w.name, w.value, s.sl AS line, e.iid
              FROM writes w
-             JOIN events e ON w.event_id = e.id AND e.session_id = w.session_id
+             JOIN events e ON w.event_id = e.id
+             LEFT JOIN smap s ON s.session_id = w.session_id AND s.iid = e.iid
              WHERE w.session_id = ?
                AND w.value IS NOT NULL
-               AND w.value LIKE '"%"'
-             LIMIT 10000`
+               AND w.value LIKE '"%"'`
         ).all(sessionId);
 
         this.emitProgress(ctx, `分析 ${strWrites.length} 个字符串写入...`, 30);

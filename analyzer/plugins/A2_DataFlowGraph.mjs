@@ -46,14 +46,25 @@ export default class A2DataFlowGraph extends BasePlugin {
             'SELECT event_id, name FROM reads WHERE session_id = ? AND name IS NOT NULL ORDER BY event_id ASC'
         ).all(sessionId);
 
-        // ── 一次性加载全部 events(id, iid, line)，消除分批 IN 查询 ─────────────
+        // ── 一次性加载全部 events(id, iid)，消除分批 IN 查询 ───────────────────
+        // line 已从 events 表移除（Phase D），改从 smap 按 iid 查询
         this.emitProgress(ctx, '加载事件元数据...', 25);
         const eventMeta = new Map(); // event_id → {iid, line}
         {
-            const rows = rawDb.prepare(
-                'SELECT id, iid, line FROM events WHERE session_id = ?'
+            const evRows = rawDb.prepare(
+                'SELECT id, iid FROM events WHERE session_id = ?'
             ).all(sessionId);
-            for (const r of rows) eventMeta.set(r.id, { iid: r.iid, line: r.line });
+            // 预加载 smap iid→sl
+            const smapLine = new Map();
+            {
+                const smRows = rawDb.prepare(
+                    'SELECT iid, sl FROM smap WHERE session_id = ?'
+                ).all(sessionId);
+                for (const r of smRows) smapLine.set(r.iid, r.sl);
+            }
+            for (const r of evRows) {
+                eventMeta.set(r.id, { iid: r.iid, line: smapLine.get(r.iid) ?? null });
+            }
         }
 
         // ── 建 write 索引：varName → [{event_id, value}]（已按 event_id ASC 有序）──
@@ -112,7 +123,7 @@ export default class A2DataFlowGraph extends BasePlugin {
         // ── field 边 ─────────────────────────────────────────────────────────
         this.emitProgress(ctx, '构建 field 边...', 70);
         const fields = rawDb.prepare(
-            'SELECT event_id, base, offset, value, is_write FROM fields WHERE session_id = ? LIMIT 5000'
+            'SELECT event_id, base, offset, value, is_write FROM fields WHERE session_id = ?'
         ).all(sessionId);
 
         for (const f of fields) {

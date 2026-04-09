@@ -100,17 +100,7 @@ export default class F2SmapLoader extends BasePlugin {
             this.emitProgress(ctx, `已处理 ${Math.min(i + BATCH_SIZE, entries.length)} / ${entries.length} iids`, progress);
         }
 
-        // 用 smap 数据回填 events 表中缺失的 line/col/src_text（correlated UPDATE）
-        this.emitProgress(ctx, '更新事件行列信息...', 96);
-
-        db.run(
-            `UPDATE events
-             SET line     = COALESCE(line,     (SELECT sl       FROM smap WHERE smap.session_id = events.session_id AND smap.iid = events.iid)),
-                 col      = COALESCE(col,      (SELECT sc       FROM smap WHERE smap.session_id = events.session_id AND smap.iid = events.iid)),
-                 src_text = COALESCE(src_text, (SELECT src_text FROM smap WHERE smap.session_id = events.session_id AND smap.iid = events.iid))
-             WHERE session_id = ? AND line IS NULL`,
-            [sessionId]
-        );
+        // Phase D：events 表已无 line/col/src_text 列，smap 是唯一来源，无需回填。
 
         this.emitProgress(ctx, `完成，共 ${count} 个 iid 条目`, 100);
         this.emitDone(ctx, { iidCount: count });

@@ -529,25 +529,7 @@ export default class I1CryptoDetector extends BasePlugin {
 
         this.emitProgress(ctx, '清空旧数据...', 0);
 
-        // 迁移兼容：确保表有 line、fn_name 列
-        try {
-            db.exec(`
-                DROP TABLE IF EXISTS crypto_hints;
-                CREATE TABLE IF NOT EXISTS crypto_hints (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id  TEXT NOT NULL,
-                    algorithm   TEXT,
-                    confidence  REAL,
-                    evidence    TEXT,
-                    iid         INTEGER,
-                    line        INTEGER,
-                    fn_name     TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_crypto_hints_session ON crypto_hints(session_id);
-            `);
-        } catch (e) {
-            db.run('DELETE FROM crypto_hints WHERE session_id = ?', [sessionId]);
-        }
+        db.run('DELETE FROM crypto_hints WHERE session_id = ?', [sessionId]);
 
         this.emitProgress(ctx, '读取 value_patterns...', 10);
 
@@ -697,10 +679,13 @@ export default class I1CryptoDetector extends BasePlugin {
         // 检测 src_text 中含有 ^ 操作的高频 iid（循环 XOR 是流密码/哈希的特征）
         this.emitProgress(ctx, '检测 XOR 模式...', 70);
         if (hasLoops) {
+            // src_text 已从 events 移除（Phase D），改从 smap 按 iid 查询
+            // 使用 LEFT JOIN 保留 iid=NULL 的事件（INNER JOIN 会漏掉无源码映射的事件）
             const xorEvents = db.all(
-                `SELECT e.iid, e.line, COUNT(*) AS cnt
+                `SELECT e.iid, s.sl AS line, COUNT(*) AS cnt
                  FROM events e
-                 WHERE e.session_id = ? AND e.src_text LIKE '%^%'
+                 LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
+                 WHERE e.session_id = ? AND s.src_text LIKE '%^%'
                  GROUP BY e.iid
                  ORDER BY cnt DESC
                  LIMIT 5`,

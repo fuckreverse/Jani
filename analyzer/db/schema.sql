@@ -1,5 +1,5 @@
 -- Jani Trace Analyzer — 数据库 Schema
--- 版本：v1.0
+-- 版本：v1.1 (Phase D: type=INTEGER, 移除 line/col/src_text)
 -- 说明：所有表和索引均在此定义，即使 Phase 1 暂不使用的表也包含在内
 
 -- ─── 工作空间（项目）─────────────────────────────────────────────────────────
@@ -39,15 +39,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 -- ─── 事件流（主表）──────────────────────────────────────────────────────────
+-- type 列存储整数编码（见 EventTypeCode 常量），由 API 层解码为字符串返回前端。
+-- line/col/src_text 已移除，统一从 smap 表按 iid 查询，避免冗余存储。
 
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY,
     session_id  TEXT NOT NULL,
-    type        TEXT NOT NULL,
+    type        INTEGER NOT NULL,   -- 事件类型整数编码，见 EventTypeCode 映射
     iid         INTEGER,
-    line        INTEGER,
-    col         INTEGER,
-    src_text    TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 
@@ -178,18 +177,6 @@ CREATE TABLE IF NOT EXISTS run_tasks (
     duration_ms INTEGER,
     session_id  TEXT,
     error_msg   TEXT
-);
-
--- ─── 热路径（A3 HotPathAnalyzer 填充）───────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS hot_iids (
-    session_id  TEXT NOT NULL,
-    iid         INTEGER NOT NULL,
-    count       INTEGER DEFAULT 0,
-    line        INTEGER,
-    col         INTEGER,
-    src_text    TEXT,
-    PRIMARY KEY (session_id, iid)
 );
 
 -- ─── 循环（A3/A5 填充）──────────────────────────────────────────────────────
@@ -344,6 +331,24 @@ CREATE TABLE IF NOT EXISTS dataflow_edges (
 );
 CREATE INDEX IF NOT EXISTS idx_df_session ON dataflow_edges(session_id);
 
+-- ─── 值索引（F1 EventIndex 填充，供值搜索 API 使用）────────────────────────
+-- 对每个 write/read/field 的值做类型化索引，支持按值反查事件
+-- val_type: 'num' / 'bool' / 'str'
+-- VI_MAX_SAME=50：同一值最多记录 50 条，防止循环变量爆炸
+
+CREATE TABLE IF NOT EXISTS value_index (
+    session_id  TEXT NOT NULL,
+    event_id    INTEGER NOT NULL,
+    val_type    TEXT NOT NULL,   -- 'num' / 'bool' / 'str'
+    val_num     REAL,            -- val_type='num' 时有效
+    val_str     TEXT,            -- val_type='str'/'bool' 时有效（截断至 256 字符）
+    var_name    TEXT,
+    source      TEXT NOT NULL,   -- 'write' / 'read' / 'field'
+    PRIMARY KEY (session_id, event_id, source)
+);
+CREATE INDEX IF NOT EXISTS idx_vi_num ON value_index(session_id, val_num) WHERE val_type = 'num';
+CREATE INDEX IF NOT EXISTS idx_vi_str ON value_index(session_id, val_str) WHERE val_type = 'str';
+
 -- ─── 索引 ────────────────────────────────────────────────────────────────────
 
 -- ─── iid 执行计数（A3 HotPathAnalyzer 填充，热力图数据）────────────────────────
@@ -359,6 +364,10 @@ CREATE TABLE IF NOT EXISTS iid_counts (
 
 CREATE INDEX IF NOT EXISTS idx_events_session_type ON events(session_id, type);
 CREATE INDEX IF NOT EXISTS idx_events_iid          ON events(session_id, iid);
+-- 覆盖索引：name + event_id，消除 A2/A5 的回表查询
+CREATE INDEX IF NOT EXISTS idx_writes_name_eid     ON writes(session_id, name, event_id);
+CREATE INDEX IF NOT EXISTS idx_reads_name_eid      ON reads(session_id, name, event_id);
+-- 保留旧名称索引（向后兼容，迁移时会自动创建新版）
 CREATE INDEX IF NOT EXISTS idx_writes_name         ON writes(session_id, name);
 CREATE INDEX IF NOT EXISTS idx_writes_event        ON writes(session_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_reads_name          ON reads(session_id, name);
@@ -367,11 +376,19 @@ CREATE INDEX IF NOT EXISTS idx_fields_offset       ON fields(session_id, offset)
 CREATE INDEX IF NOT EXISTS idx_fields_event        ON fields(session_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_call_edges_session  ON call_edges(session_id);
 CREATE INDEX IF NOT EXISTS idx_call_edges_fn_name  ON call_edges(session_id, fn_name);
+CREATE INDEX IF NOT EXISTS idx_call_edges_retval   ON call_edges(session_id, return_value);
 CREATE INDEX IF NOT EXISTS idx_taint_session       ON taint_paths(session_id);
 CREATE INDEX IF NOT EXISTS idx_var_lifetime_name   ON var_lifetime(session_id, name);
 CREATE INDEX IF NOT EXISTS idx_bookmarks_session   ON bookmarks(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_run_tasks_status    ON run_tasks(status);
-CREATE INDEX IF NOT EXISTS idx_smap_session        ON smap(session_id);
+-- events 按 type + id：I4 事件分布统计 + 游标分页
+CREATE INDEX IF NOT EXISTS idx_events_type_id      ON events(session_id, type, id);
+-- iid_counts 按 count 降序：A3/I3/I4 取 Top-N 热点
+CREATE INDEX IF NOT EXISTS idx_iid_counts_count    ON iid_counts(session_id, count DESC);
+-- loops 按迭代次数降序：A5 取高频循环
+CREATE INDEX IF NOT EXISTS idx_loops_iter_count    ON loops(session_id, iteration_count DESC);
+-- value_patterns 按 matched_constant 过滤：I1 密码学检测
+CREATE INDEX IF NOT EXISTS idx_vp_matched          ON value_patterns(session_id, matched_constant);
 
 -- ─── 插件检查点（断点恢复支持）───────────────────────────────────────────────
 -- 每个插件成功完成后写入一条记录；重新调度时跳过已有记录的插件
@@ -386,7 +403,6 @@ CREATE TABLE IF NOT EXISTS plugin_checkpoints (
     duration_ms  INTEGER,
     UNIQUE (session_id, plugin_id)
 );
-CREATE INDEX IF NOT EXISTS idx_events_session_seq  ON events(session_id, id);
 CREATE INDEX IF NOT EXISTS idx_loop_iter_session   ON loop_iterations(session_id, loop_id);
 CREATE INDEX IF NOT EXISTS idx_value_patterns_session ON value_patterns(session_id);
 CREATE INDEX IF NOT EXISTS idx_crypto_hints_session ON crypto_hints(session_id);

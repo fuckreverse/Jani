@@ -56,9 +56,36 @@
             style="width:120px"
             @keyup.enter="loadEvents(true)"
           />
-          <button class="btn-primary" @click="loadEvents(true)">查询</button>
+          <!-- 值搜索 -->
+          <div class="value-search-group">
+            <select v-model="filters.valueMode" class="value-mode-select" @change="filters.valueQuery = ''; filters.valueQuery2 = ''">
+              <option value="">值搜索…</option>
+              <option value="str">字符串精确</option>
+              <option value="strLike">字符串模糊(*)</option>
+              <option value="num">数值精确</option>
+              <option value="numRange">数值范围</option>
+            </select>
+            <template v-if="filters.valueMode === 'numRange'">
+              <input v-model="filters.valueQuery"  placeholder="最小值" type="number" style="width:80px" @keyup.enter="loadEvents(true)" />
+              <span class="range-sep">~</span>
+              <input v-model="filters.valueQuery2" placeholder="最大值" type="number" style="width:80px" @keyup.enter="loadEvents(true)" />
+            </template>
+            <input
+              v-else-if="filters.valueMode"
+              v-model="filters.valueQuery"
+              :placeholder="filters.valueMode === 'num' ? '数值' : filters.valueMode === 'strLike' ? '模糊，* 通配' : '字符串'"
+              :type="filters.valueMode === 'num' ? 'number' : 'text'"
+              style="width:140px"
+              @keyup.enter="loadEvents(true)"
+            />
+          </div>
+          <button class="btn-primary" :disabled="valueSearchLoading" @click="loadEvents(true)">
+            <span v-if="valueSearchLoading">搜索中…</span>
+            <span v-else>查询</span>
+          </button>
           <button class="btn-secondary" @click="clearFilters">清空</button>
         </div>
+        <div v-if="valueSearchError" class="value-search-error">{{ valueSearchError }}</div>
       </div>
 
       <!-- 加载中 -->
@@ -194,7 +221,7 @@ const hasMore       = ref(false);
 const currentPage   = ref(1);
 const selectedSeq   = ref(null);
 
-const filters = ref({ types: [], line: '', varName: '' });
+const filters = ref({ types: [], line: '', varName: '', valueMode: '', valueQuery: '', valueQuery2: '' });
 
 const selectedEvent = computed(() =>
     events.value.find(e => e.seq === selectedSeq.value) ?? null
@@ -249,8 +276,57 @@ async function loadEventTypes() {
 
 // ─── 事件列表加载 ─────────────────────────────────────────────────────────────
 
+// 值搜索结果：event_id 集合（null 表示不过滤）
+const valueSearchIds = ref(null);
+const valueSearchLoading = ref(false);
+const valueSearchError  = ref('');
+
+async function resolveValueSearch() {
+    const { valueMode, valueQuery, valueQuery2 } = filters.value;
+    if (!valueMode || !valueQuery.trim()) {
+        valueSearchIds.value = null;
+        valueSearchError.value = '';
+        return true;
+    }
+    valueSearchLoading.value = true;
+    valueSearchError.value = '';
+    try {
+        const p = new URLSearchParams({ limit: '1000' });
+        if (valueMode === 'str')      p.set('str',     valueQuery.trim());
+        else if (valueMode === 'strLike') p.set('strLike', valueQuery.trim());
+        else if (valueMode === 'num') p.set('num',     valueQuery.trim());
+        else if (valueMode === 'numRange') {
+            if (valueQuery.trim())  p.set('numMin', valueQuery.trim());
+            if (valueQuery2.trim()) p.set('numMax', valueQuery2.trim());
+        }
+        const res = await fetch(`/api/sessions/${props.sessionId}/value-search?${p}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        valueSearchIds.value = new Set(data.matches.map(m => m.event_id));
+        if (valueSearchIds.value.size === 0) valueSearchError.value = '值搜索无匹配';
+        return true;
+    } catch (e) {
+        valueSearchError.value = `值搜索失败: ${e.message}`;
+        valueSearchIds.value = null;
+        return false;
+    } finally {
+        valueSearchLoading.value = false;
+    }
+}
+
 async function loadEvents(reset = false) {
     if (reset) currentPage.value = 1;
+
+    // 有值搜索条件时先解析 event_id 集合
+    const hasValueFilter = filters.value.valueMode && filters.value.valueQuery.trim();
+    if (hasValueFilter) {
+        const ok = await resolveValueSearch();
+        if (!ok) return;
+    } else {
+        valueSearchIds.value = null;
+        valueSearchError.value = '';
+    }
+
     eventsLoading.value = true;
     try {
         const params = new URLSearchParams({
@@ -261,10 +337,29 @@ async function loadEvents(reset = false) {
         if (filters.value.line)    params.set('line',    filters.value.line);
         if (filters.value.varName) params.set('varName', filters.value.varName.trim());
 
+        // 值搜索：把匹配的 event_id 转为 seqFrom/seqTo 范围 + 后端过滤
+        // 当命中数量少时，改用多次精确 seqFrom 查询效果更好；
+        // 这里采用简单方案：取 min/max 作为范围，前端再过滤一次
+        if (valueSearchIds.value && valueSearchIds.value.size > 0) {
+            const ids = [...valueSearchIds.value].sort((a, b) => a - b);
+            params.set('seqFrom', ids[0]);
+            params.set('seqTo',   ids[ids.length - 1]);
+        } else if (valueSearchIds.value && valueSearchIds.value.size === 0) {
+            // 无匹配，直接返回空
+            events.value = [];
+            hasMore.value = false;
+            return;
+        }
+
         const res = await fetch(`/api/sessions/${props.sessionId}/events?${params}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        events.value = data.events || [];
+
+        // 前端二次过滤：只保留命中 event_id 的事件
+        const raw = data.events || [];
+        events.value = valueSearchIds.value
+            ? raw.filter(e => valueSearchIds.value.has(e.seq))
+            : raw;
         hasMore.value = data.hasMore || false;
     } catch (e) {
         console.error('loadEvents error:', e);
@@ -282,7 +377,9 @@ function nextPage() {
 }
 
 function clearFilters() {
-    filters.value = { types: [], line: '', varName: '' };
+    filters.value = { types: [], line: '', varName: '', valueMode: '', valueQuery: '', valueQuery2: '' };
+    valueSearchIds.value = null;
+    valueSearchError.value = '';
     typeDropdownOpen.value = false;
     loadEvents(true);
 }
@@ -420,4 +517,18 @@ onUnmounted(() => {
 }
 .btn-link { background: none; border: none; color: var(--text-muted); font-size: 11px; cursor: pointer; padding: 0; }
 .btn-link:hover { color: var(--text-primary); }
+
+/* ─── 值搜索 ─────────────────────────────────────────────────────────────── */
+.value-search-group {
+    display: flex; align-items: center; gap: 4px;
+}
+.value-mode-select {
+    font-size: 12px; padding: 5px 8px; border-radius: 6px;
+    border: 1px solid var(--border-color); background: var(--bg-secondary);
+    color: var(--text-primary); cursor: pointer; height: 32px;
+}
+.range-sep { font-size: 12px; color: var(--text-muted); padding: 0 2px; }
+.value-search-error {
+    font-size: 11px; color: #f87171; margin-top: 6px; padding: 0 4px;
+}
 </style>

@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, copyFileSync, rmSync, statSync } from 'fs';
 import { resolve, basename } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import * as db from '../db/Database.mjs';
+import { decodeType, TYPE } from '../db/EventTypeCode.mjs';
 import { schedule, autoDiscover, getCheckpoints, clearCheckpoints } from '../PluginEngine.mjs';
 
 const router = Router();
@@ -246,23 +247,24 @@ router.delete('/:id', (req, res) => {
             rmSync(sessionDir, { recursive: true, force: true });
         }
 
-        // 删除所有关联的数据库记录
+        // 删除所有关联的数据库记录（单事务，原子操作）
         const TABLES_WITH_SESSION = [
             'events', 'writes', 'reads', 'fields', 'smap',
             'call_edges', 'taint_paths', 'var_lifetime', 'scopes',
-            'bookmarks', 'hot_iids', 'iid_counts', 'loops', 'loop_iterations',
+            'bookmarks', 'iid_counts', 'loops', 'loop_iterations',
             'string_events', 'fn_signatures', 'object_timelines', 'value_patterns',
             'crypto_hints', 'signature_paths', 'obfuscation_hints', 'analysis_summary',
-            'dataflow_edges', 'plugin_checkpoints',
+            'dataflow_edges', 'value_index', 'plugin_checkpoints',
         ];
-        for (const table of TABLES_WITH_SESSION) {
-            try {
-                db.run(`DELETE FROM ${table} WHERE session_id = ?`, id);
-            } catch { /* 表不存在时忽略 */ }
-        }
-
-        // 删除 sessions 主记录
-        db.run('DELETE FROM sessions WHERE id = ?', id);
+        db.transaction(() => {
+            for (const table of TABLES_WITH_SESSION) {
+                try {
+                    db.run(`DELETE FROM ${table} WHERE session_id = ?`, id);
+                } catch { /* 表不存在时忽略 */ }
+            }
+            // 删除 sessions 主记录
+            db.run('DELETE FROM sessions WHERE id = ?', id);
+        });
 
         return res.json({ deleted: true });
     } catch (e) {
@@ -366,7 +368,8 @@ router.get('/:id/event-types', (req, res) => {
             `SELECT type, COUNT(*) as cnt FROM events WHERE session_id = ? GROUP BY type ORDER BY cnt DESC`,
             id
         );
-        return res.json({ types: rows });
+        // type 列为整数编码（Phase D），解码为字符串返回前端
+        return res.json({ types: rows.map(r => ({ type: decodeType(r.type), cnt: r.cnt })) });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/event-types] error:');
         return res.status(500).json({ error: e.message });
@@ -385,8 +388,9 @@ router.get('/:id/events', (req, res) => {
             varName,
             seqFrom,
             seqTo,
-            limit = '100',
-            offset = '0',
+            limit  = '100',
+            offset = '0',   // 向后兼容，推荐改用 cursor
+            cursor,         // 游标分页：上次返回的最后一个 seq，下次从 id > cursor 开始
         } = req.query;
 
         // 检查 session 是否存在
@@ -399,23 +403,26 @@ router.get('/:id/events', (req, res) => {
         const conditions = ['e.session_id = ?'];
         const params = [id];
 
+        // line 已从 events 移除（Phase D），通过 smap 过滤
         if (line !== undefined) {
-            conditions.push('e.line = ?');
+            conditions.push(`EXISTS (SELECT 1 FROM smap s WHERE s.session_id = e.session_id AND s.iid = e.iid AND s.sl = ?)`);
             params.push(Number(line));
         }
         // types 多选（优先），type 单选（向后兼容）
+        // type 列为整数编码（Phase D），过滤时将字符串转为整数
         if (types) {
             const typeList = types.split(',').map(t => t.trim()).filter(Boolean);
-            if (typeList.length === 1) {
+            const typeCodes = typeList.map(t => TYPE[t] ?? 0);
+            if (typeCodes.length === 1) {
                 conditions.push('e.type = ?');
-                params.push(typeList[0]);
-            } else if (typeList.length > 1) {
-                conditions.push(`e.type IN (${typeList.map(() => '?').join(',')})`);
-                params.push(...typeList);
+                params.push(typeCodes[0]);
+            } else if (typeCodes.length > 1) {
+                conditions.push(`e.type IN (${typeCodes.map(() => '?').join(',')})`);
+                params.push(...typeCodes);
             }
         } else if (type) {
             conditions.push('e.type = ?');
-            params.push(type);
+            params.push(TYPE[type] ?? 0);
         }
         if (seqFrom !== undefined) {
             conditions.push('e.id >= ?');
@@ -425,23 +432,32 @@ router.get('/:id/events', (req, res) => {
             conditions.push('e.id <= ?');
             params.push(Number(seqTo));
         }
+        // 游标分页：cursor 优先于 offset（O(1) 深页访问）
+        if (cursor !== undefined) {
+            conditions.push('e.id > ?');
+            params.push(Number(cursor));
+        }
 
         // varName：在 writes 或 reads 中包含该变量名
         if (varName) {
             conditions.push(`(
-                EXISTS (SELECT 1 FROM writes w WHERE w.event_id = e.id AND w.name = ?)
-                OR EXISTS (SELECT 1 FROM reads  r WHERE r.event_id = e.id AND r.name = ?)
+                EXISTS (SELECT 1 FROM writes w WHERE w.session_id = e.session_id AND w.event_id = e.id AND w.name = ?)
+                OR EXISTS (SELECT 1 FROM reads  r WHERE r.session_id = e.session_id AND r.event_id = e.id AND r.name = ?)
             )`);
             params.push(varName, varName);
         }
 
         const where = conditions.join(' AND ');
         const limitN  = Math.min(Number(limit)  || 100, 1000);
-        const offsetN = Number(offset) || 0;
+        // 游标模式不使用 OFFSET（O(1) 定位）；offset 仅向后兼容
+        const offsetN = cursor !== undefined ? 0 : (Number(offset) || 0);
 
+        // line/col/src_text 已从 events 移除（Phase D），LEFT JOIN smap 获取
         const events = db.all(
-            `SELECT e.id AS seq, e.type, e.iid, e.line, e.col, e.src_text
+            `SELECT e.id AS seq, e.type, e.iid,
+                    s.sl AS line, s.sc AS col, s.src_text
              FROM events e
+             LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
              WHERE ${where}
              ORDER BY e.id ASC
              LIMIT ? OFFSET ?`,
@@ -455,33 +471,20 @@ router.get('/:id/events', (req, res) => {
         if (eventIds.length > 0) {
             const placeholders = eventIds.map(() => '?').join(',');
             writes = db.all(
-                `SELECT event_id, name, value, omitted FROM writes WHERE event_id IN (${placeholders})`,
-                ...eventIds
+                `SELECT event_id, name, value, omitted FROM writes WHERE session_id = ? AND event_id IN (${placeholders})`,
+                id, ...eventIds
             );
             reads = db.all(
-                `SELECT event_id, name, value, omitted FROM reads WHERE event_id IN (${placeholders})`,
-                ...eventIds
+                `SELECT event_id, name, value, omitted FROM reads WHERE session_id = ? AND event_id IN (${placeholders})`,
+                id, ...eventIds
             );
             fields = db.all(
-                `SELECT event_id, base, offset, is_write, value, omitted FROM fields WHERE event_id IN (${placeholders})`,
-                ...eventIds
+                `SELECT event_id, base, offset, is_write, value, omitted FROM fields WHERE session_id = ? AND event_id IN (${placeholders})`,
+                id, ...eventIds
             );
         }
 
-        // 若 events 中有行列为 null 但 iid 非 null 的事件，尝试通过 smap 补全
-        const nullLineEvents = events.filter(e => e.line == null && e.iid != null);
-        const smapMap = new Map();
-        if (nullLineEvents.length > 0) {
-            const iids = [...new Set(nullLineEvents.map(e => e.iid))];
-            const smapPlaceholders = iids.map(() => '?').join(',');
-            const smapRows = db.all(
-                `SELECT iid, sl, sc, el, ec, src_text FROM smap WHERE session_id = ? AND iid IN (${smapPlaceholders})`,
-                id, ...iids
-            );
-            for (const row of smapRows) {
-                smapMap.set(row.iid, row);
-            }
-        }
+        // Phase D: line/col/src_text 已通过 LEFT JOIN smap 直接获取，无需再做补全
 
         // 按 event_id 分组
         const writesMap  = groupBy(writes,  'event_id');
@@ -490,21 +493,13 @@ router.get('/:id/events', (req, res) => {
 
         // 组合结果
         const result = events.map(e => {
-            // 若 line/col 为 null，尝试从 smap 补全
-            let line = e.line, col = e.col, srcText = e.src_text;
-            if (line == null && e.iid != null && smapMap.has(e.iid)) {
-                const sm = smapMap.get(e.iid);
-                line = sm.sl;
-                col  = sm.sc;
-                if (!srcText) srcText = sm.src_text;
-            }
             return {
                 seq:      e.seq,
-                type:     e.type,
+                type:     decodeType(e.type),  // 整数 → 字符串（Phase D）
                 iid:      e.iid,
-                line,
-                col,
-                srcText,
+                line:     e.line ?? null,
+                col:      e.col  ?? null,
+                srcText:  e.src_text ?? null,
                 writes:   (writesMap[e.seq] || []).map(w => ({
                     name:    w.name,
                     value:   safeParseJson(w.value),
@@ -525,11 +520,15 @@ router.get('/:id/events', (req, res) => {
             };
         });
 
+        // 游标：返回本页最后一条的 seq，供下次请求使用
+        const nextCursor = result.length === limitN ? result[result.length - 1].seq : null;
+
         return res.json({
             sessionId: id,
             events: result,
             count:  result.length,
             hasMore: result.length === limitN,
+            nextCursor,
         });
 
     } catch (e) {
@@ -1248,6 +1247,91 @@ router.get('/:id/summary', (req, res) => {
         });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/summary] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/value-search ────────────────────────────────────
+// 按值反查事件（利用 value_index 表）
+// 查询参数（至少提供一个）：
+//   num=<number>          精确数值匹配（走 idx_vi_num 索引，O(log N)）
+//   numMin=<n>&numMax=<n> 数值范围匹配（走 idx_vi_num 范围扫描）
+//   str=<string>          精确字符串匹配（走 idx_vi_str 索引，O(log N)）
+//   strLike=<pattern>     模糊字符串匹配，支持 * 通配符（内部转为 SQL LIKE，全表扫描）
+//   source=write|read|field  可选，限定来源（默认不限）
+//   limit=<n>             最多返回条数（默认 200，最大 1000）
+
+router.get('/:id/value-search', (req, res) => {
+    try {
+        const { id } = req.params;
+        const { num, numMin, numMax, str, strLike, source, limit = '200' } = req.query;
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        if (num === undefined && numMin === undefined && numMax === undefined &&
+            str === undefined && strLike === undefined) {
+            return res.status(400).json({
+                error: 'Provide at least one of: num, numMin/numMax, str, strLike',
+            });
+        }
+
+        const limitN = Math.min(Number(limit) || 200, 1000);
+        const conditions = ['session_id = ?'];
+        const params = [id];
+
+        // 数值类查询
+        if (num !== undefined) {
+            const n = Number(num);
+            if (isNaN(n)) return res.status(400).json({ error: 'num must be a valid number' });
+            conditions.push("val_type = 'num'", 'val_num = ?');
+            params.push(n);
+        } else if (numMin !== undefined || numMax !== undefined) {
+            conditions.push("val_type = 'num'");
+            if (numMin !== undefined) {
+                const lo = Number(numMin);
+                if (isNaN(lo)) return res.status(400).json({ error: 'numMin must be a valid number' });
+                conditions.push('val_num >= ?');
+                params.push(lo);
+            }
+            if (numMax !== undefined) {
+                const hi = Number(numMax);
+                if (isNaN(hi)) return res.status(400).json({ error: 'numMax must be a valid number' });
+                conditions.push('val_num <= ?');
+                params.push(hi);
+            }
+        // 字符串类查询
+        } else if (str !== undefined) {
+            conditions.push("val_type IN ('str', 'bool')", 'val_str = ?');
+            params.push(str);
+        } else if (strLike !== undefined) {
+            // 将用户输入的 * 转为 SQL LIKE 的 %，同时转义原有的 % 和 _
+            const likePattern = strLike
+                .replace(/%/g, '\\%')
+                .replace(/_/g, '\\_')
+                .replace(/\*/g, '%');
+            conditions.push("val_type IN ('str', 'bool')", "val_str LIKE ? ESCAPE '\\'");
+            params.push(likePattern);
+        }
+
+        // 可选：限定来源
+        if (source && ['write', 'read', 'field'].includes(source)) {
+            conditions.push('source = ?');
+            params.push(source);
+        }
+
+        const rows = db.all(
+            `SELECT event_id, val_type, val_num, val_str, var_name, source
+             FROM value_index
+             WHERE ${conditions.join(' AND ')}
+             ORDER BY event_id ASC
+             LIMIT ?`,
+            [...params, limitN]
+        );
+
+        res.json({ matches: rows, count: rows.length });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/value-search] error:');
         res.status(500).json({ error: e.message });
     }
 });

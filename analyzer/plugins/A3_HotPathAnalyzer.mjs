@@ -27,11 +27,13 @@ export default class A3HotPathAnalyzer extends BasePlugin {
         this.emitProgress(ctx, '统计 iid 执行次数...', 5);
 
         // 统计每个 iid 的执行次数
+        // line/src_text 已从 events 移除（Phase D），改从 smap 按 iid 查询
         const counts = db.all(
-            `SELECT iid, COUNT(*) as count, MIN(line) as line, MIN(src_text) as src_text
-             FROM events
-             WHERE session_id = ? AND iid IS NOT NULL
-             GROUP BY iid
+            `SELECT e.iid, COUNT(*) as count, s.sl AS line, s.src_text
+             FROM events e
+             LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
+             WHERE e.session_id = ? AND e.iid IS NOT NULL
+             GROUP BY e.iid
              ORDER BY count DESC`,
             [sessionId]
         );
@@ -60,17 +62,16 @@ export default class A3HotPathAnalyzer extends BasePlugin {
         const THRESHOLD = 50;
 
         if (hotIids.length > 0) {
-            // 分批（每批最多 900 个 iid）一次性取出所有 seq，在内存里分组
-            const CHUNK = 900;
+            // 一次性全表扫描，JS 侧按热点 iid 过滤（比分批 IN 查询更高效）
+            const hotIidSet = new Set(hotIids);
             // iid → sorted event_id[]
             const iidSeqs = new Map();
-            for (let i = 0; i < hotIids.length; i += CHUNK) {
-                const chunk = hotIids.slice(i, i + CHUNK);
-                const ph = chunk.map(() => '?').join(',');
+            {
                 const rows = rawDb.prepare(
-                    `SELECT iid, id FROM events WHERE session_id = ? AND iid IN (${ph}) ORDER BY iid ASC, id ASC`
-                ).all(sessionId, ...chunk);
+                    'SELECT iid, id FROM events WHERE session_id = ? AND iid IS NOT NULL ORDER BY iid ASC, id ASC'
+                ).all(sessionId);
                 for (const r of rows) {
+                    if (!hotIidSet.has(r.iid)) continue;
                     let arr = iidSeqs.get(r.iid);
                     if (!arr) { arr = []; iidSeqs.set(r.iid, arr); }
                     arr.push(r.id);

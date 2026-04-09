@@ -25,10 +25,12 @@ export default class A7ObjectMutationTracker extends BasePlugin {
         db.run('DELETE FROM object_timelines WHERE session_id = ?', [sessionId]);
 
         this.emitProgress(ctx, '读取 fields 表...', 5);
+        // line 已从 events 移除（Phase D），改 LEFT JOIN smap 获取
         const fields = db.all(
-            `SELECT f.event_id, f.base, f.offset, f.value, f.is_write, e.line
+            `SELECT f.event_id, f.base, f.offset, f.value, f.is_write, s.sl AS line
              FROM fields f
              JOIN events e ON f.event_id = e.id AND e.session_id = f.session_id
+             LEFT JOIN smap s ON s.session_id = f.session_id AND s.iid = e.iid
              WHERE f.session_id = ?
              ORDER BY f.event_id ASC`,
             [sessionId]

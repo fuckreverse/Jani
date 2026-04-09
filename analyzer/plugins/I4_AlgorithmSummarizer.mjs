@@ -5,6 +5,7 @@
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { decodeType } from '../db/EventTypeCode.mjs';
 
 export default class I4AlgorithmSummarizer extends BasePlugin {
     static id = 'I4-AlgorithmSummarizer';
@@ -29,10 +30,12 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
 
         // ── 事件统计 ────────────────────────────────────────────────────────
         this.emitProgress(ctx, '统计事件分布...', 10);
-        const eventStats = db.all(
+        const eventStatsRaw = db.all(
             'SELECT type, COUNT(*) as cnt FROM events WHERE session_id = ? GROUP BY type ORDER BY cnt DESC',
             [sessionId]
         );
+        // type 为整数编码（Phase D），解码为字符串
+        const eventStats = eventStatsRaw.map(r => ({ type: decodeType(r.type), cnt: r.cnt }));
 
         // ── 热路径 ──────────────────────────────────────────────────────────
         this.emitProgress(ctx, '读取热路径...', 20);
