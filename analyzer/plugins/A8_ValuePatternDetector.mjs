@@ -70,7 +70,7 @@ const CRYPTO_CONSTANTS = new Map([
     ['326615417',    'SHA512_H7_lo'],
 
     // ── SHA-3 / Keccak 轮常数 ─────────────────────────────────────────────
-    ['1',            'KECCAK_RC0'],
+    // RC0=1 太普通，不单独列入；从 RC1 开始有识别意义
     ['32898',        'KECCAK_RC1'],
     ['32907',        'KECCAK_RC2'],
     ['2147516416',   'KECCAK_RC3'],
@@ -80,8 +80,7 @@ const CRYPTO_CONSTANTS = new Map([
     ['2147483777',   'KECCAK_RC7'],
     ['1088',         'KECCAK_RATE_256'],
     ['832',          'KECCAK_RATE_512'],
-    ['136',          'KECCAK_BLOCK_256'],
-    ['104',          'KECCAK_BLOCK_512'],
+    // KECCAK_BLOCK_256=136, KECCAK_BLOCK_512=104 太小，不单独列入
 
     // ── RIPEMD-160 ────────────────────────────────────────────────────────
     ['1732584193',   'RIPEMD160_H0'],
@@ -99,28 +98,13 @@ const CRYPTO_CONSTANTS = new Map([
     ['2053994217',   'RIPEMD160_KR3'],
 
     // ── DES / 3DES ─────────────────────────────────────────────────────────
-    ['56',           'DES_KEY_BITS'],
-    ['64',           'DES_BLOCK_BITS'],
-    ['8',            'DES_BLOCK_BYTES'],
-    ['58',           'DES_IP_PERM_0'],
-    ['50',           'DES_IP_PERM_1'],
-    ['42',           'DES_IP_PERM_2'],
-    ['34',           'DES_IP_PERM_3'],
-    ['32',           'DES_E_EXP_0'],
-    ['1',            'DES_E_EXP_1'],
-    ['16',           'DES_P_PERM_0'],
-    ['7',            'DES_P_PERM_1'],
+    // 注意：56/64/8/58/50/42/34/32/1/16/7 均为普通小整数，不单独列入
+    // DES 的真正特征通过数组检测（DES_IP_TABLE / DES_SBOX_CANDIDATE）识别
 
     // ── AES ────────────────────────────────────────────────────────────────
-    ['1',            'AES_RCON_1'],
-    ['2',            'AES_RCON_2'],
-    ['4',            'AES_RCON_3'],
-    ['8',            'AES_RCON_4'],
-    ['16',           'AES_RCON_5'],
-    ['27',           'AES_RCON_9'],
-    ['54',           'AES_RCON_10'],
-    ['99',           'AES_SBOX_0'],
-    ['124',          'AES_SBOX_1'],
+    // 注意：AES Rcon 表值（1/2/4/8/16/27/54）全是普通小整数，不单独列入
+    // AES 真正的特征通过数组检测（AES_SBOX / AES_INV_SBOX / AES_KEY_128/256）识别
+    // AES_SBOX 首字节 99 也太普通，不单独列入
 
     // ── Blowfish ──────────────────────────────────────────────────────────
     ['608135816',    'BLOWFISH_P0'],
@@ -145,16 +129,15 @@ const CRYPTO_CONSTANTS = new Map([
     ['857760878',    'SALSA20_CONST1'],
     ['2036477234',   'SALSA20_CONST2'],
     ['1797285236',   'SALSA20_CONST3'],
-    ['64',           'CHACHA20_BLOCK_BYTES'],
-    ['20',           'CHACHA20_ROUNDS'],
+    // CHACHA20_BLOCK_BYTES=64, CHACHA20_ROUNDS=20 均为普通小整数，不单独列入
 
     // ── CRC-32 ─────────────────────────────────────────────────────────────
     ['3988292384',   'CRC32_POLY'],
     ['-306674912',   'CRC32_POLY_signed'],
     ['79764919',     'CRC32_POLY_NORM'],
     ['4294967295',   'CRC32_INIT'],
-    ['-1',           'CRC32_INIT_signed'],
-    ['0',            'CRC32_TABLE_0'],
+    // CRC32_INIT_signed=-1 太普通，不列入
+    // CRC32_TABLE_0=0 太普通，不列入
     ['1996959894',   'CRC32_TABLE_1'],
     ['3993919788',   'CRC32_TABLE_2'],
 
@@ -167,17 +150,16 @@ const CRYPTO_CONSTANTS = new Map([
     ['3921903700',   'CRC64_POLY_LO'],
 
     // ── HMAC ───────────────────────────────────────────────────────────────
-    ['92',           'HMAC_IPAD'],
-    ['54',           'HMAC_OPAD'],
+    // HMAC_IPAD=0x36(54), HMAC_OPAD=0x5C(92) 均为普通小整数，不单独列入
+    // HMAC 通过 XOR 模式 + 哈希调用特征识别，无需魔术常数匹配
 
     // ── Whirlpool ──────────────────────────────────────────────────────────
     ['1819895653',   'WHIRLPOOL_RC0_HI'],
     ['3318131210',   'WHIRLPOOL_RC0_LO'],
 
     // ── GOST ───────────────────────────────────────────────────────────────
-    ['0',            'GOST_IV_ZERO'],
-    ['256',          'GOST_KEY_BITS'],
-    ['256',          'GOST_BLOCK_BITS'],
+    // GOST_IV_ZERO=0, GOST_KEY_BITS=256, GOST_BLOCK_BITS=256 均为普通小整数，不单独列入
+    // GOST 难以通过单个魔术常数识别，需要其他上下文特征
 
     // ── Tiger ──────────────────────────────────────────────────────────────
     ['258009956',    'TIGER_H0_LO'],
@@ -284,8 +266,10 @@ function detectConstant(value) {
                 if (len === 64 && allNums && arr[0] === 1116352408) return 'SHA256_K_TABLE';
                 if (len === 80 && allNums && arr[0] === 1116352408) return 'SHA512_K_TABLE';
                 if (len === 256 && allNums && arr[0] === 4159426654) return 'TIGER_SBOX';
-                if (len === 50 && allNums) return 'KECCAK_STATE_CANDIDATE';
-                if (len === 2048 && allNums) return 'WHIRLPOOL_TABLE_CANDIDATE';
+                // Keccak state: 5×5×2=50 uint32，首元素须非零（全零初始态不算特征）
+                if (len === 50 && allNums && arr[0] !== 0) return 'KECCAK_STATE_CANDIDATE';
+                // Whirlpool 查找表：2048 个 uint64（拆成两个 32 位），首元素须为大值
+                if (len === 2048 && allNums && arr[0] > 0x10000000) return 'WHIRLPOOL_TABLE_CANDIDATE';
                 if (len === 5 && allNums && arr[0] === 2654435761) return 'XXHASH32_PRIMES';
             }
         } catch { /* not valid JSON array */ }
@@ -340,6 +324,14 @@ export default class A8ValuePatternDetector extends BasePlugin {
         );
 
         this.emitProgress(ctx, `分析 ${valueStats.length} 个唯一值...`, 25);
+
+        // 循环/临时变量名黑名单：这些变量名出现的值不应被标记为密码学常数
+        // （即使值本身在常数表中，循环变量恰好取到该值只是巧合）
+        const LOOP_VAR_NAMES = new Set([
+            'i', 'j', 'k', 'l', 'm', 'n', 't', 'x', 'y', 'z',
+            'idx', 'cnt', 'len', 'num', 'val', 'ret', 'tmp', 'res',
+            'result', 'count', 'index', 'value', 'offset', 'pos',
+        ]);
 
         // 过滤出需要获取 detail 的 value
         const needDetail = [];
@@ -400,15 +392,26 @@ export default class A8ValuePatternDetector extends BasePlugin {
         // 组装写入数据
         const toInsert = [];
         for (const vs of needDetail) {
-            const matched = matchedMap.get(vs.value);
-            const detail  = detailMap.get(vs.value);
+            let matched    = matchedMap.get(vs.value);
+            const detail   = detailMap.get(vs.value);
+            const varName  = detail?.name ?? null;
+
+            // 循环/临时变量名过滤：如果首次出现的变量名在黑名单中，
+            // 说明该值很可能是普通的循环变量（如 i=1,2,4,8...），不标记为密码学常数
+            if (matched && varName && LOOP_VAR_NAMES.has(varName)) {
+                matched = null;
+            }
+
+            // 仍需写入：有常数匹配、或出现次数 >= 2
+            if (!matched && vs.count < 2) continue;
+
             toInsert.push([
                 sessionId,
                 String(vs.value).substring(0, 64),
                 vs.count,
                 vs.first_seq,
                 detail?.iid  ?? null,
-                detail?.name ?? null,
+                varName,
                 detail?.line ?? null,
                 matched ?? null,
             ]);

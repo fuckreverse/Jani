@@ -748,7 +748,8 @@ export default class I1CryptoDetector extends BasePlugin {
         const sha3Patterns = patterns.filter(p =>
             p.matched_constant?.startsWith('KECCAK_')
         );
-        if (sha3Patterns.length >= 2) {
+        // RC0=1 已移除（太普通），现在任意一个 Keccak 大数值常数即可触发
+        if (sha3Patterns.length >= 1) {
             hints.push({
                 algorithm: 'SHA-3/Keccak',
                 confidence: Math.min(0.5 + sha3Patterns.length * 0.1, 0.90),
@@ -784,20 +785,22 @@ export default class I1CryptoDetector extends BasePlugin {
         }
 
         // ── DES / 3DES ────────────────────────────────────────────────────────
+        // 注意：DES_IP_PERM_*/DES_E_EXP_*/DES_P_PERM_* 单值已移除（均为小整数误报源）
+        // 现在只通过数组级特征（DES_IP_TABLE 64元素置换表 / DES_SBOX_CANDIDATE）识别
         this.emitProgress(ctx, '检测 DES/3DES...', 75);
         const desPatterns = patterns.filter(p =>
-            p.matched_constant?.startsWith('DES_') ||
             p.matched_constant === 'DES_SBOX_CANDIDATE' ||
             p.matched_constant === 'DES_IP_TABLE'
         );
-        if (desPatterns.length >= 2) {
+        // 必须命中到数组级特征才报告（单个小数值常数已无法匹配）
+        if (desPatterns.length >= 1) {
             // 判断是否有多个 S-box 特征（3DES 会有更多调用次数）
             const sboxCount = desPatterns.filter(p =>
-                p.matched_constant === 'DES_SBOX_CANDIDATE' || p.matched_constant === 'DES_IP_TABLE'
+                p.matched_constant === 'DES_SBOX_CANDIDATE'
             ).length;
             hints.push({
                 algorithm: sboxCount >= 3 ? '3DES' : 'DES',
-                confidence: Math.min(0.45 + desPatterns.length * 0.1, 0.85),
+                confidence: Math.min(0.50 + desPatterns.length * 0.15, 0.88),
                 evidence: JSON.stringify(desPatterns.map(p => ({
                     constant: p.matched_constant,
                     line: p.line,
@@ -1015,24 +1018,9 @@ export default class I1CryptoDetector extends BasePlugin {
         }
 
         // ── HMAC ──────────────────────────────────────────────────────────────
-        this.emitProgress(ctx, '检测 HMAC...', 82);
-        const hmacPatterns = patterns.filter(p =>
-            p.matched_constant?.startsWith('HMAC_')
-        );
-        if (hmacPatterns.length >= 2) {
-            hints.push({
-                algorithm: 'HMAC',
-                confidence: Math.min(0.50 + hmacPatterns.length * 0.15, 0.85),
-                evidence: JSON.stringify(hmacPatterns.map(p => ({
-                    constant: p.matched_constant,
-                    line: p.line,
-                    var: p.var_name,
-                }))),
-                iid: hmacPatterns[0].iid,
-                line: hmacPatterns[0].line,
-                fn_name: null,
-            });
-        }
+        // 注意：HMAC_IPAD(54)/HMAC_OPAD(92) 已从 A8 常数表中删除（均为普通小整数误报源）
+        // HMAC 通过第二路库调用特征识别（NodeCrypto.createHmac / aws4.sign 等），
+        // 此处魔术常数路径已无效，跳过。
 
         // ═══════════════════════════════════════════════════════════════════
         // ── 第二路：库调用特征检测 ──────────────────────────────────────────

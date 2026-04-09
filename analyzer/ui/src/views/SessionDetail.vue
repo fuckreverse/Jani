@@ -47,28 +47,12 @@
           @click="activeTab = tab.id"
         >{{ tab.label }}</button>
 
-        <!-- Phase 2 重跑按钮（F3/F4/A3 数据丢失时使用）-->
+        <!-- 进度入口按钮 -->
         <button
-          class="tab-btn btn-run-phase2"
-          :disabled="phase2Running"
-          @click="runPhase2"
-          title="强制重新运行 F3 调用图 / F4 变量生命周期 / A3 热路径分析"
-        >{{ phase2Running ? '⏳ P2 分析中...' : '🔄 重跑 Phase 2' }}</button>
-
-        <!-- Phase 3：手动触发按钮 -->
-        <button
-          class="tab-btn btn-run-phase3"
-          :disabled="phase3Running"
-          @click="runPhase3"
-        >{{ phase3Running ? '⏳ P3 分析中...' : '🚀 运行 Phase 3' }}</button>
-
-        <!-- Phase 4：手动触发按钮 -->
-        <button
-          class="tab-btn btn-run-phase4"
+          class="tab-btn btn-open-progress"
           style="margin-left:auto"
-          :disabled="phase4Running"
-          @click="runPhase4"
-        >{{ phase4Running ? '⏳ P4 分析中...' : '✨ 运行 Phase 4' }}</button>
+          @click="showProgressDrawer = true"
+        >{{ isAnalyzing ? '⏳ 分析中...' : '🔍 分析进度' }}</button>
       </div>
 
       <!-- Tab 内容区域（使用 v-show 保留已加载组件状态） -->
@@ -203,58 +187,6 @@ const objmutTabRef      = ref(null);
 const obfuscationTabRef = ref(null);
 const summaryTabRef     = ref(null);
 
-// ─── Phase 2 / 3 / 4 触发按钮 ──────────────────────────────────────────────
-const phase2Running = ref(false);
-const phase3Running = ref(false);
-const phase4Running = ref(false);
-
-async function runPhase2() {
-    phase2Running.value = true;
-    try {
-        const res = await fetch(`/api/sessions/${sessionId.value}/re-run`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phase: 'phase2', forceRerun: true }),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    } catch (e) {
-        console.error('runPhase2 error:', e);
-        phase2Running.value = false;
-    }
-    setTimeout(() => { phase2Running.value = false; }, 3000);
-}
-
-async function runPhase3() {
-    phase3Running.value = true;
-    try {
-        const res = await fetch(`/api/sessions/${sessionId.value}/run-phase3`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    } catch (e) {
-        console.error('runPhase3 error:', e);
-        phase3Running.value = false;
-    }
-    setTimeout(() => { phase3Running.value = false; }, 3000);
-}
-
-async function runPhase4() {
-    phase4Running.value = true;
-    try {
-        const res = await fetch(`/api/sessions/${sessionId.value}/run-phase4`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    } catch (e) {
-        console.error('runPhase4 error:', e);
-        phase4Running.value = false;
-    }
-    setTimeout(() => { phase4Running.value = false; }, 3000);
-}
 
 // ─── 会话加载 ─────────────────────────────────────────────────────────────────
 async function loadSession() {
@@ -269,9 +201,26 @@ async function loadSession() {
     }
 }
 
+// ─── 刷新所有 Tab ─────────────────────────────────────────────────────────────
+function reloadAllTabs() {
+    eventsTabRef.value?.reload();
+    functionsTabRef.value?.reload();
+    loopsTabRef.value?.reload();
+    patternsTabRef.value?.reload();
+    cryptoTabRef.value?.reload();
+    signaturesTabRef.value?.reload();
+    dataflowTabRef.value?.reload();
+    stringsTabRef.value?.reload();
+    fnsigTabRef.value?.reload();
+    objmutTabRef.value?.reload();
+    obfuscationTabRef.value?.reload();
+    summaryTabRef.value?.reload();
+}
+
 // ─── 插件完成时通知对应 Tab 刷新 ──────────────────────────────────────────────
 function onPluginDone(pluginId) {
     const pluginTabMap = {
+        'F1-EventIndex':            () => eventsTabRef.value?.reload(),
         'F3-CallGraphBuilder':      () => functionsTabRef.value?.reload(),
         'F4-VariableLifetime':      () => eventsTabRef.value?.reload(),
         'A3-HotPathAnalyzer':       () => patternsTabRef.value?.reload(),
@@ -334,7 +283,8 @@ function handleDetailWsEvent(msg) {
     } else if (msg.type === 'all_done') {
         wsSessionStatus.value = 'ready';
         loadSession();
-        eventsTabRef.value?.reload();
+        // all_done 时全量刷新所有 tab，确保重新分析后数据都是最新的
+        reloadAllTabs();
 
     } else if (msg.plugin && msg.status) {
         // 兼容旧格式
@@ -403,21 +353,8 @@ onUnmounted(() => {
     border-color: rgba(99,102,241,0.4) !important;
 }
 
-.btn-run-phase2 {
-    background: rgba(251,191,36,0.1); border-color: rgba(251,191,36,0.3); color: #fcd34d;
+.btn-open-progress {
+    background: rgba(99,102,241,0.08); border-color: rgba(99,102,241,0.3); color: #a5b4fc;
 }
-.btn-run-phase2:hover:not(:disabled) { background: rgba(251,191,36,0.2); }
-.btn-run-phase2:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.btn-run-phase3 {
-    background: rgba(34,197,94,0.1); border-color: rgba(34,197,94,0.3); color: #86efac;
-}
-.btn-run-phase3:hover:not(:disabled) { background: rgba(34,197,94,0.2); }
-.btn-run-phase3:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.btn-run-phase4 {
-    background: rgba(168,85,247,0.1); border-color: rgba(168,85,247,0.3); color: #d8b4fe;
-}
-.btn-run-phase4:hover:not(:disabled) { background: rgba(168,85,247,0.2); }
-.btn-run-phase4:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-open-progress:hover { background: rgba(99,102,241,0.18); color: #c7d2fe; }
 </style>

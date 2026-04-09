@@ -74,15 +74,52 @@
             <div v-for="(err, i) in errors" :key="i" class="error-item">{{ err }}</div>
           </div>
 
-          <!-- 底部按钮 -->
+          <!-- 底部：分阶段操作按钮 -->
           <div class="drawer-footer">
-            <template v-if="isFinished">
-              <span class="finish-text">✅ 分析完成</span>
-              <button class="btn-view" @click="$emit('view-session')">查看详情 →</button>
-            </template>
-            <template v-else>
-              <span class="running-text">{{ statusText }}</span>
-            </template>
+            <div class="phase-actions">
+              <!-- Phase 2 -->
+              <button
+                class="btn-phase btn-phase2"
+                :class="{ 'btn-rerun': isPhaseRun('phase2') }"
+                :disabled="isPhaseRunning('phase2') || isAnalyzingAny"
+                @click="triggerPhase('phase2')"
+                title="F3 调用图 / F4 变量生命周期 / A3 热路径"
+              >
+                <span class="phase-btn-icon">{{ isPhaseRunning('phase2') ? '⏳' : isPhaseRun('phase2') ? '🔄' : '▶' }}</span>
+                {{ isPhaseRunning('phase2') ? 'P2 分析中...' : isPhaseRun('phase2') ? '重新分析 P2' : '分析 Phase 2' }}
+              </button>
+              <!-- Phase 3 -->
+              <button
+                class="btn-phase btn-phase3"
+                :class="{ 'btn-rerun': isPhaseRun('phase3') }"
+                :disabled="isPhaseRunning('phase3') || isAnalyzingAny"
+                @click="triggerPhase('phase3')"
+                title="A5 循环 / A8 值模式 / I1 加密检测 / I2 签名"
+              >
+                <span class="phase-btn-icon">{{ isPhaseRunning('phase3') ? '⏳' : isPhaseRun('phase3') ? '🔄' : '▶' }}</span>
+                {{ isPhaseRunning('phase3') ? 'P3 分析中...' : isPhaseRun('phase3') ? '重新分析 P3' : '分析 Phase 3' }}
+              </button>
+              <!-- Phase 4 -->
+              <button
+                class="btn-phase btn-phase4"
+                :class="{ 'btn-rerun': isPhaseRun('phase4') }"
+                :disabled="isPhaseRunning('phase4') || isAnalyzingAny"
+                @click="triggerPhase('phase4')"
+                title="A2 数据流 / A4 字符串 / A6 函数签名 / A7 对象变异 / I3 混淆 / I4 算法汇总"
+              >
+                <span class="phase-btn-icon">{{ isPhaseRunning('phase4') ? '⏳' : isPhaseRun('phase4') ? '🔄' : '✨' }}</span>
+                {{ isPhaseRunning('phase4') ? 'P4 分析中...' : isPhaseRun('phase4') ? '重新分析 P4' : '分析 Phase 4' }}
+              </button>
+            </div>
+            <div class="footer-status">
+              <template v-if="isFinished && !isAnalyzingAny">
+                <span class="finish-text">✅ 分析完成</span>
+                <button class="btn-view" @click="$emit('view-session')">查看详情 →</button>
+              </template>
+              <template v-else-if="isAnalyzingAny">
+                <span class="running-text">{{ statusText }}</span>
+              </template>
+            </div>
           </div>
         </div>
       </div>
@@ -225,6 +262,55 @@ function handleWsEvent(evt) {
         pluginStatusMap.value[evt.plugin] = evt.status;
         if (evt.durationMs) pluginDurationMap.value[evt.plugin] = evt.durationMs;
         enabledPlugins.value.add(evt.plugin);
+    }
+}
+
+// ── 阶段状态判断 ──────────────────────────────────────────────────────────────
+const PHASE_PLUGIN_MAP = {
+    phase2: ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'],
+    phase3: ['A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer'],
+    phase4: ['A2-DataFlowGraph', 'A4-StringTracker', 'A6-FunctionSignatureInfer', 'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer'],
+};
+
+// 该阶段是否已运行过（至少有一个插件 done/skipped/failed）
+function isPhaseRun(phaseId) {
+    const plugins = PHASE_PLUGIN_MAP[phaseId] || [];
+    return plugins.some(id => {
+        const s = pluginStatusMap.value[id];
+        return s === 'done' || s === 'skipped' || s === 'failed';
+    });
+}
+
+// 该阶段是否正在运行
+function isPhaseRunning(phaseId) {
+    const plugins = PHASE_PLUGIN_MAP[phaseId] || [];
+    return plugins.some(id => {
+        const s = pluginStatusMap.value[id];
+        return s === 'running' || s === 'pending';
+    });
+}
+
+// 任意阶段有任务在跑
+const isAnalyzingAny = computed(() =>
+    Object.values(pluginStatusMap.value).some(s => s === 'running' || s === 'pending')
+);
+
+// 触发阶段
+const phaseApiMap = {
+    phase2: (id) => fetch(`/api/sessions/${id}/re-run`,      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phase: 'phase2', forceRerun: true }) }),
+    phase3: (id) => fetch(`/api/sessions/${id}/run-phase3`,  { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }),
+    phase4: (id) => fetch(`/api/sessions/${id}/run-phase4`,  { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }),
+};
+
+async function triggerPhase(phaseId) {
+    if (!props.sessionId) return;
+    const fn = phaseApiMap[phaseId];
+    if (!fn) return;
+    try {
+        const res = await fn(props.sessionId);
+        if (!res.ok) console.error(`triggerPhase ${phaseId} HTTP ${res.status}`);
+    } catch (e) {
+        console.error(`triggerPhase ${phaseId} error:`, e);
     }
 }
 
@@ -506,15 +592,59 @@ onUnmounted(() => disconnectWs());
 
 /* 底部 */
 .drawer-footer {
-    padding: 14px 20px;
+    padding: 12px 16px;
     border-top: 1px solid var(--border-color, #2d3148);
-    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    display: flex; flex-direction: column; gap: 10px;
     flex-shrink: 0;
+}
+.phase-actions {
+    display: flex; gap: 6px; flex-wrap: wrap;
+}
+.btn-phase {
+    flex: 1; min-width: 0;
+    padding: 7px 8px; border-radius: 6px; border: 1px solid;
+    font-size: 11px; cursor: pointer; transition: all .15s;
+    display: flex; align-items: center; gap: 5px; justify-content: center;
+    white-space: nowrap;
+}
+.btn-phase:disabled { opacity: 0.45; cursor: not-allowed; }
+.phase-btn-icon { font-size: 12px; flex-shrink: 0; }
+
+.btn-phase2 {
+    background: rgba(251,191,36,0.08); border-color: rgba(251,191,36,0.3); color: #fcd34d;
+}
+.btn-phase2:hover:not(:disabled) { background: rgba(251,191,36,0.18); }
+.btn-phase2.btn-rerun {
+    background: rgba(251,191,36,0.05); border-color: rgba(251,191,36,0.2); color: #92742b;
+}
+.btn-phase2.btn-rerun:hover:not(:disabled) { background: rgba(251,191,36,0.12); color: #fcd34d; }
+
+.btn-phase3 {
+    background: rgba(34,197,94,0.08); border-color: rgba(34,197,94,0.3); color: #86efac;
+}
+.btn-phase3:hover:not(:disabled) { background: rgba(34,197,94,0.18); }
+.btn-phase3.btn-rerun {
+    background: rgba(34,197,94,0.05); border-color: rgba(34,197,94,0.2); color: #2d6b47;
+}
+.btn-phase3.btn-rerun:hover:not(:disabled) { background: rgba(34,197,94,0.12); color: #86efac; }
+
+.btn-phase4 {
+    background: rgba(168,85,247,0.08); border-color: rgba(168,85,247,0.3); color: #d8b4fe;
+}
+.btn-phase4:hover:not(:disabled) { background: rgba(168,85,247,0.18); }
+.btn-phase4.btn-rerun {
+    background: rgba(168,85,247,0.05); border-color: rgba(168,85,247,0.2); color: #6b3d8a;
+}
+.btn-phase4.btn-rerun:hover:not(:disabled) { background: rgba(168,85,247,0.12); color: #d8b4fe; }
+
+.footer-status {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    min-height: 24px;
 }
 .finish-text  { font-size: 12px; color: #86efac; }
 .running-text { font-size: 12px; color: var(--text-muted, #64748b); }
 .btn-view {
-    padding: 7px 16px; border-radius: 6px;
+    padding: 5px 14px; border-radius: 6px;
     border: 1px solid rgba(99, 102, 241, .4);
     background: rgba(99, 102, 241, .15);
     color: #a5b4fc; font-size: 12px; cursor: pointer; transition: all .15s;
