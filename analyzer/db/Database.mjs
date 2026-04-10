@@ -316,6 +316,19 @@ function _runMigrations(db) {
         }
     }
 
+    // ── call_edges.own_event_count 列迁移 ────────────────────────────────────
+    // 新增列：自身事件数（F3 预计算），旧数据库中不存在，需在线 ALTER
+    try {
+        const callEdgesCols = new Set(
+            db.pragma('table_info(call_edges)').map(r => r.name)
+        );
+        if (callEdgesCols.size > 0 && !callEdgesCols.has('own_event_count')) {
+            db.exec('ALTER TABLE call_edges ADD COLUMN own_event_count INTEGER');
+        }
+    } catch (e) {
+        console.warn('[Database] add call_edges.own_event_count failed (non-fatal):', e.message);
+    }
+
     // ── 清理旧的低效索引 ──────────────────────────────────────────────────────
     // idx_events_session_seq 被 idx_events_type_id + PK 覆盖，冗余
     // idx_smap_session 被 smap PRIMARY KEY (session_id, iid) 覆盖，冗余

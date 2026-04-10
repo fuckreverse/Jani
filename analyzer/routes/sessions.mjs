@@ -624,36 +624,41 @@ router.get('/:id/functions', (req, res) => {
         const minEventsN = minEvents !== undefined && minEvents !== '' ? Number(minEvents) : null;
         const maxEventsN = maxEvents !== undefined && maxEvents !== '' ? Number(maxEvents) : null;
 
-        // HAVING 子句：call_count + 可选的 event_count 范围
-        // event_count ≈ MAX(return_seq) - MIN(call_seq)（同函数多次调用取最宽跨度的近似）
-        // 注意：对同一函数多次调用，每次 return_seq-call_seq 不同；
-        // 这里用 SUM(return_seq - call_seq) 作为"总事件量"更贴近实际
+        // HAVING 子句：call_count + 可选的 own_event_count 范围
+        // own_event_count 是 F3 预计算的自身事件数（不含子调用）；
+        // 对旧数据（own_event_count IS NULL）降级为 return_seq - call_seq 近似值
+        const ownExpr = `SUM(COALESCE(own_event_count, COALESCE(return_seq,call_seq) - call_seq))`;
         const havingClauses = [`COUNT(*) >= ?`];
         const havingParams  = [minCallsN];
         if (minEventsN !== null) {
-            havingClauses.push(`SUM(COALESCE(return_seq,call_seq) - call_seq) >= ?`);
+            havingClauses.push(`${ownExpr} >= ?`);
             havingParams.push(minEventsN);
         }
         if (maxEventsN !== null) {
-            havingClauses.push(`SUM(COALESCE(return_seq,call_seq) - call_seq) <= ?`);
+            havingClauses.push(`${ownExpr} <= ?`);
             havingParams.push(maxEventsN);
         }
 
-        // ORDER BY
+        // ORDER BY：按事件数排序时用均值（avgOwnExpr），更能反映"单次调用的复杂度"
+        // avgOwnExpr 此时还未定义，但 SQL 支持 SELECT 别名在 ORDER BY 中引用，
+        // 为避免混淆直接内联表达式
+        const avgOwnOrderExpr = `CAST(ROUND(1.0 * ${ownExpr} / COUNT(*)) AS INTEGER)`;
         const orderExpr = sortBy === 'event_count'
-            ? `SUM(COALESCE(return_seq,call_seq) - call_seq) DESC`
+            ? `${avgOwnOrderExpr} DESC`
             : `call_count DESC`;
 
-        // 每个函数名聚合：调用次数、事件数、最小行号、call_seq 范围
+        // 每个函数名聚合：调用次数、自身事件数（总量和均值）、最小行号、深度范围
+        const avgOwnExpr = `CAST(ROUND(1.0 * ${ownExpr} / COUNT(*)) AS INTEGER)`;
         const rows = db.all(
             `SELECT
                 fn_name,
                 fn_iid,
-                COUNT(*)                                              AS call_count,
-                SUM(COALESCE(return_seq,call_seq) - call_seq)         AS event_count,
-                MIN(caller_line)                                      AS min_line,
-                MIN(depth)                                            AS min_depth,
-                MAX(depth)                                            AS max_depth
+                COUNT(*)         AS call_count,
+                ${ownExpr}       AS event_count,
+                ${avgOwnExpr}    AS avg_own_event_count,
+                MIN(caller_line) AS min_line,
+                MIN(depth)       AS min_depth,
+                MAX(depth)       AS max_depth
              FROM call_edges
              WHERE ${conditions.join(' AND ')}
              GROUP BY fn_name, fn_iid
@@ -762,6 +767,166 @@ router.get('/:id/functions/:fnName/calls', (req, res) => {
         return res.json({ calls: result, count: result.length, total, targetCallId, offset: offsetN });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/functions/:fnName/calls] error:');
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/calls/:callId/own-events ────────────────────────
+// 返回某次具体调用的「自身事件流」：[call_seq, return_seq] 区间内去除所有直接子调用占据的 SEQ
+//
+// 实现方式（高性能，无全表扫描）：
+//  1. 查该次调用的所有直接子调用区间（depth+1，call_seq ∈ [callSeqN, returnSeqN]）
+//     → 利用 idx_call_edges_stack 索引，O(子调用数)
+//  2. 将排除区间传入 SQL WHERE，或在 Node.js 侧过滤（取决于子调用数量）
+//  3. 支持游标分页：cursor 为上次返回的最后 event SEQ，下次从 id > cursor 开始
+//     → 配合子区间排除，每页取 limit 条自身事件
+
+router.get('/:id/calls/:callId/own-events', (req, res) => {
+    try {
+        const { id, callId } = req.params;
+        const { limit = '200', cursor } = req.query;
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: `Session ${id} not found` });
+
+        // 取该次调用基本信息
+        const call = db.get(
+            'SELECT call_seq, return_seq, depth FROM call_edges WHERE id = ? AND session_id = ?',
+            Number(callId), id
+        );
+        if (!call) return res.status(404).json({ error: `Call ${callId} not found` });
+
+        const { call_seq: callSeqN, return_seq: returnSeqN, depth: depthN } = call;
+        const limitN = Math.min(Number(limit) || 200, 500);
+
+        // ── Step 1: 取所有直接子调用区间（depth+1，在本调用区间内）──────────────
+        // 使用 idx_call_edges_stack 索引：(session_id, call_seq, return_seq, depth)
+        const children = db.all(
+            `SELECT call_seq, return_seq FROM call_edges
+             WHERE session_id = ?
+               AND depth = ?
+               AND call_seq  >= ?
+               AND return_seq <= ?
+             ORDER BY call_seq ASC`,
+            id, depthN + 1, callSeqN, returnSeqN
+        );
+
+        // ── Step 2: 构建 SQL 排除条件 ─────────────────────────────────────────
+        // 策略：排除每个子调用的「内部」事件（call_seq+1 到 return_seq-1），
+        // 但保留头（CALL_PRE @ call_seq）和尾（CALL @ return_seq），
+        // 这样 A 的事件流里仍能看到「调用了 B」及「B 的返回值」。
+        // 只有 call_seq < return_seq-1 时才需要排除（否则区间为空）。
+        // 当子调用数量较少时（< 200），直接用 SQL；否则改为 Node.js 侧过滤
+        const baseConditions = [
+            'e.session_id = ?',
+            'e.id >= ?',
+            'e.id <= ?',
+        ];
+        const baseParams = [id, callSeqN, returnSeqN];
+
+        // 游标分页
+        if (cursor !== undefined && cursor !== '') {
+            baseConditions.push('e.id > ?');
+            baseParams.push(Number(cursor));
+        }
+
+        let events;
+        if (children.length > 0 && children.length <= 200) {
+            // 子调用数量合理：直接在 SQL 里排除内部区间（保留头尾）
+            // 只对 call_seq+1 <= return_seq-1 的子调用生成排除条件（否则无内部事件）
+            const innerChildren = children.filter(c => c.call_seq + 1 <= c.return_seq - 1);
+            const excludeClauses = innerChildren.map(() => 'e.id NOT BETWEEN ? AND ?');
+            const excludeParams  = innerChildren.flatMap(c => [c.call_seq + 1, c.return_seq - 1]);
+            const where = excludeClauses.length > 0
+                ? [...baseConditions, ...excludeClauses].join(' AND ')
+                : baseConditions.join(' AND ');
+
+            events = db.all(
+                `SELECT e.id AS seq, e.type, e.iid,
+                        s.sl AS line, s.sc AS col, s.src_text
+                 FROM events e
+                 LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
+                 WHERE ${where}
+                 ORDER BY e.id ASC
+                 LIMIT ?`,
+                ...baseParams, ...excludeParams, limitN
+            );
+        } else if (children.length > 200) {
+            // 子调用数量过多：先取全量 event，Node.js 侧过滤
+            // 这种情况极罕见（一个函数有 200+ 直接子调用）
+            const rawEvents = db.all(
+                `SELECT e.id AS seq, e.type, e.iid,
+                        s.sl AS line, s.sc AS col, s.src_text
+                 FROM events e
+                 LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
+                 WHERE ${baseConditions.join(' AND ')}
+                 ORDER BY e.id ASC
+                 LIMIT ?`,
+                ...baseParams, limitN * 3  // 多取以应对过滤损耗
+            );
+            // 构建子区间排除集合（排除内部，保留头尾，O(N+M)）
+            events = rawEvents.filter(e => {
+                for (const c of children) {
+                    if (e.seq > c.call_seq && e.seq < c.return_seq) return false;
+                }
+                return true;
+            }).slice(0, limitN);
+        } else {
+            // 无子调用：直接返回全量
+            const where = baseConditions.join(' AND ');
+            events = db.all(
+                `SELECT e.id AS seq, e.type, e.iid,
+                        s.sl AS line, s.sc AS col, s.src_text
+                 FROM events e
+                 LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
+                 WHERE ${where}
+                 ORDER BY e.id ASC
+                 LIMIT ?`,
+                ...baseParams, limitN
+            );
+        }
+
+        // ── Step 3: 批量查 writes/reads/fields ────────────────────────────────
+        const eventIds = events.map(e => e.seq);
+        let writes = [], reads = [], fields = [];
+
+        if (eventIds.length > 0) {
+            const ph = eventIds.map(() => '?').join(',');
+            writes = db.all(`SELECT event_id, name, value, omitted FROM writes WHERE session_id = ? AND event_id IN (${ph})`, id, ...eventIds);
+            reads  = db.all(`SELECT event_id, name, value, omitted FROM reads  WHERE session_id = ? AND event_id IN (${ph})`, id, ...eventIds);
+            fields = db.all(`SELECT event_id, base, offset, is_write, value, omitted FROM fields WHERE session_id = ? AND event_id IN (${ph})`, id, ...eventIds);
+        }
+
+        const writesMap = groupBy(writes, 'event_id');
+        const readsMap  = groupBy(reads,  'event_id');
+        const fieldsMap = groupBy(fields, 'event_id');
+
+        const result = events.map(e => ({
+            seq:     e.seq,
+            type:    decodeType(e.type),
+            iid:     e.iid,
+            line:    e.line ?? null,
+            col:     e.col  ?? null,
+            srcText: e.src_text ?? null,
+            writes:  (writesMap[e.seq] || []).map(w => ({ name: w.name, value: safeParseJson(w.value), omitted: !!w.omitted })),
+            reads:   (readsMap[e.seq]  || []).map(r => ({ name: r.name, value: safeParseJson(r.value), omitted: !!r.omitted })),
+            fields:  (fieldsMap[e.seq] || []).map(f => ({ base: f.base, offset: f.offset, isWrite: !!f.is_write, value: safeParseJson(f.value), omitted: !!f.omitted })),
+        }));
+
+        const nextCursor = result.length === limitN ? result[result.length - 1].seq : null;
+
+        return res.json({
+            sessionId: id,
+            callId:    Number(callId),
+            events:    result,
+            count:     result.length,
+            hasMore:   result.length === limitN,
+            nextCursor,
+            childCount: children.length,  // 供前端展示"隐藏了 N 个子调用"
+        });
+
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/calls/:callId/own-events] error:');
         return res.status(500).json({ error: e.message });
     }
 });

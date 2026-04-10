@@ -113,7 +113,7 @@ export default class F3CallGraphBuilder extends BasePlugin {
         const edges   = [];
 
         const stmt = rawDb.prepare(
-            'INSERT INTO call_edges (session_id, call_seq, return_seq, caller_line, fn_name, fn_iid, args_json, return_value, depth) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO call_edges (session_id, call_seq, return_seq, caller_line, fn_name, fn_iid, args_json, return_value, depth, own_event_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
         const insertBatch = rawDb.transaction((batch) => {
             for (const e of batch) stmt.run(e);
@@ -133,18 +133,24 @@ export default class F3CallGraphBuilder extends BasePlugin {
 
             if (evt.type === TYPE.CALL_PRE) {
                 stack.push({
-                    call_seq:    evt.id,
-                    caller_line: smapLineMap.get(evt.iid) ?? null,
-                    fn_iid:      evt.iid,
-                    fn_name:     calleeMap.get(evt.id) ?? `fn@${evt.iid || 'unknown'}`,
-                    args_json:   argsMap.get(evt.id) ?? '[]',
-                    depth:       depth++,
+                    call_seq:         evt.id,
+                    caller_line:      smapLineMap.get(evt.iid) ?? null,
+                    fn_iid:           evt.iid,
+                    fn_name:          calleeMap.get(evt.id) ?? `fn@${evt.iid || 'unknown'}`,
+                    args_json:        argsMap.get(evt.id) ?? '[]',
+                    depth:            depth++,
+                    child_event_span: 0,  // 直接子调用消耗的 SEQ 跨度之和
                 });
 
             } else if (evt.type === TYPE.CALL) {
                 if (stack.length === 0) { depth = Math.max(0, depth - 1); continue; }
                 const frame = stack.pop();
                 depth = Math.max(0, depth - 1);
+
+                // own_event_count = 全区间跨度 - 所有直接子调用占用的跨度
+                // 全区间：evt.id - frame.call_seq（含 CALL_PRE 和 CALL 自身，近似）
+                const totalSpan = evt.id - frame.call_seq;
+                const ownCount  = Math.max(0, totalSpan - frame.child_event_span);
 
                 edges.push([
                     sessionId,
@@ -156,8 +162,14 @@ export default class F3CallGraphBuilder extends BasePlugin {
                     frame.args_json,
                     retMap.get(evt.id) ?? null,
                     frame.depth,
+                    ownCount,
                 ]);
                 edgeCount++;
+
+                // 向父帧累加本次调用消耗的 SEQ 跨度（含子调用），供父帧计算 own_event_count
+                if (stack.length > 0) {
+                    stack[stack.length - 1].child_event_span += totalSpan;
+                }
 
                 if (edges.length >= BATCH_SIZE) {
                     flushEdges();

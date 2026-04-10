@@ -64,7 +64,7 @@
       <!-- 排序 -->
       <select v-model="fnSortBy" class="filter-select" @change="loadFnExec(true)" title="排序方式">
         <option value="call_count">调用次数↓</option>
-        <option value="event_count">事件数↓</option>
+        <option value="event_count">自身事件↓（均值）</option>
       </select>
 
       <button class="btn-primary" @click="loadFnExec(true)">查询</button>
@@ -95,7 +95,11 @@
               {{ fn.min_line ? `@line ${fn.min_line}` : `@iid ${fn.fn_iid}` }}
             </span>
             <span class="fn-call-badge">{{ fn.call_count }} 次调用</span>
-            <span v-if="fn.event_count != null" class="fn-event-badge" :title="'函数体事件总量（近似）：' + fn.event_count">~{{ formatEventCount(fn.event_count) }} 事件</span>
+            <span
+              v-if="fn.avg_own_event_count != null || fn.event_count != null"
+              class="fn-event-badge"
+              :title="`均值 ${fn.avg_own_event_count ?? '?'} / 总量 ${fn.event_count ?? '?'}（自身事件，不含子调用）`"
+            >≈{{ formatEventCount(fn.avg_own_event_count ?? fn.event_count) }} 事件/次</span>
             <span v-if="fn.min_line && !isDuplicateName(fn)" class="text-muted" style="font-size:11px">line {{ fn.min_line }}</span>
             <span v-if="fn.fn_iid && !isDuplicateName(fn)" class="text-muted" style="font-size:11px">iid={{ fn.fn_iid }}</span>
             <span class="text-muted" style="font-size:11px">深度 {{ fn.min_depth }}~{{ fn.max_depth }}</span>
@@ -154,6 +158,25 @@
                       :class="{ 'call-panel-tab-active': callView[call.id] === 'events' }"
                       @click.stop="toggleCallView(call, 'events')"
                     >📋 事件流</button>
+                    <!-- 自身/全部切换：仅在事件流面板时显示 -->
+                    <template v-if="callView[call.id] === 'events'">
+                      <span class="call-panel-sep">|</span>
+                      <button
+                        class="call-panel-tab call-panel-tab-own"
+                        :class="{ 'call-panel-tab-active': ownOnlyMode[call.id] !== false }"
+                        @click.stop="setOwnOnly(call, true)"
+                        title="只显示该函数自身的事件，隐藏内层调用的事件"
+                      >🔍 自身</button>
+                      <button
+                        class="call-panel-tab call-panel-tab-own"
+                        :class="{ 'call-panel-tab-active': ownOnlyMode[call.id] === false }"
+                        @click.stop="setOwnOnly(call, false)"
+                        title="显示包含内层调用在内的全部事件"
+                      >📄 全部</button>
+                      <span v-if="(callChildCount[call.id] || 0) > 0" class="call-child-hint">
+                        已折叠 {{ callChildCount[call.id] }} 个子调用
+                      </span>
+                    </template>
                   </div>
 
                   <!-- 调用栈面板 -->
@@ -192,7 +215,7 @@
                       <div class="spinner"></div><span>加载事件流...</span>
                     </div>
                     <div v-else-if="(callEventsMap[call.id] || []).length === 0" class="empty-state" style="padding:8px">
-                      该区间无事件
+                      该区间无{{ ownOnlyMode[call.id] !== false ? '自身' : '' }}事件
                     </div>
                     <div v-else class="events-table-wrapper">
                       <table class="events-table" style="font-size:11px">
@@ -419,6 +442,8 @@ const FN_CALLS_PAGE  = 30;
 
 const callEventsMap     = reactive({});
 const callEventsLoading = reactive({});
+const ownOnlyMode       = reactive({});  // call.id → true（自身，默认）| false（全部）
+const callChildCount    = reactive({});  // call.id → 直接子调用数量（用于提示）
 
 // 调用栈：call.id → frame[] / loading
 const callView         = reactive({});  // call.id → 'stack' | 'events' | null（当前展开面板）
@@ -563,11 +588,20 @@ async function toggleCallExpand(call) {
         return;
     }
     expandedCalls.add(call.id);
-    // 默认展开事件流面板
+    // 默认展开事件流面板，且默认为"自身"模式
     if (!callView[call.id]) callView[call.id] = 'events';
+    if (ownOnlyMode[call.id] === undefined) ownOnlyMode[call.id] = true;
     if (!callEventsMap[call.id]) {
         await loadCallEvents(call);
     }
+}
+
+// 切换自身/全部模式，清空缓存并重新加载
+async function setOwnOnly(call, ownOnly) {
+    if (ownOnlyMode[call.id] === ownOnly) return;
+    ownOnlyMode[call.id] = ownOnly;
+    callEventsMap[call.id] = null;
+    await loadCallEvents(call);
 }
 
 // 切换调用记录内的子面板（'stack' | 'events'）
@@ -608,18 +642,33 @@ async function loadCallStack(call) {
 async function loadCallEvents(call) {
     callEventsLoading[call.id] = true;
     try {
-        const params = new URLSearchParams({
-            seqFrom: call.callSeq,
-            seqTo:   call.returnSeq,
-            limit:   200,
-            offset:  0,
-        });
-        const res = await fetch(`/api/sessions/${props.sessionId}/events?${params}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+        const ownOnly = ownOnlyMode[call.id] !== false;  // 默认 true（自身模式）
+        let data;
+
+        if (ownOnly && call.id != null) {
+            // 自身模式：调用 own-events API（按 call_edges.id 路由）
+            const params = new URLSearchParams({ limit: 200 });
+            const res = await fetch(`/api/sessions/${props.sessionId}/calls/${call.id}/own-events?${params}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            data = await res.json();
+            callChildCount[call.id] = data.childCount ?? 0;
+        } else {
+            // 全部模式：调用普通 events API（按 SEQ 区间）
+            const params = new URLSearchParams({
+                seqFrom: call.callSeq,
+                seqTo:   call.returnSeq,
+                limit:   200,
+                offset:  0,
+            });
+            const res = await fetch(`/api/sessions/${props.sessionId}/events?${params}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            data = await res.json();
+        }
+
         callEventsMap[call.id] = data.events || [];
     } catch (e) {
         console.error('loadCallEvents error:', e);
+        callEventsMap[call.id] = [];
     } finally {
         callEventsLoading[call.id] = false;
     }
@@ -929,6 +978,18 @@ onMounted(() => loadFnExec(true));
     background: rgba(99,102,241,0.12) !important;
     color: #a5b4fc !important;
     font-weight: 600;
+}
+/* 自身/全部切换分隔符 */
+.call-panel-sep {
+    padding: 5px 4px; color: var(--border-color); font-size: 13px;
+    line-height: 1; user-select: none;
+}
+/* 自身模式尺寸稍小 */
+.call-panel-tab-own { padding: 5px 10px; }
+/* 子调用折叠提示 */
+.call-child-hint {
+    padding: 5px 10px; font-size: 10px; color: var(--text-muted);
+    font-style: italic; flex: 1; text-align: right;
 }
 
 /* 调用栈面板 */
