@@ -271,34 +271,14 @@
   </div>
 
   <!-- ── Fork Modal ── -->
-  <Teleport to="body">
-    <div v-if="showForkModal" class="modal-overlay" @click.self="closeForkModal">
-      <div class="modal-box">
-        <div class="modal-header">
-          <span class="modal-title">🔁 重新插桩</span>
-          <button class="modal-close" @click="closeForkModal">✕</button>
-        </div>
-        <div class="modal-body">
-          <p class="modal-hint">将复用原始源文件，以下方选项进行重新插桩，并创建一个新的工作空间。</p>
-          <div class="modal-field">
-            <label>新工作空间名称</label>
-            <input v-model="forkName" placeholder="新工作空间名称" style="width:100%" />
-          </div>
-          <InstrumentOptions ref="forkOptsRef" :embedded="true" />
-        </div>
-        <div class="modal-footer">
-          <div v-if="forkError" class="fork-error">❌ {{ forkError }}</div>
-          <div class="modal-btns">
-            <button class="btn-secondary btn-sm" @click="closeForkModal" :disabled="forkLoading">取消</button>
-            <button class="btn-accent btn-sm" @click="submitFork" :disabled="forkLoading">
-              <span v-if="forkLoading">⏳ 插桩中...</span>
-              <span v-else>开始插桩 →</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </Teleport>
+  <ForkModal
+    :visible="showForkModal"
+    :project-id="projectId"
+    :initial-name="forkInitialName"
+    :initial-options="project?.instrument_options || ''"
+    @close="showForkModal = false"
+    @success="onForkSuccess"
+  />
 
   <!-- 删除会话确认 Modal -->
   <Teleport to="body">
@@ -326,10 +306,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import InstrumentOptions from './InstrumentOptions.vue';
 import ProgressDrawer from './ProgressDrawer.vue';
+import ForkModal from './ForkModal.vue';
 
 const route  = useRoute();
 const router = useRouter();
@@ -572,51 +552,17 @@ async function copyInstrumentedCode() {
 }
 
 // ── Fork（重新插桩）Modal ─────────────────────────────────────────────────────
-const showForkModal  = ref(false);
-const forkName       = ref('');
-const forkLoading    = ref(false);
-const forkError      = ref('');
-const forkOptsRef    = ref(null);   // <InstrumentOptions> 的 ref
+const showForkModal   = ref(false);
+const forkInitialName = ref('');
 
-async function openForkModal() {
-    forkName.value    = `${project.value?.name || ''}-fork`;
-    forkError.value   = '';
-    forkLoading.value = false;
-    showForkModal.value = true;
-    await nextTick();
-    if (forkOptsRef.value && project.value?.instrument_options) {
-        try {
-            const savedOpts = JSON.parse(project.value.instrument_options);
-            forkOptsRef.value.loadOptions(savedOpts);
-        } catch { /* 忽略解析失败 */ }
-    }
+function openForkModal() {
+    forkInitialName.value = `${project.value?.name || ''}-fork`;
+    showForkModal.value   = true;
 }
 
-function closeForkModal() {
-    if (forkLoading.value) return;
+function onForkSuccess({ projectId: newProjectId }) {
     showForkModal.value = false;
-}
-
-async function submitFork() {
-    if (forkLoading.value) return;
-    forkLoading.value = true;
-    forkError.value   = '';
-    try {
-        const options = forkOptsRef.value?.buildOptions() ?? {};
-        const res = await fetch(`/api/projects/${projectId}/fork`, {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ name: forkName.value.trim(), options }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-        showForkModal.value = false;
-        router.push(`/workspaces/${data.projectId}`);
-    } catch (e) {
-        forkError.value = e.message;
-    } finally {
-        forkLoading.value = false;
-    }
+    router.push(`/workspaces/${newProjectId}`);
 }
 
 // ── 工具 ──────────────────────────────────────────────────────────────────────
@@ -1174,98 +1120,5 @@ onUnmounted(() => {
 .btn-accent:hover { background: rgba(99,102,241,0.28); }
 .btn-accent:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* ── Fork Modal ──────────────────────────────────────────────────────── */
-.modal-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.55);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 9999;
-}
-
-.modal-box {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    width: min(720px, 96vw);
-    max-height: 88vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-}
-
-.modal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 14px 20px;
-    border-bottom: 1px solid var(--border-color);
-}
-
-.modal-title {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-.modal-close {
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    font-size: 16px;
-    cursor: pointer;
-    padding: 2px 6px;
-    border-radius: 4px;
-}
-.modal-close:hover { background: var(--bg-tertiary); }
-
-.modal-body {
-    padding: 16px 20px;
-    overflow-y: auto;
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
-
-.modal-hint {
-    font-size: 12px;
-    color: var(--text-muted);
-    margin: 0;
-    line-height: 1.6;
-}
-
-.modal-field {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-}
-.modal-field label {
-    font-size: 11px;
-    color: var(--text-muted);
-}
-
-.modal-footer {
-    border-top: 1px solid var(--border-color);
-    padding: 14px 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-}
-
-.modal-btns {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-}
-
-.fork-error {
-    padding: 8px 12px;
-    background: rgba(239,68,68,0.08);
-    border-radius: 6px;
-    color: var(--danger);
-    font-size: 12px;
-}
+/* Fork Modal 样式已移至 ForkModal.vue */
 </style>

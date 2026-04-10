@@ -159,121 +159,15 @@
                   </span>
                 </div>
 
-                <!-- 三级：子面板切换（调用栈 / 事件流） -->
-                <div v-if="expandedCalls.has(call.id)" class="fn-call-panels">
-                  <!-- 面板切换按钮 -->
-                  <div class="call-panel-tabs">
-                    <button
-                      class="call-panel-tab"
-                      :class="{ 'call-panel-tab-active': callView[call.id] === 'stack' }"
-                      @click.stop="toggleCallView(call, 'stack')"
-                    >📚 调用栈</button>
-                    <button
-                      class="call-panel-tab"
-                      :class="{ 'call-panel-tab-active': callView[call.id] === 'events' }"
-                      @click.stop="toggleCallView(call, 'events')"
-                    >📋 事件流</button>
-                    <!-- 自身/全部切换：仅在事件流面板时显示 -->
-                    <template v-if="callView[call.id] === 'events'">
-                      <span class="call-panel-sep">|</span>
-                      <button
-                        class="call-panel-tab call-panel-tab-own"
-                        :class="{ 'call-panel-tab-active': ownOnlyMode[call.id] !== false }"
-                        @click.stop="setOwnOnly(call, true)"
-                        title="只显示该函数自身的事件，隐藏内层调用的事件"
-                      >🔍 自身</button>
-                      <button
-                        class="call-panel-tab call-panel-tab-own"
-                        :class="{ 'call-panel-tab-active': ownOnlyMode[call.id] === false }"
-                        @click.stop="setOwnOnly(call, false)"
-                        title="显示包含内层调用在内的全部事件"
-                      >📄 全部</button>
-                      <span v-if="(callChildCount[call.id] || 0) > 0" class="call-child-hint">
-                        已折叠 {{ callChildCount[call.id] }} 个子调用
-                      </span>
-                    </template>
-                  </div>
+                <!-- 三级：子面板切换（调用栈 / 事件流）→ CallDetail 组件 -->
+                <CallDetail
+                  v-if="expandedCalls.has(call.id)"
+                  :session-id="sessionId"
+                  :call="call"
+                  :initial-view="callView[call.id] || 'events'"
+                  @update:child-count="callChildCount[call.id] = $event"
+                />
 
-                  <!-- 调用栈面板 -->
-                  <div v-if="callView[call.id] === 'stack'" class="call-stack-panel">
-                    <div v-if="callStackLoading[call.id]" class="loading" style="padding:8px">
-                      <div class="spinner"></div><span>加载调用栈...</span>
-                    </div>
-                    <div v-else-if="(callStackMap[call.id] || []).length === 0" class="empty-state" style="padding:10px">
-                      此调用无父帧（顶层调用，depth=0）
-                    </div>
-                    <div v-else class="call-stack-list">
-                      <div
-                        v-for="frame in callStackMap[call.id]"
-                        :key="frame.depth"
-                        class="stack-frame"
-                      >
-                        <span class="frame-depth">#{{ frame.depth }}</span>
-                        <code class="frame-fn">{{ frame.fnName || '(anonymous)' }}</code>
-                        <span v-if="frame.callerLine" class="frame-line text-muted">line {{ frame.callerLine }}</span>
-                        <span class="frame-args">
-                          <span
-                            v-for="(arg, i) in (frame.args || []).slice(0, 3)"
-                            :key="i"
-                            class="var-chip var-read"
-                            :title="`${arg.name || 'arg'+i} = ${JSON.stringify(arg.value !== undefined ? arg.value : arg)}`"
-                          >{{ arg.name || ('arg'+i) }}=<em style="color:#fcd34d">{{ truncate(formatArgValue(arg.value !== undefined ? arg.value : arg), 12) }}</em></span>
-                          <span v-if="(frame.args || []).length > 3" class="var-more">+{{ frame.args.length - 3 }}</span>
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- 事件流面板 -->
-                  <div v-if="callView[call.id] === 'events'" class="fn-call-events">
-                    <div v-if="callEventsLoading[call.id]" class="loading" style="padding:8px">
-                      <div class="spinner"></div><span>加载事件流...</span>
-                    </div>
-                    <div v-else-if="(callEventsMap[call.id] || []).length === 0" class="empty-state" style="padding:8px">
-                      该区间无{{ ownOnlyMode[call.id] !== false ? '自身' : '' }}事件
-                    </div>
-                    <div v-else class="events-table-wrapper">
-                      <table class="events-table" style="font-size:11px">
-                        <thead>
-                          <tr><th>SEQ</th><th>类型</th><th>行:列</th><th>源码</th><th>写入</th><th>读取</th></tr>
-                        </thead>
-                        <tbody>
-                          <tr v-for="ev in callEventsMap[call.id]" :key="ev.seq">
-                            <td class="td-seq">{{ ev.seq }}</td>
-                            <td class="td-type">
-                              <span class="type-badge" :class="`type-${ev.type}`">{{ ev.type }}</span>
-                            </td>
-                            <td class="td-location">
-                              <span v-if="ev.line != null">{{ ev.line }}:{{ ev.col ?? 0 }}</span>
-                              <span v-else class="text-muted">—</span>
-                            </td>
-                            <td class="td-src">
-                              <code class="src-text">{{ truncate(ev.srcText, 50) }}</code>
-                            </td>
-                            <td class="td-vars">
-                              <span
-                                v-for="w in (ev.writes || []).slice(0, 2)"
-                                :key="w.name"
-                                class="var-chip var-write"
-                                :title="`${w.name} = ${JSON.stringify(w.value)}`"
-                              >{{ w.name }}<span class="var-chip-val" v-if="w.value !== null && w.value !== undefined && !w.omitted">=<em>{{ truncate(formatValue(w.value), 15) }}</em></span></span>
-                              <span v-if="(ev.writes || []).length > 2" class="var-more">+{{ ev.writes.length - 2 }}</span>
-                            </td>
-                            <td class="td-vars">
-                              <span
-                                v-for="r in (ev.reads || []).slice(0, 2)"
-                                :key="r.name"
-                                class="var-chip var-read"
-                                :title="`${r.name} → ${JSON.stringify(r.value)}`"
-                              >{{ r.name }}<span class="var-chip-val" v-if="r.value !== null && r.value !== undefined && !r.omitted">→<em>{{ truncate(formatValue(r.value), 15) }}</em></span></span>
-                              <span v-if="(ev.reads || []).length > 2" class="var-more">+{{ ev.reads.length - 2 }}</span>
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
               </div>
 
               <!-- 调用记录分页（上一页/下一页） -->
@@ -363,6 +257,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue';
 import { truncate, formatValue, formatArgValue } from '../../composables/useSessionUtils.js';
+import CallDetail from './CallDetail.vue';
 
 const props = defineProps({
     sessionId:    { type: String,  required: true },
@@ -456,15 +351,8 @@ const fnCallsPage    = reactive({});
 const fnCallsLoading = reactive({});
 const FN_CALLS_PAGE  = 30;
 
-const callEventsMap     = reactive({});
-const callEventsLoading = reactive({});
-const ownOnlyMode       = reactive({});  // call.id → true（自身，默认）| false（全部）
-const callChildCount    = reactive({});  // call.id → 直接子调用数量（用于提示）
-
-// 调用栈：call.id → frame[] / loading
-const callView         = reactive({});  // call.id → 'stack' | 'events' | null（当前展开面板）
-const callStackMap     = reactive({});  // call.id → frame[]
-const callStackLoading = reactive({});
+const callChildCount    = reactive({});  // call.id → 直接子调用数量（由 CallDetail 子组件更新）
+const callView          = reactive({});  // call.id → 'stack' | 'events'（传给 CallDetail 的 initialView）
 
 // 跨 Tab 跳转高亮：记录当前高亮的调用记录 id
 const highlightedCallId = ref(null);
@@ -599,97 +487,15 @@ async function nextCallsPage(fn) {
     await loadFnCalls(fn, false);
 }
 
-async function toggleCallExpand(call) {
+// 展开/收起调用记录（三级 CallDetail 面板）
+function toggleCallExpand(call) {
     if (expandedCalls.has(call.id)) {
         expandedCalls.delete(call.id);
-        callView[call.id] = null;
         return;
     }
     expandedCalls.add(call.id);
-    // 默认展开事件流面板，且默认为"自身"模式
+    // 默认初始面板为事件流（传给 CallDetail initialView）
     if (!callView[call.id]) callView[call.id] = 'events';
-    if (ownOnlyMode[call.id] === undefined) ownOnlyMode[call.id] = true;
-    if (!callEventsMap[call.id]) {
-        await loadCallEvents(call);
-    }
-}
-
-// 切换自身/全部模式，清空缓存并重新加载
-async function setOwnOnly(call, ownOnly) {
-    if (ownOnlyMode[call.id] === ownOnly) return;
-    ownOnlyMode[call.id] = ownOnly;
-    callEventsMap[call.id] = null;
-    await loadCallEvents(call);
-}
-
-// 切换调用记录内的子面板（'stack' | 'events'）
-async function toggleCallView(call, view) {
-    if (callView[call.id] === view) {
-        callView[call.id] = null;
-        return;
-    }
-    callView[call.id] = view;
-    if (view === 'stack' && !callStackMap[call.id]) {
-        await loadCallStack(call);
-    }
-    if (view === 'events' && !callEventsMap[call.id]) {
-        await loadCallEvents(call);
-    }
-}
-
-async function loadCallStack(call) {
-    callStackLoading[call.id] = true;
-    try {
-        const params = new URLSearchParams({
-            callSeq:   call.callSeq,
-            returnSeq: call.returnSeq,
-            depth:     call.depth,
-        });
-        const res = await fetch(`/api/sessions/${props.sessionId}/call-stack?${params}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        callStackMap[call.id] = data.stack || [];
-    } catch (e) {
-        console.error('loadCallStack error:', e);
-        callStackMap[call.id] = [];
-    } finally {
-        callStackLoading[call.id] = false;
-    }
-}
-
-async function loadCallEvents(call) {
-    callEventsLoading[call.id] = true;
-    try {
-        const ownOnly = ownOnlyMode[call.id] !== false;  // 默认 true（自身模式）
-        let data;
-
-        if (ownOnly && call.id != null) {
-            // 自身模式：调用 own-events API（按 call_edges.id 路由）
-            const params = new URLSearchParams({ limit: 200 });
-            const res = await fetch(`/api/sessions/${props.sessionId}/calls/${call.id}/own-events?${params}`);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            data = await res.json();
-            callChildCount[call.id] = data.childCount ?? 0;
-        } else {
-            // 全部模式：调用普通 events API（按 SEQ 区间）
-            const params = new URLSearchParams({
-                seqFrom: call.callSeq,
-                seqTo:   call.returnSeq,
-                limit:   200,
-                offset:  0,
-            });
-            const res = await fetch(`/api/sessions/${props.sessionId}/events?${params}`);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            data = await res.json();
-        }
-
-        callEventsMap[call.id] = data.events || [];
-    } catch (e) {
-        console.error('loadCallEvents error:', e);
-        callEventsMap[call.id] = [];
-    } finally {
-        callEventsLoading[call.id] = false;
-    }
 }
 
 // 监听跨 Tab 导航：事件流跳转过来时自动搜索并展开对应函数和调用记录
@@ -755,13 +561,10 @@ watch(() => props.targetCall, async (tc) => {
         return;
     }
 
-    // 4. 高亮该调用 + 展开事件流面板
+    // 4. 高亮该调用 + 展开事件流面板（CallDetail 会自动加载）
     highlightedCallId.value = call.id;
     expandedCalls.add(call.id);
     callView[call.id] = 'events';
-    if (!callEventsMap[call.id]) {
-        await loadCallEvents(call);
-    }
 
     // 5. 滚动到目标行
     await nextTick();

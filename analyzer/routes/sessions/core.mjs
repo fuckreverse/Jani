@@ -1,0 +1,429 @@
+/**
+ * sessions/core.mjs — 会话 CRUD + 调度
+ *
+ * POST   /api/sessions                  上传 .bin + .smap.json（可选）+ .js（可选），创建新会话
+ * GET    /api/sessions                  列出所有会话
+ * GET    /api/sessions/:id              会话详情 + 插件状态
+ * DELETE /api/sessions/:id             删除会话
+ * GET    /api/sessions/:id/checkpoints  查询插件断点恢复状态
+ * POST   /api/sessions/:id/re-run       重新触发指定 phase 或插件列表的分析
+ * POST   /api/sessions/:id/run-phase3   (向后兼容) 手动触发 Phase 3
+ * POST   /api/sessions/:id/run-phase4   (向后兼容) 手动触发 Phase 4
+ */
+
+import { Router } from 'express';
+import { createLogger } from '../../logger.mjs';
+
+const log = createLogger('sessions');
+import { existsSync, mkdirSync, copyFileSync, rmSync, statSync } from 'fs';
+import { resolve, basename } from 'path';
+import { v4 as uuidv4 } from 'uuid';
+import * as db from '../../db/Database.mjs';
+import { schedule, autoDiscover, getCheckpoints, clearCheckpoints } from '../../PluginEngine.mjs';
+import { safeParseJson } from './utils.mjs';
+
+const router = Router();
+const __dirname = resolve(new URL('.', import.meta.url).pathname);
+export const DATA_DIR = resolve(__dirname, '../../data/sessions');
+
+// 确保数据目录存在
+mkdirSync(DATA_DIR, { recursive: true });
+
+// ── 分阶段插件定义 ─────────────────────────────────────────────────────────────
+
+/**
+ * Phase 1（基础解析，创建会话时立即执行）：F1-EventIndex（+F2 如有 smap）
+ * Phase 2（自动，Phase1 完成后继续后台执行）：F3 / F4 / A3
+ * Phase 3（手动按需）：A5 / A8 / I1 / I2
+ * Phase 4（手动按需）：A2 / A4 / A7 / I3 / I4
+ */
+export const PHASE1_PLUGINS = ['F1-EventIndex'];
+export const PHASE2_PLUGINS = ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'];
+export const PHASE3_PLUGINS = ['A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer'];
+export const PHASE4_PLUGINS = [
+    'A2-DataFlowGraph',
+    'A4-StringTracker',
+    'A7-ObjectMutationTracker',
+    'I3-ObfuscationDetector',
+    'I4-AlgorithmSummarizer',
+];
+
+// ── 内部：后台调度 Phase 2 ─────────────────────────────────────────────────────
+
+export async function _schedulePhase2(sessionId, sessionDir, wsProgressBroadcast, _hasSmap) {
+    try {
+        db.run("UPDATE sessions SET status = 'indexing' WHERE id = ?", sessionId);
+        wsProgressBroadcast?.(sessionId, {
+            type: 'phase_start',
+            sessionId,
+            phase: 'phase2',
+            plugins: PHASE2_PLUGINS,
+        });
+
+        await autoDiscover();
+        await schedule(sessionId, {
+            plugins: PHASE2_PLUGINS,
+            dataDir: sessionDir,
+            phase: 'phase2',
+            skipCompleted: true,
+            onProgress: (evt) => {
+                wsProgressBroadcast?.(sessionId, evt);
+            },
+        });
+    } catch (e) {
+        log.error({ err: e }, '[sessions] phase2 schedule error:');
+        wsProgressBroadcast?.(sessionId, { type: 'error', sessionId, phase: 'phase2', message: e.message });
+    }
+}
+
+// ── POST /api/sessions ─────────────────────────────────────────────────────
+
+router.post('/', async (req, res) => {
+    try {
+        const files = req.files;
+
+        // 必须有 .bin 文件
+        const binFile = files?.bin?.[0] ?? files?.['bin']?.[0];
+        if (!binFile) {
+            return res.status(400).json({ error: 'Missing required file: bin' });
+        }
+
+        const sessionId = uuidv4();
+        const sessionDir = resolve(DATA_DIR, sessionId);
+        mkdirSync(sessionDir, { recursive: true });
+
+        // 移动 bin 文件
+        const binDest = resolve(sessionDir, binFile.originalname || 'trace.bin');
+        copyFileSync(binFile.path, binDest);
+
+        // 可选：smap 文件
+        const smapFile = files?.smap?.[0] ?? files?.['smap']?.[0];
+        let smapDest = null;
+        if (smapFile) {
+            smapDest = resolve(sessionDir, smapFile.originalname || 'trace.smap.json');
+            copyFileSync(smapFile.path, smapDest);
+        }
+
+        // 可选：原始 JS 文件
+        const sourceFile = files?.source?.[0] ?? files?.['source']?.[0];
+        let sourceDest = null;
+        if (sourceFile) {
+            sourceDest = resolve(sessionDir, sourceFile.originalname || 'source.js');
+            copyFileSync(sourceFile.path, sourceDest);
+        }
+
+        // 会话名称（来自请求体或文件名）
+        const sessionName = req.body?.name
+            || (binFile.originalname ? binFile.originalname.replace(/\.bin$/, '') : null)
+            || `session-${sessionId.slice(0, 8)}`;
+
+        const now = Date.now();
+
+        // 创建 session 记录（status = parsing：Phase 1 解析中）
+        db.run(
+            `INSERT INTO sessions (id, name, created_at, source_file, bin_path, smap_path, status, plugin_status)
+             VALUES (?, ?, ?, ?, ?, ?, 'parsing', '{}')`,
+            sessionId, sessionName, now,
+            sourceDest, binDest, smapDest
+        );
+
+        const wsProgressBroadcast = req.app.get('wsProgressBroadcast');
+
+        // Phase 1：只跑基础解析（F1-EventIndex + 可选 F2-SmapLoader）
+        const phase1Plugins = [...PHASE1_PLUGINS];
+        if (smapDest) phase1Plugins.push('F2-SmapLoader');
+
+        // 异步执行 Phase 1，完成后自动触发 Phase 2
+        autoDiscover().then(() =>
+            schedule(sessionId, {
+                plugins: phase1Plugins,
+                dataDir: sessionDir,
+                phase: 'phase1',
+                skipCompleted: true,
+                onProgress: (evt) => {
+                    wsProgressBroadcast?.(sessionId, evt);
+                    // Phase 1 全部完成后，自动后台调度 Phase 2
+                    if (evt.type === 'all_done' && evt.phase === 'phase1') {
+                        _schedulePhase2(sessionId, sessionDir, wsProgressBroadcast, !!smapDest);
+                    }
+                },
+            })
+        ).catch(e => {
+            log.error({ err: e }, '[sessions] phase1 schedule error:');
+            db.run("UPDATE sessions SET status = 'failed' WHERE id = ?", sessionId);
+            wsProgressBroadcast?.(sessionId, { type: 'error', sessionId, message: e.message });
+        });
+
+        return res.status(201).json({
+            sessionId,
+            status: 'parsing',
+            smapAvailable: !!smapDest,
+        });
+
+    } catch (e) {
+        log.error({ err: e }, '[POST /api/sessions] error:');
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions ──────────────────────────────────────────────────────
+
+router.get('/', (req, res) => {
+    try {
+        const sessions = db.all(
+            `SELECT id, name, created_at, source_file, status, event_count, plugin_status
+             FROM sessions
+             ORDER BY created_at DESC`
+        );
+
+        const result = sessions.map(s => ({
+            ...s,
+            plugin_status: safeParseJson(s.plugin_status, {}),
+        }));
+
+        return res.json(result);
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions] error:');
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id ──────────────────────────────────────────────────
+
+router.get('/:id', (req, res) => {
+    try {
+        const { id } = req.params;
+        const session = db.get('SELECT * FROM sessions WHERE id = ?', id);
+
+        if (!session) {
+            return res.status(404).json({ error: `Session ${id} not found` });
+        }
+
+        // 获取文件元信息（大小）
+        const fileInfo = {};
+        const tryStatFile = (path, key) => {
+            if (!path) { fileInfo[key] = null; return; }
+            try {
+                const st = statSync(path);
+                fileInfo[key] = { path, name: basename(path), size: st.size, mtime: st.mtimeMs };
+            } catch {
+                fileInfo[key] = { path, name: basename(path), size: null, mtime: null, missing: true };
+            }
+        };
+        tryStatFile(session.bin_path,    'binFile');
+        tryStatFile(session.smap_path,   'smapFile');
+        tryStatFile(session.source_file, 'sourceFile');
+
+        // smap 条目数（是否已加载 smap）
+        const smapCount = session.smap_path
+            ? (db.get('SELECT COUNT(*) as cnt FROM smap WHERE session_id = ?', id)?.cnt ?? 0)
+            : 0;
+
+        return res.json({
+            ...session,
+            plugin_status: safeParseJson(session.plugin_status, {}),
+            fileInfo,
+            smapCount,
+        });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id] error:');
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+// ── DELETE /api/sessions/:id ──────────────────────────────────────────────
+
+router.delete('/:id', (req, res) => {
+    try {
+        const { id } = req.params;
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        // 删除会话目录（bin/smap/source 文件）
+        const sessionDir = resolve(DATA_DIR, id);
+        if (existsSync(sessionDir)) {
+            rmSync(sessionDir, { recursive: true, force: true });
+        }
+
+        // 删除所有关联的数据库记录（单事务，原子操作）
+        const TABLES_WITH_SESSION = [
+            'events', 'writes', 'reads', 'fields', 'smap',
+            'call_edges', 'taint_paths', 'var_lifetime', 'scopes',
+            'bookmarks', 'iid_counts', 'loops', 'loop_iterations',
+            'string_events', 'fn_signatures', 'object_timelines', 'value_patterns',
+            'crypto_hints', 'signature_paths', 'obfuscation_hints', 'analysis_summary',
+            'dataflow_edges', 'value_index', 'plugin_checkpoints',
+        ];
+        db.transaction(() => {
+            for (const table of TABLES_WITH_SESSION) {
+                try {
+                    db.run(`DELETE FROM ${table} WHERE session_id = ?`, id);
+                } catch { /* 表不存在时忽略 */ }
+            }
+            // 删除 sessions 主记录
+            db.run('DELETE FROM sessions WHERE id = ?', id);
+        });
+
+        return res.json({ deleted: true });
+    } catch (e) {
+        log.error({ err: e }, '[DELETE /api/sessions/:id] error:');
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/checkpoints ─────────────────────────────────────
+
+router.get('/:id/checkpoints', (req, res) => {
+    try {
+        const { id } = req.params;
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const checkpoints = getCheckpoints(id);
+        res.json({ checkpoints });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/checkpoints] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── POST /api/sessions/:id/re-run ─────────────────────────────────────────
+// 重新触发分析（支持断点恢复 or 强制重跑）
+
+router.post('/:id/re-run', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const session = db.get('SELECT * FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const {
+            plugins,
+            phase = 'phase3',
+            forceRerun = false,
+        } = req.body ?? {};
+
+        // 确定要运行的插件列表
+        let targetPlugins;
+        if (plugins && Array.isArray(plugins) && plugins.length > 0) {
+            targetPlugins = plugins;
+        } else if (phase === 'phase1') {
+            targetPlugins = [...PHASE1_PLUGINS];
+            if (session.smap_path) targetPlugins.push('F2-SmapLoader');
+        } else if (phase === 'phase2') {
+            targetPlugins = [...PHASE2_PLUGINS];
+        } else if (phase === 'phase3') {
+            targetPlugins = [...PHASE3_PLUGINS];
+        } else if (phase === 'phase4') {
+            targetPlugins = [...PHASE4_PLUGINS];
+        } else {
+            return res.status(400).json({
+                error: 'Invalid phase. Use phase1/phase2/phase3/phase4 or provide explicit plugins list.',
+            });
+        }
+
+        // 强制重跑：清除指定插件的检查点
+        if (forceRerun) {
+            for (const pluginId of targetPlugins) {
+                clearCheckpoints(id, pluginId);
+            }
+        }
+
+        const sessionDir = resolve(DATA_DIR, id);
+        const wsProgressBroadcast = req.app.get('wsProgressBroadcast');
+
+        await autoDiscover();
+
+        schedule(id, {
+            plugins: targetPlugins,
+            dataDir: sessionDir,
+            phase,
+            skipCompleted: !forceRerun,
+            onProgress: (evt) => {
+                wsProgressBroadcast?.(id, evt);
+            },
+        }).catch(e => {
+            log.error({ err: e }, '[re-run] schedule error:');
+            wsProgressBroadcast?.(id, { type: 'error', sessionId: id, message: e.message });
+        });
+
+        return res.json({ status: 'scheduled', plugins: targetPlugins, phase, forceRerun });
+    } catch (e) {
+        log.error({ err: e }, '[POST /api/sessions/:id/re-run] error:');
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+// ── POST /api/sessions/:id/run-phase3 ─────────────────────────────────────
+// 手动触发 Phase 3 插件分析
+
+router.post('/:id/run-phase3', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const { plugins = PHASE3_PLUGINS, forceRerun = false } = req.body ?? {};
+
+        await autoDiscover();
+
+        if (forceRerun) {
+            for (const pluginId of plugins) clearCheckpoints(id, pluginId);
+        }
+
+        // 异步执行，不阻塞响应
+        schedule(id, {
+            plugins,
+            dataDir: resolve(DATA_DIR, id),
+            phase: 'phase3',
+            skipCompleted: !forceRerun,
+            onProgress: (evt) => {
+                req.app.get('wsProgressBroadcast')?.(id, evt);
+            },
+        }).catch(e => {
+            log.error({ err: e }, '[run-phase3] schedule error:');
+        });
+
+        return res.json({ status: 'scheduled', plugins, phase: 'phase3' });
+    } catch (e) {
+        log.error({ err: e }, '[POST /api/sessions/:id/run-phase3] error:');
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+// ── POST /api/sessions/:id/run-phase4 ─────────────────────────────────────
+// 手动触发 Phase 4 插件分析
+
+router.post('/:id/run-phase4', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const { plugins = PHASE4_PLUGINS, forceRerun = false } = req.body ?? {};
+
+        await autoDiscover();
+
+        if (forceRerun) {
+            for (const pluginId of plugins) clearCheckpoints(id, pluginId);
+        }
+
+        schedule(id, {
+            plugins,
+            dataDir: resolve(DATA_DIR, id),
+            phase: 'phase4',
+            skipCompleted: !forceRerun,
+            onProgress: (evt) => {
+                req.app.get('wsProgressBroadcast')?.(id, evt);
+            },
+        }).catch(e => {
+            log.error({ err: e }, '[run-phase4] schedule error:');
+        });
+
+        return res.json({ status: 'scheduled', plugins, phase: 'phase4' });
+    } catch (e) {
+        log.error({ err: e }, '[POST /api/sessions/:id/run-phase4] error:');
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+export default router;

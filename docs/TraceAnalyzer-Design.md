@@ -1,6 +1,6 @@
 # Jani Trace Analyzer — 设计文档
 
-**版本：** v1.4（已实现）  
+**版本：** v1.5（已实现）  
 **日期：** 2026-04-10  
 **目标：** 为 JS 动态 trace 提供一站式逆向分析平台，支持算法识别、污点追踪、签名还原等场景。
 
@@ -1131,7 +1131,13 @@ Jani/
 │   │   ├── I3_ObfuscationDetector.mjs
 │   │   └── I4_AlgorithmSummarizer.mjs
 │   ├── routes/
-│   │   ├── sessions.mjs       # 会话 API（含分阶段调度、re-run、delete、checkpoints API）
+│   │   ├── sessions.mjs       # 会话路由入口（组合子模块 + 导出 createSession）
+│   │   ├── sessions/          # 会话 API 子模块
+│   │   │   ├── core.mjs       # 会话 CRUD + 插件分阶段调度（re-run / delete / checkpoints）
+│   │   │   ├── events.mjs     # 事件查询 API（event-types / events / value-search）
+│   │   │   ├── functions.mjs  # 函数调用 API（functions / calls / call-graph / call-stack）
+│   │   │   ├── analysis.mjs   # 分析结果 API（hot-iids / taint / dataflow / summary 等）
+│   │   │   └── utils.mjs      # 共享工具（safeParseJson / groupBy / BUILTIN_FN_NAMES）
 │   │   ├── instrument.mjs     # 插桩 API（显式 --output，支持 wsUrl/wsSab，支持预处理）
 │   │   ├── projects.mjs       # 工作空间 API（上传/插桩/fork/下载/关联会话，支持预处理）
 │   │   └── storage.mjs        # 空间分析 API（stats 统计 + delete 批量清理）
@@ -1147,6 +1153,7 @@ Jani/
 │   │   │       ├── EventsTab.vue       # 事件列表标签页（含值搜索、跨Tab跳转）
 │   │   │       ├── FileInfoBar.vue     # 文件信息栏
 │   │   │       ├── FunctionsTab.vue    # 函数列表标签页（事件数过滤、内建函数隐藏、调用定位）
+│   │   │       ├── CallDetail.vue      # 函数调用详情面板（调用栈 / 事件流，由 FunctionsTab 使用）
 │       │   │       ├── LoopsTab.vue        # 循环分析标签页
 │       │   │       ├── ObfuscationTab.vue  # 混淆检测标签页
 │       │   │       ├── ObjMutTab.vue       # 对象变异标签页
@@ -1164,6 +1171,7 @@ Jani/
 │       │   └── views/
 │       │       ├── WorkspaceList.vue       # 工作空间列表（/workspaces）
 │       │       ├── WorkspaceDetail.vue     # 工作空间详情（/workspaces/:id）
+│       │       ├── ForkModal.vue           # 重新插桩（Fork）弹窗组件（由 WorkspaceDetail 使用）
 │       │       ├── SessionList.vue         # 会话列表（/sessions）
 │       │       ├── SessionDetail.vue       # 会话详情（/sessions/:id，多标签页分析）
 │       │       ├── InstrumentStudio.vue    # 插桩工作台（/instrument）
@@ -1281,6 +1289,17 @@ Jani/
   - `GET /api/sessions/:id/value-search/events`（值搜索 + 事件详情合并）
 - [x] **A6 FunctionSignatureInfer 移除**：功能冗余，依赖该插件的 `I2`/`I4` 已更新依赖关系
 - [x] **EventSerializer 增强**：屏蔽对象 `toJSON` 方法防止插桩代码递归调用；`fields` 序列化切换到 `base_oid`
+
+### Phase 9：代码质量重构 ✅ 已完成
+- [x] **`routes/sessions.mjs` 拆分**（原 ~1967 行 → 5 个子模块）：
+  - `sessions/core.mjs`：会话 CRUD + 插件分阶段调度（re-run / delete / checkpoints）
+  - `sessions/events.mjs`：事件查询 API（event-types / events / value-search）
+  - `sessions/functions.mjs`：函数调用 API（functions / calls / call-graph / call-stack / owner-fn）
+  - `sessions/analysis.mjs`：分析结果 API（hot-iids / taint / dataflow / strings / object-timelines / summary 等）
+  - `sessions/utils.mjs`：共享工具函数（`safeParseJson` / `groupBy` / `BUILTIN_FN_NAMES`）
+  - `sessions.mjs` 保留为入口文件，组合子路由并导出 `createSession`
+- [x] **`WorkspaceDetail.vue` 拆分**：Fork Modal 逻辑提取为独立组件 `ForkModal.vue`（props + emits 接口）
+- [x] **`FunctionsTab.vue` 拆分**：函数调用详情面板（调用栈 / 事件流）提取为独立组件 `CallDetail.vue`
 
 ---
 
