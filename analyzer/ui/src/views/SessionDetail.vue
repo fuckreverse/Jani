@@ -56,8 +56,8 @@
       </div>
 
       <!-- Tab 内容区域（使用 v-show 保留已加载组件状态） -->
-      <EventsTab      v-show="activeTab === 'events'"      ref="eventsTabRef"      :session-id="sessionId" />
-      <FunctionsTab   v-show="activeTab === 'functions'"   ref="functionsTabRef"   :session-id="sessionId" :plugin-status="pluginStatus" />
+      <EventsTab      v-show="activeTab === 'events'"      ref="eventsTabRef"      :session-id="sessionId" @goto-function="onGotoFunction" />
+      <FunctionsTab   v-show="activeTab === 'functions'"   ref="functionsTabRef"   :session-id="sessionId" :plugin-status="pluginStatus" :target-call="targetCall" />
       <LoopsTab       v-show="activeTab === 'loops'"       ref="loopsTabRef"       :session-id="sessionId" />
       <PatternsTab    v-show="activeTab === 'patterns'"    ref="patternsTabRef"    :session-id="sessionId" />
       <CryptoTab      v-show="activeTab === 'crypto'"      ref="cryptoTabRef"      :session-id="sessionId" />
@@ -144,6 +144,14 @@ const inlineProgressPct = computed(() => {
 });
 
 // ─── 标签页 ───────────────────────────────────────────────────────────────────
+// ─── 跨 Tab 导航：事件流 → 函数 ──────────────────────────────────────────────
+const targetCall = ref(null); // { fnName, fnIid, callSeq }
+
+function onGotoFunction({ fnName, fnIid, callSeq }) {
+    targetCall.value = { fnName, fnIid, callSeq };
+    activeTab.value = 'functions';
+}
+
 const tabs = [
     { id: 'events',      label: '📋 事件流' },
     { id: 'functions',   label: '📌 函数' },

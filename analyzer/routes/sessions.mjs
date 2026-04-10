@@ -548,6 +548,7 @@ router.get('/:id/functions', (req, res) => {
             minCalls = '1',
             limit    = '100',
             offset   = '0',
+            fnIid,           // 精确 iid 过滤（跨 Tab 跳转时使用）
         } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
@@ -559,6 +560,10 @@ router.get('/:id/functions', (req, res) => {
         if (search) {
             conditions.push('fn_name LIKE ?');
             params.push(`%${search}%`);
+        }
+        if (fnIid !== undefined && fnIid !== '') {
+            conditions.push('fn_iid = ?');
+            params.push(Number(fnIid));
         }
 
         const minCallsN = Math.max(1, Number(minCalls) || 1);
@@ -613,13 +618,12 @@ router.get('/:id/functions', (req, res) => {
 router.get('/:id/functions/:fnName/calls', (req, res) => {
     try {
         const { id, fnName } = req.params;
-        const { limit = '200', offset = '0', fnIid } = req.query;
+        const { limit = '200', offset = '0', fnIid, callSeq } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: `Session ${id} not found` });
 
         const limitN  = Math.min(Number(limit)  || 200, 1000);
-        const offsetN = Number(offset) || 0;
 
         // 支持按 fn_iid 精确过滤，避免同名不同位置的函数调用混在一起
         const conditions = ['session_id = ?', 'fn_name = ?'];
@@ -630,6 +634,35 @@ router.get('/:id/functions/:fnName/calls', (req, res) => {
         }
         const where = conditions.join(' AND ');
 
+        const total = db.get(
+            `SELECT COUNT(*) AS cnt FROM call_edges WHERE ${where}`,
+            ...baseParams
+        )?.cnt ?? 0;
+
+        // callSeq 定位：计算目标调用在第几条（rank），从而得到正确的 offset
+        // 这样前端不需要翻页，直接跳到包含该调用的那页
+        let offsetN = Number(offset) || 0;
+        let targetCallId = null;
+        if (callSeq !== undefined && callSeq !== '') {
+            const callSeqN = Number(callSeq);
+            const rankRow = db.get(
+                `SELECT COUNT(*) AS rank FROM call_edges
+                 WHERE ${where} AND call_seq < ?
+                 ORDER BY call_seq ASC`,
+                ...baseParams, callSeqN
+            );
+            if (rankRow) {
+                // rank 是目标调用之前有多少条，即它的 0-based 位置
+                offsetN = Math.floor(rankRow.rank / limitN) * limitN;
+            }
+            // 记录目标 call 的 id，供前端高亮
+            const targetRow = db.get(
+                `SELECT id FROM call_edges WHERE ${where} AND call_seq = ?`,
+                ...baseParams, callSeqN
+            );
+            targetCallId = targetRow?.id ?? null;
+        }
+
         const rows = db.all(
             `SELECT id, call_seq, return_seq, caller_line, fn_name, fn_iid, args_json, return_value, depth
              FROM call_edges
@@ -638,11 +671,6 @@ router.get('/:id/functions/:fnName/calls', (req, res) => {
              LIMIT ? OFFSET ?`,
             ...baseParams, limitN, offsetN
         );
-
-        const total = db.get(
-            `SELECT COUNT(*) AS cnt FROM call_edges WHERE ${where}`,
-            ...baseParams
-        )?.cnt ?? 0;
 
         const result = rows.map(r => ({
             id:           r.id,
@@ -656,7 +684,7 @@ router.get('/:id/functions/:fnName/calls', (req, res) => {
             depth:        r.depth,
         }));
 
-        return res.json({ calls: result, count: result.length, total });
+        return res.json({ calls: result, count: result.length, total, targetCallId, offset: offsetN });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/functions/:fnName/calls] error:');
         return res.status(500).json({ error: e.message });
@@ -1332,6 +1360,109 @@ router.get('/:id/value-search', (req, res) => {
         res.json({ matches: rows, count: rows.length });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/value-search] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/call-stack ──────────────────────────────────────
+// 查询某次函数调用的完整调用栈（祖先帧列表）
+// 查询参数：
+//   callSeq=<N>    当前帧的 call_seq（CALL_PRE 事件 id）
+//   returnSeq=<N>  当前帧的 return_seq（CALL 事件 id）
+//   depth=<N>      当前帧的深度，查 depth < N 的所有祖先帧
+
+router.get('/:id/call-stack', (req, res) => {
+    try {
+        const { id } = req.params;
+        const { callSeq, returnSeq, depth } = req.query;
+
+        if (callSeq === undefined || returnSeq === undefined || depth === undefined) {
+            return res.status(400).json({ error: 'callSeq, returnSeq, depth are required' });
+        }
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const callSeqN   = Number(callSeq);
+        const returnSeqN = Number(returnSeq);
+        const depthN     = Number(depth);
+
+        // 深度为 0 表示顶层调用，无父帧
+        if (depthN <= 0) {
+            return res.json({ stack: [] });
+        }
+
+        // 查找所有包含当前调用区间且深度更小的帧（即祖先帧），按深度升序排列
+        const frames = db.all(
+            `SELECT fn_name, fn_iid, caller_line, depth, args_json, return_value, call_seq, return_seq
+             FROM call_edges
+             WHERE session_id = ?
+               AND call_seq <= ?
+               AND return_seq >= ?
+               AND depth < ?
+             ORDER BY depth ASC`,
+            id, callSeqN, returnSeqN, depthN
+        );
+
+        res.json({
+            stack: frames.map(f => ({
+                fnName:      f.fn_name,
+                fnIid:       f.fn_iid,
+                callerLine:  f.caller_line,
+                depth:       f.depth,
+                args:        safeParseJson(f.args_json, []),
+                returnValue: safeParseJson(f.return_value, null),
+                callSeq:     f.call_seq,
+                returnSeq:   f.return_seq,
+            })),
+        });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/call-stack] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/events/:seq/owner-fn ────────────────────────────
+// 查询某个事件所属的最近函数帧（即包含该 seq 的 depth 最大的调用边）
+
+router.get('/:id/events/:seq/owner-fn', (req, res) => {
+    try {
+        const { id, seq } = req.params;
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const seqN = Number(seq);
+        if (isNaN(seqN)) return res.status(400).json({ error: 'seq must be a number' });
+
+        // 找包含该 seq 的调用帧中 depth 最大的（最近调用者）
+        const frame = db.get(
+            `SELECT fn_name, fn_iid, caller_line, depth, call_seq, return_seq, args_json, return_value
+             FROM call_edges
+             WHERE session_id = ? AND call_seq <= ? AND return_seq >= ?
+             ORDER BY depth DESC
+             LIMIT 1`,
+            id, seqN, seqN
+        );
+
+        if (!frame) {
+            return res.json({ ownerFn: null });
+        }
+
+        res.json({
+            ownerFn: {
+                fnName:      frame.fn_name,
+                fnIid:       frame.fn_iid,
+                callerLine:  frame.caller_line,
+                depth:       frame.depth,
+                callSeq:     frame.call_seq,
+                returnSeq:   frame.return_seq,
+                args:        safeParseJson(frame.args_json, []),
+                returnValue: safeParseJson(frame.return_value, null),
+            },
+        });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/events/:seq/owner-fn] error:');
         res.status(500).json({ error: e.message });
     }
 });

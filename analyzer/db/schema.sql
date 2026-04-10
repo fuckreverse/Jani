@@ -389,6 +389,8 @@ CREATE INDEX IF NOT EXISTS idx_iid_counts_count    ON iid_counts(session_id, cou
 CREATE INDEX IF NOT EXISTS idx_loops_iter_count    ON loops(session_id, iteration_count DESC);
 -- value_patterns 按 matched_constant 过滤：I1 密码学检测
 CREATE INDEX IF NOT EXISTS idx_vp_matched          ON value_patterns(session_id, matched_constant);
+-- 调用栈查询：按 call_seq/return_seq 范围查找祖先帧（owner-fn + call-stack API）
+CREATE INDEX IF NOT EXISTS idx_call_edges_stack    ON call_edges(session_id, call_seq, return_seq, depth);
 
 -- ─── 插件检查点（断点恢复支持）───────────────────────────────────────────────
 -- 每个插件成功完成后写入一条记录；重新调度时跳过已有记录的插件

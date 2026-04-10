@@ -73,7 +73,9 @@
               <div
                 v-for="call in fnCallsMap[fnExpandedKey(fn)]"
                 :key="call.id"
+                :id="`call-item-${call.id}`"
                 class="fn-call-item"
+                :class="{ 'call-highlighted': highlightedCallId === call.id }"
               >
                 <!-- 二级头：参数 + 返回值 -->
                 <div class="fn-call-header" @click="toggleCallExpand(call)">
@@ -98,53 +100,100 @@
                   </span>
                 </div>
 
-                <!-- 三级：该次调用的事件流 -->
-                <div v-if="expandedCalls.has(call.id)" class="fn-call-events">
-                  <div v-if="callEventsLoading[call.id]" class="loading" style="padding:8px">
-                    <div class="spinner"></div><span>加载事件流...</span>
+                <!-- 三级：子面板切换（调用栈 / 事件流） -->
+                <div v-if="expandedCalls.has(call.id)" class="fn-call-panels">
+                  <!-- 面板切换按钮 -->
+                  <div class="call-panel-tabs">
+                    <button
+                      class="call-panel-tab"
+                      :class="{ 'call-panel-tab-active': callView[call.id] === 'stack' }"
+                      @click.stop="toggleCallView(call, 'stack')"
+                    >📚 调用栈</button>
+                    <button
+                      class="call-panel-tab"
+                      :class="{ 'call-panel-tab-active': callView[call.id] === 'events' }"
+                      @click.stop="toggleCallView(call, 'events')"
+                    >📋 事件流</button>
                   </div>
-                  <div v-else-if="(callEventsMap[call.id] || []).length === 0" class="empty-state" style="padding:8px">
-                    该区间无事件
+
+                  <!-- 调用栈面板 -->
+                  <div v-if="callView[call.id] === 'stack'" class="call-stack-panel">
+                    <div v-if="callStackLoading[call.id]" class="loading" style="padding:8px">
+                      <div class="spinner"></div><span>加载调用栈...</span>
+                    </div>
+                    <div v-else-if="(callStackMap[call.id] || []).length === 0" class="empty-state" style="padding:10px">
+                      此调用无父帧（顶层调用，depth=0）
+                    </div>
+                    <div v-else class="call-stack-list">
+                      <div
+                        v-for="frame in callStackMap[call.id]"
+                        :key="frame.depth"
+                        class="stack-frame"
+                      >
+                        <span class="frame-depth">#{{ frame.depth }}</span>
+                        <code class="frame-fn">{{ frame.fnName || '(anonymous)' }}</code>
+                        <span v-if="frame.callerLine" class="frame-line text-muted">line {{ frame.callerLine }}</span>
+                        <span class="frame-args">
+                          <span
+                            v-for="(arg, i) in (frame.args || []).slice(0, 3)"
+                            :key="i"
+                            class="var-chip var-read"
+                            :title="`${arg.name || 'arg'+i} = ${JSON.stringify(arg.value !== undefined ? arg.value : arg)}`"
+                          >{{ arg.name || ('arg'+i) }}=<em style="color:#fcd34d">{{ truncate(formatArgValue(arg.value !== undefined ? arg.value : arg), 12) }}</em></span>
+                          <span v-if="(frame.args || []).length > 3" class="var-more">+{{ frame.args.length - 3 }}</span>
+                        </span>
+                      </div>
+                    </div>
                   </div>
-                  <div v-else class="events-table-wrapper">
-                    <table class="events-table" style="font-size:11px">
-                      <thead>
-                        <tr><th>SEQ</th><th>类型</th><th>行:列</th><th>源码</th><th>写入</th><th>读取</th></tr>
-                      </thead>
-                      <tbody>
-                        <tr v-for="ev in callEventsMap[call.id]" :key="ev.seq">
-                          <td class="td-seq">{{ ev.seq }}</td>
-                          <td class="td-type">
-                            <span class="type-badge" :class="`type-${ev.type}`">{{ ev.type }}</span>
-                          </td>
-                          <td class="td-location">
-                            <span v-if="ev.line != null">{{ ev.line }}:{{ ev.col ?? 0 }}</span>
-                            <span v-else class="text-muted">—</span>
-                          </td>
-                          <td class="td-src">
-                            <code class="src-text">{{ truncate(ev.srcText, 50) }}</code>
-                          </td>
-                          <td class="td-vars">
-                            <span
-                              v-for="w in (ev.writes || []).slice(0, 2)"
-                              :key="w.name"
-                              class="var-chip var-write"
-                              :title="`${w.name} = ${JSON.stringify(w.value)}`"
-                            >{{ w.name }}<span class="var-chip-val" v-if="w.value !== null && w.value !== undefined && !w.omitted">=<em>{{ truncate(formatValue(w.value), 15) }}</em></span></span>
-                            <span v-if="(ev.writes || []).length > 2" class="var-more">+{{ ev.writes.length - 2 }}</span>
-                          </td>
-                          <td class="td-vars">
-                            <span
-                              v-for="r in (ev.reads || []).slice(0, 2)"
-                              :key="r.name"
-                              class="var-chip var-read"
-                              :title="`${r.name} → ${JSON.stringify(r.value)}`"
-                            >{{ r.name }}<span class="var-chip-val" v-if="r.value !== null && r.value !== undefined && !r.omitted">→<em>{{ truncate(formatValue(r.value), 15) }}</em></span></span>
-                            <span v-if="(ev.reads || []).length > 2" class="var-more">+{{ ev.reads.length - 2 }}</span>
-                          </td>
-                        </tr>
-                      </tbody>
-                    </table>
+
+                  <!-- 事件流面板 -->
+                  <div v-if="callView[call.id] === 'events'" class="fn-call-events">
+                    <div v-if="callEventsLoading[call.id]" class="loading" style="padding:8px">
+                      <div class="spinner"></div><span>加载事件流...</span>
+                    </div>
+                    <div v-else-if="(callEventsMap[call.id] || []).length === 0" class="empty-state" style="padding:8px">
+                      该区间无事件
+                    </div>
+                    <div v-else class="events-table-wrapper">
+                      <table class="events-table" style="font-size:11px">
+                        <thead>
+                          <tr><th>SEQ</th><th>类型</th><th>行:列</th><th>源码</th><th>写入</th><th>读取</th></tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="ev in callEventsMap[call.id]" :key="ev.seq">
+                            <td class="td-seq">{{ ev.seq }}</td>
+                            <td class="td-type">
+                              <span class="type-badge" :class="`type-${ev.type}`">{{ ev.type }}</span>
+                            </td>
+                            <td class="td-location">
+                              <span v-if="ev.line != null">{{ ev.line }}:{{ ev.col ?? 0 }}</span>
+                              <span v-else class="text-muted">—</span>
+                            </td>
+                            <td class="td-src">
+                              <code class="src-text">{{ truncate(ev.srcText, 50) }}</code>
+                            </td>
+                            <td class="td-vars">
+                              <span
+                                v-for="w in (ev.writes || []).slice(0, 2)"
+                                :key="w.name"
+                                class="var-chip var-write"
+                                :title="`${w.name} = ${JSON.stringify(w.value)}`"
+                              >{{ w.name }}<span class="var-chip-val" v-if="w.value !== null && w.value !== undefined && !w.omitted">=<em>{{ truncate(formatValue(w.value), 15) }}</em></span></span>
+                              <span v-if="(ev.writes || []).length > 2" class="var-more">+{{ ev.writes.length - 2 }}</span>
+                            </td>
+                            <td class="td-vars">
+                              <span
+                                v-for="r in (ev.reads || []).slice(0, 2)"
+                                :key="r.name"
+                                class="var-chip var-read"
+                                :title="`${r.name} → ${JSON.stringify(r.value)}`"
+                              >{{ r.name }}<span class="var-chip-val" v-if="r.value !== null && r.value !== undefined && !r.omitted">→<em>{{ truncate(formatValue(r.value), 15) }}</em></span></span>
+                              <span v-if="(ev.reads || []).length > 2" class="var-more">+{{ ev.reads.length - 2 }}</span>
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -234,12 +283,13 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue';
+import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue';
 import { truncate, formatValue, formatArgValue } from '../../composables/useSessionUtils.js';
 
 const props = defineProps({
     sessionId:    { type: String,  required: true },
     pluginStatus: { type: Object,  default: () => ({}) },
+    targetCall:   { type: Object,  default: null },  // { fnName, fnIid, callSeq } — 来自事件流跳转
 });
 
 const f3Status = computed(() => props.pluginStatus?.['F3-CallGraphBuilder'] ?? '');
@@ -318,6 +368,14 @@ const FN_CALLS_PAGE  = 30;
 const callEventsMap     = reactive({});
 const callEventsLoading = reactive({});
 
+// 调用栈：call.id → frame[] / loading
+const callView         = reactive({});  // call.id → 'stack' | 'events' | null（当前展开面板）
+const callStackMap     = reactive({});  // call.id → frame[]
+const callStackLoading = reactive({});
+
+// 跨 Tab 跳转高亮：记录当前高亮的调用记录 id
+const highlightedCallId = ref(null);
+
 function fnExpandedKey(fn) {
     return `${fn.fn_name}__${fn.fn_iid ?? ''}`;
 }
@@ -378,19 +436,26 @@ async function toggleFnExpand(fn) {
     }
 }
 
-async function loadFnCalls(fn, reset = false) {
+// targetCallSeq：可选，传入后后端自动计算所在页并返回 targetCallId
+// overrideFnIid：可选，覆盖 fn.fn_iid（用于跨 Tab 跳转时精确匹配 owner-fn 返回的 iid）
+async function loadFnCalls(fn, reset = false, targetCallSeq = null, overrideFnIid = undefined) {
     const key = fnExpandedKey(fn);
     if (reset) fnCallsPage[key] = 1;
     fnCallsLoading[key] = true;
     try {
-        const page   = fnCallsPage[key] || 1;
-        const offset = (page - 1) * FN_CALLS_PAGE;
-        const params = new URLSearchParams({
-            limit:  FN_CALLS_PAGE,
-            offset,
-        });
+        const params = new URLSearchParams({ limit: FN_CALLS_PAGE });
         // 传 fn_iid 确保只查该函数定义处的调用，避免同名函数混在一起
-        if (fn.fn_iid != null) params.set('fnIid', fn.fn_iid);
+        // overrideFnIid 优先（跨 Tab 跳转时用 owner-fn 返回的精确 iid）
+        const fnIidToUse = overrideFnIid !== undefined ? overrideFnIid : fn.fn_iid;
+        if (fnIidToUse != null) params.set('fnIid', fnIidToUse);
+        // 有目标 callSeq 时让后端定位到正确页，忽略本地 page 状态
+        if (targetCallSeq != null) {
+            params.set('callSeq', targetCallSeq);
+        } else {
+            const page   = fnCallsPage[key] || 1;
+            const offset = (page - 1) * FN_CALLS_PAGE;
+            params.set('offset', offset);
+        }
         const res = await fetch(
             `/api/sessions/${props.sessionId}/functions/${encodeURIComponent(fn.fn_name)}/calls?${params}`
         );
@@ -398,8 +463,17 @@ async function loadFnCalls(fn, reset = false) {
         const data = await res.json();
         fnCallsMap[key]   = data.calls || [];
         fnCallsTotal[key] = data.total ?? (data.calls?.length ?? 0);
+        // 根据后端返回的 offset 同步本地页码
+        if (data.offset != null) {
+            fnCallsPage[key] = Math.floor(data.offset / FN_CALLS_PAGE) + 1;
+        }
+        // 调试：打印后端返回的定位信息
+        console.debug('[loadFnCalls] targetCallId=', data.targetCallId, 'offset=', data.offset, 'total=', data.total, 'calls[0]=', data.calls?.[0]);
+        // 返回后端定位到的目标 call id
+        return data.targetCallId ?? null;
     } catch (e) {
         console.error('loadFnCalls error:', e);
+        return null;
     } finally {
         fnCallsLoading[key] = false;
     }
@@ -425,11 +499,49 @@ async function nextCallsPage(fn) {
 async function toggleCallExpand(call) {
     if (expandedCalls.has(call.id)) {
         expandedCalls.delete(call.id);
+        callView[call.id] = null;
         return;
     }
     expandedCalls.add(call.id);
+    // 默认展开事件流面板
+    if (!callView[call.id]) callView[call.id] = 'events';
     if (!callEventsMap[call.id]) {
         await loadCallEvents(call);
+    }
+}
+
+// 切换调用记录内的子面板（'stack' | 'events'）
+async function toggleCallView(call, view) {
+    if (callView[call.id] === view) {
+        callView[call.id] = null;
+        return;
+    }
+    callView[call.id] = view;
+    if (view === 'stack' && !callStackMap[call.id]) {
+        await loadCallStack(call);
+    }
+    if (view === 'events' && !callEventsMap[call.id]) {
+        await loadCallEvents(call);
+    }
+}
+
+async function loadCallStack(call) {
+    callStackLoading[call.id] = true;
+    try {
+        const params = new URLSearchParams({
+            callSeq:   call.callSeq,
+            returnSeq: call.returnSeq,
+            depth:     call.depth,
+        });
+        const res = await fetch(`/api/sessions/${props.sessionId}/call-stack?${params}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        callStackMap[call.id] = data.stack || [];
+    } catch (e) {
+        console.error('loadCallStack error:', e);
+        callStackMap[call.id] = [];
+    } finally {
+        callStackLoading[call.id] = false;
     }
 }
 
@@ -452,6 +564,81 @@ async function loadCallEvents(call) {
         callEventsLoading[call.id] = false;
     }
 }
+
+// 监听跨 Tab 导航：事件流跳转过来时自动搜索并展开对应函数和调用记录
+watch(() => props.targetCall, async (tc) => {
+    if (!tc) return;
+    highlightedCallId.value = null;
+
+    // 1. 用精确函数名搜索（精确匹配，确保第一页就能找到）
+    fnExecSearch.value = tc.fnName || '';
+    fnExecPage.value   = 1;
+    fnExecLoading.value = true;
+    let fn = null;
+    try {
+        const params = new URLSearchParams({
+            limit:    FN_EXEC_PAGE,
+            offset:   0,
+            minCalls: 1,
+            search:   tc.fnName || '',
+        });
+        // 传入精确 fnIid，确保同名函数时只返回目标函数条目
+        if (tc.fnIid != null) params.set('fnIid', tc.fnIid);
+        const res = await fetch(`/api/sessions/${props.sessionId}/functions?${params}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        fnExecList.value  = data.functions || [];
+        fnExecTotal.value = data.total ?? (data.functions?.length ?? 0);
+        fn = fnExecList.value.find(f => f.fn_name === tc.fnName)
+          ?? fnExecList.value[0]  // fnIid 过滤后通常只有一条
+          ?? null;
+    } catch (e) {
+        console.error('targetCall: loadFnExec error:', e);
+    } finally {
+        fnExecLoading.value = false;
+    }
+
+    if (!fn) {
+        console.warn('targetCall: function not found:', tc.fnName);
+        return;
+    }
+
+    // 2. 展开函数，并用 callSeq 让后端定位到正确页
+    const key = fnExpandedKey(fn);
+    // 清除旧数据，确保重新加载
+    delete fnCallsMap[key];
+    delete fnCallsTotal[key];
+    delete fnCallsPage[key];
+    expandedFns.add(key);
+
+    // 传入 tc.fnIid 作为精确 iid 过滤，避免同名函数 iid 不匹配导致找不到目标调用
+    const targetCallId = await loadFnCalls(fn, true, tc.callSeq, tc.fnIid);
+    await nextTick();
+
+    // 3. 找到目标调用记录（优先用后端返回的 id，备用前端按 callSeq 匹配）
+    const calls = fnCallsMap[key] || [];
+    const call = targetCallId != null
+        ? calls.find(c => c.id === targetCallId)
+        : calls.find(c => c.callSeq === tc.callSeq);
+
+    if (!call) {
+        console.warn('targetCall: call not found in page, targetCallId=', targetCallId, 'callSeq=', tc.callSeq, 'tc=', JSON.stringify(tc), 'calls=', JSON.stringify(calls));
+        return;
+    }
+
+    // 4. 高亮该调用 + 展开事件流面板
+    highlightedCallId.value = call.id;
+    expandedCalls.add(call.id);
+    callView[call.id] = 'events';
+    if (!callEventsMap[call.id]) {
+        await loadCallEvents(call);
+    }
+
+    // 5. 滚动到目标行
+    await nextTick();
+    const el = document.getElementById(`call-item-${call.id}`);
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+});
 
 defineExpose({ reload: () => loadFnExec(true) });
 
@@ -621,7 +808,8 @@ onMounted(() => loadFnExec(true));
 /* 二级：调用容器 */
 .fn-calls-container { border-top: 1px solid var(--border-color); background: var(--bg-primary, #0f1117); }
 .fn-calls-list { display: flex; flex-direction: column; gap: 1px; padding: 6px 8px; }
-.fn-call-item { border: 1px solid rgba(45,49,72,0.6); border-radius: 5px; overflow: hidden; background: var(--bg-secondary); margin-bottom: 3px; }
+.fn-call-item { border: 1px solid rgba(45,49,72,0.6); border-radius: 5px; overflow: hidden; background: var(--bg-secondary); margin-bottom: 3px; transition: border-color 0.2s, box-shadow 0.2s; }
+.call-highlighted { border-color: rgba(99,102,241,0.7) !important; box-shadow: 0 0 0 2px rgba(99,102,241,0.25); }
 .fn-call-header {
     display: flex; align-items: center; gap: 8px; padding: 6px 12px;
     cursor: pointer; transition: background 0.1s; flex-wrap: wrap;
@@ -630,8 +818,43 @@ onMounted(() => loadFnExec(true));
 .fn-args-preview { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .fn-ret-preview { display: flex; align-items: center; gap: 4px; }
 
+/* 三级：面板容器 */
+.fn-call-panels { border-top: 1px solid var(--border-color); background: rgba(15,17,23,0.6); }
+
+/* 面板切换按钮组 */
+.call-panel-tabs {
+    display: flex; gap: 0; border-bottom: 1px solid var(--border-color);
+}
+.call-panel-tab {
+    padding: 5px 14px; font-size: 11px; background: transparent;
+    border: none; border-right: 1px solid var(--border-color);
+    color: var(--text-muted); cursor: pointer; transition: background 0.1s, color 0.1s;
+}
+.call-panel-tab:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.call-panel-tab-active {
+    background: rgba(99,102,241,0.12) !important;
+    color: #a5b4fc !important;
+    font-weight: 600;
+}
+
+/* 调用栈面板 */
+.call-stack-panel { padding: 8px 12px; }
+.call-stack-list { display: flex; flex-direction: column; gap: 2px; }
+.stack-frame {
+    display: flex; align-items: center; gap: 8px; padding: 4px 8px;
+    border-radius: 4px; background: var(--bg-secondary);
+    border: 1px solid rgba(45,49,72,0.5); flex-wrap: wrap;
+}
+.frame-depth {
+    font-size: 10px; font-family: monospace; color: var(--text-muted);
+    min-width: 24px; flex-shrink: 0;
+}
+.frame-fn { font-size: 12px; color: #a5b4fc; font-weight: 600; flex-shrink: 0; }
+.frame-line { font-size: 11px; flex-shrink: 0; }
+.frame-args { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+
 /* 三级：事件流 */
-.fn-call-events { border-top: 1px solid var(--border-color); padding: 8px; background: rgba(15,17,23,0.6); }
+.fn-call-events { padding: 8px; }
 
 /* 事件表格 */
 .events-table-wrapper { overflow-x: auto; }

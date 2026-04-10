@@ -94,8 +94,11 @@
         <span>加载事件...</span>
       </div>
 
+      <!-- 跳转错误提示（独立显示，不影响表格渲染） -->
+      <div v-if="gotoFnError" class="goto-fn-error">{{ gotoFnError }}</div>
+
       <!-- 事件表格 -->
-      <div v-else-if="events.length > 0" class="events-table-wrapper">
+      <div v-if="events.length > 0" class="events-table-wrapper">
         <table class="events-table">
           <thead>
             <tr>
@@ -106,6 +109,7 @@
               <th>写入</th>
               <th>读取</th>
               <th>属性</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -153,12 +157,21 @@
                 >{{ f.base }}.{{ f.offset }}</span>
                 <span v-if="(event.fields || []).length > 2" class="var-more">+{{ event.fields.length - 2 }}</span>
               </td>
+              <td class="td-actions">
+                <button
+                  class="btn-goto-fn"
+                  :class="{ 'btn-goto-fn-loading': gotoFnLoading[event.seq] }"
+                  :disabled="gotoFnLoading[event.seq]"
+                  title="跳转到所属函数"
+                  @click.stop="gotoOwnerFn(event)"
+                >📌</button>
+              </td>
             </tr>
           </tbody>
         </table>
       </div>
 
-      <div v-else class="empty-state">
+      <div v-if="!eventsLoading && events.length === 0" class="empty-state">
         <p>暂无事件，或条件过滤后无结果</p>
       </div>
 
@@ -206,12 +219,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, reactive, onMounted, onUnmounted } from 'vue';
 import { truncate, formatValue } from '../../composables/useSessionUtils.js';
 
 const props = defineProps({
     sessionId: { type: String, required: true },
 });
+
+const emit = defineEmits(['goto-function']);
 
 const PAGE_SIZE = 100;
 
@@ -384,6 +399,37 @@ function clearFilters() {
     loadEvents(true);
 }
 
+// ─── 跳转到所属函数 ───────────────────────────────────────────────────────────
+
+const gotoFnLoading = reactive({}); // seq → boolean
+const gotoFnError   = ref('');
+
+async function gotoOwnerFn(event) {
+    if (gotoFnLoading[event.seq]) return;
+    gotoFnLoading[event.seq] = true;
+    gotoFnError.value = '';
+    try {
+        const res = await fetch(`/api/sessions/${props.sessionId}/events/${event.seq}/owner-fn`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data.ownerFn) {
+            gotoFnError.value = `SEQ ${event.seq} 不在任何函数调用内（顶层代码）`;
+            setTimeout(() => { gotoFnError.value = ''; }, 3000);
+            return;
+        }
+        emit('goto-function', {
+            fnName:  data.ownerFn.fnName,
+            fnIid:   data.ownerFn.fnIid,
+            callSeq: data.ownerFn.callSeq,
+        });
+    } catch (e) {
+        gotoFnError.value = `查询失败: ${e.message}`;
+        setTimeout(() => { gotoFnError.value = ''; }, 3000);
+    } finally {
+        gotoFnLoading[event.seq] = false;
+    }
+}
+
 defineExpose({ reload: () => loadEvents(true) });
 
 onMounted(async () => {
@@ -517,6 +563,23 @@ onUnmounted(() => {
 }
 .btn-link { background: none; border: none; color: var(--text-muted); font-size: 11px; cursor: pointer; padding: 0; }
 .btn-link:hover { color: var(--text-primary); }
+
+/* ─── 跳转函数按钮 ───────────────────────────────────────────────────────── */
+.td-actions { width: 32px; text-align: center; padding: 4px !important; }
+.btn-goto-fn {
+    background: none; border: none; cursor: pointer; font-size: 13px;
+    opacity: 0.45; transition: opacity 0.15s, transform 0.1s;
+    padding: 2px 4px; border-radius: 3px; line-height: 1;
+}
+.btn-goto-fn:hover:not(:disabled) { opacity: 1; background: rgba(99,102,241,0.15); }
+.btn-goto-fn:disabled { cursor: default; }
+.btn-goto-fn-loading { opacity: 0.3; animation: spin 0.8s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.goto-fn-error {
+    font-size: 11px; color: #f87171; margin: 6px 0; padding: 4px 8px;
+    background: rgba(248,113,113,0.08); border-radius: 4px;
+    border: 1px solid rgba(248,113,113,0.2);
+}
 
 /* ─── 值搜索 ─────────────────────────────────────────────────────────────── */
 .value-search-group {

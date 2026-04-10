@@ -298,6 +298,8 @@ function _runMigrations(db) {
         ['idx_vp_matched',         'value_patterns', 'session_id, matched_constant'],
         // call_edges 按 return_value：I3 字符串解密函数检测
         ['idx_call_edges_retval',  'call_edges',  'session_id, return_value'],
+        // 调用栈查询：owner-fn + call-stack API 的范围查询（call_seq <= N AND return_seq >= N）
+        ['idx_call_edges_stack',   'call_edges',  'session_id, call_seq, return_seq, depth'],
     ];
     for (const [idxName, tbl, cols] of newIndexes) {
         try {
