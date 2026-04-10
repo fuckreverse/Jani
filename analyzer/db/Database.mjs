@@ -391,6 +391,59 @@ function _runMigrations(db) {
         console.warn('[Database] migrate events table failed (non-fatal):', e.message);
     }
 
+    // ── value_dict 表创建（值字典：全局唯一字符串池）────────────────────────
+    // 新表：schema.sql 中已有 CREATE TABLE IF NOT EXISTS，此处补充索引（幂等）
+    try {
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS value_dict (
+                id          INTEGER PRIMARY KEY,
+                session_id  TEXT NOT NULL,
+                val_text    TEXT NOT NULL,
+                val_type    TEXT NOT NULL,
+                val_num     REAL,
+                UNIQUE (session_id, val_text)
+            );
+            CREATE INDEX IF NOT EXISTS idx_vd_session_text ON value_dict(session_id, val_text);
+            CREATE INDEX IF NOT EXISTS idx_vd_num ON value_dict(session_id, val_num) WHERE val_type = 'num';
+            CREATE INDEX IF NOT EXISTS idx_vd_type ON value_dict(session_id, val_type);
+        `);
+    } catch (e) {
+        if (!e.message.includes('already exists')) {
+            console.warn('[Database] create value_dict failed (non-fatal):', e.message);
+        }
+    }
+
+    // ── writes/reads/fields 新增 value_id 列（兼容旧数据库）────────────────
+    for (const tbl of ['writes', 'reads', 'fields']) {
+        try {
+            const cols = new Set(db.pragma(`table_info(${tbl})`).map(r => r.name));
+            if (cols.size > 0 && !cols.has('value_id')) {
+                db.exec(`ALTER TABLE ${tbl} ADD COLUMN value_id INTEGER`);
+            }
+        } catch (e) {
+            console.warn(`[Database] add ${tbl}.value_id failed (non-fatal):`, e.message);
+        }
+    }
+
+    // ── writes/reads/fields value_id 索引（补充，幂等）──────────────────────
+    const valueIdIndexes = [
+        ['idx_writes_value_id', 'writes', 'session_id, value_id'],
+        ['idx_reads_value_id',  'reads',  'session_id, value_id'],
+        ['idx_fields_value_id', 'fields', 'session_id, value_id'],
+    ];
+    for (const [idxName, tbl, cols] of valueIdIndexes) {
+        try {
+            const exists = db.prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name=?"
+            ).get(idxName);
+            if (!exists) {
+                db.exec(`CREATE INDEX IF NOT EXISTS ${idxName} ON ${tbl}(${cols})`);
+            }
+        } catch (e) {
+            console.warn(`[Database] create index ${idxName} failed (non-fatal):`, e.message);
+        }
+    }
+
     // ── obfuscation_hints.fn_name 列迁移 ─────────────────────────────────────
     // I3 v2：string_decoder 类型新增 fn_name，用于前端跳转函数面板
     try {

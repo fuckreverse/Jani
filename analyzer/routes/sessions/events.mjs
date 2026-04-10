@@ -5,6 +5,8 @@
  * GET /api/sessions/:id/events              事件列表（分页 + 过滤）
  * GET /api/sessions/:id/value-search        按值反查 value_index
  * GET /api/sessions/:id/value-search/events 值搜索 + 事件详情合并
+ * GET /api/sessions/:id/value-dict          值字典查询（按 val_type/text 搜索，含引用计数）
+ * GET /api/sessions/:id/value-dict/stats    值字典统计（总条目数、类型分布、Top-N 高频值）
  */
 
 import { Router } from 'express';
@@ -434,6 +436,193 @@ router.get('/value-search/events', (req, res) => {
         });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/value-search/events] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/value-dict/stats ────────────────────────────────
+// 值字典统计：总条目数、各类型数量、Top-N 高频引用值
+// 引用计数 = 在 writes + reads + fields 中 value_id 出现的总次数
+// 查询参数：
+//   topN=<n>  返回引用最多的 N 个值（默认 20，最大 200）
+
+router.get('/value-dict/stats', (req, res) => {
+    try {
+        const { id } = req.params;
+        const { topN = '20' } = req.query;
+        const topNNum = Math.min(Number(topN) || 20, 200);
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        // 总条目数（value_dict 中该 session 的唯一值数）
+        const totalRow = db.get(
+            'SELECT COUNT(*) AS total FROM value_dict WHERE session_id = ?', [id]
+        );
+
+        // 各类型分布
+        const typeStats = db.all(
+            `SELECT val_type, COUNT(*) AS cnt
+             FROM value_dict WHERE session_id = ?
+             GROUP BY val_type ORDER BY cnt DESC`,
+            [id]
+        );
+
+        // Top-N 高频引用值
+        // 使用 UNION ALL 聚合三张表的 value_id 引用次数
+        const topValues = db.all(
+            `SELECT vd.id, vd.val_text, vd.val_type, vd.val_num,
+                    SUM(ref.cnt) AS ref_count
+             FROM value_dict vd
+             JOIN (
+                 SELECT value_id, COUNT(*) AS cnt
+                 FROM writes WHERE session_id = ? AND value_id IS NOT NULL GROUP BY value_id
+                 UNION ALL
+                 SELECT value_id, COUNT(*) AS cnt
+                 FROM reads  WHERE session_id = ? AND value_id IS NOT NULL GROUP BY value_id
+                 UNION ALL
+                 SELECT value_id, COUNT(*) AS cnt
+                 FROM fields WHERE session_id = ? AND value_id IS NOT NULL GROUP BY value_id
+             ) ref ON ref.value_id = vd.id
+             WHERE vd.session_id = ?
+             GROUP BY vd.id
+             ORDER BY ref_count DESC
+             LIMIT ?`,
+            [id, id, id, id, topNNum]
+        );
+
+        res.json({
+            sessionId:    id,
+            totalEntries: totalRow?.total ?? 0,
+            typeStats:    typeStats.map(r => ({ type: r.val_type, count: r.cnt })),
+            topValues:    topValues.map(r => ({
+                id:        r.id,
+                valText:   r.val_text,
+                valType:   r.val_type,
+                valNum:    r.val_num ?? null,
+                refCount:  r.ref_count,
+            })),
+        });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/value-dict/stats] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/value-dict ──────────────────────────────────────
+// 值字典查询：按类型 / 文本搜索字典条目，并返回引用计数
+// 查询参数：
+//   valType=<type>      限定类型：num / bool / str / null / obj
+//   text=<string>       精确匹配 val_text（走 UNIQUE 索引，O(log N)）
+//   textLike=<pattern>  模糊匹配 val_text（支持 * 通配，走全扫描）
+//   numMin=<n>          数值下限（val_type='num' 时走 idx_vd_num 索引）
+//   numMax=<n>          数值上限
+//   withRefCount=1      是否附带各表引用计数（默认 0，附带时查询较慢）
+//   limit=<n>           返回条数（默认 100，最大 500）
+//   offset=<n>          偏移（默认 0）
+
+router.get('/value-dict', (req, res) => {
+    try {
+        const { id } = req.params;
+        const {
+            valType, text, textLike, numMin, numMax,
+            withRefCount = '0',
+            limit = '100', offset = '0',
+        } = req.query;
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const limitN  = Math.min(Number(limit)  || 100, 500);
+        const offsetN = Number(offset) || 0;
+
+        const conds  = ['vd.session_id = ?'];
+        const params = [id];
+
+        if (valType) {
+            conds.push('vd.val_type = ?');
+            params.push(valType);
+        }
+        if (text !== undefined) {
+            conds.push('vd.val_text = ?');
+            params.push(text);
+        } else if (textLike !== undefined) {
+            const pat = textLike
+                .replace(/%/g, '\\%').replace(/_/g, '\\_').replace(/\*/g, '%');
+            conds.push("vd.val_text LIKE ? ESCAPE '\\'");
+            params.push(pat);
+        }
+        if (numMin !== undefined) {
+            const lo = Number(numMin);
+            if (isNaN(lo)) return res.status(400).json({ error: 'numMin must be a number' });
+            conds.push('vd.val_type = ?', 'vd.val_num >= ?');
+            params.push('num', lo);
+        }
+        if (numMax !== undefined) {
+            const hi = Number(numMax);
+            if (isNaN(hi)) return res.status(400).json({ error: 'numMax must be a number' });
+            if (numMin === undefined) { conds.push('vd.val_type = ?'); params.push('num'); }
+            conds.push('vd.val_num <= ?');
+            params.push(hi);
+        }
+
+        const where = conds.join(' AND ');
+
+        let rows;
+        if (withRefCount === '1') {
+            // 附带引用计数：UNION ALL 聚合三张表，再 LEFT JOIN value_dict
+            rows = db.all(
+                `SELECT vd.id, vd.val_text, vd.val_type, vd.val_num,
+                        COALESCE(SUM(ref.cnt), 0) AS ref_count
+                 FROM value_dict vd
+                 LEFT JOIN (
+                     SELECT value_id, COUNT(*) AS cnt
+                     FROM writes WHERE session_id = ? AND value_id IS NOT NULL GROUP BY value_id
+                     UNION ALL
+                     SELECT value_id, COUNT(*) AS cnt
+                     FROM reads  WHERE session_id = ? AND value_id IS NOT NULL GROUP BY value_id
+                     UNION ALL
+                     SELECT value_id, COUNT(*) AS cnt
+                     FROM fields WHERE session_id = ? AND value_id IS NOT NULL GROUP BY value_id
+                 ) ref ON ref.value_id = vd.id
+                 WHERE ${where}
+                 GROUP BY vd.id
+                 ORDER BY vd.id ASC
+                 LIMIT ? OFFSET ?`,
+                [id, id, id, ...params, limitN, offsetN]
+            );
+        } else {
+            rows = db.all(
+                `SELECT vd.id, vd.val_text, vd.val_type, vd.val_num
+                 FROM value_dict vd
+                 WHERE ${where}
+                 ORDER BY vd.id ASC
+                 LIMIT ? OFFSET ?`,
+                [...params, limitN, offsetN]
+            );
+        }
+
+        // 总数（用于分页）
+        const totalRow = db.get(
+            `SELECT COUNT(*) AS total FROM value_dict vd WHERE ${where}`,
+            params
+        );
+
+        res.json({
+            sessionId: id,
+            entries:   rows.map(r => ({
+                id:        r.id,
+                valText:   r.val_text,
+                valType:   r.val_type,
+                valNum:    r.val_num ?? null,
+                refCount:  r.ref_count ?? undefined,
+            })),
+            total:   totalRow?.total ?? 0,
+            count:   rows.length,
+            hasMore: offsetN + rows.length < (totalRow?.total ?? 0),
+        });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/value-dict] error:');
         res.status(500).json({ error: e.message });
     }
 });

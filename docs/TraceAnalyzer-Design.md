@@ -55,7 +55,7 @@ Jani 的插桩引擎已能产出高质量 trace（`.bin` + `.smap.json`），包
 │  │              SQLite（better-sqlite3，WAL 模式写磁盘）   │  │
 │  │  sessions | events | writes | reads | fields | smap   │  │
 │  │  call_edges | taint_paths | var_lifetime | scopes      │  │
-│  │  value_patterns | bookmarks | value_index | ...        │  │
+│  │  value_dict | value_patterns | bookmarks | value_index  │  │
 │  │  plugin_checkpoints（断点恢复 / 进度持久化）            │  │
 │  └────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
@@ -139,6 +139,7 @@ CREATE TABLE writes (
     session_id  TEXT NOT NULL,
     name        TEXT,
     value       TEXT,     -- JSON 序列化
+    value_id    INTEGER,  -- 引用 value_dict.id（F1 v2+ 填充，NULL 表示旧数据）
     omitted     INTEGER DEFAULT 0
 );
 
@@ -149,6 +150,7 @@ CREATE TABLE reads (
     session_id  TEXT NOT NULL,
     name        TEXT,
     value       TEXT,
+    value_id    INTEGER,  -- 引用 value_dict.id（F1 v2+ 填充，NULL 表示旧数据）
     omitted     INTEGER DEFAULT 0
 );
 
@@ -161,8 +163,22 @@ CREATE TABLE fields (
     offset      TEXT,
     is_write    INTEGER,
     value       TEXT,
+    value_id    INTEGER,  -- 引用 value_dict.id（F1 v2+ 填充，NULL 表示旧数据）
     omitted     INTEGER DEFAULT 0,
     base_oid    INTEGER   -- 运行时对象唯一 ID（OID），NULL/0 表示非对象或 OID 未知
+);
+
+-- 值字典（由 F1 EventIndex 填充，全局唯一字符串池）
+-- writes/reads/fields.value_id 引用此表的 id，对重复值去重存储
+-- val_type: 'num' / 'bool' / 'str' / 'null' / 'obj'
+-- 典型压缩比：循环中同一数值 100k 次写入 → 字典只存 1 行
+CREATE TABLE value_dict (
+    id          INTEGER PRIMARY KEY,  -- 内存计数器分配，非 AUTOINCREMENT
+    session_id  TEXT NOT NULL,
+    val_text    TEXT NOT NULL,        -- 原始序列化字符串（同 writes/reads/fields.value）
+    val_type    TEXT NOT NULL,        -- 'num' / 'bool' / 'str' / 'null' / 'obj'
+    val_num     REAL,                 -- val_type='num' 时有效，用于数值范围查询
+    UNIQUE (session_id, val_text)
 );
 
 -- 源码映射（来自 .smap.json）
@@ -219,6 +235,9 @@ CREATE TABLE var_lifetime (
 -- 值索引（由 F1 EventIndex 填充，供值搜索 API 使用）
 -- 对每个 write/read/field 的值做类型化索引，支持按值反查事件
 -- val_type: 'num' / 'bool' / 'str'；VI_MAX_SAME=50：同一值最多记录 50 条，防止循环变量爆炸
+-- 注意：value_index 与 value_dict 共存但定位不同：
+--   value_dict = 去重存储（每个唯一值 1 行），writes/reads/fields.value_id 引用
+--   value_index = 反查索引（每次出现 1 行，上限 50），供 value-search API 使用
 CREATE TABLE value_index (
     session_id  TEXT NOT NULL,
     event_id    INTEGER NOT NULL,
@@ -242,6 +261,17 @@ CREATE INDEX idx_fields_offset       ON fields(session_id, offset);
 CREATE INDEX idx_call_edges_session  ON call_edges(session_id);
 CREATE INDEX idx_taint_session       ON taint_paths(session_id);
 CREATE INDEX idx_var_lifetime_name   ON var_lifetime(session_id, name);
+
+-- value_dict 索引（由 _runMigrations 创建，不在 schema.sql 中定义，
+-- 避免旧数据库升级时因列不存在而报错；value_id 列通过 ALTER TABLE ADD COLUMN 添加后才创建）
+CREATE UNIQUE INDEX idx_vd_session_text ON value_dict(session_id, val_text); -- 查重
+CREATE INDEX idx_vd_num  ON value_dict(session_id, val_num) WHERE val_type='num'; -- 数值范围查询
+CREATE INDEX idx_vd_type ON value_dict(session_id, val_type); -- 按类型过滤
+
+-- value_id 反查索引（由 _runMigrations 在 ALTER TABLE ADD COLUMN 之后创建）
+CREATE INDEX idx_writes_value_id ON writes(session_id, value_id);
+CREATE INDEX idx_reads_value_id  ON reads(session_id, value_id);
+CREATE INDEX idx_fields_value_id ON fields(session_id, value_id);
 ```
 
 ```sql
@@ -306,14 +336,23 @@ API 兼容层（与原 sql.js 版本完全兼容）
 
 #### 在线迁移（`_runMigrations`）
 
-旧 DB 文件升级时自动执行列添加（ALTER TABLE ... ADD COLUMN IF NOT EXISTS 等），保证向后兼容：
+旧 DB 文件升级时自动执行列添加（ALTER TABLE ... ADD COLUMN 等），保证向后兼容：
 
 ```
-迁移项示例：
-  - call_edges 表：添加 own_event_count 列
-  - fields 表：添加 base_oid 列（替代已废弃的 base 字符串列）
+迁移项（按执行顺序）：
+  - sessions 表：添加 project_id 列
   - projects 表：添加 preprocessed_path 列
+  - writes/reads/fields 表：去除 AUTOINCREMENT + FOREIGN KEY（重建表，提升批量 INSERT 性能）
   - events 表迁移：将旧 TEXT 类型的 type 列转为 INTEGER（重建表）
+  - call_edges 表：添加 own_event_count 列
+  - obfuscation_hints 表：添加 fn_name 列
+  - object_timelines 表：添加 src_text 列
+  - value_dict 表：CREATE TABLE IF NOT EXISTS（新表，幂等）
+  - writes/reads/fields 表：ALTER TABLE ADD COLUMN value_id INTEGER（旧数据 NULL）
+  - value_dict 索引：idx_vd_session_text / idx_vd_num / idx_vd_type
+  - value_id 索引：idx_writes_value_id / idx_reads_value_id / idx_fields_value_id
+    （必须在 value_id 列添加之后创建，避免旧库升级报"no such column: value_id"）
+  - oid_aliases 表：CREATE TABLE IF NOT EXISTS（新表，幂等）
 ```
 
 #### 文件位置
@@ -436,8 +475,10 @@ phase1 全部完成 → 通知 UI（type: 'all_done', phase: 'phase1'）
 #### F1 · EventIndex
 - **依赖：** 无
 - **输入：** `.bin` 文件
-- **功能：** 解析二进制 trace，写入 `events / writes / reads / fields` 表
+- **功能：** 解析二进制 trace，写入 `events / writes / reads / fields / value_dict` 表
 - **输出：** 数据库填充完成
+- **值字典机制：** 内存 `Map<val_text, id>` 去重，内存计数器分配 ID（避免 N+1 查询），
+  `INSERT OR IGNORE` 保证幂等；`writes/reads/fields.value_id` 同步填充
 
 #### F2 · SmapLoader
 - **依赖：** 无
@@ -949,6 +990,17 @@ GET  /api/sessions/:id/value-search/events?num=0.5&varName=key&offset=0&limit=50
     参数与 value-search 相同，额外支持 offset/limit 分页
     返回：{ events: [...], total, count, hasMore }
 
+GET  /api/sessions/:id/value-dict/stats
+    值字典统计信息（value_dict 表）
+    返回：{ total, byType: { num, str, bool, null, obj }, topValues: [{ val_text, val_type, refCount }] }
+    refCount = 该值在 writes+reads+fields 中被引用的总次数
+
+GET  /api/sessions/:id/value-dict?type=num&text=foo&numMin=0&numMax=100&offset=0&limit=50&withRefCount=false
+    查询值字典条目，支持：
+      type（按 val_type 过滤）/ text（精确文本匹配）/ numMin+numMax（数值范围，仅 type=num）
+      offset+limit（分页）/ withRefCount=true（附带引用计数，需 JOIN writes/reads/fields，较慢）
+    返回：{ entries: [{ id, val_text, val_type, val_num, refCount? }], total, hasMore }
+
 GET  /api/sessions/:id/taint?var=key&direction=forward
     触发/获取污点追踪结果
 
@@ -1289,11 +1341,18 @@ Jani/
   - `GET /api/sessions/:id/value-search/events`（值搜索 + 事件详情合并）
 - [x] **A6 FunctionSignatureInfer 移除**：功能冗余，依赖该插件的 `I2`/`I4` 已更新依赖关系
 - [x] **EventSerializer 增强**：屏蔽对象 `toJSON` 方法防止插桩代码递归调用；`fields` 序列化切换到 `base_oid`
+- [x] **`value_dict` 表**：值字典去重表，由 F1 EventIndex v2 填充
+  - `writes/reads/fields` 各新增 `value_id INTEGER` 列（外键引用 `value_dict.id`）
+  - 旧数据 `value_id = NULL`（向后兼容），新会话完整填充
+  - 内存 `Map<val_text, id>` + 局部计数器，零额外 DB 查询；`INSERT OR IGNORE` 批量幂等写入
+  - 三条新 API：`GET /api/sessions/:id/value-dict`（条目查询） + `GET /api/sessions/:id/value-dict/stats`（统计）
+  - `_runMigrations` 自动升级旧库（`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ADD COLUMN`）
+  - value_dict / value_id 索引仅在 `_runMigrations` 中创建，避免 `schema.sql` 执行时"列不存在"报错
 
 ### Phase 9：代码质量重构 ✅ 已完成
 - [x] **`routes/sessions.mjs` 拆分**（原 ~1967 行 → 5 个子模块）：
   - `sessions/core.mjs`：会话 CRUD + 插件分阶段调度（re-run / delete / checkpoints）
-  - `sessions/events.mjs`：事件查询 API（event-types / events / value-search）
+  - `sessions/events.mjs`：事件查询 API（event-types / events / value-search / **value-dict**）
   - `sessions/functions.mjs`：函数调用 API（functions / calls / call-graph / call-stack / owner-fn）
   - `sessions/analysis.mjs`：分析结果 API（hot-iids / taint / dataflow / strings / object-timelines / summary 等）
   - `sessions/utils.mjs`：共享工具函数（`safeParseJson` / `groupBy` / `BUILTIN_FN_NAMES`）
@@ -1319,6 +1378,8 @@ Jani/
 | MCP 传输协议 | stdio + HTTP SSE 双实现 | stdio 供本地直连，SSE 供远程 LLM 访问，覆盖所有场景 |
 | MCP 权限控制 | 暂不实现 | 本地工具，无需隔离；后续按需添加 |
 | MCP 传输标准 | Streamable HTTP（主）+ SSE（兼容）+ stdio（本地） | 覆盖新旧客户端，符合 MCP 2025-03-26 规范 |
+| value_dict 与 value_index 共存 | value_dict = 去重存储；value_index = 反查索引 | 两者定位不同：value_dict 节省存储（重复值只存一份）并支持 JOIN 聚合；value_index 保留精确的"值→事件"映射，上限 50 防爆炸，供 value-search API 使用 |
+| value_id 索引创建时机 | 不放 schema.sql，改放 `_runMigrations`（ALTER TABLE 之后） | 旧数据库升级时 `value_id` 列通过 ALTER TABLE 添加；若提前在 schema.sql 建索引，exec(schema) 会因列不存在报"SqliteError: no such column"而启动失败 |
 | F4 VariableLifetime | 持久化到 SQLite | 避免跨会话重跑插件时数据丢失 |
 | JS 执行环境 | Node.js + JSDOM 可选 | 目标 JS 可能依赖浏览器环境，纯 Node.js 无法运行 |
 | .smap.json 必填性 | 可选（降级处理） | 缺失时跳过 F2，iid 映射不可用，但事件流仍完整 |

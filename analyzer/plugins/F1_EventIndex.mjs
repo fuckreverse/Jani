@@ -3,7 +3,7 @@
  *
  * 依赖：无
  * 输入：.bin 文件（JTB1 格式）
- * 输出：events、writes、reads、fields 表
+ * 输出：events、writes、reads、fields、value_dict 表
  *
  * 采用 32MB 滑动窗口流式读取，避免大文件 OOM。
  *
@@ -14,6 +14,7 @@
  *   - serializeValue fast-path：基础类型跳过 try/catch（V8 JIT 友好）
  *   - stmtXxx.run(...row) spread 传参：比数组传参快
  *   - F1 运行期间临时关闭外键约束，消除每次 INSERT 的父表查找开销
+ *   - value_dict：内存 Map 分配局部 ID，避免 N+1 查询；INSERT OR IGNORE 保证幂等
  */
 
 import { openSync, readSync, fstatSync, closeSync } from 'fs';
@@ -84,6 +85,7 @@ export default class F1EventIndex extends BasePlugin {
         this.emitProgress(ctx, '清理旧数据...', 2);
         db.run('DELETE FROM oid_aliases  WHERE session_id = ?', sessionId);
         db.run('DELETE FROM value_index WHERE session_id = ?', sessionId);
+        db.run('DELETE FROM value_dict  WHERE session_id = ?', sessionId);
         db.run('DELETE FROM fields WHERE session_id = ?', sessionId);
         db.run('DELETE FROM reads  WHERE session_id = ?', sessionId);
         db.run('DELETE FROM writes WHERE session_id = ?', sessionId);
@@ -100,14 +102,18 @@ export default class F1EventIndex extends BasePlugin {
         const stmtEvent = rawDb.prepare(
             'INSERT OR IGNORE INTO events (id, session_id, type, iid) VALUES (?, ?, ?, ?)'
         );
+        // value_dict：INSERT OR IGNORE，id 由内存计数器分配，避免 N+1 查询
+        const stmtVD = rawDb.prepare(
+            'INSERT OR IGNORE INTO value_dict (id, session_id, val_text, val_type, val_num) VALUES (?, ?, ?, ?, ?)'
+        );
         const stmtWrite = rawDb.prepare(
-            'INSERT INTO writes (event_id, session_id, name, value, omitted) VALUES (?, ?, ?, ?, ?)'
+            'INSERT INTO writes (event_id, session_id, name, value, value_id, omitted) VALUES (?, ?, ?, ?, ?, ?)'
         );
         const stmtRead = rawDb.prepare(
-            'INSERT INTO reads (event_id, session_id, name, value, omitted) VALUES (?, ?, ?, ?, ?)'
+            'INSERT INTO reads (event_id, session_id, name, value, value_id, omitted) VALUES (?, ?, ?, ?, ?, ?)'
         );
         const stmtField = rawDb.prepare(
-            'INSERT INTO fields (event_id, session_id, offset, is_write, value, omitted, base_oid) VALUES (?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO fields (event_id, session_id, offset, is_write, value, value_id, omitted, base_oid) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
         );
         const stmtVI = rawDb.prepare(
             'INSERT OR IGNORE INTO value_index (session_id, event_id, val_type, val_num, val_str, var_name, source) VALUES (?, ?, ?, ?, ?, ?, ?)'
@@ -120,9 +126,54 @@ export default class F1EventIndex extends BasePlugin {
         // value_index 去重计数器：val_key → count（防止同一值无限写入）
         const viCount = new Map(); // `${val_type}:${val_key}` → number
 
+        // ── 值字典（内存局部字典，session 级别唯一）────────────────────────────
+        // key: serialized value text（即 serializeValue 的返回值）
+        // val: 局部 INTEGER id（递增，从 1 开始）
+        // 通过内存 Map 完全避免 SELECT 查询，INSERT OR IGNORE 保证冲突时不覆盖
+        const vdMap = new Map(); // val_text → value_id
+        let vdNextId = 1;
+
+        /**
+         * 将一个序列化值字符串写入值字典，返回其 id。
+         * - null 值（undefined→null 的序列化）直接返回 null，不入字典
+         * - 热路径：Map.get 命中时 O(1)，无任何 DB 操作
+         *
+         * @param {string|null} sv - serializeValue() 的返回值
+         * @param {Array}       vdBatch - 当前批次 value_dict INSERT 缓冲
+         * @returns {number|null} value_id or null
+         */
+        const internValue = (sv, vdBatch) => {
+            if (sv === null) return null;
+            let id = vdMap.get(sv);
+            if (id !== undefined) return id;
+            // 新值：分配局部 ID，推入 vdBatch
+            id = vdNextId++;
+            vdMap.set(sv, id);
+            // 解析类型和数值，与 pushVI 逻辑保持一致
+            let val_type, val_num;
+            if (sv === 'null') {
+                val_type = 'null'; val_num = null;
+            } else if (sv === 'true' || sv === 'false') {
+                val_type = 'bool'; val_num = null;
+            } else {
+                const n = Number(sv);
+                if (!isNaN(n) && sv.trim() !== '') {
+                    val_type = 'num'; val_num = n;
+                } else if (sv.startsWith('"') || sv.startsWith('{') || sv.startsWith('[')) {
+                    val_type = sv.startsWith('"') ? 'str' : 'obj'; val_num = null;
+                } else {
+                    val_type = 'str'; val_num = null;
+                }
+            }
+            vdBatch.push([id, sessionId, sv, val_type, val_num]);
+            return id;
+        };
+
         // better-sqlite3 原生事务：spread 传参比数组传参快（跳过内部类型判断）
         let oidAliasBatch = [];
-        const flushTx = rawDb.transaction((evts, wrs, rds, flds, vis, oas) => {
+        const flushTx = rawDb.transaction((evts, wrs, rds, flds, vis, oas, vds) => {
+            // value_dict 必须先写，writes/reads/fields 引用其 id（外键关系，此处不启用约束）
+            for (const v of vds)  stmtVD.run(...v);
             for (const e of evts) stmtEvent.run(...e);
             for (const w of wrs)  stmtWrite.run(...w);
             for (const r of rds)  stmtRead.run(...r);
@@ -154,6 +205,7 @@ export default class F1EventIndex extends BasePlugin {
         let readBatch  = [];
         let fieldBatch = [];
         let viBatch    = [];
+        let vdBatch    = [];  // value_dict INSERT 缓冲（当 flush 时写入）
         let totalEvents = 0;
         let batchCount  = 0;
         const dict = new Map();
@@ -164,14 +216,16 @@ export default class F1EventIndex extends BasePlugin {
         let lastReportEvents = 0;
 
         const flush = () => {
-            if (eventBatch.length === 0) return;
-            flushTx(eventBatch, writeBatch, readBatch, fieldBatch, viBatch, oidAliasBatch);
+            if (eventBatch.length === 0 && vdBatch.length === 0) return;
+            flushTx(eventBatch, writeBatch, readBatch, fieldBatch, viBatch, oidAliasBatch, vdBatch);
             eventBatch    = [];
             writeBatch    = [];
             readBatch     = [];
             fieldBatch    = [];
             viBatch       = [];
             oidAliasBatch = [];
+            vdBatch       = [];
+            // 注意：vdMap 和 vdNextId 不重置，跨 batch 保持内存字典完整性
         };
 
         /** 尝试将一个值加入 value_index 批次（去重 + 类型化） */
@@ -258,7 +312,8 @@ export default class F1EventIndex extends BasePlugin {
             if (event.writes?.length > 0) {
                 for (const w of event.writes) {
                     const sv = serializeValue(w.value);
-                    writeBatch.push([eventId, sessionId, w.name ?? null, sv, w.omitted ? 1 : 0]);
+                    const vid = internValue(sv, vdBatch);
+                    writeBatch.push([eventId, sessionId, w.name ?? null, sv, vid, w.omitted ? 1 : 0]);
                     if (!w.omitted) pushVI(eventId, sv, w.name, 'write');
                     // 方向三：v2 格式时，write.oid != null 表示写入值是对象引用
                     // 记录到 oid_aliases 表（UNIQUE，同一变量只记最早出现的）
@@ -270,7 +325,8 @@ export default class F1EventIndex extends BasePlugin {
             if (event.reads?.length > 0) {
                 for (const r of event.reads) {
                     const sv = serializeValue(r.value);
-                    readBatch.push([eventId, sessionId, r.name ?? null, sv, r.omitted ? 1 : 0]);
+                    const vid = internValue(sv, vdBatch);
+                    readBatch.push([eventId, sessionId, r.name ?? null, sv, vid, r.omitted ? 1 : 0]);
                     if (!r.omitted) pushVI(eventId, sv, r.name, 'read');
                 }
             }
@@ -279,14 +335,18 @@ export default class F1EventIndex extends BasePlugin {
             // F3_CallGraphBuilder 依赖此字段来识别函数名；若缺失则降级为 fn@<iid>
             if (event.type === 'CALL_PRE') {
                 if (event.fn) {
-                    readBatch.push([eventId, sessionId, 'callee', JSON.stringify(event.fn), 0]);
+                    const sv = JSON.stringify(event.fn);
+                    const vid = internValue(sv, vdBatch);
+                    readBatch.push([eventId, sessionId, 'callee', sv, vid, 0]);
                 }
                 // 把参数列表写入 writes 表（name='arg0','arg1',...），F3 读取 args 时依赖此数据
                 if (event.args?.length > 0) {
                     const argc = Math.min(event.args.length, 8);
                     for (let i = 0; i < argc; i++) {
                         const v = event.args[i];
-                        writeBatch.push([eventId, sessionId, `arg${i}`, serializeValue(v), v === undefined ? 1 : 0]);
+                        const sv = serializeValue(v);
+                        const vid = internValue(sv, vdBatch);
+                        writeBatch.push([eventId, sessionId, `arg${i}`, sv, vid, v === undefined ? 1 : 0]);
                     }
                 }
             }
@@ -296,15 +356,20 @@ export default class F1EventIndex extends BasePlugin {
             if (event.type === 'CALL') {
                 // result===undefined 表示被 omitted（值太大被截断），仍写一行以标记存在
                 const omitted = event.result === undefined ? 1 : 0;
-                writeBatch.push([eventId, sessionId, 'return', serializeValue(event.result), omitted]);
+                const sv = serializeValue(event.result);
+                const vid = internValue(sv, vdBatch);
+                writeBatch.push([eventId, sessionId, 'return', sv, vid, omitted]);
             }
             if (event.fields?.length > 0) {
                 for (const f of event.fields) {
+                    const sv = serializeValue(f.value);
+                    const vid = internValue(sv, vdBatch);
                     fieldBatch.push([
                         eventId, sessionId,
                         f.offset ?? null,
                         f.isWrite ? 1 : 0,
-                        serializeValue(f.value),
+                        sv,
+                        vid,
                         f.omitted ? 1 : 0,
                         f.baseOid ?? null,
                     ]);

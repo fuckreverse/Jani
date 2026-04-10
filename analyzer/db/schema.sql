@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 -- ─── 变量写入 ────────────────────────────────────────────────────────────────
+-- value_id: 引用 value_dict.id（F1 v2+ 填充）；NULL 表示旧数据或值无法字典化
 
 CREATE TABLE IF NOT EXISTS writes (
     id          INTEGER PRIMARY KEY,
@@ -58,6 +59,7 @@ CREATE TABLE IF NOT EXISTS writes (
     session_id  TEXT NOT NULL,
     name        TEXT,
     value       TEXT,
+    value_id    INTEGER,        -- 引用 value_dict.id，与 value 列冗余但压缩友好
     omitted     INTEGER DEFAULT 0
 );
 
@@ -69,6 +71,7 @@ CREATE TABLE IF NOT EXISTS reads (
     session_id  TEXT NOT NULL,
     name        TEXT,
     value       TEXT,
+    value_id    INTEGER,        -- 引用 value_dict.id，与 value 列冗余但压缩友好
     omitted     INTEGER DEFAULT 0
 );
 
@@ -81,6 +84,7 @@ session_id  TEXT NOT NULL,
 offset      TEXT,
 is_write    INTEGER,
 value       TEXT,
+value_id    INTEGER,            -- 引用 value_dict.id，与 value 列冗余但压缩友好
 omitted     INTEGER DEFAULT 0,
 base_oid    INTEGER             -- 运行时对象唯一 ID（OID），NULL 表示非对象或 OID 未知
 );
@@ -349,6 +353,28 @@ CREATE TABLE IF NOT EXISTS dataflow_edges (
 );
 CREATE INDEX IF NOT EXISTS idx_df_session ON dataflow_edges(session_id);
 
+-- ─── 值字典（F1 EventIndex 填充，全局唯一字符串池）──────────────────────────
+-- 将 writes/reads/fields 中的 value 文本去重存储，每个 session 独立字典。
+-- writes/reads/fields.value_id 引用此表的 id，减少重复字符串存储。
+-- val_type: 'num' / 'bool' / 'str' / 'null' / 'obj'
+-- val_num:  数值（val_type='num' 时有效，方便数值范围查询）
+-- 典型压缩比：循环场景下同一个数值 100k 次写入 → 只存 1 行
+
+CREATE TABLE IF NOT EXISTS value_dict (
+    id          INTEGER PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    val_text    TEXT NOT NULL,   -- 原始序列化字符串（同 writes/reads/fields.value）
+    val_type    TEXT NOT NULL,   -- 'num' / 'bool' / 'str' / 'null' / 'obj'
+    val_num     REAL,            -- val_type='num' 时有效，用于数值范围查询
+    UNIQUE (session_id, val_text)
+);
+-- 按 session + val_text 查找：F1 写入时查重
+CREATE INDEX IF NOT EXISTS idx_vd_session_text ON value_dict(session_id, val_text);
+-- 按 session + val_num 范围查询：数值搜索
+CREATE INDEX IF NOT EXISTS idx_vd_num ON value_dict(session_id, val_num) WHERE val_type = 'num';
+-- 按 val_type 过滤：列出某 session 的所有字符串值 / 数值等
+CREATE INDEX IF NOT EXISTS idx_vd_type ON value_dict(session_id, val_type);
+
 -- ─── 值索引（F1 EventIndex 填充，供值搜索 API 使用）────────────────────────
 -- 对每个 write/read/field 的值做类型化索引，支持按值反查事件
 -- val_type: 'num' / 'bool' / 'str'
@@ -394,6 +420,9 @@ CREATE INDEX IF NOT EXISTS idx_reads_name          ON reads(session_id, name);
 CREATE INDEX IF NOT EXISTS idx_reads_event         ON reads(session_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_fields_offset       ON fields(session_id, offset);
 CREATE INDEX IF NOT EXISTS idx_fields_event        ON fields(session_id, event_id);
+-- 注意：idx_writes_value_id / idx_reads_value_id / idx_fields_value_id
+-- 由 Database.mjs _runMigrations() 在 value_id 列迁移完成后创建，不在此处定义
+-- （原因：旧数据库升级时 schema.sql 先于 ALTER TABLE 执行，此处创建索引会因列不存在而报错）
 CREATE INDEX IF NOT EXISTS idx_call_edges_session  ON call_edges(session_id);
 CREATE INDEX IF NOT EXISTS idx_call_edges_fn_name  ON call_edges(session_id, fn_name);
 CREATE INDEX IF NOT EXISTS idx_call_edges_retval   ON call_edges(session_id, return_value);
