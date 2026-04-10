@@ -147,15 +147,20 @@
                     <span
                       v-for="(arg, i) in (call.args || []).slice(0, 4)"
                       :key="i"
-                      class="var-chip var-read"
-                      :title="`${arg.name || 'arg'+i} = ${JSON.stringify(arg.value || arg)}`"
+                      class="var-chip var-read var-chip-expandable"
+                      title="点击查看完整参数值"
+                      @click.stop="openValueViewer(arg.value !== undefined ? arg.value : arg, arg.name || ('arg'+i))"
                     >{{ arg.name || ('arg'+i) }}=<em style="color:#fcd34d">{{ truncate(formatArgValue(arg.value !== undefined ? arg.value : arg), 15) }}</em></span>
                     <span v-if="(call.args || []).length > 4" class="var-more">+{{ call.args.length - 4 }}</span>
                   </span>
                   <!-- 返回值 -->
                   <span v-if="call.returnValue !== null && call.returnValue !== undefined" class="fn-ret-preview">
                     <span class="filter-label" style="margin-left:8px">→</span>
-                    <span class="var-chip var-write">{{ truncate(formatArgValue(call.returnValue), 20) }}</span>
+                    <span
+                      class="var-chip var-write var-chip-expandable"
+                      title="点击查看完整返回值"
+                      @click.stop="openValueViewer(call.returnValue, 'return')"
+                    >{{ truncate(formatArgValue(call.returnValue), 20) }}</span>
                   </span>
                 </div>
 
@@ -257,6 +262,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue';
 import { truncate, formatValue, formatArgValue } from '../../composables/useSessionUtils.js';
+import { openValueViewer } from '../../composables/useValueViewer.js';
 import CallDetail from './CallDetail.vue';
 
 const props = defineProps({
@@ -861,6 +867,8 @@ onMounted(() => loadFnExec(true));
 .var-chip { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 11px; font-family: monospace; margin-right: 3px; cursor: default; }
 .var-write { background: rgba(34,197,94,0.15);  color: #86efac; }
 .var-read  { background: rgba(99,102,241,0.15); color: #a5b4fc; }
+.var-chip-expandable { cursor: pointer; }
+.var-chip-expandable:hover { filter: brightness(1.2); outline: 1px solid rgba(255,255,255,0.15); }
 .var-chip-val { opacity: 0.75; font-size: 10px; margin-left: 2px; }
 .var-chip-val em { font-style: normal; color: #fcd34d; }
 .var-more { font-size: 11px; color: var(--text-muted); }

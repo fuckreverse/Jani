@@ -1,5 +1,8 @@
 <template>
   <div class="session-detail">
+    <!-- 全局值查看器 modal -->
+    <ValueViewer />
+
     <!-- 进度抽屉 -->
     <ProgressDrawer
       :visible="showProgressDrawer"
@@ -94,6 +97,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 
 import ProgressDrawer  from './ProgressDrawer.vue';
+import ValueViewer     from '../components/ValueViewer.vue';
 import SessionHeader   from '../components/session/SessionHeader.vue';
 import FileInfoBar     from '../components/session/FileInfoBar.vue';
 import EventsTab       from '../components/session/EventsTab.vue';

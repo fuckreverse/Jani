@@ -95,8 +95,9 @@
                         <span
                           v-for="(val, key) in iter.vars_snapshot"
                           :key="key"
-                          class="var-chip var-write"
-                          :title="`${key} = ${val}`"
+                          class="var-chip var-write var-chip-expandable"
+                          title="点击查看完整值"
+                          @click.stop="openValueViewer(val, key)"
                         >{{ key }}=<em>{{ truncateVal(val) }}</em></span>
                         <span v-if="Object.keys(iter.vars_snapshot).length === 0" class="text-muted">—</span>
                       </div>
@@ -130,6 +131,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue';
+import { openValueViewer } from '../../composables/useValueViewer.js';
 
 const props = defineProps({
     sessionId: { type: String, required: true },
@@ -371,5 +373,7 @@ onMounted(loadLoops);
 }
 .var-write { background: rgba(34,197,94,0.15); color: #86efac; }
 .var-chip em { font-style: normal; color: #fcd34d; font-size: 10px; margin-left: 2px; }
+.var-chip-expandable { cursor: pointer; }
+.var-chip-expandable:hover { filter: brightness(1.2); outline: 1px solid rgba(255,255,255,0.15); }
 .text-muted { color: var(--text-muted); font-size: 11px; }
 </style>

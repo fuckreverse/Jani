@@ -57,8 +57,12 @@
 
               <!-- 值 + 解码展示区 -->
               <td class="td-value-cell">
-                <code class="src-text">{{ truncate(s.value, 80) }}</code>
-                <!-- url / hex 类型：按需解码按钮 -->
+                <code
+                  class="src-text str-value-clickable"
+                  title="点击查看完整字符串"
+                  @click="openValueViewer(s.value, s.var_name || 'string')"
+                >{{ truncate(s.value, 80) }}</code>
+                <!-- url / hex 类型：按需解码按鈕 -->
                 <template v-if="isDecodable(s.encoding_hint)">
                   <button
                     v-if="!decodedMap[s.id]"
@@ -71,7 +75,11 @@
                   </button>
                   <div v-else class="decoded-block">
                     <span class="decoded-label">解码后：</span>
-                    <code class="decoded-value">{{ truncate(decodedMap[s.id], 200) }}</code>
+                    <code
+                      class="decoded-value str-value-clickable"
+                      title="点击查看完整解码内容"
+                      @click="openValueViewer(decodedMap[s.id], (s.var_name || 'decoded') + ' [解码后]')"
+                    >{{ truncate(decodedMap[s.id], 200) }}</code>
                     <button class="btn-decode btn-decode-close" @click="delete decodedMap[s.id]">✕</button>
                   </div>
                 </template>
@@ -121,6 +129,7 @@
 <script setup>
 import { ref, computed, reactive } from 'vue';
 import { truncate } from '../../composables/useSessionUtils.js';
+import { openValueViewer } from '../../composables/useValueViewer.js';
 
 const props = defineProps({
     sessionId: { type: String, required: true },
@@ -337,6 +346,12 @@ onMounted(loadStrings);
     color: #86efac; font-family: monospace; font-size: 11px;
     word-break: break-all; flex: 1;
 }
+.str-value-clickable {
+    cursor: pointer;
+    border-bottom: 1px dashed rgba(134, 239, 172, 0.3);
+    transition: opacity 0.1s;
+}
+.str-value-clickable:hover { opacity: 0.8; border-bottom-style: solid; }
 
 /* 操作列 */
 .td-actions { width: 64px; text-align: center; padding: 4px 6px !important; white-space: nowrap; }

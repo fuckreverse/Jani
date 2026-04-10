@@ -151,7 +151,9 @@
                   v-for="w in (event.writes || []).slice(0, 3)"
                   :key="w.name"
                   class="var-chip var-write"
-                  :title="`${w.name} = ${JSON.stringify(w.value)}`"
+                  :class="{ 'var-chip-expandable': w.value !== null && w.value !== undefined && !w.omitted }"
+                  :title="w.value !== null && w.value !== undefined && !w.omitted ? '点击查看完整值' : `${w.name} = ${JSON.stringify(w.value)}`"
+                  @click.stop="w.value !== null && w.value !== undefined && !w.omitted && openValueViewer(w.value, w.name)"
                 >{{ w.name }}<span class="var-chip-val" v-if="w.value !== null && w.value !== undefined && !w.omitted">=<em>{{ truncate(formatValue(w.value), 20) }}</em></span><span class="var-chip-omitted" v-else-if="w.omitted">…</span></span>
                 <span v-if="(event.writes || []).length > 3" class="var-more">+{{ event.writes.length - 3 }}</span>
               </td>
@@ -160,7 +162,9 @@
                   v-for="r in (event.reads || []).slice(0, 3)"
                   :key="r.name"
                   class="var-chip var-read"
-                  :title="`${r.name} → ${JSON.stringify(r.value)}`"
+                  :class="{ 'var-chip-expandable': r.value !== null && r.value !== undefined && !r.omitted }"
+                  :title="r.value !== null && r.value !== undefined && !r.omitted ? '点击查看完整值' : `${r.name} → ${JSON.stringify(r.value)}`"
+                  @click.stop="r.value !== null && r.value !== undefined && !r.omitted && openValueViewer(r.value, r.name)"
                 >{{ r.name }}<span class="var-chip-val" v-if="r.value !== null && r.value !== undefined && !r.omitted">→<em>{{ truncate(formatValue(r.value), 20) }}</em></span><span class="var-chip-omitted" v-else-if="r.omitted">…</span></span>
                 <span v-if="(event.reads || []).length > 3" class="var-more">+{{ event.reads.length - 3 }}</span>
               </td>
@@ -203,12 +207,17 @@
     <div v-if="selectedEvent" class="event-detail card">
       <h2 class="section-title">事件详情 — SEQ {{ selectedEvent.seq }}</h2>
       <div class="detail-grid">
-        <div v-if="selectedEvent.writes?.length" class="detail-section">
+          <div v-if="selectedEvent.writes?.length" class="detail-section">
           <div class="detail-label">写入变量</div>
           <div v-for="w in selectedEvent.writes" :key="w.name" class="var-row">
             <span class="var-name">{{ w.name }}</span>
             <span class="var-arrow">=</span>
-            <code class="var-value">{{ formatValue(w.value) }}</code>
+            <code
+              class="var-value"
+              :class="{ 'var-value-clickable': !w.omitted && w.value !== null && w.value !== undefined }"
+              :title="!w.omitted && w.value !== null && w.value !== undefined ? '点击查看完整值' : ''"
+              @click="!w.omitted && w.value !== null && w.value !== undefined && openValueViewer(w.value, w.name)"
+            >{{ formatValue(w.value) }}</code>
             <span v-if="w.omitted" class="omitted-badge">OMITTED</span>
           </div>
         </div>
@@ -217,7 +226,12 @@
           <div v-for="r in selectedEvent.reads" :key="r.name" class="var-row">
             <span class="var-name">{{ r.name }}</span>
             <span class="var-arrow">→</span>
-            <code class="var-value">{{ formatValue(r.value) }}</code>
+            <code
+              class="var-value"
+              :class="{ 'var-value-clickable': !r.omitted && r.value !== null && r.value !== undefined }"
+              :title="!r.omitted && r.value !== null && r.value !== undefined ? '点击查看完整值' : ''"
+              @click="!r.omitted && r.value !== null && r.value !== undefined && openValueViewer(r.value, r.name)"
+            >{{ formatValue(r.value) }}</code>
             <span v-if="r.omitted" class="omitted-badge">OMITTED</span>
           </div>
         </div>
@@ -226,7 +240,12 @@
           <div v-for="f in selectedEvent.fields" :key="`${f.baseOid ?? '?'}.${f.offset}`" class="var-row">
             <span class="var-name">#{{ f.baseOid ?? '?' }}.{{ f.offset }}</span>
             <span class="var-arrow">{{ f.isWrite ? '=' : '→' }}</span>
-            <code class="var-value">{{ formatValue(f.value) }}</code>
+            <code
+              class="var-value"
+              :class="{ 'var-value-clickable': f.value !== null && f.value !== undefined }"
+              :title="f.value !== null && f.value !== undefined ? '点击查看完整值' : ''"
+              @click="f.value !== null && f.value !== undefined && openValueViewer(f.value, `#${f.baseOid ?? '?'}.${f.offset}`)"
+            >{{ formatValue(f.value) }}</code>
           </div>
         </div>
       </div>
@@ -237,6 +256,7 @@
 <script setup>
 import { ref, computed, reactive, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { truncate, formatValue } from '../../composables/useSessionUtils.js';
+import { openValueViewer } from '../../composables/useValueViewer.js';
 
 const props = defineProps({
     sessionId: { type: String, required: true },
@@ -525,6 +545,8 @@ onUnmounted(() => {
 .var-chip-val { opacity: 0.75; font-size: 10px; margin-left: 2px; }
 .var-chip-val em { font-style: normal; color: #fcd34d; }
 .var-chip-omitted { font-size: 10px; opacity: 0.5; margin-left: 1px; }
+.var-chip-expandable { cursor: pointer; }
+.var-chip-expandable:hover { filter: brightness(1.2); outline: 1px solid rgba(255,255,255,0.15); }
 .var-more { font-size: 11px; color: var(--text-muted); }
 
 /* 分页 */
@@ -552,6 +574,15 @@ onUnmounted(() => {
 .var-value {
     color: #fcd34d; max-width: 200px; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap;
+}
+.var-value-clickable {
+    cursor: pointer;
+    border-bottom: 1px dashed rgba(252, 211, 77, 0.4);
+    transition: color 0.1s, border-color 0.1s;
+}
+.var-value-clickable:hover {
+    color: #fef08a;
+    border-bottom-color: rgba(252, 211, 77, 0.8);
 }
 .omitted-badge {
     font-size: 10px; padding: 1px 5px; background: rgba(148,163,184,0.15);

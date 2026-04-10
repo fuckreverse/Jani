@@ -51,8 +51,24 @@
               </td>
               <td><code class="src-text">{{ t.base_var }}</code></td>
               <td><span class="var-chip var-field">{{ t.offset_key }}</span></td>
-              <td><code class="src-text" style="color:#94a3b8">{{ truncate(t.old_value, 40) || '—' }}</code></td>
-              <td><code class="src-text" style="color:#fcd34d">{{ truncate(t.new_value, 40) || '—' }}</code></td>
+              <td>
+                <code
+                  class="src-text"
+                  style="color:#94a3b8"
+                  :class="{ 'obj-value-clickable': t.old_value != null }"
+                  :title="t.old_value != null ? '点击查看完整旧值' : ''"
+                  @click="t.old_value != null && openValueViewer(tryParseJson(t.old_value), t.offset_key + ' (旧值)')"
+                >{{ truncate(t.old_value, 40) || '—' }}</code>
+              </td>
+              <td>
+                <code
+                  class="src-text"
+                  style="color:#fcd34d"
+                  :class="{ 'obj-value-clickable': t.new_value != null }"
+                  :title="t.new_value != null ? '点击查看完整新值' : ''"
+                  @click="t.new_value != null && openValueViewer(tryParseJson(t.new_value), t.offset_key + ' (新值)')"
+                >{{ truncate(t.new_value, 40) || '—' }}</code>
+              </td>
               <td class="td-seq">{{ t.line ?? '—' }}</td>
               <td class="td-seq">{{ t.change_seq }}</td>
             </tr>
@@ -85,6 +101,7 @@
 <script setup>
 import { ref, onMounted } from 'vue';
 import { truncate } from '../../composables/useSessionUtils.js';
+import { openValueViewer } from '../../composables/useValueViewer.js';
 
 const props = defineProps({
     sessionId: { type: String, required: true },
@@ -135,6 +152,11 @@ function onFilterChange() {
     loadObjTimelines(1);
 }
 
+function tryParseJson(s) {
+    if (s == null) return s;
+    try { return JSON.parse(s); } catch { return s; }
+}
+
 function goPage(p) {
     const pg = Math.max(1, Math.min(Number(p) || 1, totalPages.value));
     if (pg !== currentPage.value) {
@@ -176,6 +198,12 @@ onMounted(() => loadObjTimelines(1));
 .var-write { background: rgba(34,197,94,0.15); color: #86efac; }
 .var-read  { background: rgba(99,102,241,0.15); color: #a5b4fc; }
 .var-field { background: rgba(245,158,11,0.15); color: #fcd34d; }
+.obj-value-clickable {
+    cursor: pointer;
+    border-bottom: 1px dashed rgba(255,255,255,0.2);
+    transition: opacity 0.1s;
+}
+.obj-value-clickable:hover { opacity: 0.85; border-bottom-style: solid; }
 
 /* 分页 */
 .pagination-bar {

@@ -55,8 +55,9 @@
             <span
               v-for="(arg, i) in (frame.args || []).slice(0, 3)"
               :key="i"
-              class="var-chip var-read"
-              :title="`${arg.name || 'arg'+i} = ${JSON.stringify(arg.value !== undefined ? arg.value : arg)}`"
+              class="var-chip var-read var-chip-expandable"
+              title="点击查看完整参数值"
+              @click.stop="openValueViewer(arg.value !== undefined ? arg.value : arg, arg.name || ('arg'+i))"
             >{{ arg.name || ('arg'+i) }}=<em style="color:#fcd34d">{{ truncate(formatArgValue(arg.value !== undefined ? arg.value : arg), 12) }}</em></span>
             <span v-if="(frame.args || []).length > 3" class="var-more">+{{ frame.args.length - 3 }}</span>
           </span>
@@ -95,7 +96,9 @@
                   v-for="w in (ev.writes || []).slice(0, 2)"
                   :key="w.name"
                   class="var-chip var-write"
-                  :title="`${w.name} = ${JSON.stringify(w.value)}`"
+                  :class="{ 'var-chip-expandable': w.value !== null && w.value !== undefined && !w.omitted }"
+                  :title="w.value !== null && w.value !== undefined && !w.omitted ? '点击查看完整值' : `${w.name} = ${JSON.stringify(w.value)}`"
+                  @click.stop="w.value !== null && w.value !== undefined && !w.omitted && openValueViewer(w.value, w.name)"
                 >{{ w.name }}<span class="var-chip-val" v-if="w.value !== null && w.value !== undefined && !w.omitted">=<em>{{ truncate(formatValue(w.value), 15) }}</em></span></span>
                 <span v-if="(ev.writes || []).length > 2" class="var-more">+{{ ev.writes.length - 2 }}</span>
               </td>
@@ -104,7 +107,9 @@
                   v-for="r in (ev.reads || []).slice(0, 2)"
                   :key="r.name"
                   class="var-chip var-read"
-                  :title="`${r.name} → ${JSON.stringify(r.value)}`"
+                  :class="{ 'var-chip-expandable': r.value !== null && r.value !== undefined && !r.omitted }"
+                  :title="r.value !== null && r.value !== undefined && !r.omitted ? '点击查看完整值' : `${r.name} → ${JSON.stringify(r.value)}`"
+                  @click.stop="r.value !== null && r.value !== undefined && !r.omitted && openValueViewer(r.value, r.name)"
                 >{{ r.name }}<span class="var-chip-val" v-if="r.value !== null && r.value !== undefined && !r.omitted">→<em>{{ truncate(formatValue(r.value), 15) }}</em></span></span>
                 <span v-if="(ev.reads || []).length > 2" class="var-more">+{{ ev.reads.length - 2 }}</span>
               </td>
@@ -119,6 +124,7 @@
 <script setup>
 import { ref, watch } from 'vue';
 import { truncate, formatValue, formatArgValue } from '../../composables/useSessionUtils.js';
+import { openValueViewer } from '../../composables/useValueViewer.js';
 
 const props = defineProps({
   sessionId:  { type: String,  required: true },
@@ -318,6 +324,8 @@ async function loadEvents() {
 .var-read  { background: rgba(99,102,241,0.15); color: #a5b4fc; }
 .var-chip-val { opacity: 0.75; font-size: 10px; margin-left: 2px; }
 .var-chip-val em { font-style: normal; color: #fcd34d; }
+.var-chip-expandable { cursor: pointer; }
+.var-chip-expandable:hover { filter: brightness(1.2); outline: 1px solid rgba(255,255,255,0.15); }
 .var-more  { font-size: 11px; color: var(--text-muted); }
 .text-muted { color: var(--text-muted); }
 
