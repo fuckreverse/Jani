@@ -170,13 +170,14 @@ CREATE TABLE fields (
 
 -- 值字典（由 F1 EventIndex 填充，全局唯一字符串池）
 -- writes/reads/fields.value_id 引用此表的 id，对重复值去重存储
--- val_type: 'num' / 'bool' / 'str' / 'null' / 'obj'
+-- val_type: 'num' / 'bool' / 'str' / 'null' / 'obj' / 'ta'
+--   'ta' = TypedArray / ArrayBuffer，val_text 为 "[TypeName(N):MB:hexpreview]" 格式字符串
 -- 典型压缩比：循环中同一数值 100k 次写入 → 字典只存 1 行
 CREATE TABLE value_dict (
     id          INTEGER PRIMARY KEY,  -- 内存计数器分配，非 AUTOINCREMENT
     session_id  TEXT NOT NULL,
     val_text    TEXT NOT NULL,        -- 原始序列化字符串（同 writes/reads/fields.value）
-    val_type    TEXT NOT NULL,        -- 'num' / 'bool' / 'str' / 'null' / 'obj'
+    val_type    TEXT NOT NULL,        -- 'num' / 'bool' / 'str' / 'null' / 'obj' / 'ta'
     val_num     REAL,                 -- val_type='num' 时有效，用于数值范围查询
     UNIQUE (session_id, val_text)
 );
@@ -234,16 +235,17 @@ CREATE TABLE var_lifetime (
 
 -- 值索引（由 F1 EventIndex 填充，供值搜索 API 使用）
 -- 对每个 write/read/field 的值做类型化索引，支持按值反查事件
--- val_type: 'num' / 'bool' / 'str'；VI_MAX_SAME=50：同一值最多记录 50 条，防止循环变量爆炸
+-- val_type: 'num' / 'bool' / 'str' / 'ta'；VI_MAX_SAME=50：同一值最多记录 50 条，防止循环变量爆炸
+--   'ta' = TypedArray / ArrayBuffer，val_str 存放 "[TypeName(N):MB:hexpreview]" 格式字符串
 -- 注意：value_index 与 value_dict 共存但定位不同：
 --   value_dict = 去重存储（每个唯一值 1 行），writes/reads/fields.value_id 引用
 --   value_index = 反查索引（每次出现 1 行，上限 50），供 value-search API 使用
 CREATE TABLE value_index (
     session_id  TEXT NOT NULL,
     event_id    INTEGER NOT NULL,
-    val_type    TEXT NOT NULL,   -- 'num' / 'bool' / 'str'
+    val_type    TEXT NOT NULL,   -- 'num' / 'bool' / 'str' / 'ta'
     val_num     REAL,            -- val_type='num' 时有效
-    val_str     TEXT,            -- val_type='str'/'bool' 时有效（截断至 256 字符）
+    val_str     TEXT,            -- val_type='str'/'bool'/'ta' 时有效（截断至 256 字符）
     var_name    TEXT,
     source      TEXT NOT NULL,   -- 'write' / 'read' / 'field'
     PRIMARY KEY (session_id, event_id, source)
@@ -272,6 +274,17 @@ CREATE INDEX idx_vd_type ON value_dict(session_id, val_type); -- 按类型过滤
 CREATE INDEX idx_writes_value_id ON writes(session_id, value_id);
 CREATE INDEX idx_reads_value_id  ON reads(session_id, value_id);
 CREATE INDEX idx_fields_value_id ON fields(session_id, value_id);
+
+-- 新增索引（由 _runMigrations 在线迁移时创建）
+-- 优化 own-events 子调用排除查询（列顺序：depth 前置覆盖 WHERE depth=?+1 AND session_id=? 条件）
+CREATE INDEX IF NOT EXISTS idx_call_edges_depth ON call_edges(session_id, depth, call_seq, return_seq);
+
+-- 优化 object_timelines 时间窗口过滤（seqFrom/seqTo 参数）
+CREATE INDEX IF NOT EXISTS idx_obj_timeline_seq ON object_timelines(session_id, seq);
+
+-- TypedArray 部分索引（只含 val_type='ta' 的行，用于 TypedArray 值搜索）
+CREATE INDEX IF NOT EXISTS idx_vi_ta ON value_index(session_id, val_str)
+    WHERE val_type = 'ta';
 ```
 
 ```sql
@@ -353,6 +366,9 @@ API 兼容层（与原 sql.js 版本完全兼容）
   - value_id 索引：idx_writes_value_id / idx_reads_value_id / idx_fields_value_id
     （必须在 value_id 列添加之后创建，避免旧库升级报"no such column: value_id"）
   - oid_aliases 表：CREATE TABLE IF NOT EXISTS（新表，幂等）
+  - 索引 idx_call_edges_depth：CREATE INDEX IF NOT EXISTS（depth 前置覆盖索引，优化 own-events 子调用排除查询）
+  - 索引 idx_obj_timeline_seq：CREATE INDEX IF NOT EXISTS（object_timelines 时间窗口过滤）
+  - 索引 idx_vi_ta：CREATE INDEX IF NOT EXISTS（value_index 中 TypedArray 部分索引）
 ```
 
 #### 文件位置
@@ -985,6 +1001,13 @@ GET  /api/sessions/:id/events/:seq/owner-fn
     查询某个事件所属的最近函数帧（包含该 seq 的 depth 最大的 call_edge）
     返回：{ call: { fnName, fnIid, callerLine, depth, callSeq, returnSeq, ... } } 或 null
 
+GET  /api/sessions/:id/flamegraph?seqFrom=&seqTo=&maxDepth=20&minSelf=0
+    生成 Speedscope 兼容的火焰图 JSON（可直接导入 speedscope.app）
+    seqFrom/seqTo：时间窗口过滤（可选，不传则覆盖全量 trace）
+    maxDepth：最大调用深度（默认 20）；minSelf：过滤 self time 过小的函数（默认 0，不过滤）
+    实现：查询 call_edges → Node.js 端重建调用树 → 计算 total/self time → 拼装 Speedscope JSON
+    返回：Speedscope $schema 格式 JSON，profiles[0] 为 sampled profile
+
 GET  /api/sessions/:id/value-search?num=0.5&str=foo&strLike=*secret*&varName=key&source=write&limit=200
     按值搜索 value_index 表，返回匹配的 event_id 列表
     支持：num（精确数值）/ numMin+numMax（数值范围）/ str（精确字符串）/ strLike（通配符，* 匹配任意）/ varName（按变量名过滤）
@@ -1015,6 +1038,31 @@ GET  /api/sessions/:id/hot-iids
 
 GET  /api/sessions/:id/call-graph
     调用图数据
+
+GET  /api/sessions/:id/loop-iterations?seqFrom=&seqTo=&limit=200&offset=0
+    循环迭代快照数据（A5 LoopDetector 输出）
+    seqFrom/seqTo：时间窗口过滤，只返回循环起始 seq 在该范围内的记录（可选）
+    返回：{ iterations: [{ loopIid, round, seq, vars }], total }
+
+GET  /api/sessions/:id/value-patterns?seqFrom=&seqTo=&limit=200&offset=0
+    值模式检测结果（A8 ValuePatternDetector 输出，35+ 魔术常数）
+    seqFrom/seqTo：时间窗口过滤，只返回 event_id 在该范围内的记录（可选）
+    返回：{ patterns: [{ event_id, name, value, matched_constant, category }], total }
+
+GET  /api/sessions/:id/strings?seqFrom=&seqTo=&limit=500&offset=0
+    字符串追踪结果（A4 StringTracker 输出）
+    seqFrom/seqTo：时间窗口过滤（可选）
+    返回：{ strings: [{ event_id, name, value, length }], total }
+
+GET  /api/sessions/:id/object-timelines?seqFrom=&seqTo=&limit=200&offset=0
+    对象属性变化时间线（A7 ObjectMutationTracker 输出）
+    seqFrom/seqTo：时间窗口过滤，只返回 seq 在该范围内的记录（可选）
+    返回：{ timelines: [{ base_var, seq, mutation_type, offset, value, src_text }], total }
+
+GET  /api/sessions/:id/dataflow?seqFrom=&seqTo=&limit=200&offset=0
+    数据流边（A2 DataFlowGraph 输出）
+    seqFrom/seqTo：时间窗口过滤，只返回 from_seq 在该范围内的记录（可选）
+    返回：{ edges: [{ from_seq, to_seq, var_name, from_line, to_line }], total }
 
 GET  /api/sessions/:id/crypto-hints
     加密检测结果

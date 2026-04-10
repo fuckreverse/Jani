@@ -302,6 +302,19 @@ function _runMigrations(db) {
         ['idx_call_edges_stack',   'call_edges',  'session_id, call_seq, return_seq, depth'],
         // var_name 过滤：按变量名反查事件（P1 值追踪增强）
         ['idx_vi_varname',         'value_index', 'session_id, var_name'],
+        // own-events 子调用查询：depth 等值过滤 + call_seq/return_seq 范围，比 idx_call_edges_stack 更快
+        ['idx_call_edges_depth',   'call_edges',  'session_id, depth, call_seq, return_seq'],
+        // object-timelines 时间窗口过滤：change_seq 范围查询
+        ['idx_obj_timeline_seq',   'object_timelines', 'session_id, change_seq'],
+    ];
+    // ── TypedArray 值类型索引（val_type = 'ta' 的 partial index）──────────────
+    // SQLite partial index 不能通过普通 CREATE INDEX IF NOT EXISTS 在旧库上追加，
+    // 需要单独处理（与 newIndexes 分开，因为 partial index 无法用同一套循环创建）
+    const taIndexDefs = [
+        {
+            name:  'idx_vi_ta',
+            sql:   "CREATE INDEX IF NOT EXISTS idx_vi_ta ON value_index(session_id, val_str) WHERE val_type = 'ta'",
+        },
     ];
     for (const [idxName, tbl, cols] of newIndexes) {
         try {
@@ -313,6 +326,19 @@ function _runMigrations(db) {
             }
         } catch (e) {
             console.warn(`[Database] create index ${idxName} failed (non-fatal):`, e.message);
+        }
+    }
+    // Partial index（WHERE 子句）需要单独创建
+    for (const { name, sql } of taIndexDefs) {
+        try {
+            const exists = db.prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name=?"
+            ).get(name);
+            if (!exists) {
+                db.exec(sql);
+            }
+        } catch (e) {
+            console.warn(`[Database] create partial index ${name} failed (non-fatal):`, e.message);
         }
     }
 

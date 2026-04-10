@@ -51,7 +51,7 @@ const YIELD_EVERY_BATCHES = 10;
 
 // value_index 配置
 const VI_MAX_SAME = 50;   // 同一值最多记录 50 条（防止循环变量爆炸）
-const VI_MAX_STR  = 256;  // 字符串截断长度
+const VI_MAX_STR  = 65000;  // 字符串截断长度（与 EventSerializer STRING 类型截断上限对齐，留出 payload 头部余量）
 
 export default class F1EventIndex extends BasePlugin {
     static id = 'F1-EventIndex';
@@ -159,6 +159,9 @@ export default class F1EventIndex extends BasePlugin {
                 const n = Number(sv);
                 if (!isNaN(n) && sv.trim() !== '') {
                     val_type = 'num'; val_num = n;
+                } else if (sv.startsWith('"[') && /^"\[(?:Uint8Array|Int8Array|Uint16Array|Int16Array|Uint32Array|Int32Array|Float32Array|Float64Array|BigInt64Array|BigUint64Array|ArrayBuffer)\(/.test(sv)) {
+                    // TypedArray 格式：'"[Uint8Array(N):MB:hexpreview]"'
+                    val_type = 'ta'; val_num = null;
                 } else if (sv.startsWith('"') || sv.startsWith('{') || sv.startsWith('[')) {
                     val_type = sv.startsWith('"') ? 'str' : 'obj'; val_num = null;
                 } else {
@@ -239,13 +242,19 @@ export default class F1EventIndex extends BasePlugin {
                 const n = Number(t);
                 if (!isNaN(n) && t.trim() !== '') {
                     val_type = 'num'; val_num = n; val_str = null;
+                } else if (t.startsWith('"[') && /^"\[(?:Uint8Array|Int8Array|Uint16Array|Int16Array|Uint32Array|Int32Array|Float32Array|Float64Array|BigInt64Array|BigUint64Array|ArrayBuffer)\(/.test(t)) {
+                    // TypedArray 格式：'"[TypeName(N):byteLength B:hexpreview]"'
+                    // 解包 JSON 引号后，截断到 VI_MAX_STR 存入 val_str，类型标记为 'ta'
+                    let s = t;
+                    try { s = JSON.parse(t); } catch { /* keep raw */ }
+                    val_type = 'ta'; val_num = null; val_str = s.substring(0, VI_MAX_STR);
                 } else {
                     // 字符串：去掉 JSON 引号包裹
                     let s = t;
                     if (s.startsWith('"') && s.endsWith('"')) {
                         try { s = JSON.parse(s); } catch { /* keep raw */ }
                     }
-                    if (s.length === 0 || s.length > VI_MAX_STR) return; // 太短或太长不索引
+                    if (s.length === 0) return; // 空字符串不索引
                     val_type = 'str'; val_num = null; val_str = s.substring(0, VI_MAX_STR);
                 }
             }
@@ -423,6 +432,9 @@ export default class F1EventIndex extends BasePlugin {
  * 将运行时值序列化为 JSON 字符串存入 DB。
  * fast-path：基础类型直接 JSON.stringify，跳过 try/catch（V8 JIT 友好）。
  * 仅 object/function 类型才走 try/catch 防止循环引用抛出。
+ *
+ * TYPED_ARRAY 特殊处理：readValue() 解码后返回格式为 "[TypeName(N):MB:hexpreview]" 的字符串，
+ * 此处直接 JSON.stringify 包裹（加引号）存入 DB，保留可读性。
  */
 function serializeValue(value) {
     if (value === undefined) return null;

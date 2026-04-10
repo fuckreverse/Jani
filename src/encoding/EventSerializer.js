@@ -27,16 +27,18 @@
  *
  *     [0]   u8  valueType  (VALUE_TYPE.*)
  *     后续字节（依 valueType）：
- *       OMITTED    → 无后续（值可通过 smap.defIid 追溯）
- *       NULL       → 无后续
- *       UNDEFINED  → 无后续
- *       BOOL_T/F   → 无后续
- *       INT32      → 4 字节 i32（小端）
- *       FLOAT64    → 8 字节 f64（小端）
- *       STRING     → u16 长度 + UTF-8 字节
- *       OBJECT     → u16 长度 + UTF-8 字节
- *       FUNCTION   → u8 名称长度 + ASCII 字节（最长 255）
- *       STRING_REF → u16 字典 ID（引用已注册的字符串，3 字节 vs 原始编码）
+ *       OMITTED     → 无后续（值可通过 smap.defIid 追溯）
+ *       NULL        → 无后续
+ *       UNDEFINED   → 无后续
+ *       BOOL_T/F    → 无后续
+ *       INT32       → 4 字节 i32（小端）
+ *       FLOAT64     → 8 字节 f64（小端）
+ *       STRING      → u16 长度 + UTF-8 字节
+ *       OBJECT      → u16 长度 + UTF-8 字节
+ *       FUNCTION    → u8 名称长度 + ASCII 字节（最长 255）
+ *       STRING_REF  → u16 字典 ID（引用已注册的字符串，3 字节 vs 原始编码）
+ *       TYPED_ARRAY → u8 类型名长度 + ASCII(类型名) + u32 元素数量 + u32 字节长度
+ *                     + u16 hex摘要长度 + hex摘要字节（最多 128 字节 = 前 64B 的 hex）
  *
  * ### 批次格式（流式写入，NodeStreamBackend 使用）
  *
@@ -159,17 +161,19 @@ export const FLAGS = Object.freeze({
 // ─── 值类型常量 ────────────────────────────────────────────────────────────────
 
 export const VALUE_TYPE = Object.freeze({
-    OMITTED:    0x00,  // 值省略（可追溯），无后续字节
-    NULL:       0x01,  // null，无后续字节
-    UNDEFINED:  0x02,  // undefined，无后续字节
-    BOOL_T:     0x03,  // true，无后续字节
-    BOOL_F:     0x04,  // false，无后续字节
-    INT32:      0x05,  // 整数，4 字节 i32（小端）— 整数优化
-    FLOAT64:    0x06,  // 浮点数，8 字节 f64（小端）
-    STRING:     0x07,  // 字符串，u16 长度 + UTF-8
-    OBJECT:     0x08,  // 对象 JSON，u16 长度 + UTF-8
-    FUNCTION:   0x09,  // 函数，u8 名称长度 + ASCII
-    STRING_REF: 0x0A,  // 字符串引用（字典压缩），2 字节 u16 ID
+    OMITTED:     0x00,  // 值省略（可追溯），无后续字节
+    NULL:        0x01,  // null，无后续字节
+    UNDEFINED:   0x02,  // undefined，无后续字节
+    BOOL_T:      0x03,  // true，无后续字节
+    BOOL_F:      0x04,  // false，无后续字节
+    INT32:       0x05,  // 整数，4 字节 i32（小端）— 整数优化
+    FLOAT64:     0x06,  // 浮点数，8 字节 f64（小端）
+    STRING:      0x07,  // 字符串，u16 长度 + UTF-8
+    OBJECT:      0x08,  // 对象 JSON，u16 长度 + UTF-8
+    FUNCTION:    0x09,  // 函数，u8 名称长度 + ASCII
+    STRING_REF:  0x0A,  // 字符串引用（字典压缩），2 字节 u16 ID
+    TYPED_ARRAY: 0x0B,  // TypedArray/ArrayBuffer：u8 类型名长度 + ASCII(类型名) +
+                        //   u32 元素数量 + u32 字节长度 + u16 hex摘要长度 + hex摘要字节（最多128字节）
 });
 
 // ─── 编码工具 ──────────────────────────────────────────────────────────────────
@@ -242,6 +246,10 @@ function measureValue(v, omit = false, pool = null) {
         const nb   = encodeUtf8(name.slice(0, 255));
         return { vt: VALUE_TYPE.FUNCTION, extraBytes: 1 + nb.length, strBytes: nb };
     }
+    // TypedArray / ArrayBuffer 特殊处理（必须在 typeof 'object' 分支之前检测）
+    if (t === 'object' && v !== null && _isTypedArrayOrBuffer(v)) {
+        return _measureTypedArray(v);
+    }
     if (t === 'string') {
         // 字典压缩：若有 pool，尝试用 STRING_REF（3字节）代替完整编码
         if (pool !== null) {
@@ -251,7 +259,7 @@ function measureValue(v, omit = false, pool = null) {
                 return { vt: VALUE_TYPE.STRING_REF, extraBytes: 2, poolId: id };
             }
         }
-        const nb = encodeUtf8(v.length > 256 ? v.slice(0, 255) + '…' : v);
+        const nb = encodeUtf8(v.length > 65000 ? v.slice(0, 64999) + '…' : v);
         return { vt: VALUE_TYPE.STRING, extraBytes: 2 + nb.length, strBytes: nb };
     }
     // 对象：使用快照的原生 JSON.stringify。
@@ -286,8 +294,73 @@ function measureValue(v, omit = false, pool = null) {
         }
     } catch { s = '[object]'; }
     if (s === undefined) s = '[object]';
-    const nb = encodeUtf8(s.length > 256 ? s.slice(0, 255) + '…' : s);
+    const nb = encodeUtf8(s.length > 65000 ? s.slice(0, 64999) + '…' : s);
     return { vt: VALUE_TYPE.OBJECT, extraBytes: 2 + nb.length, strBytes: nb };
+}
+
+/**
+ * 检测对象是否为 TypedArray 或 ArrayBuffer。
+ * @param {*} v
+ * @returns {boolean}
+ */
+function _isTypedArrayOrBuffer(v) {
+    if (v instanceof ArrayBuffer) return true;
+    // TypedArray：具有 buffer 属性 + BYTES_PER_ELEMENT 属性且不是 DataView
+    return (ArrayBuffer.isView(v) && !(v instanceof DataView));
+}
+
+/**
+ * 计算 TypedArray/ArrayBuffer 的编码大小。
+ * 格式：u8(类型名len) + ASCII(类型名) + u32(element_count) + u32(byte_length) +
+ *       u16(hex_len) + ASCII(hex摘要，最多128字符 = 64字节数据)
+ * @param {TypedArray|ArrayBuffer} v
+ * @returns {{ vt: number, extraBytes: number, _taInfo: object }}
+ */
+function _measureTypedArray(v) {
+    let typeName, elementCount, byteLength, bufferRef, bufferOffset;
+    if (v instanceof ArrayBuffer) {
+        typeName     = 'ArrayBuffer';
+        elementCount = 0;
+        byteLength   = v.byteLength;
+        bufferRef    = v;
+        bufferOffset = 0;
+    } else {
+        typeName     = v.constructor?.name ?? 'TypedArray';
+        elementCount = v.length;
+        byteLength   = v.byteLength;
+        bufferRef    = v.buffer;
+        bufferOffset = v.byteOffset;
+    }
+    // 截取前 64 字节做 hex 摘要（128 个 hex 字符）
+    const previewBytes  = Math.min(byteLength, 64);
+    const hexStr        = _bufToHex(bufferRef, bufferOffset, previewBytes);
+    const hexBytes      = encodeUtf8(hexStr);   // hex 只含 ASCII，length == hexStr.length
+    const typeNameBytes = encodeUtf8(typeName.slice(0, 255));
+    // 1(typeName_len) + typeName.len + 4(element_count) + 4(byte_length) + 2(hex_len) + hex.len
+    const extraBytes = 1 + typeNameBytes.length + 4 + 4 + 2 + hexBytes.length;
+    return {
+        vt: VALUE_TYPE.TYPED_ARRAY,
+        extraBytes,
+        _taInfo: { typeNameBytes, elementCount, byteLength, hexBytes },
+    };
+}
+
+/**
+ * 将 ArrayBuffer 的部分字节转为 hex 字符串（小写）。
+ * @param {ArrayBuffer} buf
+ * @param {number} byteOffset
+ * @param {number} length
+ * @returns {string}
+ */
+function _bufToHex(buf, byteOffset, length) {
+    try {
+        const view = new Uint8Array(buf, byteOffset, length);
+        let hex = '';
+        for (let i = 0; i < view.length; i++) {
+            hex += view[i].toString(16).padStart(2, '0');
+        }
+        return hex;
+    } catch { return ''; }
 }
 
 /**
@@ -357,6 +430,27 @@ function writeValue(view, offset, measured, v) {
             offset += 2;
             new Uint8Array(view.buffer, view.byteOffset + offset).set(nb);
             offset += nb.length;
+            break;
+        }
+        case VALUE_TYPE.TYPED_ARRAY: {
+            const { typeNameBytes, elementCount, byteLength, hexBytes } = measured._taInfo;
+            // u8 类型名长度
+            view.setUint8(offset, typeNameBytes.length);
+            offset += 1;
+            // ASCII 类型名
+            new Uint8Array(view.buffer, view.byteOffset + offset, typeNameBytes.length).set(typeNameBytes);
+            offset += typeNameBytes.length;
+            // u32 元素数量
+            view.setUint32(offset, elementCount >>> 0, true);
+            offset += 4;
+            // u32 字节长度
+            view.setUint32(offset, byteLength >>> 0, true);
+            offset += 4;
+            // u16 hex摘要长度 + hex字节
+            view.setUint16(offset, hexBytes.length, true);
+            offset += 2;
+            new Uint8Array(view.buffer, view.byteOffset + offset, hexBytes.length).set(hexBytes);
+            offset += hexBytes.length;
             break;
         }
     }
@@ -459,6 +553,28 @@ function readValue(view, offset, dict = null) {
             const r = readUtf8u16(view, offset);
             try { value = JSON.parse(r.str); } catch { value = r.str; }
             offset = r.end;
+            break;
+        }
+        case VALUE_TYPE.TYPED_ARRAY: {
+            // 读取类型名（u8 len + ASCII）
+            const typeNameLen = view.getUint8(offset);
+            offset += 1;
+            const typeNameBytes = new Uint8Array(view.buffer, view.byteOffset + offset, typeNameLen);
+            const typeName = String.fromCharCode(...typeNameBytes);
+            offset += typeNameLen;
+            // 读取元素数量和字节长度
+            const elementCount = view.getUint32(offset, true);
+            offset += 4;
+            const byteLength = view.getUint32(offset, true);
+            offset += 4;
+            // 读取 hex 摘要
+            const hexLen = view.getUint16(offset, true);
+            offset += 2;
+            const hexBytes = new Uint8Array(view.buffer, view.byteOffset + offset, hexLen);
+            const hexPreview = String.fromCharCode(...hexBytes);
+            offset += hexLen;
+            // 组合成可读字符串：[Uint8Array(256):1024B:aabbccdd...]
+            value = `[${typeName}(${elementCount}):${byteLength}B:${hexPreview}]`;
             break;
         }
         default:

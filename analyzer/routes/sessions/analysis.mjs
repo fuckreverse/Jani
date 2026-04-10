@@ -98,11 +98,12 @@ router.post('/taint', async (req, res) => {
 });
 
 // ── GET /api/sessions/:id/loop-iterations ─────────────────────────────────
+// 新增 seqFrom/seqTo：按循环起止 SEQ 范围过滤（只看某次函数调用区间内的循环迭代）
 
 router.get('/loop-iterations', (req, res) => {
     try {
         const { id } = req.params;
-        const { loopId, limit = '100', offset = '0' } = req.query;
+        const { loopId, limit = '100', offset = '0', seqFrom, seqTo } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -113,6 +114,15 @@ router.get('/loop-iterations', (req, res) => {
         if (loopId !== undefined) {
             conditions.push('loop_id = ?');
             params.push(Number(loopId));
+        }
+        // 时间窗口过滤：按迭代起始 SEQ 范围（start_seq 在 [seqFrom, seqTo] 内）
+        if (seqFrom !== undefined && seqFrom !== '') {
+            conditions.push('start_seq >= ?');
+            params.push(Number(seqFrom));
+        }
+        if (seqTo !== undefined && seqTo !== '') {
+            conditions.push('start_seq <= ?');
+            params.push(Number(seqTo));
         }
 
         const limitN  = Math.min(Number(limit)  || 200, 1000);
@@ -132,10 +142,20 @@ router.get('/loop-iterations', (req, res) => {
             vars_snapshot: safeParseJson(r.vars_snapshot, {}),
         }));
 
-        // 同时返回循环列表（供前端 loop_id 选择）
+        // 同时返回循环列表（供前端 loop_id 选择，按时间窗口过滤）
+        const loopConds = ['session_id = ?'];
+        const loopParams = [id];
+        if (seqFrom !== undefined && seqFrom !== '') {
+            loopConds.push('start_seq >= ?');
+            loopParams.push(Number(seqFrom));
+        }
+        if (seqTo !== undefined && seqTo !== '') {
+            loopConds.push('start_seq <= ?');
+            loopParams.push(Number(seqTo));
+        }
         const loops = db.all(
-            'SELECT id, iid, start_seq, end_seq, iteration_count, line FROM loops WHERE session_id = ? ORDER BY id ASC',
-            id
+            `SELECT id, iid, start_seq, end_seq, iteration_count, line FROM loops WHERE ${loopConds.join(' AND ')} ORDER BY id ASC`,
+            ...loopParams
         );
 
         const totalRow = db.get(
@@ -151,11 +171,12 @@ router.get('/loop-iterations', (req, res) => {
 });
 
 // ── GET /api/sessions/:id/value-patterns ──────────────────────────────────
+// 新增 seqFrom/seqTo：按首次出现 SEQ（first_seq）范围过滤
 
 router.get('/value-patterns', (req, res) => {
     try {
         const { id } = req.params;
-        const { onlyCrypto, varName, minCount, limit = '2000' } = req.query;
+        const { onlyCrypto, varName, minCount, limit = '2000', seqFrom, seqTo } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -173,6 +194,15 @@ router.get('/value-patterns', (req, res) => {
         if (minCount) {
             conditions.push('count >= ?');
             params.push(Number(minCount) || 1);
+        }
+        // 时间窗口过滤：按首次出现 SEQ（first_seq 在 [seqFrom, seqTo] 内）
+        if (seqFrom !== undefined && seqFrom !== '') {
+            conditions.push('first_seq >= ?');
+            params.push(Number(seqFrom));
+        }
+        if (seqTo !== undefined && seqTo !== '') {
+            conditions.push('first_seq <= ?');
+            params.push(Number(seqTo));
         }
 
         const limitN = Math.min(Number(limit) || 2000, 2000);
@@ -262,11 +292,12 @@ router.get('/signature-paths', (req, res) => {
 });
 
 // ── GET /api/sessions/:id/dataflow ────────────────────────────────────────
+// 新增 seqFrom/seqTo：按事件 SEQ 范围过滤（from_event_id 或 to_event_id 在区间内）
 
 router.get('/dataflow', (req, res) => {
     try {
         const { id } = req.params;
-        const { edgeType, varName, limit = '200', offset = '0' } = req.query;
+        const { edgeType, varName, limit = '200', offset = '0', seqFrom, seqTo } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -281,6 +312,15 @@ router.get('/dataflow', (req, res) => {
         if (varName) {
             conditions.push('(from_var = ? OR to_var = ?)');
             params.push(varName, varName);
+        }
+        // 时间窗口过滤：from_event_id（边的起点事件）在 [seqFrom, seqTo] 内
+        if (seqFrom !== undefined && seqFrom !== '') {
+            conditions.push('from_event_id >= ?');
+            params.push(Number(seqFrom));
+        }
+        if (seqTo !== undefined && seqTo !== '') {
+            conditions.push('from_event_id <= ?');
+            params.push(Number(seqTo));
         }
 
         const limitN  = Math.min(Number(limit)  || 200, 1000);
@@ -314,11 +354,12 @@ router.get('/dataflow', (req, res) => {
 });
 
 // ── GET /api/sessions/:id/strings ─────────────────────────────────────────
+// 新增 seqFrom/seqTo：按事件 SEQ 范围（event_id）过滤
 
 router.get('/strings', (req, res) => {
     try {
         const { id } = req.params;
-        const { encoding, limit = '500', offset = '0' } = req.query;
+        const { encoding, limit = '500', offset = '0', seqFrom, seqTo } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -329,6 +370,15 @@ router.get('/strings', (req, res) => {
         if (encoding) {
             conditions.push('encoding_hint = ?');
             params.push(encoding);
+        }
+        // 时间窗口过滤：event_id 在 [seqFrom, seqTo] 内
+        if (seqFrom !== undefined && seqFrom !== '') {
+            conditions.push('event_id >= ?');
+            params.push(Number(seqFrom));
+        }
+        if (seqTo !== undefined && seqTo !== '') {
+            conditions.push('event_id <= ?');
+            params.push(Number(seqTo));
         }
 
         const limitN = Math.min(Number(limit) || 500, 2000);
@@ -362,6 +412,7 @@ router.get('/strings', (req, res) => {
 });
 
 // ── GET /api/sessions/:id/object-timelines ────────────────────────────────
+// 新增 seqFrom/seqTo：按变更 SEQ（change_seq）范围过滤，只看某段时间内的属性变化
 
 router.get('/object-timelines', (req, res) => {
     try {
@@ -371,6 +422,8 @@ router.get('/object-timelines', (req, res) => {
             onlyWrites,
             page     = '1',
             pageSize = '100',
+            seqFrom,
+            seqTo,
         } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
@@ -385,6 +438,15 @@ router.get('/object-timelines', (req, res) => {
         }
         if (onlyWrites === '1' || onlyWrites === 'true') {
             conditions.push('is_write = 1');
+        }
+        // 时间窗口过滤：change_seq 在 [seqFrom, seqTo] 内
+        if (seqFrom !== undefined && seqFrom !== '') {
+            conditions.push('change_seq >= ?');
+            params.push(Number(seqFrom));
+        }
+        if (seqTo !== undefined && seqTo !== '') {
+            conditions.push('change_seq <= ?');
+            params.push(Number(seqTo));
         }
 
         const where   = conditions.join(' AND ');

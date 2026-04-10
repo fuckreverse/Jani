@@ -258,6 +258,8 @@ CREATE TABLE IF NOT EXISTS object_timelines (
     src_text        TEXT    -- 该行源码片段（来自 smap.src_text，方向五补充）
 );
 CREATE INDEX IF NOT EXISTS idx_obj_timeline_session ON object_timelines(session_id, base_var);
+-- 时间窗口过滤：change_seq 范围查询
+CREATE INDEX IF NOT EXISTS idx_obj_timeline_seq    ON object_timelines(session_id, change_seq);
 
 -- ─── OID 别名（F1 EventIndex 填充，方向三：OID→变量名映射）──────────────────
 -- 记录 OID 对应的变量名（一个 OID 可有多个变量名，取最早出现的）
@@ -356,7 +358,7 @@ CREATE INDEX IF NOT EXISTS idx_df_session ON dataflow_edges(session_id);
 -- ─── 值字典（F1 EventIndex 填充，全局唯一字符串池）──────────────────────────
 -- 将 writes/reads/fields 中的 value 文本去重存储，每个 session 独立字典。
 -- writes/reads/fields.value_id 引用此表的 id，减少重复字符串存储。
--- val_type: 'num' / 'bool' / 'str' / 'null' / 'obj'
+-- val_type: 'num' / 'bool' / 'str' / 'null' / 'obj' / 'ta'（TypedArray/ArrayBuffer）
 -- val_num:  数值（val_type='num' 时有效，方便数值范围查询）
 -- 典型压缩比：循环场景下同一个数值 100k 次写入 → 只存 1 行
 
@@ -364,7 +366,7 @@ CREATE TABLE IF NOT EXISTS value_dict (
     id          INTEGER PRIMARY KEY,
     session_id  TEXT NOT NULL,
     val_text    TEXT NOT NULL,   -- 原始序列化字符串（同 writes/reads/fields.value）
-    val_type    TEXT NOT NULL,   -- 'num' / 'bool' / 'str' / 'null' / 'obj'
+    val_type    TEXT NOT NULL,   -- 'num' / 'bool' / 'str' / 'null' / 'obj' / 'ta'
     val_num     REAL,            -- val_type='num' 时有效，用于数值范围查询
     UNIQUE (session_id, val_text)
 );
@@ -377,21 +379,23 @@ CREATE INDEX IF NOT EXISTS idx_vd_type ON value_dict(session_id, val_type);
 
 -- ─── 值索引（F1 EventIndex 填充，供值搜索 API 使用）────────────────────────
 -- 对每个 write/read/field 的值做类型化索引，支持按值反查事件
--- val_type: 'num' / 'bool' / 'str'
+-- val_type: 'num' / 'bool' / 'str' / 'ta'（TypedArray/ArrayBuffer）
 -- VI_MAX_SAME=50：同一值最多记录 50 条，防止循环变量爆炸
 
 CREATE TABLE IF NOT EXISTS value_index (
     session_id  TEXT NOT NULL,
     event_id    INTEGER NOT NULL,
-    val_type    TEXT NOT NULL,   -- 'num' / 'bool' / 'str'
+    val_type    TEXT NOT NULL,   -- 'num' / 'bool' / 'str' / 'ta'
     val_num     REAL,            -- val_type='num' 时有效
-    val_str     TEXT,            -- val_type='str'/'bool' 时有效（截断至 256 字符）
+    val_str     TEXT,            -- val_type='str'/'bool'/'ta' 时有效（截断至 256 字符）
     var_name    TEXT,
     source      TEXT NOT NULL,   -- 'write' / 'read' / 'field'
     PRIMARY KEY (session_id, event_id, source)
 );
 CREATE INDEX IF NOT EXISTS idx_vi_num     ON value_index(session_id, val_num) WHERE val_type = 'num';
 CREATE INDEX IF NOT EXISTS idx_vi_str     ON value_index(session_id, val_str) WHERE val_type = 'str';
+-- TypedArray 类型过滤：列出某 session 所有 TypedArray 事件
+CREATE INDEX IF NOT EXISTS idx_vi_ta      ON value_index(session_id, val_str) WHERE val_type = 'ta';
 -- var_name 过滤：按变量名反查事件（P1 值追踪增强）
 CREATE INDEX IF NOT EXISTS idx_vi_varname ON value_index(session_id, var_name);
 
@@ -440,6 +444,9 @@ CREATE INDEX IF NOT EXISTS idx_loops_iter_count    ON loops(session_id, iteratio
 CREATE INDEX IF NOT EXISTS idx_vp_matched          ON value_patterns(session_id, matched_constant);
 -- 调用栈查询：按 call_seq/return_seq 范围查找祖先帧（owner-fn + call-stack API）
 CREATE INDEX IF NOT EXISTS idx_call_edges_stack    ON call_edges(session_id, call_seq, return_seq, depth);
+-- own-events 子调用查询：depth 前置，消除 (session_id, depth=N, call_seq>=X, return_seq<=Y) 的全扫
+-- 比 idx_call_edges_stack 更适合 depth 等值过滤场景（call_seq/return_seq 范围过滤作为 covering）
+CREATE INDEX IF NOT EXISTS idx_call_edges_depth    ON call_edges(session_id, depth, call_seq, return_seq);
 
 -- ─── 插件检查点（断点恢复支持）───────────────────────────────────────────────
 -- 每个插件成功完成后写入一条记录；重新调度时跳过已有记录的插件

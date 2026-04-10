@@ -534,6 +534,7 @@ _doInit() 完成  →  _flushPreInitQueue()
 | `0x08` | `OBJECT` | u16 长度 + JSON UTF-8 字节（最长 256 字符） |
 | `0x09` | `FUNCTION` | u8 名称长度 + ASCII 字节（最长 255） |
 | `0x0A` | `STRING_REF` | u16 字典 ID（需在对应 `DICT_ENTRY` 中查找实际字符串） |
+| `0x0B` | `TYPED_ARRAY` | `[u8 nameLen][nameBytes][u32 byteLen][u32 elemCount][u8[min(byteLen,64)] rawBytes]`<br>解码后显示为 `[TypeName(N):MB:hexpreview]` 字符串，例如 `[Uint8Array(8):8B:deadbeef01020304]`；超过 64 字节时 hex 摘要截断到前 64 字节（128 个 hex 字符）；`ArrayBuffer` 元素数显示为 0 |
 
 #### 值省略（FAI 优化）
 

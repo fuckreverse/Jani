@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 // 被测模块
 import { RingBuffer }           from '../../src/logger/RingBuffer.js';
 import {
-    EVENT_TYPE, FORMAT_VERSION,
+    EVENT_TYPE, VALUE_TYPE, FORMAT_VERSION,
     serializeEvent, serializeBatch, deserializeEvent, deserializeAll,
     createFileHeader, isBinaryTrace, FILE_HEADER_SIZE,
     StringPool, EventSerializerWithPool,
@@ -230,6 +230,129 @@ describe('EventSerializer', () => {
             assert.equal(event.iid,  ev.iid,  `iid mismatch for ${ev.type}`);
             assert.equal(event.seq,  ev.seq,  `seq mismatch for ${ev.type}`);
         }
+    });
+
+    // ── VALUE_TYPE.TYPED_ARRAY (0x0B) 编解码测试 ──────────────────────────────
+
+    test('VALUE_TYPE 枚举含 TYPED_ARRAY = 0x0B', () => {
+        assert.equal(VALUE_TYPE.TYPED_ARRAY, 0x0B);
+    });
+
+    test('TYPED_ARRAY：Uint8Array 编解码往返', () => {
+        const arr = new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF, 1, 2, 3, 4]);
+        const ev = {
+            type: 'END_EXPR', iid: 48, seq: 10,
+            writes: [{ name: 'buf', val: arr, omit: false }],
+            reads:  [],
+            fields: [],
+        };
+        const buf = serializeEvent(ev);
+        const { event } = deserializeEvent(new DataView(buf), 0);
+        assert.equal(event.writes.length, 1);
+        assert.equal(event.writes[0].name, 'buf');
+        // 解码结果应包含类型名、元素数和字节数
+        const decoded = event.writes[0].value;
+        assert.ok(typeof decoded === 'string', '解码值应为字符串');
+        assert.ok(decoded.startsWith('[Uint8Array(8):8B:'), `应包含类型和大小：${decoded}`);
+        // hex 摘要：deadbeef01020304
+        assert.ok(decoded.includes('deadbeef01020304'), `应包含 hex 摘要：${decoded}`);
+    });
+
+    test('TYPED_ARRAY：Float64Array 编解码往返', () => {
+        const arr = new Float64Array([3.14, 2.71]);
+        const ev = {
+            type: 'END_EXPR', iid: 56, seq: 11,
+            writes: [{ name: 'floats', val: arr, omit: false }],
+            reads:  [], fields: [],
+        };
+        const buf = serializeEvent(ev);
+        const { event } = deserializeEvent(new DataView(buf), 0);
+        const decoded = event.writes[0].value;
+        assert.ok(decoded.startsWith('[Float64Array(2):16B:'), `类型名应为 Float64Array：${decoded}`);
+    });
+
+    test('TYPED_ARRAY：ArrayBuffer 编解码往返', () => {
+        const ab = new ArrayBuffer(6);
+        new Uint8Array(ab).set([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+        const ev = {
+            type: 'END_EXPR', iid: 64, seq: 12,
+            writes: [{ name: 'rawBuf', val: ab, omit: false }],
+            reads:  [], fields: [],
+        };
+        const buf = serializeEvent(ev);
+        const { event } = deserializeEvent(new DataView(buf), 0);
+        const decoded = event.writes[0].value;
+        assert.ok(decoded.startsWith('[ArrayBuffer(0):6B:'), `ArrayBuffer 应无元素数：${decoded}`);
+        assert.ok(decoded.includes('010203040506'), `hex 摘要应正确：${decoded}`);
+    });
+
+    test('TYPED_ARRAY：空 TypedArray 编解码', () => {
+        const arr = new Int32Array(0);
+        const ev = {
+            type: 'END_EXPR', iid: 72, seq: 13,
+            writes: [{ name: 'empty', val: arr, omit: false }],
+            reads:  [], fields: [],
+        };
+        const buf = serializeEvent(ev);
+        const { event } = deserializeEvent(new DataView(buf), 0);
+        const decoded = event.writes[0].value;
+        assert.ok(decoded.startsWith('[Int32Array(0):0B:'), `空数组应为 0 元素 0 字节：${decoded}`);
+    });
+
+    test('TYPED_ARRAY：超过 64 字节时 hex 摘要截断到前 128 字符', () => {
+        // 128 字节的 Uint8Array，hex 摘要只取前 64 字节 = 128 个 hex 字符
+        const arr = new Uint8Array(128).fill(0xAB);
+        const ev = {
+            type: 'END_EXPR', iid: 80, seq: 14,
+            writes: [{ name: 'big', val: arr, omit: false }],
+            reads:  [], fields: [],
+        };
+        const buf = serializeEvent(ev);
+        const { event } = deserializeEvent(new DataView(buf), 0);
+        const decoded = event.writes[0].value;
+        // 格式：[Uint8Array(128):128B:abab...（128个hex字符）]
+        assert.ok(decoded.startsWith('[Uint8Array(128):128B:'), `大数组应含正确元数据：${decoded}`);
+        // hex 摘要 = 前 64 字节 × 2 字符/字节 = 128 字符
+        const hexPart = decoded.slice(decoded.indexOf(':', decoded.indexOf(':') + 1) + 1).replace(']', '');
+        // 第三个冒号之后的 hex 字符串长度应为 128
+        const parts = decoded.slice(1, -1).split(':');  // 去掉 [ 和 ]
+        // parts = ['Uint8Array(128)', '128B', 'abab...']
+        assert.equal(parts[2].length, 128, `hex 摘要应恰好 128 字符，实际：${parts[2].length}`);
+        assert.ok(parts[2] === 'ab'.repeat(64), `hex 摘要应为 64 个 ab：${parts[2].slice(0, 10)}...`);
+    });
+
+    test('TYPED_ARRAY：DataView 不被识别为 TypedArray（走 OBJECT 路径）', () => {
+        // DataView 不应触发 TYPED_ARRAY 编码，应 fallback 到 OBJECT (JSON)
+        const dv = new DataView(new ArrayBuffer(4));
+        const ev = {
+            type: 'END_EXPR', iid: 88, seq: 15,
+            writes: [{ name: 'dv', val: dv, omit: false }],
+            reads:  [], fields: [],
+        };
+        const buf = serializeEvent(ev);
+        const { event } = deserializeEvent(new DataView(buf), 0);
+        const decoded = event.writes[0].value;
+        // DataView 走 OBJECT 路径，序列化后不含 TypedArray 格式
+        assert.ok(!decoded?.startsWith?.('[DataView'), `DataView 不应走 TYPED_ARRAY 路径：${decoded}`);
+    });
+
+    test('TYPED_ARRAY：与其他值类型混合的批次往返', () => {
+        const arr = new Uint32Array([100, 200, 300]);
+        const ev = {
+            type: 'END_EXPR', iid: 96, seq: 16,
+            writes: [
+                { name: 'num',   val: 42,   omit: false },
+                { name: 'typed', val: arr,  omit: false },
+                { name: 'str',   val: 'hi', omit: false },
+            ],
+            reads:  [],
+            fields: [],
+        };
+        const buf = serializeEvent(ev);
+        const { event } = deserializeEvent(new DataView(buf), 0);
+        assert.equal(event.writes[0].value, 42,  '数字值应正确');
+        assert.ok(event.writes[1].value.startsWith('[Uint32Array(3):12B:'), 'TypedArray 值应正确');
+        assert.equal(event.writes[2].value, 'hi', '字符串值应正确');
     });
 });
 

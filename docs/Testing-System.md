@@ -336,7 +336,7 @@ npm run test:logging
 | `NodeStreamBackend` | JTB1 二进制写入（魔数验证 + 反序列化）、多批次、writeSync、LogManager 集成、setSmap 写出 `.smap.json` 均已覆盖 | 补充：背压（大 batch 阻塞 drain 事件）、autoFlush=true 路径 |
 | `WsWorkerBackend.js` / `WsSabBackend.js` | **完全未覆盖** | 需要 Worker 环境；建议补充 mock Worker 的单元测试 |
 | `IdbWorkerBackend.js` | **完全未覆盖** | 需要 IndexedDB 环境（浏览器）；暂缓 |
-| `EventSerializer` 边界 | 已覆盖：JTB1 魔数、serializeEvent/serializeBatch/deserializeAll 往返（常见值类型）、isBinaryTrace、VALUE_TYPE.OMITTED（省略值） | 补充：超长字符串截断、非 ASCII 字符（CJK）、FLOAT64 精度保持、负数 iid |
+| `EventSerializer` 边界 | 已覆盖：JTB1 魔数、serializeEvent/serializeBatch/deserializeAll 往返（常见值类型）、isBinaryTrace、VALUE_TYPE.OMITTED（省略值）、**VALUE_TYPE.TYPED_ARRAY**（Uint8Array/Float64Array/ArrayBuffer/Int32Array 往返、空数组、大数组 hex 截断、DataView fallback、混合批次，共 8 个专项测试） | 补充：超长字符串截断、非 ASCII 字符（CJK）、FLOAT64 精度保持、负数 iid |
 | `WsBackend` 重连/断线 | 未覆盖 | 补充：连接中断后的重试行为、窗口满时的背压 |
 
 ### 4.5 端到端分析插件（`src/plugins/`）

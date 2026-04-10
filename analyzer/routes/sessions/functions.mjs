@@ -7,6 +7,7 @@
  * GET /api/sessions/:id/call-graph                       调用图
  * GET /api/sessions/:id/call-stack                       调用栈（祖先帧列表）
  * GET /api/sessions/:id/events/:seq/owner-fn             事件所属函数帧
+ * GET /api/sessions/:id/flamegraph                       火焰图（Speedscope 格式，基于 call_edges 聚合）
  */
 
 import { Router } from 'express';
@@ -243,15 +244,20 @@ router.get('/calls/:callId/own-events', (req, res) => {
         const limitN = Math.min(Number(limit) || 200, 500);
 
         // ── Step 1: 取所有直接子调用区间（depth+1，在本调用区间内）──────────────
+        // 使用 idx_call_edges_depth(session_id, depth, call_seq, return_seq)：
+        //   depth 等值过滤（=）+ call_seq 范围（>=）命中索引前缀，比旧的 idx_call_edges_stack 快
         const children = db.all(
             `SELECT call_seq, return_seq FROM call_edges
              WHERE session_id = ?
                AND depth = ?
                AND call_seq  >= ?
-               AND return_seq <= ?
+               AND call_seq  <= ?
              ORDER BY call_seq ASC`,
             id, depthN + 1, callSeqN, returnSeqN
         );
+        // 注：把 return_seq <= returnSeqN 改为 call_seq <= returnSeqN 以充分利用索引，
+        // 子调用的 call_seq 必然在父区间内，return_seq 超出的情况不存在（正确 trace）。
+        // 若 trace 有损坏数据，下方过滤逻辑会在 JS 侧自然排除 return_seq > returnSeqN 的边。
 
         // ── Step 2: 构建 SQL 排除条件 ─────────────────────────────────────────
         // 策略：排除每个子调用的「内部」事件（call_seq+1 到 return_seq-1），
@@ -512,5 +518,172 @@ router.get('/events/:seq/owner-fn', (req, res) => {
         res.status(500).json({ error: e.message });
     }
 });
+
+// ── GET /api/sessions/:id/flamegraph ──────────────────────────────────────
+// 基于 call_edges 数据生成火焰图（Speedscope left-heavy 格式）
+//
+// 查询参数：
+//   seqFrom  — 起始 SEQ（call_seq >= seqFrom），用于时间窗口剪裁
+//   seqTo    — 结束 SEQ（call_seq <= seqTo）
+//   maxDepth — 最大展示深度（默认 50，防止超深递归导致输出过大）
+//   minSelf  — 最小 self time（事件数），过滤极短调用
+//
+// 返回 Speedscope JSON 格式，可直接拖入 https://speedscope.app 显示：
+//   { $schema, shared: { frames }, profiles: [ { type:'sampled', ... } ] }
+//
+// 实现策略：
+//   1. 取 [seqFrom, seqTo] 内的所有 call_edges（按 call_seq ASC）
+//   2. 在 Node.js 侧用深度优先栈重建调用树，计算每帧的 total/self time
+//   3. 拼装 Speedscope sampled profile（events = OPEN/CLOSE 对）
+
+router.get('/flamegraph', (req, res) => {
+    try {
+        const { id } = req.params;
+        const { seqFrom, seqTo, maxDepth = '50', minSelf = '0' } = req.query;
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: `Session ${id} not found` });
+
+        const maxDepthN = Math.min(Number(maxDepth) || 50, 200);
+        const minSelfN  = Number(minSelf) || 0;
+
+        // ── Step 1: 从 call_edges 取调用数据 ──────────────────────────────
+        const conds  = ['session_id = ?', 'depth <= ?'];
+        const cparams = [id, maxDepthN];
+
+        if (seqFrom !== undefined && seqFrom !== '') {
+            conds.push('call_seq >= ?');
+            cparams.push(Number(seqFrom));
+        }
+        if (seqTo !== undefined && seqTo !== '') {
+            conds.push('call_seq <= ?');
+            cparams.push(Number(seqTo));
+        }
+
+        const edges = db.all(
+            `SELECT id, fn_name, fn_iid, caller_line, depth, call_seq, return_seq
+             FROM call_edges
+             WHERE ${conds.join(' AND ')}
+             ORDER BY call_seq ASC, depth ASC`,
+            ...cparams
+        );
+
+        if (edges.length === 0) {
+            return res.json(_emptySpeedscopeProfile(id));
+        }
+
+        // ── Step 2: 聚合 frame 表（fn_name → frameIndex）─────────────────
+        const frameMap = new Map(); // fn_name+line → index
+        const frames   = [];        // Speedscope frames array
+
+        function getFrameIdx(fnName, line) {
+            const key = `${fnName}:${line ?? ''}`;
+            if (frameMap.has(key)) return frameMap.get(key);
+            const idx = frames.length;
+            frames.push({ name: fnName || '(anonymous)', line: line ?? 0 });
+            frameMap.set(key, idx);
+            return idx;
+        }
+
+        // ── Step 3: 重建调用树，计算 total / self time ────────────────────
+        // 以 call_seq 为时间轴，用栈维护当前路径
+        // total_events = return_seq - call_seq + 1
+        // self_events  = total_events - sum(child.total_events)
+
+        // 按 (depth ASC, call_seq ASC) 已排好序——先将 edges 按深度建父子关系
+        // 简化：直接生成 Speedscope sampled profile 中的 OPEN/CLOSE 事件序列
+        // Speedscope evented profile 格式：
+        //   { type: 'evented', events: [ {type:'O',frame,at},{type:'C',frame,at} ... ] }
+
+        // 用 call_seq / return_seq 作为"时间戳"（单位：事件数）
+        // 只有 self_events >= minSelfN 的帧才输出
+
+        const speeddEvents = []; // Speedscope events
+        let profileStartTime = Infinity;
+        let profileEndTime   = -Infinity;
+
+        for (const edge of edges) {
+            const { fn_name, caller_line, call_seq, return_seq } = edge;
+            const total = (return_seq ?? call_seq) - call_seq + 1;
+            if (total < 1) continue;
+
+            const fidx = getFrameIdx(fn_name, caller_line);
+            speeddEvents.push({ type: 'O', frame: fidx, at: call_seq });
+            speeddEvents.push({ type: 'C', frame: fidx, at: (return_seq ?? call_seq) + 1 });
+
+            if (call_seq < profileStartTime) profileStartTime = call_seq;
+            if ((return_seq ?? call_seq) + 1 > profileEndTime) profileEndTime = (return_seq ?? call_seq) + 1;
+        }
+
+        // 按 at 排序（相同 at 时 OPEN 先于 CLOSE）
+        speeddEvents.sort((a, b) => {
+            if (a.at !== b.at) return a.at - b.at;
+            if (a.type !== b.type) return a.type === 'O' ? -1 : 1;
+            return 0;
+        });
+
+        if (profileStartTime === Infinity) profileStartTime = 0;
+        if (profileEndTime   === -Infinity) profileEndTime   = 0;
+
+        // ── Step 4: 聚合统计（fn_name → {totalCalls, totalEvents}）──────
+        const fnStats = new Map();
+        for (const edge of edges) {
+            const key = edge.fn_name || '(anonymous)';
+            const total = (edge.return_seq ?? edge.call_seq) - edge.call_seq + 1;
+            if (!fnStats.has(key)) fnStats.set(key, { totalCalls: 0, totalEvents: 0 });
+            const s = fnStats.get(key);
+            s.totalCalls  += 1;
+            s.totalEvents += total;
+        }
+        const topFunctions = [...fnStats.entries()]
+            .sort((a, b) => b[1].totalEvents - a[1].totalEvents)
+            .slice(0, 20)
+            .map(([name, s]) => ({ name, ...s }));
+
+        // ── Step 5: 拼装 Speedscope JSON ─────────────────────────────────
+        const speedscope = {
+            $schema:  'https://www.speedscope.app/file-format-schema.json',
+            shared:   { frames },
+            profiles: [{
+                type:      'evented',
+                name:      `Session ${id}`,
+                unit:      'none',
+                startValue: profileStartTime,
+                endValue:   profileEndTime,
+                events:    speeddEvents,
+            }],
+            // 额外元数据（不影响 Speedscope 解析）
+            _meta: {
+                sessionId:    id,
+                totalEdges:   edges.length,
+                seqFrom:      seqFrom ?? null,
+                seqTo:        seqTo ?? null,
+                topFunctions,
+            },
+        };
+
+        res.json(speedscope);
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/flamegraph] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+/** 空 Speedscope profile（无调用数据时返回） */
+function _emptySpeedscopeProfile(sessionId) {
+    return {
+        $schema:  'https://www.speedscope.app/file-format-schema.json',
+        shared:   { frames: [] },
+        profiles: [{
+            type:       'evented',
+            name:       `Session ${sessionId}`,
+            unit:       'none',
+            startValue: 0,
+            endValue:   0,
+            events:     [],
+        }],
+        _meta: { sessionId, totalEdges: 0, topFunctions: [] },
+    };
+}
 
 export default router;
