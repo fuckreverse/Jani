@@ -397,7 +397,7 @@ router.get('/object-timelines', (req, res) => {
         const totalPages = Math.max(1, Math.ceil(total / pageSizeN));
 
         const rows = db.all(
-            `SELECT id, base_var, offset_key, change_seq, old_value, new_value, line, is_write
+            `SELECT id, base_var, offset_key, change_seq, old_value, new_value, line, is_write, src_text
              FROM object_timelines
              WHERE ${where}
              ORDER BY change_seq ASC

@@ -112,7 +112,9 @@ for (const proto of [
 
 /** 文件魔数：ASCII "JTB1" */
 export const MAGIC = new Uint8Array([0x4A, 0x54, 0x42, 0x31]);
-export const FORMAT_VERSION = 0x01;
+export const FORMAT_VERSION = 0x02;
+/** v1: 无 write.oid；v2: END_EXPR writes 条目末尾附加 val_oid u32 */
+export const FORMAT_VERSION_V1 = 0x01;
 
 /** 文件头大小（魔数 4B + 版本 1B + 保留 3B = 8B） */
 export const FILE_HEADER_SIZE = 8;
@@ -774,8 +776,9 @@ function measureEvent(event, pool = null) {
             for (const w of writes) {
                 const nm = measureStr(w.name, pool);
                 const mv = measureValue(w.val, w.omit === true, pool);
-                size += strFieldBytes(nm) + 1 + mv.extraBytes;
-                wm.push({ nm, mv, val: w.val, omit: w.omit });
+                // v2：writes 条目末尾附加 val_oid u32（4B，0=非对象）
+                size += strFieldBytes(nm) + 1 + mv.extraBytes + 4;
+                wm.push({ nm, mv, val: w.val, omit: w.omit, oid: w.oid ?? 0 });
             }
             for (const r of reads) {
                 const nm = measureStr(r.name, pool);
@@ -874,6 +877,8 @@ function writePayload(view, offset, type, _m) {
             for (const w of _m.wm) {
                 offset = writeStr(view, offset, w.nm);
                 offset = writeValue(view, offset, w.mv, w.val);
+                // v2: writes 条目末尾附加 val_oid u32（0=非对象）
+                view.setUint32(offset, (w.oid ?? 0) >>> 0, true);  offset += 4;
             }
             for (const r of _m.rm) {
                 offset = writeStr(view, offset, r.nm);
@@ -1060,6 +1065,19 @@ export function isBinaryTrace(buf) {
         && bytes[3] === 0x31;
 }
 
+/**
+ * 从文件头读取格式版本号（字节偏移 4）。
+ * 调用方需先确认魔数正确（isBinaryTrace）。
+ * @param {DataView|Buffer} viewOrBuf
+ * @returns {number}  版本号（0x01=旧版，0x02=支持 write.oid）
+ */
+export function readFileVersion(viewOrBuf) {
+    const view = viewOrBuf instanceof DataView
+        ? viewOrBuf
+        : new DataView(viewOrBuf.buffer ?? viewOrBuf, viewOrBuf.byteOffset ?? 0);
+    return view.getUint8(4);
+}
+
 // ─── 有状态序列化器（Value Pool 版本）──────────────────────────────────────────
 
 /**
@@ -1184,7 +1202,7 @@ export class EventSerializerWithPool {
  * @param {Map<number,string>} [dict]  字符串字典（解码 STRING_REF / 0xFFFF 哨兵用，可复用）
  * @returns {{ event: object, nextOffset: number }}
  */
-export function deserializeEvent(view, offset, dict = null) {
+export function deserializeEvent(view, offset, dict = null, version = FORMAT_VERSION) {
     const typeByte  = view.getUint8(offset);
     const flagsByte = view.getUint8(offset + 1);
     const iid       = view.getUint32(offset + 2, true);
@@ -1274,7 +1292,14 @@ export function deserializeEvent(view, offset, dict = null) {
                 pos = rn.end;
                 const rv = readValue(view, pos, dict);
                 pos = rv.end;
-                event.writes.push({ name: rn.str, value: rv.value, omitted: rv.omitted });
+                let writeOid = null;
+                if (version >= 0x02) {
+                    // v2：条目末尾有 val_oid u32
+                    const rawOid = view.getUint32(pos, true);
+                    writeOid = rawOid === 0 ? null : rawOid;
+                    pos += 4;
+                }
+                event.writes.push({ name: rn.str, value: rv.value, omitted: rv.omitted, oid: writeOid });
             }
             for (let i = 0; i < readCount; i++) {
                 const rn = readStr(view, pos, dict);

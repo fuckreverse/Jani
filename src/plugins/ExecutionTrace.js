@@ -284,7 +284,12 @@ export class ExecutionTraceAnalysis {
     // ── 指令级钩子 ────────────────────────────────────────────────────────────
 
     writeVar(iid, name, val) {
-        _push(this._pendingWrites, { name, val });
+        // 方向三：如果写入的值是对象引用，附带其 OID（供 F1 建立 oid_aliases 表）
+        const oid = (val !== null && val !== undefined &&
+                     (typeof val === 'object' || typeof val === 'function'))
+            ? (this._sb?.getOid?.(val) ?? null)
+            : null;
+        _push(this._pendingWrites, { name, val, oid });
         return { result: val };
     }
 
@@ -380,8 +385,12 @@ export class ExecutionTraceAnalysis {
             if (w.name) writtenNames.add(w.name);
         }
 
-        // 构建 END_EXPR 事件
-        const evWrites = writes.map(w => ({ name: w.name, val: w.val }));
+        // 构建 END_EXPR 事件（oid 字段透传：v2 格式 END_EXPR writes 条目末尾附加 val_oid u32）
+        const evWrites = writes.map(w => ({
+            name: w.name,
+            val:  w.val,
+            ...(w.oid != null ? { oid: w.oid } : {}),
+        }));
         const evReads  = reads
             .filter(r => !writtenNames.has(r.name))
             .map(r => ({ name: r.name, val: r.val, omit: r.omit === true }));

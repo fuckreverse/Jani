@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 // 被测模块
 import { RingBuffer }           from '../../src/logger/RingBuffer.js';
 import {
-    EVENT_TYPE,
+    EVENT_TYPE, FORMAT_VERSION,
     serializeEvent, serializeBatch, deserializeEvent, deserializeAll,
     createFileHeader, isBinaryTrace, FILE_HEADER_SIZE,
     StringPool, EventSerializerWithPool,
@@ -118,7 +118,7 @@ describe('EventSerializer', () => {
         assert.equal(bytes[1], 0x54); // T
         assert.equal(bytes[2], 0x42); // B
         assert.equal(bytes[3], 0x31); // 1
-        assert.equal(bytes[4], 0x01); // version
+        assert.equal(bytes[4], FORMAT_VERSION); // version (当前为 0x02, v2 支持 write.oid)
         assert.equal(header.byteLength, FILE_HEADER_SIZE);
     });
 

@@ -37,7 +37,7 @@ try {
     throw new Error(`F1_EventIndex: 无法加载 EventSerializer: ${e.message}`);
 }
 
-const { FILE_HEADER_SIZE, EVENT_HEADER_SIZE, deserializeEvent, isBinaryTrace } = EventSerializer;
+const { FILE_HEADER_SIZE, EVENT_HEADER_SIZE, deserializeEvent, isBinaryTrace, readFileVersion } = EventSerializer;
 
 // 滑动窗口大小：32MB，保证单个超长事件也能容纳
 const WINDOW_SIZE = 32 * 1024 * 1024;
@@ -77,7 +77,12 @@ export default class F1EventIndex extends BasePlugin {
             throw new Error(`文件 "${session.bin_path}" 不是有效的 JTB1 trace 文件`);
         }
 
+        // 读取格式版本号（字节偏移4，v1=0x01 无 write.oid，v2=0x02 有 write.oid）
+        const fileVersion = readFileVersion ? readFileVersion(headerBuf) : 0x01;
+        log.info({ sessionId, fileVersion }, `Trace 文件格式版本: v${fileVersion}`);
+
         this.emitProgress(ctx, '清理旧数据...', 2);
+        db.run('DELETE FROM oid_aliases  WHERE session_id = ?', sessionId);
         db.run('DELETE FROM value_index WHERE session_id = ?', sessionId);
         db.run('DELETE FROM fields WHERE session_id = ?', sessionId);
         db.run('DELETE FROM reads  WHERE session_id = ?', sessionId);
@@ -107,17 +112,23 @@ export default class F1EventIndex extends BasePlugin {
         const stmtVI = rawDb.prepare(
             'INSERT OR IGNORE INTO value_index (session_id, event_id, val_type, val_num, val_str, var_name, source) VALUES (?, ?, ?, ?, ?, ?, ?)'
         );
+        // oid_aliases：INSERT OR IGNORE，同一 (session, oid, var_name) 只记录最早的那条
+        const stmtOidAlias = rawDb.prepare(
+            'INSERT OR IGNORE INTO oid_aliases (session_id, oid, var_name, event_id) VALUES (?, ?, ?, ?)'
+        );
 
         // value_index 去重计数器：val_key → count（防止同一值无限写入）
         const viCount = new Map(); // `${val_type}:${val_key}` → number
 
         // better-sqlite3 原生事务：spread 传参比数组传参快（跳过内部类型判断）
-        const flushTx = rawDb.transaction((evts, wrs, rds, flds, vis) => {
+        let oidAliasBatch = [];
+        const flushTx = rawDb.transaction((evts, wrs, rds, flds, vis, oas) => {
             for (const e of evts) stmtEvent.run(...e);
             for (const w of wrs)  stmtWrite.run(...w);
             for (const r of rds)  stmtRead.run(...r);
             for (const f of flds) stmtField.run(...f);
             for (const v of vis)  stmtVI.run(...v);
+            for (const o of oas)  stmtOidAlias.run(...o);
         });
 
         // ── 滑动窗口状态 ──────────────────────────────────────────────────────
@@ -154,12 +165,13 @@ export default class F1EventIndex extends BasePlugin {
 
         const flush = () => {
             if (eventBatch.length === 0) return;
-            flushTx(eventBatch, writeBatch, readBatch, fieldBatch, viBatch);
-            eventBatch = [];
-            writeBatch = [];
-            readBatch  = [];
-            fieldBatch = [];
-            viBatch    = [];
+            flushTx(eventBatch, writeBatch, readBatch, fieldBatch, viBatch, oidAliasBatch);
+            eventBatch    = [];
+            writeBatch    = [];
+            readBatch     = [];
+            fieldBatch    = [];
+            viBatch       = [];
+            oidAliasBatch = [];
         };
 
         /** 尝试将一个值加入 value_index 批次（去重 + 类型化） */
@@ -219,7 +231,7 @@ export default class F1EventIndex extends BasePlugin {
 
             let result;
             try {
-                result = deserializeEvent(view, relOffset, dict);
+                result = deserializeEvent(view, relOffset, dict, fileVersion);
             } catch (e) {
                 log.warn({ err: e, fileOffset: windowStart + relOffset, sessionId },
                     `Decode error at file offset ${windowStart + relOffset}: ${e.message}`);
@@ -248,6 +260,11 @@ export default class F1EventIndex extends BasePlugin {
                     const sv = serializeValue(w.value);
                     writeBatch.push([eventId, sessionId, w.name ?? null, sv, w.omitted ? 1 : 0]);
                     if (!w.omitted) pushVI(eventId, sv, w.name, 'write');
+                    // 方向三：v2 格式时，write.oid != null 表示写入值是对象引用
+                    // 记录到 oid_aliases 表（UNIQUE，同一变量只记最早出现的）
+                    if (w.oid != null && w.name && w.name !== '(return)' && w.name !== '(throw)') {
+                        oidAliasBatch.push([sessionId, w.oid, w.name, eventId]);
+                    }
                 }
             }
             if (event.reads?.length > 0) {

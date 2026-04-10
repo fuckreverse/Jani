@@ -37,11 +37,11 @@
       <div class="events-table-wrapper">
         <table class="events-table">
           <thead>
-            <tr><th>操作</th><th>对象</th><th>属性</th><th>旧值</th><th>新值</th><th>行号</th><th>SEQ</th></tr>
+            <tr><th>操作</th><th>对象</th><th>属性</th><th>旧值</th><th>新值</th><th>代码</th><th>行号</th><th>SEQ</th></tr>
           </thead>
           <tbody>
             <tr v-if="objTimelines.length === 0">
-              <td colspan="7" style="text-align:center; color:var(--text-muted); padding:24px">无匹配记录</td>
+              <td colspan="8" style="text-align:center; color:var(--text-muted); padding:24px">无匹配记录</td>
             </tr>
             <tr v-for="t in objTimelines" :key="t.id" :class="t.is_write ? '' : 'row-read-op'">
               <td>
@@ -49,7 +49,7 @@
                   {{ t.is_write ? 'write' : 'read' }}
                 </span>
               </td>
-              <td><code class="src-text">{{ t.base_var }}</code></td>
+              <td><code class="src-text obj-label" :title="t.base_var">{{ t.base_var }}</code></td>
               <td><span class="var-chip var-field">{{ t.offset_key }}</span></td>
               <td>
                 <code
@@ -68,6 +68,10 @@
                   :title="t.new_value != null ? '点击查看完整新值' : ''"
                   @click="t.new_value != null && openValueViewer(tryParseJson(t.new_value), t.offset_key + ' (新值)')"
                 >{{ truncate(t.new_value, 40) || '—' }}</code>
+              </td>
+              <td>
+                <code v-if="t.src_text" class="src-snippet" :title="t.src_text">{{ truncate(t.src_text, 50) }}</code>
+                <span v-else class="td-empty">—</span>
               </td>
               <td class="td-seq">{{ t.line ?? '—' }}</td>
               <td class="td-seq">{{ t.change_seq }}</td>
@@ -204,6 +208,14 @@ onMounted(() => loadObjTimelines(1));
     transition: opacity 0.1s;
 }
 .obj-value-clickable:hover { opacity: 0.85; border-bottom-style: solid; }
+.obj-label { max-width: 180px; }
+.src-snippet {
+    color: #93c5fd; font-size: 11px; white-space: nowrap;
+    max-width: 220px; display: block; overflow: hidden; text-overflow: ellipsis;
+    background: rgba(99,102,241,0.08); padding: 1px 4px; border-radius: 3px;
+    cursor: default;
+}
+.td-empty { color: var(--text-muted); font-size: 11px; }
 
 /* 分页 */
 .pagination-bar {

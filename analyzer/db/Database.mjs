@@ -403,4 +403,39 @@ function _runMigrations(db) {
     } catch (e) {
         console.warn('[Database] add obfuscation_hints.fn_name failed (non-fatal):', e.message);
     }
+
+    // ── object_timelines.src_text 列迁移（方向五）────────────────────────────
+    // 新增列：该行源码片段（来自 smap.src_text），A7 重跑后填充
+    try {
+        const otCols = new Set(
+            db.pragma('table_info(object_timelines)').map(r => r.name)
+        );
+        if (otCols.size > 0 && !otCols.has('src_text')) {
+            db.exec('ALTER TABLE object_timelines ADD COLUMN src_text TEXT');
+        }
+    } catch (e) {
+        console.warn('[Database] add object_timelines.src_text failed (non-fatal):', e.message);
+    }
+
+    // ── oid_aliases 表创建（方向三）──────────────────────────────────────────
+    // 新表：OID → 变量名映射，由 F1 EventIndex 写入，A7 查询用于展示对象名称
+    // schema.sql 中已有 CREATE TABLE IF NOT EXISTS，此处仅补充索引（幂等）
+    try {
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS oid_aliases (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id  TEXT NOT NULL,
+                oid         INTEGER NOT NULL,
+                var_name    TEXT NOT NULL,
+                event_id    INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_oid_aliases_oid_var ON oid_aliases(session_id, oid, var_name);
+            CREATE INDEX IF NOT EXISTS idx_oid_aliases_session ON oid_aliases(session_id, oid);
+        `);
+    } catch (e) {
+        // 表已存在时 CREATE TABLE IF NOT EXISTS 不会报错，此处仅记录非预期错误
+        if (!e.message.includes('already exists')) {
+            console.warn('[Database] create oid_aliases failed (non-fatal):', e.message);
+        }
+    }
 }

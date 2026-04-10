@@ -3,6 +3,7 @@
  *
  * GET  /api/storage/stats    扫描 data 目录，返回各分类的空间占用、文件明细和删除建议
  * POST /api/storage/delete   批量删除：uploads 孤立文件 / sessions / projects 目录
+ * POST /api/storage/vacuum   执行 SQLite VACUUM + WAL checkpoint，回收删除数据占用的磁盘空间
  */
 
 import { Router } from 'express';
@@ -501,6 +502,46 @@ async function _deleteItem(item) {
         return { ok: false, path: itemPath, type, error: e.message };
     }
 }
+
+// ── POST /api/storage/vacuum ────────────────────────────────────────────────
+// 执行 WAL checkpoint（将 WAL 文件合并回主库）+ VACUUM（重建数据库，回收空闲页）。
+// VACUUM 在大型数据库上可能耗时较长（秒级），期间数据库被独占锁定。
+// 不能在事务内执行，better-sqlite3 的同步 API 直接调用即可。
+
+router.post('/vacuum', (req, res) => {
+    try {
+        const rawDb = db.raw();
+
+        // 1. WAL checkpoint：将 WAL 文件内容合并回主数据库文件并截断 WAL
+        const cpResult = rawDb.pragma('wal_checkpoint(TRUNCATE)');
+        log.info({ cpResult }, '[storage/vacuum] WAL checkpoint done');
+
+        // 2. 记录 VACUUM 前的文件大小
+        const sizeBefore = safeStat(DB_FILE)?.size ?? 0;
+
+        // 3. VACUUM：重建整个数据库文件，回收所有空闲页的磁盘空间
+        rawDb.exec('VACUUM');
+
+        // 4. 统计节省的空间
+        const sizeAfter  = safeStat(DB_FILE)?.size ?? 0;
+        const freed      = Math.max(0, sizeBefore - sizeAfter);
+
+        log.info({ sizeBefore, sizeAfter, freed }, '[storage/vacuum] VACUUM done');
+
+        res.json({
+            ok:           true,
+            sizeBefore,
+            sizeAfter,
+            freed,
+            sizeBeforeStr: fmtBytes(sizeBefore),
+            sizeAfterStr:  fmtBytes(sizeAfter),
+            freedStr:      fmtBytes(freed),
+        });
+    } catch (e) {
+        log.error({ err: e }, '[POST /api/storage/vacuum] error');
+        res.status(500).json({ error: e.message });
+    }
+});
 
 // ── 数据库帮助函数（防止 DB 未初始化时崩溃）──────────────────────────────
 

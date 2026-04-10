@@ -40,12 +40,23 @@
             <div class="summary-value total-value">{{ stats.summary.totalSizeStr }}</div>
           </div>
         </div>
-        <div v-for="(cat, key) in stats.summary.breakdown" :key="key" class="summary-card card">
+        <div v-for="(cat, key) in stats.summary.breakdown" :key="key" class="summary-card card" :class="{ 'db-card': key === 'database' }">
           <div class="summary-icon">{{ catIcon(key) }}</div>
           <div class="summary-body">
             <div class="summary-label">{{ catLabel(key) }}</div>
             <div class="summary-value">{{ cat.sizeStr }}</div>
             <div v-if="cat.count != null" class="summary-sub">{{ cat.count }} 个</div>
+            <div v-if="key === 'database'" class="vacuum-area">
+              <button
+                class="btn-vacuum btn-sm"
+                :disabled="vacuuming"
+                @click="runVacuum"
+                title="执行 VACUUM + WAL checkpoint，回收删除数据占用的磁盘空间"
+              >
+                <span v-if="vacuuming"><span class="spinner-sm"></span> 压缩中...</span>
+                <span v-else>🗜️ 压缩数据库</span>
+              </button>
+            </div>
           </div>
           <div class="summary-bar">
             <div
@@ -294,6 +305,7 @@ const deleting      = ref(false);
 const deletingSugId = ref(null);
 const deleteConfirm = ref(null);
 const toast         = ref(null);
+const vacuuming     = ref(false);
 
 const tabs = [
     { id: 'sessions', label: '会话数据' },
@@ -403,6 +415,25 @@ function catLabel(key) { return { uploads: '上传临时文件', sessions: '会�
 function catIcon(key)  { return { uploads: '📤', sessions: '📊', projects: '🗂️', database: '🗃️' }[key] || '📁'; }
 function priorityLabel(p) { return { high: '⚠️ 推荐清理', medium: '💡 建议', low: '📋 可选', info: 'ℹ️ 提示' }[p] || p; }
 
+async function runVacuum() {
+    vacuuming.value = true;
+    try {
+        const res  = await fetch('/api/storage/vacuum', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        if (data.freed > 0) {
+            showToast('success', `🗜️ VACUUM 完成，释放了 ${data.freedStr}（${data.sizeBeforeStr} → ${data.sizeAfterStr}）`);
+        } else {
+            showToast('success', `🗜️ VACUUM 完成，数据库已是最优状态（${data.sizeAfterStr}）`);
+        }
+        await loadStats();
+    } catch (e) {
+        showToast('error', '❌ VACUUM 失败：' + e.message);
+    } finally {
+        vacuuming.value = false;
+    }
+}
+
 let _tt = null;
 function showToast(type, message) {
     toast.value = { type, message }; clearTimeout(_tt);
@@ -441,6 +472,14 @@ function showToast(type, message) {
 .bar-sessions { background: var(--accent); }
 .bar-projects { background: var(--success); }
 .bar-database { background: #ec4899; }
+
+/* ── 数据库卡片 VACUUM 区域 ──────────────────────────────────────── */
+.db-card       { flex-direction: column; align-items: stretch; }
+.db-card .summary-icon { align-self: flex-start; }
+.vacuum-area   { margin-top: 10px; }
+.btn-vacuum    { width: 100%; justify-content: center; background: rgba(236,72,153,.15); color: #f472b6; border: 1px solid rgba(236,72,153,.3); border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; padding: 5px 10px; transition: background .15s, border-color .15s; display: flex; align-items: center; gap: 4px; }
+.btn-vacuum:hover:not(:disabled) { background: rgba(236,72,153,.25); border-color: rgba(236,72,153,.5); }
+.btn-vacuum:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ── 章节 ────────────────────────────────────────────────────────── */
 .section       { margin-bottom: 36px; }

@@ -244,15 +244,29 @@ CREATE INDEX IF NOT EXISTS idx_fn_sig_session ON fn_signatures(session_id);
 CREATE TABLE IF NOT EXISTS object_timelines (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id      TEXT NOT NULL,
-    base_var        TEXT,
+    base_var        TEXT,   -- '#<oid>' 或 '<varName> (#<oid>)'（有别名时）
     offset_key      TEXT,
     change_seq      INTEGER,
     old_value       TEXT,
     new_value       TEXT,
     line            INTEGER,
-    is_write        INTEGER DEFAULT 1
+    is_write        INTEGER DEFAULT 1,
+    src_text        TEXT    -- 该行源码片段（来自 smap.src_text，方向五补充）
 );
 CREATE INDEX IF NOT EXISTS idx_obj_timeline_session ON object_timelines(session_id, base_var);
+
+-- ─── OID 别名（F1 EventIndex 填充，方向三：OID→变量名映射）──────────────────
+-- 记录 OID 对应的变量名（一个 OID 可有多个变量名，取最早出现的）
+
+CREATE TABLE IF NOT EXISTS oid_aliases (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL,
+    oid         INTEGER NOT NULL,   -- 运行时对象 OID
+    var_name    TEXT NOT NULL,      -- 持有该 OID 的变量名
+    event_id    INTEGER NOT NULL    -- 首次观察到此绑定的事件 id
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_oid_aliases_oid_var ON oid_aliases(session_id, oid, var_name);
+CREATE INDEX IF NOT EXISTS idx_oid_aliases_session ON oid_aliases(session_id, oid);
 
 -- ─── 值模式（A8 ValuePatternDetector 填充）──────────────────────────────────
 
