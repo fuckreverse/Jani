@@ -947,12 +947,18 @@ POST /api/sessions/:id/re-run
       - 也可传 plugins 数组指定具体插件 ID 列表
     返回：{ status: 'scheduled', plugins, phase, forceRerun }
 
-GET  /api/sessions/:id/events?line=42&type=END_EXPR&types=CALL_PRE,CALL&limit=100&offset=0
+GET  /api/sessions/:id/events?line=42&type=END_EXPR&types=CALL_PRE,CALL&limit=100&cursor=<last_seq>
     查询事件（支持多维过滤）
-    注意：大 trace 推荐用 seqFrom/seqTo 游标分页，避免 offset 深翻页性能问题
-    游标用法：第一页 ?limit=100，下一页 ?seqFrom=<上页末尾seq+1>&limit=100
+    分页机制（混合策略）：
+      游标分页（普通浏览）：传 cursor=<上页末尾 seq>，后端 id > cursor，O(log N) B-tree 定位
+        第一页：不传 cursor（或 cursor=0）；响应包含 nextCursor 供下一页使用
+        响应：{ events, count, hasMore, nextCursor: <末页为 null> }
+      seqFrom 定位（跨 Tab 跳转）：传 seqFrom=<目标 seq>，后端 id >= seqFrom，直接定位
+        前端 EventsTab 跨 Tab 跳转专用；跳转后若翻页，游标从当前页末尾重新计算
+      offset 分页（向后兼容）：cursor 未传时生效；不推荐用于深页
     types 参数：多类型过滤（逗号分隔），优先于 type（向后兼容）
-    事件对象新格式：fields 数组项已将 base 字段改为 baseOid（运行时对象 ID，null 表示未知）
+    events.type 为整数编码（Phase D），API 响应已自动解码为字符串
+    事件对象 fields 数组项：base 字段已改为 baseOid（运行时对象 ID，null 表示未知）
 
 GET  /api/sessions/:id/functions?search=&minCalls=1&minEvents=&maxEvents=&hideBuiltin=0&sortBy=call_count&limit=100&offset=0
     查询函数调用统计（聚合 call_edges 按 fn_name + fn_iid 分组）
@@ -1203,6 +1209,9 @@ Jani/
 │       │   │       ├── CryptoTab.vue       # 加密检测标签页
 │       │   │       ├── DataflowTab.vue     # 数据流图标签页
 │   │   │       ├── EventsTab.vue       # 事件列表标签页（含值搜索、跨Tab跳转）
+│   │   │       #   普通模式：游标分页（cursorStack，O(log N) B-tree 定位，深页恒速）
+│   │   │       #   值搜索模式：offset 分页（结果集有限，随机翻页需求高）
+│   │   │       #   跨Tab跳转：seqFrom 精确定位（无需估算页码）
 │   │   │       ├── FileInfoBar.vue     # 文件信息栏
 │   │   │       ├── FunctionsTab.vue    # 函数列表标签页（事件数过滤、内建函数隐藏、调用定位）
 │   │   │       ├── CallDetail.vue      # 函数调用详情面板（调用栈 / 事件流，由 FunctionsTab 使用）

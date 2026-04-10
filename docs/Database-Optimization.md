@@ -253,26 +253,37 @@ DROP INDEX IF EXISTS idx_smap_session;
 
 ## 4. 查询模式优化
 
-### 4.1 事件列表分页：OFFSET → 游标
+### 4.1 事件列表分页：OFFSET → 游标 ✅ 已完成
 
-**位置：** `analyzer/server/routes/sessions.mjs` — `GET /api/sessions/:id/events`
+**位置：** `analyzer/routes/sessions/events.mjs` + `analyzer/ui/src/components/session/EventsTab.vue`
 
-**当前（有问题）：**
+**实现的混合策略（三路分发）：**
+
+| 场景 | 机制 | SQL | 复杂度 |
+|------|------|-----|--------|
+| 普通浏览（顺序翻页） | cursor（cursorStack） | `id > cursor` | O(log N) |
+| 跨 Tab 跳转（targetSeq） | seqFrom 精确定位 | `id >= seqFrom` | O(log N) |
+| 值搜索结果翻页 | offset（原有） | `LIMIT/OFFSET` | O(N)（可接受：结果集有限） |
+
+**后端（已完成）：**
 ```sql
-SELECT ... FROM events WHERE session_id=? ... ORDER BY id ASC LIMIT ? OFFSET ?
--- OFFSET 在大表上是线性扫描，翻到第 500 页需跳过 50 万行
+-- 游标模式：cursor 优先于 offset，O(log N) B-tree 定位
+SELECT ... FROM events WHERE session_id=? AND id > ? ORDER BY id ASC LIMIT ?
+-- 响应包含 nextCursor: <本页末尾 seq>（末页为 null）
 ```
 
-**优化后：**
-```sql
--- 前端传入上一页最后一条的 id（cursor），初始为 0
-SELECT ... FROM events WHERE session_id=? AND id > ? ... ORDER BY id ASC LIMIT 1000
--- 每次查询 O(1) 定位 + O(page_size) 读取，深页速度恒定
-```
+**前端（已完成）：**
+- `cursorStack: ref([0])`：第 i 项记录第 i+1 页的起始游标
+  - 下一页：`cursor = cursorStack[currentPage - 1]`，加载后存入 `cursorStack[currentPage]`
+  - 上一页：`currentPage--`，从 `cursorStack[currentPage - 1]` 读取（已缓存，无需重新请求）
+- `targetSeq` 跳转：直接传 `seqFrom=seq`，`id >= seqFrom`，无需估算页码
+- 过滤/清空：重置 `cursorStack = [0]`，回到第 1 页游标起点
+- 值搜索模式：`currentPage` 驱动 `offset`，行为不变
 
-**API 变更：**
-- 请求参数：`cursor=<last_id>`（替代 `offset=<n>`）
-- 响应新增：`nextCursor: <last_id_of_page>`（为 null 表示末页）
+**API 响应变更：**
+- 新增：`nextCursor: <末尾 seq 或 null>`（已实装）
+- 保留：`hasMore`（向后兼容）
+- `offset` 参数：cursor 未传时向后兼容生效（不推荐深页使用）
 
 ### 4.2 批量 IN 查询补 `session_id`
 
@@ -861,12 +872,12 @@ CREATE INDEX IF NOT EXISTS idx_call_edges_retval ON call_edges(session_id, retur
 
 ### Phase B — 需要 migration 的 Schema 改动
 
-| 编号 | 改动 | 涉及文件 |
-|------|------|---------|
-| B1 | 合并 `hot_iids` → `iid_counts` | schema.sql + A3/I3/I4/sessions.mjs |
-| B2 | 删除 `writes/reads/fields` 的 `id` 列 | schema.sql + F1 + migration |
-| B3 | 事件列表分页改游标 | sessions.mjs + 前端 |
-| B4 | F2 UPDATE 改 JOIN UPDATE | F2_SmapLoader.mjs |
+| 编号 | 改动 | 涉及文件 | 状态 |
+|------|------|---------|------|
+| B1 | 合并 `hot_iids` → `iid_counts` | schema.sql + A3/I3/I4/sessions.mjs | 待实施 |
+| B2 | 删除 `writes/reads/fields` 的 `id` 列 | schema.sql + F1 + migration | 待实施 |
+| B3 | 事件列表分页改游标 | sessions.mjs + 前端 EventsTab.vue | ✅ 已完成 |
+| B4 | F2 UPDATE 改 JOIN UPDATE | F2_SmapLoader.mjs | 待实施 |
 
 ### Phase C — 值搜索功能 ✅ 已完成（C1–C4/C6/C7/C9）
 
@@ -926,7 +937,7 @@ CREATE INDEX IF NOT EXISTS idx_call_edges_retval ON call_edges(session_id, retur
 - [ ] **`VI_MAX_SAME` 阈值**：当前设 50，可根据实际 trace 特征调整（越小存储越省，但可能漏掉高频出现的有效值）
 - [ ] **`VI_MAX_STR` 长度**：当前设 256 字节，base64 token 通常 300-500 字节，是否需要加大？
 - [x] **D1/D2 时机**：已完成。`events.type` 已改为 INTEGER，`events.line/col/src_text` 已删除（见 Phase D）。
-- [ ] **游标分页的前端改动量**：当前前端是否有多处使用 offset 参数，改动范围评估
+- [x] **游标分页的前端改动量** ✅ 已完成：EventsTab.vue 普通模式改用 cursorStack 游标翻页，跨Tab跳转改用 seqFrom 精确定位，值搜索保留 offset（~60 行改动）
 - [ ] **`call_edges.args_json` 是否需要拆分**：若未来需要按参数类型/值查询，`value_index` 已通过 `name='arg0'` 覆盖，无需额外拆分
 - [ ] **E2 的 A5 OOM 修复策略**：A5 全量加载 events + writes 是设计决策（需要全局视图做二分），真正的修复需要重新设计算法（如按 iid 分批处理），改动较大，是否优先处理？
 - [ ] **E3 的多 session 并存问题**：A8/I1/I2 的 DROP TABLE 模式是否真的需要修复？如果业务上每次分析只有一个 session 在运行，这个问题实际上不存在

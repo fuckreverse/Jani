@@ -198,7 +198,7 @@
       <!-- 分页 -->
       <div v-if="events.length > 0" class="pagination">
         <button class="btn-secondary" :disabled="currentPage <= 1" @click="prevPage">← 上一页</button>
-        <span class="page-info">第 {{ currentPage }} 页（每页 {{ PAGE_SIZE }} 条）</span>
+        <span class="page-info">第 {{ currentPage }} 页（每页 {{ PAGE_SIZE }} 条）<span v-if="!isValueSearchMode()" class="cursor-hint" title="游标分页：深页访问速度恒定">⚡</span></span>
         <button class="btn-secondary" :disabled="!hasMore" @click="nextPage">下一页 →</button>
       </div>
     </div>
@@ -272,6 +272,13 @@ const eventsLoading = ref(false);
 const hasMore       = ref(false);
 const currentPage   = ref(1);
 const selectedSeq   = ref(null);
+
+// ─── 游标分页状态（普通模式专用）─────────────────────────────────────────────
+// cursorStack[0] = 第 1 页起始游标（始终为 0，代表从头开始）
+// cursorStack[n] = 第 n+1 页起始游标（即第 n 页最后一条 seq）
+// 翻到第 N 页时：请求 cursor = cursorStack[N-1]（0-indexed）
+// 获得响应后：cursorStack[N] = nextCursor（供下一页使用）
+const cursorStack   = ref([0]);   // 初始：第 1 页从 cursor=0 开始
 
 const filters = ref({ types: [], line: '', varName: '', valueMode: '', valueQuery: '', valueQuery2: '' });
 
@@ -355,14 +362,26 @@ function buildValueSearchParams() {
     return p;
 }
 
-async function loadEvents(reset = false) {
-    if (reset) currentPage.value = 1;
+/**
+ * loadEvents — 统一事件加载入口
+ *
+ * 普通模式（非值搜索）：游标分页（cursor），O(log N) B-tree 定位
+ *   - reset=true  → 重置到第 1 页，清空 cursorStack
+ *   - seqFromVal  → seqFrom 直接定位（跨 Tab 跳转专用），重置 cursorStack
+ *   - 否则        → 用 cursorStack[currentPage-1] 拿本页游标
+ * 值搜索模式：保留 offset 分页（结果集小，随机翻页需求高）
+ */
+async function loadEvents(reset = false, seqFromVal = null) {
+    if (reset) {
+        currentPage.value = 1;
+        cursorStack.value = [0];
+    }
     eventsLoading.value  = true;
     valueSearchError.value = '';
 
     try {
         if (isValueSearchMode()) {
-            // ── 值搜索模式：使用 value-search/events 合并接口，支持正确分页 ──
+            // ── 值搜索模式：offset 分页（结果集有限，OFFSET 开销可接受）──
             const p = buildValueSearchParams();
             p.set('limit',  PAGE_SIZE);
             p.set('offset', (currentPage.value - 1) * PAGE_SIZE);
@@ -380,12 +399,20 @@ async function loadEvents(reset = false) {
 
             if (data.total === 0) valueSearchError.value = '值搜索无匹配';
         } else {
-            // ── 普通模式：使用 events 接口 ──
+            // ── 普通模式：游标分页（O(log N) B-tree 定位，消除深页线性扫描）──
             valueSearchTotal.value = 0;
-            const params = new URLSearchParams({
-                limit:  PAGE_SIZE,
-                offset: (currentPage.value - 1) * PAGE_SIZE,
-            });
+            const params = new URLSearchParams({ limit: PAGE_SIZE });
+
+            if (seqFromVal != null) {
+                // 跨 Tab 跳转：用 seqFrom 精确定位，重置游标栈
+                params.set('seqFrom', seqFromVal);
+                cursorStack.value = [0];  // 跳转后若再翻页，重新从第 1 页走游标
+            } else {
+                // 普通翻页：从游标栈取当前页的起始游标
+                const cursor = cursorStack.value[currentPage.value - 1] ?? 0;
+                if (cursor > 0) params.set('cursor', cursor);
+            }
+
             if (filters.value.types.length > 0) params.set('types', filters.value.types.join(','));
             if (filters.value.line)    params.set('line',    filters.value.line);
             if (filters.value.varName) params.set('varName', filters.value.varName.trim());
@@ -396,6 +423,11 @@ async function loadEvents(reset = false) {
 
             events.value  = data.events || [];
             hasMore.value = data.hasMore || false;
+
+            // 保存本页末尾游标，供下一页使用（nextCursor 为 null 表示末页）
+            if (data.nextCursor != null) {
+                cursorStack.value[currentPage.value] = data.nextCursor;
+            }
         }
     } catch (e) {
         console.error('loadEvents error:', e);
@@ -407,11 +439,17 @@ async function loadEvents(reset = false) {
 }
 
 function prevPage() {
-    if (currentPage.value > 1) { currentPage.value--; loadEvents(); }
+    if (currentPage.value > 1) {
+        currentPage.value--;
+        loadEvents();
+    }
 }
 
 function nextPage() {
-    if (hasMore.value) { currentPage.value++; loadEvents(); }
+    if (hasMore.value) {
+        currentPage.value++;
+        loadEvents();
+    }
 }
 
 function clearFilters() {
@@ -419,6 +457,7 @@ function clearFilters() {
     valueSearchTotal.value = 0;
     valueSearchError.value = '';
     typeDropdownOpen.value = false;
+    cursorStack.value = [0];
     loadEvents(true);
 }
 
@@ -457,16 +496,15 @@ async function gotoOwnerFn(event) {
 
 watch(() => props.targetSeq, async (seq) => {
     if (seq == null) return;
-    // 清空过滤、定位到含该 SEQ 的分页
+    // 清空过滤 + 游标栈，用 seqFrom 直接定位（O(log N)，无需估算页码）
     filters.value = { types: [], line: '', varName: '', valueMode: '', valueQuery: '', valueQuery2: '' };
     valueSearchTotal.value = 0;
     valueSearchError.value = '';
+    currentPage.value = 1;
+    cursorStack.value = [0];
 
-    // 计算目标在第几页（后端按 id/seq 升序分页，从 seq=1 起计）
-    // 直接用 seq 偏移估算（seq 从 1 开始，每页 PAGE_SIZE 条）
-    const targetPage = Math.max(1, Math.ceil(seq / PAGE_SIZE));
-    currentPage.value = targetPage;
-    await loadEvents();
+    // seqFrom 精确定位：后端从 id >= seq 开始返回 PAGE_SIZE 条
+    await loadEvents(false, seq);
     await nextTick();
 
     // 高亮 + 滚动
@@ -661,6 +699,12 @@ onUnmounted(() => {
     font-size: 11px; color: var(--text-muted); margin-bottom: 8px; padding: 0 4px;
 }
 .value-search-total strong { color: #a5b4fc; }
+
+/* 游标分页标记 */
+.cursor-hint {
+    font-size: 10px; margin-left: 4px; opacity: 0.5;
+    cursor: default; user-select: none;
+}
 
 /* 命中值列 */
 .td-match { min-width: 100px; max-width: 180px; }
