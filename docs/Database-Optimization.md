@@ -1,7 +1,7 @@
 # JTA 数据库优化设计
 
-**版本：** v1.2
-**日期：** 2026-04-09
+**版本：** v1.3
+**日期：** 2026-04-10
 **目标：** 最小存储空间 + 极致读写查性能
 
 ---
@@ -147,11 +147,11 @@ CREATE TABLE IF NOT EXISTS reads (
 CREATE TABLE IF NOT EXISTS fields (
     event_id   INTEGER NOT NULL,
     session_id TEXT NOT NULL,
-    base       TEXT,
     offset     TEXT,
     is_write   INTEGER,
     value      TEXT,
-    omitted    INTEGER DEFAULT 0
+    omitted    INTEGER DEFAULT 0,
+    base_oid   INTEGER   -- 运行时对象唯一 ID（已替代原 base TEXT 字段）
 );
 ```
 
@@ -868,28 +868,29 @@ CREATE INDEX IF NOT EXISTS idx_call_edges_retval ON call_edges(session_id, retur
 | B3 | 事件列表分页改游标 | sessions.mjs + 前端 |
 | B4 | F2 UPDATE 改 JOIN UPDATE | F2_SmapLoader.mjs |
 
-### Phase C — 值搜索功能（新增）
+### Phase C — 值搜索功能 ✅ 已完成（C1–C4/C6/C7/C9）
 
-| 编号 | 改动 | 涉及文件 |
-|------|------|---------|
-| C1 | 新增 `value_index` 表 + 3 索引 | schema.sql |
-| C2 | 新增 `idx_call_edges_retval` | schema.sql |
-| C3 | F1 同步填充 `value_index`（含去重逻辑） | F1_EventIndex.mjs |
-| C4 | 新增值搜索 API 端点 | sessions.mjs |
-| C5 | 函数调用端点支持参数/返回值过滤 | sessions.mjs |
-| C6 | EventsTab 新增值搜索 UI | EventsTab.vue |
-| C7 | FunctionsTab 新增参数/返回值搜索 UI | FunctionsTab.vue |
-| C8 | A4/A8 改为查 `value_index` | A4/A8 插件 |
-| C9 | DELETE session 清理 `value_index` | sessions.mjs |
+| 编号 | 改动 | 涉及文件 | 状态 |
+|------|------|---------|------|
+| C1 | 新增 `value_index` 表 + 3 索引 | schema.sql | ✅ 已完成 |
+| C2 | 新增 `idx_call_edges_retval` | schema.sql | ✅ 已完成 |
+| C3 | F1 同步填充 `value_index`（含去重逻辑） | F1_EventIndex.mjs | ✅ 已完成 |
+| C4 | 新增值搜索 API 端点 | sessions.mjs | ✅ 已完成 |
+| C5 | 函数调用端点支持参数/返回值过滤 | sessions.mjs | ✅ 已完成 |
+| C6 | EventsTab 新增值搜索 UI | EventsTab.vue | ✅ 已完成 |
+| C7 | FunctionsTab 新增参数/返回值搜索 UI | FunctionsTab.vue | ✅ 已完成 |
+| C8 | A4/A8 改为查 `value_index` | A4/A8 插件 | ⬜ 待执行 |
+| C9 | DELETE session 清理 `value_index` | sessions.mjs | ✅ 已完成 |
 
-### Phase D — 高收益但改动较大
+### Phase D — 高收益改动 ✅ 已完成
 
-| 编号 | 改动 | 涉及文件 |
-|------|------|---------|
-| D1 | `events.type` TEXT → INTEGER + `event_types` 枚举表 | schema.sql + F1 + 所有插件 + API |
-| D2 | 删除 `events.line/col/src_text`，查询时 JOIN smap | schema.sql + F1 + F2(可删) + F3 + A2 + A3 + A4 + A7 + I1 + I2 + I4 + API |
+| 编号 | 改动 | 涉及文件 | 状态 |
+|------|------|---------|------|
+| D1 | `events.type` TEXT → INTEGER（引入 `EventTypeCode.mjs` 双向映射，取代 `event_types` 枚举表方案） | schema.sql + F1 + EventTypeCode.mjs + API | ✅ 已完成 |
+| D2 | 删除 `events.line/col/src_text`，查询时 JOIN smap；F2 UPDATE 逻辑整体删除 | schema.sql + F1 + F2 + F3 + A2 + A3 + A4 + A7 + I1 + I2 + I4 + API | ✅ 已完成 |
+| — | `fields.base TEXT` → `fields.base_oid INTEGER`（运行时对象 OID，精确追踪对象属性） | schema.sql + F1 + EventSerializer.js + ExecutionTrace.js | ✅ 已完成 |
 
-D1 + D2 合并实施收益最大（节省 3-4GB，查询速度提升明显），建议在一个独立 PR 中完成。D2 的影响面比预期大（9 个插件，含 A4/I2），实施前需逐一验证每个插件的改写是否正确（改写方案见 4.7 节）。
+> D1 实际实现方案：使用 `EventTypeCode.mjs` 应用层常量对象做双向映射（而非 `event_types` 数据库枚举表），API 层返回前解码为字符串。
 
 ### Phase E — Bug 修复（独立处理）
 
@@ -924,7 +925,7 @@ D1 + D2 合并实施收益最大（节省 3-4GB，查询速度提升明显），
 
 - [ ] **`VI_MAX_SAME` 阈值**：当前设 50，可根据实际 trace 特征调整（越小存储越省，但可能漏掉高频出现的有效值）
 - [ ] **`VI_MAX_STR` 长度**：当前设 256 字节，base64 token 通常 300-500 字节，是否需要加大？
-- [ ] **D1/D2 时机**：`events.type` 改 INTEGER + 删除 `events.line/col/src_text` 需要更新 7 个插件，是否在 Phase C 完成后一并做？
+- [x] **D1/D2 时机**：已完成。`events.type` 已改为 INTEGER，`events.line/col/src_text` 已删除（见 Phase D）。
 - [ ] **游标分页的前端改动量**：当前前端是否有多处使用 offset 参数，改动范围评估
 - [ ] **`call_edges.args_json` 是否需要拆分**：若未来需要按参数类型/值查询，`value_index` 已通过 `name='arg0'` 覆盖，无需额外拆分
 - [ ] **E2 的 A5 OOM 修复策略**：A5 全量加载 events + writes 是设计决策（需要全局视图做二分），真正的修复需要重新设计算法（如按 iid 分批处理），改动较大，是否优先处理？

@@ -1,11 +1,15 @@
 /**
  * I3_ObfuscationDetector.mjs — 检测混淆特征
- * 检测变量名熵值、字符串解密函数特征、控制流平坦化
+ * 检测变量名熵值、字符串解密函数特征、控制流混淆（CFF/VMP 保守合并）
  * 写入 obfuscation_hints 表
  *
  * 性能优化：
  *  - string_decoder 检测：用 GROUP BY + HAVING 子查询预筛选，
  *    再一次批量取 return_value 样本，消除 N 次单行查询
+ *
+ * 注意：CFF（控制流平坦化）与 VMP（虚拟机保护）在动态运行数据层面
+ *  特征高度重叠，难以可靠区分，统一用 'obfuscated_control_flow' 类型，
+ *  附带事件密度提示，由用户自行判断。
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
@@ -33,7 +37,7 @@ function isShortObfuscated(name) {
 export default class I3ObfuscationDetector extends BasePlugin {
     static id = 'I3-ObfuscationDetector';
     static deps = ['F1-EventIndex', 'A3-HotPathAnalyzer'];
-    static description = '检测混淆特征：短变量名、字符串解密函数、控制流平坦化';
+    static description = '检测混淆特征：短变量名、字符串解密函数、控制流混淆（CFF/VMP）';
     static displayName = 'I3 · ObfuscationDetector';
 
     async run(ctx) {
@@ -67,6 +71,7 @@ export default class I3ObfuscationDetector extends BasePlugin {
                 null,
                 null,
                 Math.min(0.5 + shortVarCount / varNames.length * 0.5, 0.95),
+                null, // fn_name
             ]);
         }
 
@@ -78,6 +83,7 @@ export default class I3ObfuscationDetector extends BasePlugin {
                 null,
                 null,
                 Math.min(0.3 + highEntropyCount * 0.05, 0.85),
+                null, // fn_name
             ]);
         }
 
@@ -128,13 +134,20 @@ export default class I3ObfuscationDetector extends BasePlugin {
                         cg.fn_iid,
                         null,
                         Math.min(0.4 + strRets.length * 0.1, 0.90),
+                        cg.fn_name, // fn_name，供前端跳转
                     ]);
                 }
             }
         }
 
-        // ── 3. 控制流平坦化检测 ──────────────────────────────────────────────
-        this.emitProgress(ctx, '检测控制流平坦化...', 70);
+        // ── 3. 控制流混淆检测（保守策略：CFF/VMP 统一为 obfuscated_control_flow）─
+        //
+        // CFF（控制流平坦化）与 VMP（虚拟机保护）在运行时数据层面特征高度重叠：
+        //  - CFF：大 while+switch 状态机，少量状态变量多值跳转
+        //  - VMP：字节码解释器，单函数事件量极高，opcode 变量值域极大
+        // 仅凭动态事件数据难以可靠区分，此处统一检测"状态机式控制流混淆"，
+        // 并用事件密度作为辅助提示，由用户结合源码人工判断。
+        this.emitProgress(ctx, '检测控制流混淆...', 70);
         const hotIids = db.all(
             'SELECT iid, count, line FROM iid_counts WHERE session_id = ? AND count >= 10 ORDER BY count DESC LIMIT 50',
             [sessionId]
@@ -156,13 +169,33 @@ export default class I3ObfuscationDetector extends BasePlugin {
             );
 
             if (numericWrites.length >= 2 && hotIids.length >= 5) {
+                // 尝试用事件密度区分倾向（仅供参考，非确定性判断）
+                // 取最热函数的平均事件量，> 5000 倾向 VMP，否则倾向 CFF，均无法确定
+                const hotFn = db.get(
+                    `SELECT AVG(own_event_count) as avg_ev
+                     FROM call_edges
+                     WHERE session_id = ? AND own_event_count IS NOT NULL
+                     ORDER BY own_event_count DESC
+                     LIMIT 1`,
+                    [sessionId]
+                );
+                const avgHotEvents = hotFn?.avg_ev ?? 0;
+
+                let tendencyNote = '';
+                if (avgHotEvents > 5000) {
+                    tendencyNote = '（最热函数事件量极高，可能为 VMP 虚拟机保护；但也可能是深度嵌套的 CFF，需结合源码判断）';
+                } else {
+                    tendencyNote = '（特征符合控制流平坦化 CFF；若存在字节码解释器循环也可能为 VMP，建议结合源码确认）';
+                }
+
                 hints.push([
                     sessionId,
-                    'flat_control_flow',
-                    `发现 ${hotIids.length} 个热点 iid + ${numericWrites.length} 个多值数字变量，疑似控制流平坦化（状态机跳转）`,
+                    'obfuscated_control_flow',
+                    `发现 ${hotIids.length} 个热点 iid + ${numericWrites.length} 个多值数字变量，疑似控制流混淆（CFF/VMP 难以自动区分）${tendencyNote}`,
                     hotIids[0].iid,
                     hotIids[0].line,
                     Math.min(0.3 + numericWrites.length * 0.05, 0.75),
+                    null, // fn_name
                 ]);
             }
         }
@@ -174,7 +207,7 @@ export default class I3ObfuscationDetector extends BasePlugin {
             db.transaction(() => {
                 for (const hint of hints) {
                     db.run(
-                        'INSERT INTO obfuscation_hints (session_id, hint_type, description, iid, line, confidence) VALUES (?, ?, ?, ?, ?, ?)',
+                        'INSERT INTO obfuscation_hints (session_id, hint_type, description, iid, line, confidence, fn_name) VALUES (?, ?, ?, ?, ?, ?, ?)',
                         hint
                     );
                 }

@@ -35,7 +35,7 @@ mkdirSync(DATA_DIR, { recursive: true });
  * Phase 1（基础解析，创建会话时立即执行）：F1-EventIndex（+F2 如有 smap）
  * Phase 2（自动，Phase1 完成后继续后台执行）：F3 / F4 / A3
  * Phase 3（手动按需）：A5 / A8 / I1 / I2
- * Phase 4（手动按需）：A2 / A4 / A6 / A7 / I3 / I4
+ * Phase 4（手动按需）：A2 / A4 / A7 / I3 / I4
  */
 const PHASE1_PLUGINS = ['F1-EventIndex'];
 const PHASE2_PLUGINS = ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'];
@@ -43,7 +43,6 @@ const PHASE3_PLUGINS = ['A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-Crypto
 const PHASE4_PLUGINS = [
     'A2-DataFlowGraph',
     'A4-StringTracker',
-    'A6-FunctionSignatureInfer',
     'A7-ObjectMutationTracker',
     'I3-ObfuscationDetector',
     'I4-AlgorithmSummarizer',
@@ -478,11 +477,11 @@ router.get('/:id/events', (req, res) => {
                 `SELECT event_id, name, value, omitted FROM reads WHERE session_id = ? AND event_id IN (${placeholders})`,
                 id, ...eventIds
             );
-            fields = db.all(
-                `SELECT event_id, base, offset, is_write, value, omitted FROM fields WHERE session_id = ? AND event_id IN (${placeholders})`,
-                id, ...eventIds
-            );
-        }
+fields = db.all(
+`SELECT event_id, offset, is_write, value, omitted, base_oid FROM fields WHERE session_id = ? AND event_id IN (${placeholders})`,
+id, ...eventIds
+);
+}
 
         // Phase D: line/col/src_text 已通过 LEFT JOIN smap 直接获取，无需再做补全
 
@@ -511,11 +510,11 @@ router.get('/:id/events', (req, res) => {
                     omitted: !!r.omitted,
                 })),
                 fields:   (fieldsMap[e.seq] || []).map(f => ({
-                    base:    f.base,
                     offset:  f.offset,
                     isWrite: !!f.is_write,
                     value:   safeParseJson(f.value),
                     omitted: !!f.omitted,
+                    baseOid: f.base_oid ?? null,
                 })),
             };
         });
@@ -594,6 +593,7 @@ router.get('/:id/functions', (req, res) => {
             maxEvents,          // 函数体最多事件数
             hideBuiltin = '0',  // '1' 隐藏 JS 内建函数
             sortBy      = 'call_count',  // 'call_count' | 'event_count'
+            line,               // 调用点行号过滤：caller_line = N（精确匹配）
         } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
@@ -616,6 +616,12 @@ router.get('/:id/functions', (req, res) => {
             const placeholders = Array.from(BUILTIN_FN_NAMES).map(() => '?').join(',');
             conditions.push(`fn_name NOT IN (${placeholders})`);
             params.push(...BUILTIN_FN_NAMES);
+        }
+        // line：按调用点行号精确过滤（caller_line = N）
+        // 用于定位 (anonymous) 等同名函数：在第 N 行调用的函数
+        if (line !== undefined && line !== '') {
+            conditions.push('caller_line = ?');
+            params.push(Number(line));
         }
 
         const minCallsN  = Math.max(1, Number(minCalls) || 1);
@@ -894,7 +900,7 @@ router.get('/:id/calls/:callId/own-events', (req, res) => {
             const ph = eventIds.map(() => '?').join(',');
             writes = db.all(`SELECT event_id, name, value, omitted FROM writes WHERE session_id = ? AND event_id IN (${ph})`, id, ...eventIds);
             reads  = db.all(`SELECT event_id, name, value, omitted FROM reads  WHERE session_id = ? AND event_id IN (${ph})`, id, ...eventIds);
-            fields = db.all(`SELECT event_id, base, offset, is_write, value, omitted FROM fields WHERE session_id = ? AND event_id IN (${ph})`, id, ...eventIds);
+            fields = db.all(`SELECT event_id, offset, is_write, value, omitted, base_oid FROM fields WHERE session_id = ? AND event_id IN (${ph})`, id, ...eventIds);
         }
 
         const writesMap = groupBy(writes, 'event_id');
@@ -910,7 +916,7 @@ router.get('/:id/calls/:callId/own-events', (req, res) => {
             srcText: e.src_text ?? null,
             writes:  (writesMap[e.seq] || []).map(w => ({ name: w.name, value: safeParseJson(w.value), omitted: !!w.omitted })),
             reads:   (readsMap[e.seq]  || []).map(r => ({ name: r.name, value: safeParseJson(r.value), omitted: !!r.omitted })),
-            fields:  (fieldsMap[e.seq] || []).map(f => ({ base: f.base, offset: f.offset, isWrite: !!f.is_write, value: safeParseJson(f.value), omitted: !!f.omitted })),
+            fields:  (fieldsMap[e.seq] || []).map(f => ({ offset: f.offset, isWrite: !!f.is_write, value: safeParseJson(f.value), omitted: !!f.omitted, baseOid: f.base_oid ?? null })),
         }));
 
         const nextCursor = result.length === limitN ? result[result.length - 1].seq : null;
@@ -1051,7 +1057,7 @@ router.post('/:id/taint', async (req, res) => {
 router.get('/:id/loop-iterations', (req, res) => {
     try {
         const { id } = req.params;
-        const { loopId, limit = '200', offset = '0' } = req.query;
+        const { loopId, limit = '100', offset = '0' } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -1087,7 +1093,13 @@ router.get('/:id/loop-iterations', (req, res) => {
             id
         );
 
-        res.json({ loops, iterations: result, count: result.length });
+        // total：仅统计当前过滤条件下的迭代总数（供前端分页）
+        const totalRow = db.get(
+            `SELECT COUNT(*) as total FROM loop_iterations WHERE ${conditions.join(' AND ')}`,
+            ...params
+        );
+
+        res.json({ loops, iterations: result, count: result.length, total: totalRow?.total ?? 0, offset: offsetN });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/loop-iterations] error:');
         res.status(500).json({ error: e.message });
@@ -1099,7 +1111,7 @@ router.get('/:id/loop-iterations', (req, res) => {
 router.get('/:id/value-patterns', (req, res) => {
     try {
         const { id } = req.params;
-        const { onlyCrypto, limit = '500' } = req.query;
+        const { onlyCrypto, varName, minCount, limit = '2000' } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -1110,8 +1122,16 @@ router.get('/:id/value-patterns', (req, res) => {
         if (onlyCrypto === '1' || onlyCrypto === 'true') {
             conditions.push('matched_constant IS NOT NULL');
         }
+        if (varName) {
+            conditions.push('var_name LIKE ?');
+            params.push(`%${varName}%`);
+        }
+        if (minCount) {
+            conditions.push('count >= ?');
+            params.push(Number(minCount) || 1);
+        }
 
-        const limitN = Math.min(Number(limit) || 500, 2000);
+        const limitN = Math.min(Number(limit) || 2000, 2000);
 
         const rows = db.all(
             `SELECT id, value_hash, count, first_seq, iid, var_name, line, matched_constant
@@ -1122,7 +1142,7 @@ router.get('/:id/value-patterns', (req, res) => {
             ...params, limitN
         );
 
-        res.json({ patterns: rows, count: rows.length });
+        res.json({ patterns: rows, count: rows.length, total: rows.length });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/value-patterns] error:');
         res.status(500).json({ error: e.message });
@@ -1275,7 +1295,7 @@ router.post('/:id/run-phase4', async (req, res) => {
 router.get('/:id/dataflow', (req, res) => {
     try {
         const { id } = req.params;
-        const { edgeType, varName, limit = '500' } = req.query;
+        const { edgeType, varName, limit = '200', offset = '0' } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -1292,23 +1312,31 @@ router.get('/:id/dataflow', (req, res) => {
             params.push(varName, varName);
         }
 
-        const limitN = Math.min(Number(limit) || 500, 2000);
+        const limitN  = Math.min(Number(limit)  || 200, 1000);
+        const offsetN = Number(offset) || 0;
+
         const edges = db.all(
             `SELECT id, from_event_id, to_event_id, from_var, to_var, edge_type, iid, line
              FROM dataflow_edges
              WHERE ${conditions.join(' AND ')}
              ORDER BY id ASC
-             LIMIT ?`,
-            [...params, limitN]
+             LIMIT ? OFFSET ?`,
+            [...params, limitN, offsetN]
         );
 
-        // 汇总统计
+        // 汇总统计（始终用全量统计，不受 edgeType/varName 过滤影响，方便显示全局分布）
         const stats = db.all(
             'SELECT edge_type, COUNT(*) as cnt FROM dataflow_edges WHERE session_id = ? GROUP BY edge_type ORDER BY cnt DESC',
             [id]
         );
 
-        res.json({ edges, stats, count: edges.length });
+        // 当前过滤条件下的总数
+        const totalRow = db.get(
+            `SELECT COUNT(*) as total FROM dataflow_edges WHERE ${conditions.join(' AND ')}`,
+            params
+        );
+
+        res.json({ edges, stats, count: edges.length, total: totalRow?.total ?? 0, offset: offsetN });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/dataflow] error:');
         res.status(500).json({ error: e.message });
@@ -1365,59 +1393,17 @@ router.get('/:id/strings', (req, res) => {
     }
 });
 
-// ── GET /api/sessions/:id/fn-signatures ───────────────────────────────────
-
-router.get('/:id/fn-signatures', (req, res) => {
-    try {
-        const { id } = req.params;
-        const { onlyPure, limit = '200' } = req.query;
-
-        const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
-        if (!session) return res.status(404).json({ error: 'Session not found' });
-
-        const conditions = ['session_id = ?'];
-        const params = [id];
-
-        if (onlyPure === '1' || onlyPure === 'true') {
-            conditions.push('is_pure = 1');
-        }
-
-        const limitN = Math.min(Number(limit) || 200, 1000);
-
-        const rows = db.all(
-            `SELECT id, fn_name, fn_iid, call_count, is_pure, arg_types, return_types, sample_args, sample_return
-             FROM fn_signatures
-             WHERE ${conditions.join(' AND ')}
-             ORDER BY call_count DESC
-             LIMIT ?`,
-            [...params, limitN]
-        );
-
-        const result = rows.map(r => ({
-            ...r,
-            arg_types:    safeParseJson(r.arg_types, []),
-            return_types: safeParseJson(r.return_types, {}),
-            sample_args:  safeParseJson(r.sample_args, []),
-        }));
-
-        const summary = db.get(
-            'SELECT COUNT(*) as total, SUM(is_pure) as pure_count FROM fn_signatures WHERE session_id = ?',
-            [id]
-        );
-
-        res.json({ signatures: result, summary, count: result.length });
-    } catch (e) {
-        log.error({ err: e }, '[GET /api/sessions/:id/fn-signatures] error:');
-        res.status(500).json({ error: e.message });
-    }
-});
-
 // ── GET /api/sessions/:id/object-timelines ────────────────────────────────
 
 router.get('/:id/object-timelines', (req, res) => {
     try {
         const { id } = req.params;
-        const { baseVar, limit = '300', onlyWrites } = req.query;
+        const {
+            baseVar,
+            onlyWrites,
+            page     = '1',
+            pageSize = '100',
+        } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -1433,29 +1419,48 @@ router.get('/:id/object-timelines', (req, res) => {
             conditions.push('is_write = 1');
         }
 
-        const limitN = Math.min(Number(limit) || 300, 2000);
+        const where   = conditions.join(' AND ');
+        const pageSizeN = Math.min(Math.max(Number(pageSize) || 100, 1), 500);
+        const pageN     = Math.max(Number(page) || 1, 1);
+        const offsetN   = (pageN - 1) * pageSizeN;
+
+        // 总数（用于分页）
+        const totalRow = db.get(`SELECT COUNT(*) as cnt FROM object_timelines WHERE ${where}`, params);
+        const total    = totalRow?.cnt ?? 0;
+        const totalPages = Math.max(1, Math.ceil(total / pageSizeN));
 
         const rows = db.all(
             `SELECT id, base_var, offset_key, change_seq, old_value, new_value, line, is_write
              FROM object_timelines
-             WHERE ${conditions.join(' AND ')}
+             WHERE ${where}
              ORDER BY change_seq ASC
-             LIMIT ?`,
-            [...params, limitN]
+             LIMIT ? OFFSET ?`,
+            [...params, pageSizeN, offsetN]
         );
 
-        // 按 base_var 分组的统计
+        // 按 base_var 分组的统计（含读写，全量，LIMIT 500 防超大数据集）
         const baseVarStats = db.all(
-            `SELECT base_var, COUNT(*) as change_count
+            `SELECT base_var, COUNT(*) as total_count,
+                    SUM(is_write) as write_count,
+                    COUNT(*) - SUM(is_write) as read_count
              FROM object_timelines
-             WHERE session_id = ? AND is_write = 1
+             WHERE session_id = ?
              GROUP BY base_var
-             ORDER BY change_count DESC
-             LIMIT 50`,
+             ORDER BY write_count DESC, total_count DESC
+             LIMIT 500`,
             [id]
         );
 
-        res.json({ timelines: rows, baseVarStats, count: rows.length });
+        res.json({
+            timelines:   rows,
+            baseVarStats,
+            count:       rows.length,
+            total,
+            totalPages,
+            page:        pageN,
+            pageSize:    pageSizeN,
+            hasMore:     pageN < totalPages,
+        });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/object-timelines] error:');
         res.status(500).json({ error: e.message });
@@ -1472,7 +1477,7 @@ router.get('/:id/obfuscation', (req, res) => {
         if (!session) return res.status(404).json({ error: 'Session not found' });
 
         const hints = db.all(
-            'SELECT id, hint_type, description, iid, line, confidence FROM obfuscation_hints WHERE session_id = ? ORDER BY confidence DESC',
+            'SELECT id, hint_type, description, iid, line, confidence, fn_name FROM obfuscation_hints WHERE session_id = ? ORDER BY confidence DESC',
             [id]
         );
 
@@ -1721,10 +1726,10 @@ router.get('/:id/value-search/events', (req, res) => {
             `SELECT event_id, name, value, omitted FROM reads WHERE session_id = ? AND event_id IN (${placeholders})`,
             id, ...eventIds
         );
-        const fields = db.all(
-            `SELECT event_id, base, offset, is_write, value, omitted FROM fields WHERE session_id = ? AND event_id IN (${placeholders})`,
-            id, ...eventIds
-        );
+const fields = db.all(
+`SELECT event_id, offset, is_write, value, omitted, base_oid FROM fields WHERE session_id = ? AND event_id IN (${placeholders})`,
+id, ...eventIds
+);
 
         const writesMap = groupBy(writes, 'event_id');
         const readsMap  = groupBy(reads,  'event_id');
@@ -1752,7 +1757,7 @@ router.get('/:id/value-search/events', (req, res) => {
             matchInfo: matchInfo[e.seq] ?? null,   // 命中的值信息（变量名、值）
             writes:    (writesMap[e.seq] || []).map(w => ({ name: w.name, value: safeParseJson(w.value), omitted: !!w.omitted })),
             reads:     (readsMap[e.seq]  || []).map(r => ({ name: r.name, value: safeParseJson(r.value), omitted: !!r.omitted })),
-            fields:    (fieldsMap[e.seq] || []).map(f => ({ base: f.base, offset: f.offset, isWrite: !!f.is_write, value: safeParseJson(f.value), omitted: !!f.omitted })),
+            fields:    (fieldsMap[e.seq] || []).map(f => ({ offset: f.offset, isWrite: !!f.is_write, value: safeParseJson(f.value), omitted: !!f.omitted, baseOid: f.base_oid ?? null })),
         }));
 
         res.json({

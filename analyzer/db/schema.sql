@@ -75,14 +75,14 @@ CREATE TABLE IF NOT EXISTS reads (
 -- ─── 属性读写 ────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS fields (
-    id          INTEGER PRIMARY KEY,
-    event_id    INTEGER NOT NULL,
-    session_id  TEXT NOT NULL,
-    base        TEXT,
-    offset      TEXT,
-    is_write    INTEGER,
-    value       TEXT,
-    omitted     INTEGER DEFAULT 0
+id          INTEGER PRIMARY KEY,
+event_id    INTEGER NOT NULL,
+session_id  TEXT NOT NULL,
+offset      TEXT,
+is_write    INTEGER,
+value       TEXT,
+omitted     INTEGER DEFAULT 0,
+base_oid    INTEGER             -- 运行时对象唯一 ID（OID），NULL 表示非对象或 OID 未知
 );
 
 -- ─── 源码映射 ────────────────────────────────────────────────────────────────
@@ -300,11 +300,12 @@ CREATE TABLE IF NOT EXISTS signature_paths (
 CREATE TABLE IF NOT EXISTS obfuscation_hints (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id      TEXT NOT NULL,
-    hint_type       TEXT,   -- 'short_var' / 'string_decoder' / 'flat_control_flow' / 'high_entropy_name'
+    hint_type       TEXT,   -- 'short_var' / 'string_decoder' / 'obfuscated_control_flow' / 'high_entropy_name'
     description     TEXT,
     iid             INTEGER,
     line            INTEGER,
-    confidence      REAL
+    confidence      REAL,
+    fn_name         TEXT    -- 仅 string_decoder 类型填充，用于前端跳转到函数面板
 );
 CREATE INDEX IF NOT EXISTS idx_obf_hints_session ON obfuscation_hints(session_id);
 

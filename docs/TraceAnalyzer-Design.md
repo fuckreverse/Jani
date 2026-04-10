@@ -1,7 +1,7 @@
 # Jani Trace Analyzer — 设计文档
 
-**版本：** v1.2（已实现）  
-**日期：** 2026-04-08  
+**版本：** v1.4（已实现）  
+**日期：** 2026-04-10  
 **目标：** 为 JS 动态 trace 提供一站式逆向分析平台，支持算法识别、污点追踪、签名还原等场景。
 
 ---
@@ -52,10 +52,10 @@ Jani 的插桩引擎已能产出高质量 trace（`.bin` + `.smap.json`），包
 │  │ Handler  │  │ (Scheduler)  │  │ (REST/WS)│  │ Runner  │  │
 │  └────┬─────┘  └──────┬───────┘  └─────┬────┘  └────┬────┘  │
 │  ┌────▼───────────────▼─────────────────▼────────────▼────┐  │
-│  │              SQLite（sql.js，内存 db + flush）          │  │
+│  │              SQLite（better-sqlite3，WAL 模式写磁盘）   │  │
 │  │  sessions | events | writes | reads | fields | smap   │  │
 │  │  call_edges | taint_paths | var_lifetime | scopes      │  │
-│  │  value_patterns | bookmarks | fn_signatures | ...      │  │
+│  │  value_patterns | bookmarks | value_index | ...        │  │
 │  │  plugin_checkpoints（断点恢复 / 进度持久化）            │  │
 │  └────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
@@ -66,7 +66,7 @@ Jani 的插桩引擎已能产出高质量 trace（`.bin` + `.smap.json`），包
 | 层次 | 技术选型 | 理由 |
 |---|---|---|
 | 后端 | Node.js + Express | 与 Jani 同生态，无额外运行时 |
-| 数据库 | SQLite（**sql.js**，WASM 纯 JS 实现） | 沙箱环境无 gcc，无法编译 better-sqlite3 原生模块；sql.js 零编译依赖，内存 db + 批次末尾 flush 写盘，性能可接受 |
+| 数据库 | SQLite（**better-sqlite3**，原生同步 API） | 直接写磁盘，无 flush/dirty 机制；同步 API 无 IPC 开销，批量 INSERT 比 sql.js 快 4–8×；WAL 模式支持并发读 |
 | Trace 收集 | 内置 `/ws/trace` WebSocket 端点 | 原独立 `trace-server` 功能已集成进 JTA Server，无需单独启动 |
 | 工作空间管理 | `projects` 表 + `/api/projects` 路由 | 一次插桩，反复复用；上传原始 JS 自动触发插桩，后续上传 trace.bin 无需重新插桩 |
 | 前端 | Vue 3 + Vite | 轻量，组件化，易于实现代码编辑器集成 |
@@ -123,50 +123,46 @@ CREATE TABLE sessions (
 );
 
 -- 事件流（主表）
+-- 注意：type 字段存储整数编码，见 db/EventTypeCode.mjs；line/col/src_text 已移至 smap 表
 CREATE TABLE events (
     id          INTEGER PRIMARY KEY,  -- seq
     session_id  TEXT NOT NULL,
-    type        TEXT NOT NULL,        -- END_EXPR / CALL_PRE / CALL / SCRIPT_ENTER 等
+    type        INTEGER NOT NULL,     -- 事件类型整数编码（见 EventTypeCode.TYPE）
     iid         INTEGER,
-    line        INTEGER,
-    col         INTEGER,              -- 字符偏移量（从行首算起，与 Jani smap 的 sc 字段含义一致）
-    src_text    TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 
 -- 变量写入
 CREATE TABLE writes (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          INTEGER PRIMARY KEY,
     event_id    INTEGER NOT NULL,
     session_id  TEXT NOT NULL,
     name        TEXT,
     value       TEXT,     -- JSON 序列化
-    omitted     INTEGER DEFAULT 0,
-    FOREIGN KEY (event_id) REFERENCES events(id)
+    omitted     INTEGER DEFAULT 0
 );
 
 -- 变量读取
 CREATE TABLE reads (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          INTEGER PRIMARY KEY,
     event_id    INTEGER NOT NULL,
     session_id  TEXT NOT NULL,
     name        TEXT,
     value       TEXT,
-    omitted     INTEGER DEFAULT 0,
-    FOREIGN KEY (event_id) REFERENCES events(id)
+    omitted     INTEGER DEFAULT 0
 );
 
 -- 属性读写（fields）
+-- 注意：base 字段已移除，改用 base_oid（运行时对象唯一 ID，0 或 NULL 表示非对象）
 CREATE TABLE fields (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          INTEGER PRIMARY KEY,
     event_id    INTEGER NOT NULL,
     session_id  TEXT NOT NULL,
-    base        TEXT,
     offset      TEXT,
     is_write    INTEGER,
     value       TEXT,
     omitted     INTEGER DEFAULT 0,
-    FOREIGN KEY (event_id) REFERENCES events(id)
+    base_oid    INTEGER   -- 运行时对象唯一 ID（OID），NULL/0 表示非对象或 OID 未知
 );
 
 -- 源码映射（来自 .smap.json）
@@ -184,14 +180,16 @@ CREATE TABLE smap (
 CREATE TABLE call_edges (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id      TEXT NOT NULL,
-    call_seq        INTEGER,   -- CALL_PRE 事件的 seq
-    return_seq      INTEGER,   -- CALL 事件的 seq
+    call_seq        INTEGER,    -- CALL_PRE 事件的 seq
+    return_seq      INTEGER,    -- CALL 事件的 seq
     caller_line     INTEGER,
     fn_name         TEXT,
-    fn_iid      INTEGER,   -- 被调用函数定义处的 iid（混淆代码中函数名相同时用于区分）
+    fn_iid          INTEGER,    -- 被调用函数定义处的 iid（混淆代码中函数名相同时用于区分）
     args_json       TEXT,
     return_value    TEXT,
-    depth           INTEGER    -- 调用深度
+    depth           INTEGER,    -- 调用深度
+    own_event_count INTEGER     -- 自身事件数：(return_seq - call_seq) 减去子调用覆盖的 SEQ 跨度
+                                -- 由 F3_CallGraphBuilder 预计算写入（O(N)）；旧数据此列为 NULL
 );
 
 -- 污点路径（由 TaintTracker 插件填充）
@@ -216,6 +214,20 @@ CREATE TABLE var_lifetime (
     write_count     INTEGER DEFAULT 0,
     read_count      INTEGER DEFAULT 0,
     scope           TEXT        -- 推断的作用域（global / closure / local），由 F5 填充
+);
+
+-- 值索引（由 F1 EventIndex 填充，供值搜索 API 使用）
+-- 对每个 write/read/field 的值做类型化索引，支持按值反查事件
+-- val_type: 'num' / 'bool' / 'str'；VI_MAX_SAME=50：同一值最多记录 50 条，防止循环变量爆炸
+CREATE TABLE value_index (
+    session_id  TEXT NOT NULL,
+    event_id    INTEGER NOT NULL,
+    val_type    TEXT NOT NULL,   -- 'num' / 'bool' / 'str'
+    val_num     REAL,            -- val_type='num' 时有效
+    val_str     TEXT,            -- val_type='str'/'bool' 时有效（截断至 256 字符）
+    var_name    TEXT,
+    source      TEXT NOT NULL,   -- 'write' / 'read' / 'field'
+    PRIMARY KEY (session_id, event_id, source)
 );
 ```
 
@@ -262,47 +274,54 @@ CREATE TABLE run_tasks (
 
 ### 3.3 Database.mjs 实现说明
 
-由于沙箱环境缺少 gcc，无法编译 better-sqlite3 原生模块，最终采用 **sql.js**（SQLite WASM 纯 JS 移植）。
+采用 **better-sqlite3**（原生 C++ 扩展，同步 API），相比原来的 sql.js 内存模式有显著性能提升。
 
 #### 核心设计
 
 ```
-内存运行模式
-  ├── 数据库始终在 WASM 内存中（_db）
-  ├── transaction() 内只写内存，不 export（高性能）
-  ├── 每次 transaction() 后标记 _dirty = true
-  └── flush() / close() 时：_db.export() → writeFileSync 写盘
+直接写磁盘模式
+  ├── WAL 模式（journal_mode = WAL）：并发读不阻塞写
+  ├── 同步写策略（synchronous = NORMAL）：比 FULL 快，WAL 下足够安全
+  ├── 页缓存 64MB（cache_size = -16000）
+  ├── mmap 128MB（mmap_size = 134217728）：减少大表顺序扫描的系统调用
+  └── flush() 为空操作（better-sqlite3 直接写磁盘，无需手动 flush）
 
-API 兼容层
+LRU prepared statement 缓存
+  ├── 容量 200 条：覆盖所有插件热路径 SQL
+  ├── 命中 → 移到末尾（LRU 队尾）
+  └── 淘汰 → 驱逐最久未使用的（Map 迭代顺序 = 插入顺序，第一项即 LRU）
+
+API 兼容层（与原 sql.js 版本完全兼容）
   ├── all(sql, ...args)   → 查询多行（返回数组）
   ├── get(sql, ...args)   → 查询单行
   ├── run(sql, ...args)   → 执行写入（不返回数据）
-  ├── transaction(fn)     → 批量写入事务（内存操作，末尾 flush）
-  └── getDb()             → 获取原始 sql.js db 实例（供插件直接使用）
+  ├── transaction(fn)     → 批量写入事务（better-sqlite3 同步回调）
+  ├── exec(sql)           → 执行多条语句（DDL/schema）
+  └── raw()               → 获取原始 better-sqlite3 Database 实例（供插件直接使用）
 
 参数规范化（normalizeParams）
   ├── db.all(sql, p1, p2)         → 展开参数形式
   └── db.all(sql, [p1, p2])       → 数组形式（两种调用方式均支持）
 ```
 
-#### 嵌套事务处理（`_inTransaction` 标志）
+#### 在线迁移（`_runMigrations`）
 
-sql.js 不支持 SAVEPOINT，直接嵌套 BEGIN/COMMIT 会报错。Database.mjs 通过 `_inTransaction` 标志处理：
+旧 DB 文件升级时自动执行列添加（ALTER TABLE ... ADD COLUMN IF NOT EXISTS 等），保证向后兼容：
 
 ```
-外层 transaction(fn)
-  ├── _inTransaction = false → BEGIN; fn(); COMMIT; flush(); _inTransaction = false
-  └── 内层 transaction(fn)（嵌套调用）
-       └── _inTransaction = true → 直接执行 fn()，跳过 BEGIN/COMMIT/flush
+迁移项示例：
+  - call_edges 表：添加 own_event_count 列
+  - fields 表：添加 base_oid 列（替代已废弃的 base 字符串列）
+  - projects 表：添加 preprocessed_path 列
+  - events 表迁移：将旧 TEXT 类型的 type 列转为 INTEGER（重建表）
 ```
-
-同理，`run()` 和 `persist()` 在事务中也跳过 flush，避免 `cannot rollback - no transaction is active` 错误。
 
 #### 文件位置
 
 ```
-analyzer/db/Database.mjs    # sql.js 封装
-analyzer/db/schema.sql      # 建表 DDL（同步执行）
+analyzer/db/Database.mjs        # better-sqlite3 封装（LRU stmt 缓存 + 迁移）
+analyzer/db/schema.sql          # 建表 DDL（幂等，CREATE TABLE IF NOT EXISTS）
+analyzer/db/EventTypeCode.mjs   # events.type 整数编码双向映射（与 EventSerializer 对齐）
 ```
 
 ---
@@ -490,14 +509,6 @@ phase1 全部完成 → 通知 UI（type: 'all_done', phase: 'phase1'）
   - 可视化：迭代 × 变量值的二维表格
 - **输出：** `loop_iterations` 表
 
-#### A6 · FunctionSignatureInfer
-- **依赖：** F1, F3
-- **功能：**
-  - 聚合函数所有调用记录：`(fn, args[], return)`
-  - 推断：纯函数（相同输入 → 相同输出）？
-  - 统计参数类型分布
-- **输出：** `fn_signatures` 表
-
 #### A7 · ObjectMutationTracker
 - **依赖：** F1
 - **功能：**
@@ -529,7 +540,7 @@ phase1 全部完成 → 通知 UI（type: 'all_done', phase: 'phase1'）
 - **输出：** `crypto_hints` 表（iid, algorithm, confidence, evidence）
 
 #### I2 · SignatureAnalyzer ⭐
-- **依赖：** A1, A6, A4
+- **依赖：** A1, A4
 - **功能：**
   - 定位 HTTP 请求构造点（headers/body 的 putField）
   - 反向追踪 `sign/token/timestamp/nonce` 字段的来源
@@ -540,12 +551,12 @@ phase1 全部完成 → 通知 UI（type: 'all_done', phase: 'phase1'）
 - **依赖：** A2, A3, F2
 - **检测：**
   - 变量名熵值（短/随机变量名 = 高熵）
-  - 字符串解密函数识别（一函数多次调用返回不同字符串）
-  - 控制流平坦化（大 switch + 单循环变量）
-- **输出：** `obfuscation_hints` 表
+  - 字符串解密函数识别（一函数多次调用返回不同字符串，`fn_name` 字段记录供 UI 跳转）
+  - 控制流混淆（大 switch + 单循环变量；高事件密度提示）
+- **输出：** `obfuscation_hints` 表（含 `hint_type`、`description`、`confidence`、`fn_name` 字段）
 
 #### I4 · AlgorithmSummarizer
-- **依赖：** I1, A1, A5, A6
+- **依赖：** I1, A1, A5
 - **功能：** 汇总所有 Inference 结论，生成人类可读摘要
   - 示例："函数 `_0x1a2b` 是 AES-128 加密，key 来自变量 `secret`（第 42 行赋值），被 `sign()` 调用"
   - 可选：接入 LLM 做进一步语义解释
@@ -900,17 +911,54 @@ GET  /api/sessions/:id/events?line=42&type=END_EXPR&types=CALL_PRE,CALL&limit=10
     注意：大 trace 推荐用 seqFrom/seqTo 游标分页，避免 offset 深翻页性能问题
     游标用法：第一页 ?limit=100，下一页 ?seqFrom=<上页末尾seq+1>&limit=100
     types 参数：多类型过滤（逗号分隔），优先于 type（向后兼容）
+    事件对象新格式：fields 数组项已将 base 字段改为 baseOid（运行时对象 ID，null 表示未知）
+
+GET  /api/sessions/:id/functions?search=&minCalls=1&minEvents=&maxEvents=&hideBuiltin=0&sortBy=call_count&limit=100&offset=0
+    查询函数调用统计（聚合 call_edges 按 fn_name + fn_iid 分组）
+    返回：{ functions: [{ fn_name, fn_iid, call_count, event_count, avg_own_event_count, min_line, ... }], total }
+    hideBuiltin=1：过滤 JS 内建函数名
+    sortBy=event_count：按平均自身事件数排序（衡量函数复杂度）
+    minEvents/maxEvents：按 own_event_count 范围过滤（对旧数据降级为 return_seq-call_seq 近似）
+
+GET  /api/sessions/:id/functions/:fnName/calls?limit=200&offset=0&fnIid=&callSeq=
+    查询某函数所有调用记录（含参数、返回值、SEQ 范围）
+    fnIid：按 fn_iid 精确过滤，区分同名不同位置的函数
+    callSeq：自动定位到包含该调用的分页（前端无需手动翻页）
+    返回：{ calls: [{ id, call_seq, return_seq, depth, args, return_value, ... }], total, offset }
+
+GET  /api/sessions/:id/calls/:callId/own-events?limit=50&offset=0
+    查询单次调用自身事件流（排除子调用事件），支持分页
+    返回：{ events: [...], total, ownEventCount }
+
+GET  /api/sessions/:id/call-stack?callSeq=N&returnSeq=M&depth=D
+    查询某次函数调用的完整调用栈（祖先帧列表，按深度升序）
+    返回：{ stack: [{ fnName, fnIid, callerLine, depth, args, returnValue, callSeq, returnSeq }] }
+
+GET  /api/sessions/:id/events/:seq/owner-fn
+    查询某个事件所属的最近函数帧（包含该 seq 的 depth 最大的 call_edge）
+    返回：{ call: { fnName, fnIid, callerLine, depth, callSeq, returnSeq, ... } } 或 null
+
+GET  /api/sessions/:id/value-search?num=0.5&str=foo&strLike=*secret*&varName=key&source=write&limit=200
+    按值搜索 value_index 表，返回匹配的 event_id 列表
+    支持：num（精确数值）/ numMin+numMax（数值范围）/ str（精确字符串）/ strLike（通配符，* 匹配任意）/ varName（按变量名过滤）
+    返回：{ matches: [{ event_id, val_type, val_num, val_str, var_name, source }], count }
+
+GET  /api/sessions/:id/value-search/events?num=0.5&varName=key&offset=0&limit=50
+    值搜索 + 事件详情合并接口（一次请求完成"按值找事件"并返回完整事件数据）
+    解决原方案"取 min/max 范围 + 前端二次过滤"的分页不准问题
+    参数与 value-search 相同，额外支持 offset/limit 分页
+    返回：{ events: [...], total, count, hasMore }
 
 GET  /api/sessions/:id/taint?var=key&direction=forward
     触发/获取污点追踪结果
 
-GET  /api/sessions/:id/hotpath
-    热路径数据
+GET  /api/sessions/:id/hot-iids
+    热路径数据（iid 执行次数统计）
 
-GET  /api/sessions/:id/callgraph
+GET  /api/sessions/:id/call-graph
     调用图数据
 
-GET  /api/sessions/:id/crypto
+GET  /api/sessions/:id/crypto-hints
     加密检测结果
 
 GET  /api/sessions/:id/summary
@@ -1063,19 +1111,19 @@ Jani/
 │   ├── logger.mjs             # 日志封装（pino）
 │   ├── db/
 │   │   ├── schema.sql         # 表结构定义（含 projects / plugin_checkpoints 等全部表）
-│   │   └── Database.mjs       # SQLite 封装（sql.js WASM）
+│   │   ├── Database.mjs       # SQLite 封装（better-sqlite3，LRU stmt 缓存 + 在线迁移）
+│   │   └── EventTypeCode.mjs  # events.type 整数编码双向映射（与 EventSerializer 字节值对齐）
 │   ├── plugins/               # 所有分析插件（平铺，无子目录）
 │   │   ├── BasePlugin.mjs     # 插件基类
-│   │   ├── F1_EventIndex.mjs  # 基础：事件索引（BATCH_SIZE=5000，yield 让出事件循环）
+│   │   ├── F1_EventIndex.mjs  # 基础：事件索引 + 值索引（BATCH_SIZE=5000，yield 让出事件循环）
 │   │   ├── F2_SmapLoader.mjs
-│   │   ├── F3_CallGraphBuilder.mjs
+│   │   ├── F3_CallGraphBuilder.mjs  # 调用图 + own_event_count 预计算
 │   │   ├── F4_VariableLifetime.mjs
 │   │   ├── A1_TaintTracker.mjs
 │   │   ├── A2_DataFlowGraph.mjs
 │   │   ├── A3_HotPathAnalyzer.mjs
 │   │   ├── A4_StringTracker.mjs
 │   │   ├── A5_LoopDetector.mjs
-│   │   ├── A6_FunctionSignatureInfer.mjs
 │   │   ├── A7_ObjectMutationTracker.mjs
 │   │   ├── A8_ValuePatternDetector.mjs
 │   │   ├── I1_CryptoDetector.mjs
@@ -1096,10 +1144,9 @@ Jani/
 │       │   │   └── session/   # 会话详情标签页组件
 │       │   │       ├── CryptoTab.vue       # 加密检测标签页
 │       │   │       ├── DataflowTab.vue     # 数据流图标签页
-│       │   │       ├── EventsTab.vue       # 事件列表标签页
-│       │   │       ├── FileInfoBar.vue     # 文件信息栏
-│       │   │       ├── FnSigTab.vue        # 函数签名标签页
-│       │   │       ├── FunctionsTab.vue    # 调用图标签页
+│   │   │       ├── EventsTab.vue       # 事件列表标签页（含值搜索、跨Tab跳转）
+│   │   │       ├── FileInfoBar.vue     # 文件信息栏
+│   │   │       ├── FunctionsTab.vue    # 函数列表标签页（事件数过滤、内建函数隐藏、调用定位）
 │       │   │       ├── LoopsTab.vue        # 循环分析标签页
 │       │   │       ├── ObfuscationTab.vue  # 混淆检测标签页
 │       │   │       ├── ObjMutTab.vue       # 对象变异标签页
@@ -1173,14 +1220,14 @@ Jani/
 - [x] 后端 API：`/run-phase3`，A5/A8/I1/I2 全部 done
 
 ### Phase 4：推理与报告 ✅ 已完成
-- [x] A6 FunctionSignatureInfer（`fn_signatures` 表）
 - [x] A7 ObjectMutationTracker（`object_timelines` 表）
-- [x] I3 ObfuscationDetector（`obfuscation_hints` 表）
+- [x] I3 ObfuscationDetector（`obfuscation_hints` 表，含控制流混淆检测）
 - [x] I4 AlgorithmSummarizer（`analysis_summary`，Markdown 报告）
-- [x] 后端 API：`/run-phase4`，A2/A4/A6/A7/I3/I4 全部 done
+- [x] 后端 API：`/run-phase4`，A2/A4/A7/I3/I4 全部 done
 - [x] 完整流程端到端验证通过（2026-04-05，7 行测试文件，15 条事件，全部插件 done）
+- **注：** A6 FunctionSignatureInfer 已在后续重构中移除（见 Phase 8）
 
-> **当前状态：** JTA 服务运行在 `http://localhost:33000`，全部 4 个阶段 17 个分析插件已完工，工作空间管理、预处理集成、空间分析功能均已实装。
+> **当前状态：** JTA 服务运行在 `http://localhost:33000`，全部分析插件已完工，工作空间管理、预处理集成、空间分析功能均已实装。
 
 ### Phase 5：工作空间管理 ✅ 已完成
 - [x] `db/schema.sql` 新增 `projects` 表
@@ -1212,13 +1259,36 @@ Jani/
 - [ ] `mcp/jta-mcp-sse.mjs`：HTTP SSE 传输，供远程 LLM 访问
 - [ ] 配置示例：Claude Desktop `claude_desktop_config.json` 片段
 
+### Phase 8：数据库优化重构 ✅ 已完成
+- [x] **SQLite 后端切换**：`sql.js`（内存 WASM）→ `better-sqlite3`（原生同步 C++）
+  - 批量 INSERT 速度提升 4–8×；WAL 模式支持并发读；直接写磁盘，无需手动 flush
+  - 同步 API 消除异步回调层，大幅简化插件代码
+- [x] **LRU Prepared Statement 缓存**：容量 200 条，覆盖所有插件热路径 SQL，消除重复编译开销
+- [x] **在线迁移（Online Migration）**：`Database.mjs` 启动时自动检测缺失列并 `ALTER TABLE ADD COLUMN`，数据库向后兼容，旧会话无需重建
+- [x] **Schema 优化**：
+  - `events.type`：`TEXT` → `INTEGER`（引入 `EventTypeCode.mjs` 整数编码双向映射）
+  - `events` 表移除 `line`、`col`、`src_text` 列（改由 smap 动态查询，减少 DB 体积）
+  - `fields` 表 `base` 字段改为 `base_oid`（运行时对象唯一 ID，取代序列化后的 base 值，精确追踪对象属性）
+  - `call_edges` 表新增 `own_event_count`（记录函数调用自身的事件数，供 FunctionsTab 排序过滤）
+- [x] **`value_index` 表**：新增事件值类型化索引表，由 F1 EventIndex 填充，支持 `/api/sessions/:id/value-search` 值搜索 API
+- [x] **新增 API**：
+  - `GET /api/sessions/:id/functions`（函数列表，支持事件数过滤、内建函数隐藏）
+  - `GET /api/sessions/:id/functions/:fnName/calls`（函数调用详情）
+  - `GET /api/sessions/:id/calls/:callId/own-events`（函数自身事件流）
+  - `GET /api/sessions/:id/call-stack`（调用栈快照）
+  - `GET /api/sessions/:id/events/:seq/owner-fn`（事件所属函数）
+  - `GET /api/sessions/:id/value-search`（按值搜索 `value_index`）
+  - `GET /api/sessions/:id/value-search/events`（值搜索 + 事件详情合并）
+- [x] **A6 FunctionSignatureInfer 移除**：功能冗余，依赖该插件的 `I2`/`I4` 已更新依赖关系
+- [x] **EventSerializer 增强**：屏蔽对象 `toJSON` 方法防止插桩代码递归调用；`fields` 序列化切换到 `base_oid`
+
 ---
 
 ## 10. 关键设计决策
 
 | 决策 | 选择 | 理由 |
 |---|---|---|
-| 数据库 | SQLite（sql.js） | 零部署、本地、点查快；sql.js 因沙箱无 gcc 替换 better-sqlite3；污点链 BFS 在 Node.js 层处理 |
+| 数据库 | SQLite（**better-sqlite3**） | 零部署、本地、点查快；原生 C++ 扩展，同步 API 无异步开销；WAL 模式直接写磁盘，批量 INSERT 比 sql.js 快 4–8×；污点链 BFS 在 Node.js 层处理 |
 | 本地 vs 服务化 | 本地运行 | 目标代码可能含敏感逻辑，不适合上传到服务器 |
 | 插件并发 | 拓扑排序后并发执行无依赖插件 | 充分利用 I/O 等待时间 |
 | 污点追踪粒度 | 变量名级别（非字节级） | JS 动态 trace 的天然粒度，足够逆向分析使用 |

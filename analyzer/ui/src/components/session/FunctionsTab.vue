@@ -55,6 +55,21 @@
         />
       </label>
 
+      <!-- 行号过滤 -->
+      <label class="filter-label">
+        行号
+        <input
+          v-model="fnLineFilter"
+          type="number"
+          min="1"
+          placeholder="调用点行"
+          style="width:72px"
+          title="按调用点行号过滤（caller_line = N），可用于定位 (anonymous) 等函数"
+          @keyup.enter="loadFnExec(true)"
+          @change="loadFnExec(true)"
+        />
+      </label>
+
       <!-- 隐藏内建函数 toggle -->
       <label class="filter-label filter-toggle" :class="{ 'toggle-active': fnHideBuiltin }" @click="fnHideBuiltin = !fnHideBuiltin; loadFnExec(true)">
         <span class="toggle-dot"></span>
@@ -382,6 +397,7 @@ const fnMinEvents    = ref('');    // 函数体事件数下限（空=不过滤�
 const fnMaxEvents    = ref('');    // 函数体事件数上限（空=不过滤）
 const fnHideBuiltin  = ref(true);  // 默认开：隐藏内建函数
 const fnSortBy       = ref('call_count');  // 'call_count' | 'event_count'
+const fnLineFilter   = ref('');    // 调用点行号过滤（空=不过滤）
 const fnExecPage     = ref(1);
 const FN_EXEC_PAGE   = 50;
 
@@ -477,6 +493,7 @@ async function loadFnExec(reset = false) {
         if (fnHideBuiltin.value)        params.set('hideBuiltin',  '1');
         if (fnMinEvents.value !== '')   params.set('minEvents',    fnMinEvents.value);
         if (fnMaxEvents.value !== '')   params.set('maxEvents',    fnMaxEvents.value);
+        if (fnLineFilter.value !== '')  params.set('line',         fnLineFilter.value);
         const res = await fetch(`/api/sessions/${props.sessionId}/functions?${params}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -496,6 +513,7 @@ function clearFnExecFilters() {
     fnMaxEvents.value    = '';
     fnHideBuiltin.value  = true;  // 重置保持默认开启
     fnSortBy.value       = 'call_count';
+    fnLineFilter.value   = '';
     loadFnExec(true);
 }
 
@@ -922,6 +940,11 @@ onMounted(() => loadFnExec(true));
     color: var(--text-primary); cursor: pointer;
 }
 .filter-select:focus { outline: none; border-color: rgba(99,102,241,0.5); }
+
+/* 隐藏 number input 的上下调整箭头（spinner） */
+.filter-bar input[type=number]::-webkit-inner-spin-button,
+.filter-bar input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.filter-bar input[type=number] { -moz-appearance: textfield; }
 
 /* 内建函数 toggle 按钮 */
 .filter-toggle {

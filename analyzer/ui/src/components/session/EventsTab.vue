@@ -167,10 +167,10 @@
               <td class="td-vars">
                 <span
                   v-for="f in (event.fields || []).slice(0, 2)"
-                  :key="`${f.base}.${f.offset}`"
+                  :key="`${f.baseOid ?? '?'}.${f.offset}`"
                   class="var-chip var-field"
-                  :title="`${f.base}.${f.offset} ${f.isWrite ? '=' : '→'} ${JSON.stringify(f.value)}`"
-                >{{ f.base }}.{{ f.offset }}</span>
+                  :title="`#${f.baseOid ?? '?'}.${f.offset} ${f.isWrite ? '=' : '→'} ${JSON.stringify(f.value)}`"
+                >#{{ f.baseOid ?? '?' }}.{{ f.offset }}</span>
                 <span v-if="(event.fields || []).length > 2" class="var-more">+{{ event.fields.length - 2 }}</span>
               </td>
               <td class="td-actions">
@@ -223,8 +223,8 @@
         </div>
         <div v-if="selectedEvent.fields?.length" class="detail-section">
           <div class="detail-label">属性访问</div>
-          <div v-for="f in selectedEvent.fields" :key="`${f.base}.${f.offset}`" class="var-row">
-            <span class="var-name">{{ f.base }}.{{ f.offset }}</span>
+          <div v-for="f in selectedEvent.fields" :key="`${f.baseOid ?? '?'}.${f.offset}`" class="var-row">
+            <span class="var-name">#{{ f.baseOid ?? '?' }}.{{ f.offset }}</span>
             <span class="var-arrow">{{ f.isWrite ? '=' : '→' }}</span>
             <code class="var-value">{{ formatValue(f.value) }}</code>
           </div>

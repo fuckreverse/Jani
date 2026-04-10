@@ -390,4 +390,17 @@ function _runMigrations(db) {
     } catch (e) {
         console.warn('[Database] migrate events table failed (non-fatal):', e.message);
     }
+
+    // ── obfuscation_hints.fn_name 列迁移 ─────────────────────────────────────
+    // I3 v2：string_decoder 类型新增 fn_name，用于前端跳转函数面板
+    try {
+        const obfCols = new Set(
+            db.pragma('table_info(obfuscation_hints)').map(r => r.name)
+        );
+        if (obfCols.size > 0 && !obfCols.has('fn_name')) {
+            db.exec('ALTER TABLE obfuscation_hints ADD COLUMN fn_name TEXT');
+        }
+    } catch (e) {
+        console.warn('[Database] add obfuscation_hints.fn_name failed (non-fatal):', e.message);
+    }
 }

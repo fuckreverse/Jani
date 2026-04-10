@@ -55,7 +55,8 @@
  *   FUNCTION_EXIT   = 0x06   payload: [flags.hasException → exception_val]
  *   END_EXPR        = 0x07   payload: [write_count u8]([name_str][val])*
  *                                     [read_count u8]([name_str][val])*  ← val 可能是 OMITTED
- *                                     [field_count u8]([base_str][offset_str][isWrite u8][val])*
+ *                                     [field_count u8]([offset_str][isWrite u8][val][base_oid u32])*
+ *                                                       base_oid = 0 表示非对象（primitive / null / OID 未知）
  *   KEY_EVENT       = 0x08   payload: [level u8][text_str]
  *   DICT_ENTRY      = 0x09   payload: [id u16][str_len u16][UTF-8 字节]
  *                             含义：将 id 注册到字典，后续 STRING_REF 可引用
@@ -143,13 +144,14 @@ export const EVENT_TYPE_NAME = Object.fromEntries(
 // ─── flags 位掩码 ──────────────────────────────────────────────────────────────
 
 export const FLAGS = Object.freeze({
-    HAS_EXCEPTION:  0x01,  // CALL / FUNCTION_EXIT：有异常值
-    IS_CONSTRUCTOR: 0x02,  // CALL_PRE：new 调用
-    IS_METHOD:      0x04,  // CALL_PRE：方法调用（base = this）
-    HAS_THIS:       0x08,  // CALL_PRE：包含 this 值
-    VALUE_OMITTED:  0x10,  // 通用：值已省略（可通过 smap.defIid 追溯）
-    IS_WRITE:       0x20,  // field 条目：属性写入
-    DIRECT_FE:      0x40,  // FUNCTION_ENTER：无 callPre 覆盖（直接调用）
+    HAS_EXCEPTION:    0x01,  // CALL / FUNCTION_EXIT：有异常值
+    IS_CONSTRUCTOR:   0x02,  // CALL_PRE：new 调用
+    IS_METHOD:        0x04,  // CALL_PRE：方法调用（base = this）
+    HAS_THIS:         0x08,  // CALL_PRE：包含 this 值
+    VALUE_OMITTED:    0x10,  // 通用：值已省略（可通过 smap.defIid 追溯）
+    IS_WRITE:         0x20,  // field 条目：属性写入
+    DIRECT_FE:        0x40,  // FUNCTION_ENTER：无 callPre 覆盖（直接调用）
+    // 0x80 保留（曾用于 FIELDS_HAVE_OID，已废弃，field 固定携带 base_oid）
 });
 
 // ─── 值类型常量 ────────────────────────────────────────────────────────────────
@@ -661,9 +663,9 @@ export class StringPool {
                     this._scanValue(r.val);
                 }
                 for (const f of fields) {
-                    this._scanStr(f.base ?? '');
                     this._scanStr(String(f.offset ?? ''));
                     this._scanValue(f.val);
+                    // base_oid 是 u32，不走 StringPool
                 }
                 break;
             }
@@ -782,11 +784,11 @@ function measureEvent(event, pool = null) {
                 rm.push({ nm, mv, val: r.val, omit: r.omit });
             }
             for (const f of fields) {
-                const bnm = measureStr(f.base ?? '', pool);
                 const onm = measureStr(String(f.offset ?? ''), pool);
                 const mv = measureValue(f.val, false, pool);
-                size += strFieldBytes(bnm) + strFieldBytes(onm) + 1 + 1 + mv.extraBytes;
-                fm.push({ bnm, onm, mv, val: f.val, isWrite: f.isWrite });
+                // [offset_str][isWrite 1B][val(1B vt + extraBytes)][base_oid u32 4B]
+                size += strFieldBytes(onm) + 1 + 1 + mv.extraBytes + 4;
+                fm.push({ onm, mv, val: f.val, isWrite: f.isWrite, baseOid: f.baseOid ?? 0 });
             }
             return { payloadSize: size, _m: { writes, reads, fields, wm, rm, fm } };
         }
@@ -878,10 +880,11 @@ function writePayload(view, offset, type, _m) {
                 offset = writeValue(view, offset, r.mv, r.val);
             }
             for (const f of _m.fm) {
-                offset = writeStr(view, offset, f.bnm);
+                // [offset_str][isWrite 1B][val][base_oid u32 小端，0=null]
                 offset = writeStr(view, offset, f.onm);
                 view.setUint8(offset, f.isWrite ? 1 : 0);  offset += 1;
                 offset = writeValue(view, offset, f.mv, f.val);
+                view.setUint32(offset, f.baseOid >>> 0, true);  offset += 4;
             }
             break;
         }
@@ -925,7 +928,6 @@ function computeTypeAndFlags(event) {
     if (event.type === 'FUNCTION_ENTER' && event.directFe) {
         flagsByte |= FLAGS.DIRECT_FE;
     }
-
     return { typeByte, flagsByte };
 }
 
@@ -1282,15 +1284,17 @@ export function deserializeEvent(view, offset, dict = null) {
                 event.reads.push({ name: rn.str, value: rv.value, omitted: rv.omitted });
             }
             for (let i = 0; i < fieldCount; i++) {
-                const rb = readStr(view, pos, dict);
-                pos = rb.end;
+                // [offset_str][isWrite 1B][val][base_oid u32]
                 const ro = readStr(view, pos, dict);
                 pos = ro.end;
                 const isWrite = view.getUint8(pos) !== 0;
                 pos += 1;
                 const rv = readValue(view, pos, dict);
                 pos = rv.end;
-                event.fields.push({ base: rb.str, offset: ro.str, isWrite, value: rv.value, omitted: rv.omitted });
+                const raw = view.getUint32(pos, true);
+                const baseOid = raw === 0 ? null : raw;
+                pos += 4;
+                event.fields.push({ offset: ro.str, isWrite, value: rv.value, omitted: rv.omitted, baseOid });
             }
             break;
         }

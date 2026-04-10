@@ -123,20 +123,22 @@ export default class A2DataFlowGraph extends BasePlugin {
         // ── field 边 ─────────────────────────────────────────────────────────
         this.emitProgress(ctx, '构建 field 边...', 70);
         const fields = rawDb.prepare(
-            'SELECT event_id, base, offset, value, is_write FROM fields WHERE session_id = ?'
+            'SELECT event_id, offset, base_oid, is_write FROM fields WHERE session_id = ?'
         ).all(sessionId);
 
         for (const f of fields) {
-            if (f.base === null || f.base === undefined) continue;
             if (f.offset === null || f.offset === undefined) continue;
 
-            const varLabel = `${f.base}.${f.offset}`;
-            const meta = eventMeta.get(f.event_id); // 直接查全局 Map，无需额外查询
+            // base 标识：有 OID 用 "#<id>"，否则跳过（无法定位对象）
+            if (f.base_oid == null) continue;
+            const baseLabel = `#${f.base_oid}`;
+            const varLabel  = `${baseLabel}.${f.offset}`;
+            const meta = eventMeta.get(f.event_id);
 
             if (f.is_write) {
-                edges.push([sessionId, f.event_id, null, String(f.base), varLabel, 'field_write', meta?.iid ?? null, meta?.line ?? null]);
+                edges.push([sessionId, f.event_id, null, baseLabel, varLabel, 'field_write', meta?.iid ?? null, meta?.line ?? null]);
             } else {
-                edges.push([sessionId, null, f.event_id, varLabel, String(f.base), 'field_read', meta?.iid ?? null, meta?.line ?? null]);
+                edges.push([sessionId, null, f.event_id, varLabel, baseLabel, 'field_read', meta?.iid ?? null, meta?.line ?? null]);
             }
 
             if (edges.length >= BATCH_SIZE) {

@@ -41,25 +41,12 @@ import { createDiagLogger, DOMAIN } from '../logger/diagnostics.js';
 import { serialize } from '../utils/serialize.js';
 import {
     $push as _push, $pop as _pop,
-    $isArray, $keys,
+    $keys,
 } from '../runtime/NativeProxy.js';
 
 const dbg = createDiagLogger(DOMAIN.ANALYSIS);
 
 // ── 工具 ─────────────────────────────────────────────────────────────────────
-
-/**
- * 将属性访问的 base 对象序列化为简短类型标记，避免大数组/对象展开。
- *   数组  → "[…N]"（N 为长度）
- *   对象  → "{…}"
- *   其他  → 直接 serialize（数字/字符串/null 等）
- */
-function _shortBase(base) {
-    if (base === null || base === undefined) return serialize(base);
-    if ($isArray(base)) return `[…${base.length}]`;
-    if (typeof base === 'object') return '{…}';
-    return serialize(base);
-}
 
 // ── 分析类 ───────────────────────────────────────────────────────────────────
 
@@ -322,26 +309,28 @@ export class ExecutionTraceAnalysis {
 
     getField(iid, base, offset, val, isComputed, isOpAssign, isMethodCall) {
         if (!isMethodCall) {
-            const baseStr = _shortBase(base);
+            // getOid：只读查询，不分配新 OID；非对象返回 null
+            const baseOid = this._sb?.getOid?.(base) ?? null;
             _push(this._pendingFields, {
-                base:      baseStr,
                 offset:    String(offset),
                 val,
                 isComputed: !!isComputed,
                 isWrite:   false,
+                baseOid,
             });
         }
         return { result: val };
     }
 
     putField(iid, base, offset, val, isComputed, isOpAssign) {
-        const baseStr = _shortBase(base);
+        // putField 时 P() 已调用 #getOrCreateOid 分配了 OID，getOid 此处可拿到
+        const baseOid = this._sb?.getOid?.(base) ?? null;
         _push(this._pendingFields, {
-            base:      baseStr,
             offset:    String(offset),
             val,
             isComputed: !!isComputed,
             isWrite:   true,
+            baseOid,
         });
         return { result: val };
     }
@@ -397,10 +386,10 @@ export class ExecutionTraceAnalysis {
             .filter(r => !writtenNames.has(r.name))
             .map(r => ({ name: r.name, val: r.val, omit: r.omit === true }));
         const evFields = fields.map(f => ({
-            base:    f.base,
             offset:  f.offset,
             val:     f.val,
             isWrite: !!f.isWrite,
+            baseOid: f.baseOid ?? null,
         }));
 
         this._emit({

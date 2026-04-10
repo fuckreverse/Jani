@@ -11,7 +11,6 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
     static id = 'I4-AlgorithmSummarizer';
     static deps = [
         'A3-HotPathAnalyzer',
-        'A6-FunctionSignatureInfer',
         'I3-ObfuscationDetector',
     ];
     static description = '汇总所有分析结果，生成 JSON + Markdown 算法报告，写入 analysis_summary 表';
@@ -56,17 +55,6 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
         );
         const topCalledFns = db.all(
             'SELECT fn_name, COUNT(*) as call_count FROM call_edges WHERE session_id = ? GROUP BY fn_name ORDER BY call_count DESC LIMIT 10',
-            [sessionId]
-        );
-
-        // ── 函数签名 ────────────────────────────────────────────────────────
-        this.emitProgress(ctx, '读取函数签名...', 40);
-        const fnSigStats = db.get(
-            'SELECT COUNT(*) as total, SUM(is_pure) as pure_count FROM fn_signatures WHERE session_id = ?',
-            [sessionId]
-        );
-        const pureFunctions = db.all(
-            'SELECT fn_name, fn_iid, call_count, arg_types, return_types FROM fn_signatures WHERE session_id = ? AND is_pure = 1 ORDER BY call_count DESC LIMIT 20',
             [sessionId]
         );
 
@@ -179,11 +167,6 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
                 maxCallDepth: callGraphStats ? callGraphStats.max_depth : 0,
                 topCalledFunctions: topCalledFns,
             },
-            functionSignatures: {
-                total: fnSigStats ? fnSigStats.total : 0,
-                pureCount: fnSigStats ? fnSigStats.pure_count : 0,
-                pureFunctions,
-            },
             dataFlow: {
                 totalEdges: dfStats ? dfStats.total : 0,
                 edgesByType: dfByType,
@@ -276,19 +259,6 @@ function generateMarkdown(report) {
         lines.push(`\n**调用频率 Top 10：**`);
         for (const f of report.callGraph.topCalledFunctions) {
             lines.push(`- \`${f.fn_name || '(anonymous)'}\`: ${f.call_count} 次`);
-        }
-    }
-
-    // 函数签名
-    if (report.functionSignatures.total > 0) {
-        lines.push(`\n## 🔍 函数签名推断`);
-        lines.push(`- 分析函数数：${report.functionSignatures.total}`);
-        lines.push(`- 纯函数数：${report.functionSignatures.pureCount}`);
-        if (report.functionSignatures.pureFunctions.length > 0) {
-            lines.push(`\n**纯函数列表（前10个）：**`);
-            for (const f of report.functionSignatures.pureFunctions.slice(0, 10)) {
-                lines.push(`- \`${f.fn_name || '(anonymous)'}\` 调用 ${f.call_count} 次`);
-            }
         }
     }
 

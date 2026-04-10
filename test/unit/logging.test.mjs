@@ -636,13 +636,12 @@ describe('StringPool', () => {
             type: 'END_EXPR', iid: 8, seq: 1,
             writes: [{ name: 'counter', val: 1 }],
             reads:  [{ name: 'counter', val: 1 }],
-            // base/offset 需 >= 4 字符才会入池
-            fields: [{ base: 'baseObj', offset: 'propName', val: 2 }],
+            // offset 需 >= 4 字符才会入池；base_oid 是 u32，不走 StringPool
+            fields: [{ offset: 'propName', val: 2, baseOid: 3 }],
         }]);
         assert.ok(pool.lookup('counter')  !== null, 'counter 应已注册');
-        assert.ok(pool.lookup('baseObj')  !== null, 'baseObj 应已注册');
         assert.ok(pool.lookup('propName') !== null, 'propName 应已注册');
-        // 短字符串（< 4 字符）不会入池
+        // base_oid 是数字，不会入池
         assert.equal(pool.lookup('obj'), null, 'obj（3字符）不应入池');
     });
 
@@ -724,17 +723,18 @@ describe('EventSerializerWithPool — 序列化与反序列化往返', () => {
                 type: 'END_EXPR', iid: 16, seq: 1,
                 writes: [{ name: 'myCounter', val: 42 }],
                 reads:  [{ name: 'myCounter', val: 42 }],
-                fields: [{ base: 'myObj', offset: 'myProp', isWrite: false, val: 'hello' }],
+                fields: [{ offset: 'myProp', isWrite: false, val: 'hello', baseOid: 7 }],
             },
         ]]);
         const endExprs = events.filter(e => e.type === 'END_EXPR');
         assert.equal(endExprs.length, 1, '应有 1 条 END_EXPR');
         const ev = endExprs[0];
-        assert.equal(ev.writes[0].name,   'myCounter', 'writes 变量名应还原');
-        assert.equal(ev.writes[0].value,  42,          'writes 值应还原');
-        assert.equal(ev.reads[0].name,    'myCounter', 'reads 变量名应还原');
-        assert.equal(ev.fields[0].base,   'myObj',     'fields base 应还原');
-        assert.equal(ev.fields[0].offset, 'myProp',    'fields offset 应还原');
+        assert.equal(ev.writes[0].name,      'myCounter', 'writes 变量名应还原');
+        assert.equal(ev.writes[0].value,     42,          'writes 值应还原');
+        assert.equal(ev.reads[0].name,       'myCounter', 'reads 变量名应还原');
+        assert.equal(ev.fields[0].offset,    'myProp',    'fields offset 应还原');
+        assert.equal(ev.fields[0].baseOid,   7,           'fields baseOid 应还原');
+        assert.equal(ev.fields[0].isWrite,   false,       'fields isWrite 应还原');
     });
 
     test('多批次高频重复字符串 — 字典不重复增长', () => {

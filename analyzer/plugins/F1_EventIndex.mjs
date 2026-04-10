@@ -102,7 +102,7 @@ export default class F1EventIndex extends BasePlugin {
             'INSERT INTO reads (event_id, session_id, name, value, omitted) VALUES (?, ?, ?, ?, ?)'
         );
         const stmtField = rawDb.prepare(
-            'INSERT INTO fields (event_id, session_id, base, offset, is_write, value, omitted) VALUES (?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO fields (event_id, session_id, offset, is_write, value, omitted, base_oid) VALUES (?, ?, ?, ?, ?, ?, ?)'
         );
         const stmtVI = rawDb.prepare(
             'INSERT OR IGNORE INTO value_index (session_id, event_id, val_type, val_num, val_str, var_name, source) VALUES (?, ?, ?, ?, ?, ?, ?)'
@@ -285,10 +285,11 @@ export default class F1EventIndex extends BasePlugin {
                 for (const f of event.fields) {
                     fieldBatch.push([
                         eventId, sessionId,
-                        f.base   ?? null, f.offset ?? null,
+                        f.offset ?? null,
                         f.isWrite ? 1 : 0,
                         serializeValue(f.value),
                         f.omitted ? 1 : 0,
+                        f.baseOid ?? null,
                     ]);
                 }
             }

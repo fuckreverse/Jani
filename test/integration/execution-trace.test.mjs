@@ -51,7 +51,7 @@ function eventsToSearchStr(events) {
         }
         for (const f of (ev.fields ?? [])) {
             if (f.offset) parts.push('.' + f.offset);
-            if (f.base)   parts.push(f.base);
+            if (f.baseOid != null) parts.push('#' + f.baseOid);
             if (f.val != null) parts.push(String(f.val));
         }
         // CALL / CALL_PRE 参数

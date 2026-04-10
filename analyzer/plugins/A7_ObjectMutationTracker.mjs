@@ -1,6 +1,9 @@
 /**
- * A7_ObjectMutationTracker.mjs — 按 (base, offset) 重建对象属性变化时间线
+ * A7_ObjectMutationTracker.mjs — 按 (base_oid, offset) 重建对象属性变化时间线
  * 写入 object_timelines 表
+ *
+ * 聚合 key = `#${base_oid}\x00${offset}`（精确追踪同一对象实例）
+ * base_oid 为 null 的 field 条目（primitive / OID 未知）直接跳过。
  *
  * 性能优化：
  *  - batch_size 1000 → 5000
@@ -14,7 +17,7 @@ const BATCH_SIZE = 5000;
 export default class A7ObjectMutationTracker extends BasePlugin {
     static id = 'A7-ObjectMutationTracker';
     static deps = ['F1-EventIndex'];
-    static description = '按 (base, offset) 重建对象属性变化时间线，写入 object_timelines 表';
+    static description = '按 (base_oid, offset) 重建对象属性变化时间线，写入 object_timelines 表';
     static displayName = 'A7 · ObjectMutationTracker';
 
     async run(ctx) {
@@ -25,13 +28,12 @@ export default class A7ObjectMutationTracker extends BasePlugin {
         db.run('DELETE FROM object_timelines WHERE session_id = ?', [sessionId]);
 
         this.emitProgress(ctx, '读取 fields 表...', 5);
-        // line 已从 events 移除（Phase D），改 LEFT JOIN smap 获取
         const fields = db.all(
-            `SELECT f.event_id, f.base, f.offset, f.value, f.is_write, s.sl AS line
+            `SELECT f.event_id, f.offset, f.value, f.is_write, f.base_oid, s.sl AS line
              FROM fields f
              JOIN events e ON f.event_id = e.id AND e.session_id = f.session_id
              LEFT JOIN smap s ON s.session_id = f.session_id AND s.iid = e.iid
-             WHERE f.session_id = ?
+             WHERE f.session_id = ? AND f.base_oid IS NOT NULL
              ORDER BY f.event_id ASC`,
             [sessionId]
         );
@@ -44,7 +46,7 @@ export default class A7ObjectMutationTracker extends BasePlugin {
 
         this.emitProgress(ctx, `处理 ${fields.length} 条 field 记录...`, 20);
 
-        const lastValues = new Map(); // key=`${base}\x00${offset}` → lastValue
+        const lastValues = new Map(); // `#${base_oid}\x00${offset}` → lastValue
         let rows = [];
         let totalWritten = 0;
 
@@ -64,17 +66,17 @@ export default class A7ObjectMutationTracker extends BasePlugin {
 
         let processed = 0;
         for (const f of fields) {
-            if (f.base === null || f.base === undefined) continue;
             if (f.offset === null || f.offset === undefined) continue;
 
-            const key  = `${f.base}\x00${f.offset}`;
-            const prev = lastValues.get(key);
+            const key     = `#${f.base_oid}\x00${f.offset}`;
+            const baseVar = `#${f.base_oid}`;
+            const prev    = lastValues.get(key);
 
             if (f.is_write) {
                 if (prev !== f.value) {
                     rows.push([
                         sessionId,
-                        String(f.base),
+                        baseVar,
                         String(f.offset),
                         f.event_id,
                         prev !== undefined ? prev : null,
@@ -87,7 +89,7 @@ export default class A7ObjectMutationTracker extends BasePlugin {
             } else {
                 rows.push([
                     sessionId,
-                    String(f.base),
+                    baseVar,
                     String(f.offset),
                     f.event_id,
                     prev !== undefined ? prev : null,
