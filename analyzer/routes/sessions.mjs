@@ -539,16 +539,61 @@ router.get('/:id/events', (req, res) => {
 
 // ── GET /api/sessions/:id/functions ──────────────────────────────────────
 // 按 fn_name 聚合 call_edges，返回函数列表（调用次数、行号等）
+//
+// 新增过滤参数：
+//   minEvents   / maxEvents  — 按函数体事件数（≈ MAX(return_seq)-MIN(call_seq) 近似）过滤
+//   hideBuiltin              — '1' 时隐藏 JS 内建函数（charAt/indexOf/push/… 等）
+//   sortBy                   — 'call_count'（默认）| 'event_count'（按事件数倒序）
+
+// 常见 JS 内建 / 原生方法名列表（用于 hideBuiltin 过滤）
+const BUILTIN_FN_NAMES = new Set([
+    // String.prototype
+    'charAt','charCodeAt','codePointAt','indexOf','lastIndexOf',
+    'slice','substring','substr','trim','trimStart','trimEnd','trimLeft','trimRight',
+    'split','replace','replaceAll','match','matchAll','search',
+    'includes','startsWith','endsWith','repeat','padStart','padEnd',
+    'toUpperCase','toLowerCase','toLocaleLowerCase','toLocaleUpperCase',
+    'normalize','localeCompare','toString','valueOf','concat','at',
+    // Array.prototype
+    'push','pop','shift','unshift','splice','concat','join','reverse','sort',
+    'map','filter','reduce','reduceRight','forEach','find','findIndex',
+    'findLast','findLastIndex','some','every','flat','flatMap',
+    'includes','indexOf','lastIndexOf','fill','copyWithin','entries','keys','values',
+    'at','toString','toReversed','toSorted','toSpliced','with',
+    // Math
+    'floor','ceil','round','abs','max','min','pow','sqrt','log','log2','log10',
+    'exp','sign','trunc','cbrt','hypot','random','sin','cos','tan',
+    'asin','acos','atan','atan2','sinh','cosh','tanh','clz32','fround','imul',
+    // Number / global
+    'parseInt','parseFloat','isNaN','isFinite','isInteger','isSafeInteger',
+    'toFixed','toPrecision','toExponential',
+    // Object
+    'hasOwnProperty','isPrototypeOf','propertyIsEnumerable',
+    'getOwnPropertyNames','getOwnPropertyDescriptor','getPrototypeOf',
+    'assign','keys','values','entries','freeze','seal','create','defineProperty',
+    // JSON
+    'parse','stringify',
+    // Promise / async
+    'then','catch','finally','resolve','reject','all','allSettled','race','any',
+    // Misc
+    'encodeURIComponent','decodeURIComponent','encodeURI','decodeURI',
+    'apply','call','bind','hasOwn','set','get','delete','has','clear',
+    'add','size','entries','forEach',
+]);
 
 router.get('/:id/functions', (req, res) => {
     try {
         const { id } = req.params;
         const {
-            search   = '',
-            minCalls = '1',
-            limit    = '100',
-            offset   = '0',
-            fnIid,           // 精确 iid 过滤（跨 Tab 跳转时使用）
+            search      = '',
+            minCalls    = '1',
+            limit       = '100',
+            offset      = '0',
+            fnIid,              // 精确 iid 过滤（跨 Tab 跳转时使用）
+            minEvents,          // 函数体最少事件数（近似：MAX(return_seq)-MIN(call_seq)）
+            maxEvents,          // 函数体最多事件数
+            hideBuiltin = '0',  // '1' 隐藏 JS 内建函数
+            sortBy      = 'call_count',  // 'call_count' | 'event_count'
         } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
@@ -565,30 +610,60 @@ router.get('/:id/functions', (req, res) => {
             conditions.push('fn_iid = ?');
             params.push(Number(fnIid));
         }
+        // hideBuiltin：fn_name 不在内建名单中（仅 fn_name 不含 '.' 的短名；Math.xxx 等带点的
+        // 由于 call_edges.fn_name 通常只存方法短名，这里直接用 NOT IN 过滤）
+        if (hideBuiltin === '1') {
+            const placeholders = Array.from(BUILTIN_FN_NAMES).map(() => '?').join(',');
+            conditions.push(`fn_name NOT IN (${placeholders})`);
+            params.push(...BUILTIN_FN_NAMES);
+        }
 
-        const minCallsN = Math.max(1, Number(minCalls) || 1);
-        const limitN    = Math.min(Number(limit)  || 100, 500);
-        const offsetN   = Number(offset) || 0;
+        const minCallsN  = Math.max(1, Number(minCalls) || 1);
+        const limitN     = Math.min(Number(limit)  || 100, 500);
+        const offsetN    = Number(offset) || 0;
+        const minEventsN = minEvents !== undefined && minEvents !== '' ? Number(minEvents) : null;
+        const maxEventsN = maxEvents !== undefined && maxEvents !== '' ? Number(maxEvents) : null;
 
-        // 每个函数名聚合：调用次数、最小行号、call_seq 范围
+        // HAVING 子句：call_count + 可选的 event_count 范围
+        // event_count ≈ MAX(return_seq) - MIN(call_seq)（同函数多次调用取最宽跨度的近似）
+        // 注意：对同一函数多次调用，每次 return_seq-call_seq 不同；
+        // 这里用 SUM(return_seq - call_seq) 作为"总事件量"更贴近实际
+        const havingClauses = [`COUNT(*) >= ?`];
+        const havingParams  = [minCallsN];
+        if (minEventsN !== null) {
+            havingClauses.push(`SUM(COALESCE(return_seq,call_seq) - call_seq) >= ?`);
+            havingParams.push(minEventsN);
+        }
+        if (maxEventsN !== null) {
+            havingClauses.push(`SUM(COALESCE(return_seq,call_seq) - call_seq) <= ?`);
+            havingParams.push(maxEventsN);
+        }
+
+        // ORDER BY
+        const orderExpr = sortBy === 'event_count'
+            ? `SUM(COALESCE(return_seq,call_seq) - call_seq) DESC`
+            : `call_count DESC`;
+
+        // 每个函数名聚合：调用次数、事件数、最小行号、call_seq 范围
         const rows = db.all(
             `SELECT
                 fn_name,
                 fn_iid,
-                COUNT(*)           AS call_count,
-                MIN(caller_line)   AS min_line,
-                MIN(depth)         AS min_depth,
-                MAX(depth)         AS max_depth
+                COUNT(*)                                              AS call_count,
+                SUM(COALESCE(return_seq,call_seq) - call_seq)         AS event_count,
+                MIN(caller_line)                                      AS min_line,
+                MIN(depth)                                            AS min_depth,
+                MAX(depth)                                            AS max_depth
              FROM call_edges
              WHERE ${conditions.join(' AND ')}
              GROUP BY fn_name, fn_iid
-             HAVING COUNT(*) >= ?
-             ORDER BY call_count DESC
+             HAVING ${havingClauses.join(' AND ')}
+             ORDER BY ${orderExpr}
              LIMIT ? OFFSET ?`,
-            ...params, minCallsN, limitN, offsetN
+            ...params, ...havingParams, limitN, offsetN
         );
 
-        // 总数（用于分页）：用 CTE 对聚合结果再计数，完全避免相关子查询
+        // 总数（用于分页）：用子查询对聚合结果再计数
         const totalRow = db.get(
             `SELECT COUNT(*) AS total
              FROM (
@@ -596,9 +671,9 @@ router.get('/:id/functions', (req, res) => {
                FROM call_edges
                WHERE ${conditions.join(' AND ')}
                GROUP BY fn_name, fn_iid
-               HAVING COUNT(*) >= ?
+               HAVING ${havingClauses.join(' AND ')}
              )`,
-            ...params, minCallsN
+            ...params, ...havingParams
         );
 
         return res.json({
@@ -1105,13 +1180,20 @@ router.get('/:id/strings', (req, res) => {
             [...params, limitN, offsetN]
         );
 
+        // 总数（用于分页）
+        const totalRow = db.get(
+            `SELECT COUNT(*) as cnt FROM string_events WHERE ${conditions.join(' AND ')}`,
+            params
+        );
+        const total = totalRow?.cnt ?? 0;
+
         // 编码分布统计
         const encodingStats = db.all(
             'SELECT encoding_hint, COUNT(*) as cnt FROM string_events WHERE session_id = ? GROUP BY encoding_hint ORDER BY cnt DESC',
             [id]
         );
 
-        res.json({ strings: rows, encodingStats, count: rows.length });
+        res.json({ strings: rows, encodingStats, count: rows.length, total, hasMore: offsetN + rows.length < total });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/strings] error:');
         res.status(500).json({ error: e.message });

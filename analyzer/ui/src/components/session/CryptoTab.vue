@@ -23,10 +23,31 @@
             <span v-if="hint.fn_name"> · {{ hint.fn_name }}</span>
           </div>
           <div v-if="hint.evidence?.length" class="crypto-evidence">
-            <div v-for="(ev, i) in hint.evidence.slice(0, 4)" :key="i" class="evidence-item">
-              <span class="crypto-badge">{{ ev.constant }}</span>
-              <span v-if="ev.line" class="text-muted" style="font-size:11px"> line {{ ev.line }}</span>
-            </div>
+            <!-- 值模式（魔术常数）：evidence 含 constant 字段 -->
+            <template v-if="hint.evidence[0]?.constant !== undefined">
+              <div v-for="(ev, i) in hint.evidence.slice(0, 4)" :key="i" class="evidence-item">
+                <span class="crypto-badge">{{ ev.constant }}</span>
+                <span v-if="ev.var" class="text-muted" style="font-size:11px"> {{ ev.var }}</span>
+                <span v-if="ev.line" class="text-muted" style="font-size:11px"> line {{ ev.line }}</span>
+              </div>
+            </template>
+            <!-- 库调用特征：evidence 含 fn 字段（call/field 两路） -->
+            <template v-else-if="hint.evidence[0]?.fn !== undefined">
+              <div class="evidence-label">命中调用：</div>
+              <div v-for="(ev, i) in hint.evidence.slice(0, 4)" :key="i" class="evidence-item">
+                <span class="crypto-badge crypto-badge-call">{{ ev.fn }}</span>
+                <span class="text-muted" style="font-size:11px"> ×{{ ev.cnt }}</span>
+                <span v-if="ev.line" class="text-muted" style="font-size:11px"> line {{ ev.line }}</span>
+              </div>
+            </template>
+            <!-- XOR 行为特征 -->
+            <template v-else-if="hint.evidence[0]?.xorCount !== undefined">
+              <div class="evidence-item">
+                <span class="crypto-badge crypto-badge-xor">XOR 操作</span>
+                <span class="text-muted" style="font-size:11px"> ×{{ hint.evidence[0].xorCount }} 次</span>
+                <span v-if="hint.evidence[0].line" class="text-muted" style="font-size:11px"> line {{ hint.evidence[0].line }}</span>
+              </div>
+            </template>
           </div>
         </div>
       </div>
@@ -88,6 +109,15 @@ onMounted(loadCryptoHints);
 .crypto-badge {
     display: inline-block; padding: 2px 7px; border-radius: 4px;
     background: rgba(245,158,11,0.2); color: #fcd34d; font-size: 11px; font-weight: 600; font-family: monospace;
+}
+.crypto-badge-call {
+    background: rgba(99,102,241,0.2); color: #a5b4fc;
+}
+.crypto-badge-xor {
+    background: rgba(16,185,129,0.2); color: #6ee7b7;
+}
+.evidence-label {
+    width: 100%; font-size: 10px; color: var(--text-muted); margin-bottom: 2px;
 }
 .text-muted { color: var(--text-muted); }
 </style>

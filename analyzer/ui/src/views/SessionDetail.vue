@@ -56,14 +56,14 @@
       </div>
 
       <!-- Tab 内容区域（使用 v-show 保留已加载组件状态） -->
-      <EventsTab      v-show="activeTab === 'events'"      ref="eventsTabRef"      :session-id="sessionId" @goto-function="onGotoFunction" />
+      <EventsTab      v-show="activeTab === 'events'"      ref="eventsTabRef"      :session-id="sessionId" :target-seq="targetSeq" @goto-function="onGotoFunction" />
       <FunctionsTab   v-show="activeTab === 'functions'"   ref="functionsTabRef"   :session-id="sessionId" :plugin-status="pluginStatus" :target-call="targetCall" />
       <LoopsTab       v-show="activeTab === 'loops'"       ref="loopsTabRef"       :session-id="sessionId" />
       <PatternsTab    v-show="activeTab === 'patterns'"    ref="patternsTabRef"    :session-id="sessionId" />
       <CryptoTab      v-show="activeTab === 'crypto'"      ref="cryptoTabRef"      :session-id="sessionId" />
       <SignaturesTab  v-show="activeTab === 'signatures'"  ref="signaturesTabRef"  :session-id="sessionId" />
       <DataflowTab    v-show="activeTab === 'dataflow'"    ref="dataflowTabRef"    :session-id="sessionId" />
-      <StringsTab     v-show="activeTab === 'strings'"     ref="stringsTabRef"     :session-id="sessionId" />
+      <StringsTab     v-show="activeTab === 'strings'"     ref="stringsTabRef"     :session-id="sessionId" @goto-event="onGotoEvent" @goto-function="onGotoFunction" />
       <FnSigTab       v-show="activeTab === 'fnsig'"       ref="fnsigTabRef"       :session-id="sessionId" />
       <ObjMutTab      v-show="activeTab === 'objmut'"      ref="objmutTabRef"      :session-id="sessionId" />
       <ObfuscationTab v-show="activeTab === 'obfuscation'" ref="obfuscationTabRef" :session-id="sessionId" />
@@ -144,12 +144,19 @@ const inlineProgressPct = computed(() => {
 });
 
 // ─── 标签页 ───────────────────────────────────────────────────────────────────
-// ─── 跨 Tab 导航：事件流 → 函数 ──────────────────────────────────────────────
+// ─── 跨 Tab 导航：事件流 ↔ 函数 ─────────────────────────────────────────────
 const targetCall = ref(null); // { fnName, fnIid, callSeq }
+const targetSeq  = ref(null); // event SEQ，用于事件流跳转定位
 
 function onGotoFunction({ fnName, fnIid, callSeq }) {
     targetCall.value = { fnName, fnIid, callSeq };
     activeTab.value = 'functions';
+}
+
+/** 来自 StringsTab 的跳转到事件流（按 event_id = event SEQ） */
+function onGotoEvent({ eventId }) {
+    targetSeq.value = eventId;
+    activeTab.value = 'events';
 }
 
 const tabs = [

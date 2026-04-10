@@ -235,11 +235,12 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onMounted, onUnmounted } from 'vue';
+import { ref, computed, reactive, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { truncate, formatValue } from '../../composables/useSessionUtils.js';
 
 const props = defineProps({
     sessionId: { type: String, required: true },
+    targetSeq: { type: Number, default: null },   // 从外部跳转到指定 event SEQ
 });
 
 const emit = defineEmits(['goto-function']);
@@ -431,6 +432,35 @@ async function gotoOwnerFn(event) {
         gotoFnLoading[event.seq] = false;
     }
 }
+
+// ─── 跨 Tab 导航：跳转到指定 event SEQ ──────────────────────────────────────
+
+watch(() => props.targetSeq, async (seq) => {
+    if (seq == null) return;
+    // 清空过滤、定位到含该 SEQ 的分页
+    filters.value = { types: [], line: '', varName: '', valueMode: '', valueQuery: '', valueQuery2: '' };
+    valueSearchTotal.value = 0;
+    valueSearchError.value = '';
+
+    // 计算目标在第几页（后端按 id/seq 升序分页，从 seq=1 起计）
+    // 直接用 seq 偏移估算（seq 从 1 开始，每页 PAGE_SIZE 条）
+    const targetPage = Math.max(1, Math.ceil(seq / PAGE_SIZE));
+    currentPage.value = targetPage;
+    await loadEvents();
+    await nextTick();
+
+    // 高亮 + 滚动
+    selectedSeq.value = seq;
+    await nextTick();
+    const rows = document.querySelectorAll('.events-table tbody tr');
+    for (const row of rows) {
+        const seqCell = row.querySelector('.td-seq');
+        if (seqCell && Number(seqCell.textContent.trim()) === seq) {
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            break;
+        }
+    }
+});
 
 defineExpose({ reload: () => loadEvents(true) });
 

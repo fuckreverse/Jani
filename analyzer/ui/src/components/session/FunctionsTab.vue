@@ -18,16 +18,55 @@
         />
         <button v-if="fnExecSearch" class="search-clear" @click="clearSearch" title="清空搜索">✕</button>
       </div>
-      <label class="filter-label" style="gap:4px">
-        最少调用次数
+
+      <!-- 调用次数 -->
+      <label class="filter-label">
+        调用次数 ≥
         <input
           v-model="fnExecMinCalls"
           type="number"
           min="1"
-          style="width:70px"
+          style="width:62px"
           @keyup.enter="loadFnExec(true)"
         />
       </label>
+
+      <!-- 事件数范围 -->
+      <label class="filter-label">
+        事件数
+        <input
+          v-model="fnMinEvents"
+          type="number"
+          min="0"
+          placeholder="最少"
+          style="width:62px"
+          title="函数体内事件总量下限（近似值）"
+          @keyup.enter="loadFnExec(true)"
+        />
+        <span style="color:var(--text-muted);font-size:11px">~</span>
+        <input
+          v-model="fnMaxEvents"
+          type="number"
+          min="0"
+          placeholder="最多"
+          style="width:62px"
+          title="函数体内事件总量上限（近似值）"
+          @keyup.enter="loadFnExec(true)"
+        />
+      </label>
+
+      <!-- 隐藏内建函数 toggle -->
+      <label class="filter-label filter-toggle" :class="{ 'toggle-active': fnHideBuiltin }" @click="fnHideBuiltin = !fnHideBuiltin; loadFnExec(true)">
+        <span class="toggle-dot"></span>
+        隐藏内建函数
+      </label>
+
+      <!-- 排序 -->
+      <select v-model="fnSortBy" class="filter-select" @change="loadFnExec(true)" title="排序方式">
+        <option value="call_count">调用次数↓</option>
+        <option value="event_count">事件数↓</option>
+      </select>
+
       <button class="btn-primary" @click="loadFnExec(true)">查询</button>
       <button class="btn-secondary" @click="clearFnExecFilters">重置</button>
     </div>
@@ -56,6 +95,7 @@
               {{ fn.min_line ? `@line ${fn.min_line}` : `@iid ${fn.fn_iid}` }}
             </span>
             <span class="fn-call-badge">{{ fn.call_count }} 次调用</span>
+            <span v-if="fn.event_count != null" class="fn-event-badge" :title="'函数体事件总量（近似）：' + fn.event_count">~{{ formatEventCount(fn.event_count) }} 事件</span>
             <span v-if="fn.min_line && !isDuplicateName(fn)" class="text-muted" style="font-size:11px">line {{ fn.min_line }}</span>
             <span v-if="fn.fn_iid && !isDuplicateName(fn)" class="text-muted" style="font-size:11px">iid={{ fn.fn_iid }}</span>
             <span class="text-muted" style="font-size:11px">深度 {{ fn.min_depth }}~{{ fn.max_depth }}</span>
@@ -315,8 +355,20 @@ function isDuplicateName(fn) {
 const fnExecLoading  = ref(false);
 const fnExecSearch   = ref('');
 const fnExecMinCalls = ref(1);
+const fnMinEvents    = ref('');    // 函数体事件数下限（空=不过滤）
+const fnMaxEvents    = ref('');    // 函数体事件数上限（空=不过滤）
+const fnHideBuiltin  = ref(true);  // 默认开：隐藏内建函数
+const fnSortBy       = ref('call_count');  // 'call_count' | 'event_count'
 const fnExecPage     = ref(1);
 const FN_EXEC_PAGE   = 50;
+
+/** 格式化事件量：超过 1000 显示 1.2k */
+function formatEventCount(n) {
+    if (n == null) return '?';
+    if (n >= 10000) return `${(n / 1000).toFixed(0)}k`;
+    if (n >= 1000)  return `${(n / 1000).toFixed(1)}k`;
+    return String(n);
+}
 
 // 搜索防抖（400ms）
 let searchTimer = null;
@@ -394,8 +446,12 @@ async function loadFnExec(reset = false) {
             limit:    FN_EXEC_PAGE,
             offset,
             minCalls: fnExecMinCalls.value || 1,
+            sortBy:   fnSortBy.value,
         });
-        if (fnExecSearch.value.trim()) params.set('search', fnExecSearch.value.trim());
+        if (fnExecSearch.value.trim())  params.set('search',      fnExecSearch.value.trim());
+        if (fnHideBuiltin.value)        params.set('hideBuiltin',  '1');
+        if (fnMinEvents.value !== '')   params.set('minEvents',    fnMinEvents.value);
+        if (fnMaxEvents.value !== '')   params.set('maxEvents',    fnMaxEvents.value);
         const res = await fetch(`/api/sessions/${props.sessionId}/functions?${params}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -411,6 +467,10 @@ async function loadFnExec(reset = false) {
 function clearFnExecFilters() {
     fnExecSearch.value   = '';
     fnExecMinCalls.value = 1;
+    fnMinEvents.value    = '';
+    fnMaxEvents.value    = '';
+    fnHideBuiltin.value  = true;  // 重置保持默认开启
+    fnSortBy.value       = 'call_count';
     loadFnExec(true);
 }
 
@@ -581,9 +641,11 @@ watch(() => props.targetCall, async (tc) => {
             offset:   0,
             minCalls: 1,
             search:   tc.fnName || '',
+            // 跨 Tab 跳转时不过滤内建函数，确保目标函数一定能找到
+            hideBuiltin: '0',
         });
         // 传入精确 fnIid，确保同名函数时只返回目标函数条目
-        if (tc.fnIid != null) params.set('fnIid', tc.fnIid);
+        if (tc.fnIid != null) params.set('fnIid', String(tc.fnIid));
         const res = await fetch(`/api/sessions/${props.sessionId}/functions?${params}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -798,6 +860,38 @@ onMounted(() => loadFnExec(true));
     display: inline-block; padding: 1px 7px; border-radius: 10px;
     background: rgba(99,102,241,0.15); color: #a5b4fc; font-size: 11px; font-weight: 600; flex-shrink: 0;
 }
+.fn-event-badge {
+    display: inline-block; padding: 1px 7px; border-radius: 10px;
+    background: rgba(34,197,94,0.10); color: #86efac; font-size: 11px; font-weight: 500; flex-shrink: 0;
+    border: 1px solid rgba(34,197,94,0.18);
+}
+
+/* ── 筛选控件 ──────────────────────────────────────────────────────────── */
+.filter-select {
+    font-size: 12px; padding: 4px 8px; border-radius: 6px; height: 30px;
+    border: 1px solid var(--border-color); background: var(--bg-secondary);
+    color: var(--text-primary); cursor: pointer;
+}
+.filter-select:focus { outline: none; border-color: rgba(99,102,241,0.5); }
+
+/* 内建函数 toggle 按钮 */
+.filter-toggle {
+    display: flex; align-items: center; gap: 6px; cursor: pointer;
+    padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border-color);
+    background: var(--bg-secondary); user-select: none;
+    transition: background 0.15s, border-color 0.15s; font-size: 12px;
+}
+.filter-toggle:hover { border-color: rgba(99,102,241,0.4); background: var(--bg-tertiary); }
+.filter-toggle.toggle-active {
+    background: rgba(99,102,241,0.12);
+    border-color: rgba(99,102,241,0.45);
+    color: #a5b4fc;
+}
+.toggle-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    background: var(--text-muted); transition: background 0.15s;
+}
+.filter-toggle.toggle-active .toggle-dot { background: #a5b4fc; }
 .fn-location-badge {
     display: inline-block; padding: 1px 7px; border-radius: 4px;
     background: rgba(245,158,11,0.15); color: #fcd34d;
