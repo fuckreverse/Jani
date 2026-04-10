@@ -1292,15 +1292,15 @@ router.get('/:id/summary', (req, res) => {
 router.get('/:id/value-search', (req, res) => {
     try {
         const { id } = req.params;
-        const { num, numMin, numMax, str, strLike, source, limit = '200' } = req.query;
+        const { num, numMin, numMax, str, strLike, varName, source, limit = '200' } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
         if (!session) return res.status(404).json({ error: 'Session not found' });
 
         if (num === undefined && numMin === undefined && numMax === undefined &&
-            str === undefined && strLike === undefined) {
+            str === undefined && strLike === undefined && varName === undefined) {
             return res.status(400).json({
-                error: 'Provide at least one of: num, numMin/numMax, str, strLike',
+                error: 'Provide at least one of: num, numMin/numMax, str, strLike, varName',
             });
         }
 
@@ -1348,6 +1348,12 @@ router.get('/:id/value-search', (req, res) => {
             params.push(source);
         }
 
+        // 可选：按变量名过滤（走 idx_vi_varname 索引）
+        if (varName) {
+            conditions.push('var_name = ?');
+            params.push(varName);
+        }
+
         const rows = db.all(
             `SELECT event_id, val_type, val_num, val_str, var_name, source
              FROM value_index
@@ -1360,6 +1366,156 @@ router.get('/:id/value-search', (req, res) => {
         res.json({ matches: rows, count: rows.length });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/value-search] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/value-search/events ─────────────────────────────
+// 值搜索 + 事件详情合并接口：一次请求完成"按值找事件"并返回完整事件数据（含分页）
+// 解决原方案"取 min/max 范围 + 前端二次过滤"的分页不准问题
+// 查询参数与 value-search 相同，额外支持：
+//   offset=<n>   分页偏移（默认 0）
+//   limit=<n>    每页条数（默认 50，最大 200）
+
+router.get('/:id/value-search/events', (req, res) => {
+    try {
+        const { id } = req.params;
+        const { num, numMin, numMax, str, strLike, varName, source,
+                limit = '50', offset = '0' } = req.query;
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        if (num === undefined && numMin === undefined && numMax === undefined &&
+            str === undefined && strLike === undefined && varName === undefined) {
+            return res.status(400).json({
+                error: 'Provide at least one of: num, numMin/numMax, str, strLike, varName',
+            });
+        }
+
+        const limitN  = Math.min(Number(limit)  || 50,  200);
+        const offsetN = Number(offset) || 0;
+
+        // 构建 value_index 查询条件（与 value-search 相同）
+        const viConds  = ['vi.session_id = ?'];
+        const viParams = [id];
+
+        if (num !== undefined) {
+            const n = Number(num);
+            if (isNaN(n)) return res.status(400).json({ error: 'num must be a valid number' });
+            viConds.push("vi.val_type = 'num'", 'vi.val_num = ?');
+            viParams.push(n);
+        } else if (numMin !== undefined || numMax !== undefined) {
+            viConds.push("vi.val_type = 'num'");
+            if (numMin !== undefined) { viConds.push('vi.val_num >= ?'); viParams.push(Number(numMin)); }
+            if (numMax !== undefined) { viConds.push('vi.val_num <= ?'); viParams.push(Number(numMax)); }
+        } else if (str !== undefined) {
+            viConds.push("vi.val_type IN ('str', 'bool')", 'vi.val_str = ?');
+            viParams.push(str);
+        } else if (strLike !== undefined) {
+            const likePattern = strLike
+                .replace(/%/g, '\\%').replace(/_/g, '\\_').replace(/\*/g, '%');
+            viConds.push("vi.val_type IN ('str', 'bool')", "vi.val_str LIKE ? ESCAPE '\\'");
+            viParams.push(likePattern);
+        }
+        if (source && ['write', 'read', 'field'].includes(source)) {
+            viConds.push('vi.source = ?');
+            viParams.push(source);
+        }
+        if (varName) {
+            viConds.push('vi.var_name = ?');
+            viParams.push(varName);
+        }
+
+        const viWhere = viConds.join(' AND ');
+
+        // 总命中数（用于前端分页显示）
+        const totalRow = db.get(
+            `SELECT COUNT(DISTINCT vi.event_id) AS total
+             FROM value_index vi WHERE ${viWhere}`,
+            viParams
+        );
+        const total = totalRow?.total ?? 0;
+
+        // 按 event_id 分页取目标事件 id 列表
+        const matchRows = db.all(
+            `SELECT DISTINCT vi.event_id, vi.var_name, vi.val_type, vi.val_num, vi.val_str, vi.source
+             FROM value_index vi
+             WHERE ${viWhere}
+             ORDER BY vi.event_id ASC
+             LIMIT ? OFFSET ?`,
+            [...viParams, limitN, offsetN]
+        );
+
+        if (matchRows.length === 0) {
+            return res.json({ events: [], total, count: 0, hasMore: false });
+        }
+
+        const eventIds = matchRows.map(r => r.event_id);
+        const placeholders = eventIds.map(() => '?').join(',');
+
+        // 拉取事件主体（JOIN smap）
+        const evRows = db.all(
+            `SELECT e.id AS seq, e.type, e.iid,
+                    s.sl AS line, s.sc AS col, s.src_text
+             FROM events e
+             LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
+             WHERE e.session_id = ? AND e.id IN (${placeholders})
+             ORDER BY e.id ASC`,
+            id, ...eventIds
+        );
+
+        // 批量取 writes/reads/fields
+        const writes = db.all(
+            `SELECT event_id, name, value, omitted FROM writes WHERE session_id = ? AND event_id IN (${placeholders})`,
+            id, ...eventIds
+        );
+        const reads = db.all(
+            `SELECT event_id, name, value, omitted FROM reads WHERE session_id = ? AND event_id IN (${placeholders})`,
+            id, ...eventIds
+        );
+        const fields = db.all(
+            `SELECT event_id, base, offset, is_write, value, omitted FROM fields WHERE session_id = ? AND event_id IN (${placeholders})`,
+            id, ...eventIds
+        );
+
+        const writesMap = groupBy(writes, 'event_id');
+        const readsMap  = groupBy(reads,  'event_id');
+        const fieldsMap = groupBy(fields, 'event_id');
+
+        // 构建 matchInfo：event_id → { varName, valType, valNum, valStr, source }
+        const matchInfo = {};
+        for (const r of matchRows) {
+            matchInfo[r.event_id] = {
+                varName:  r.var_name,
+                valType:  r.val_type,
+                valNum:   r.val_num,
+                valStr:   r.val_str,
+                source:   r.source,
+            };
+        }
+
+        const result = evRows.map(e => ({
+            seq:       e.seq,
+            type:      decodeType(e.type),
+            iid:       e.iid,
+            line:      e.line ?? null,
+            col:       e.col  ?? null,
+            srcText:   e.src_text ?? null,
+            matchInfo: matchInfo[e.seq] ?? null,   // 命中的值信息（变量名、值）
+            writes:    (writesMap[e.seq] || []).map(w => ({ name: w.name, value: safeParseJson(w.value), omitted: !!w.omitted })),
+            reads:     (readsMap[e.seq]  || []).map(r => ({ name: r.name, value: safeParseJson(r.value), omitted: !!r.omitted })),
+            fields:    (fieldsMap[e.seq] || []).map(f => ({ base: f.base, offset: f.offset, isWrite: !!f.is_write, value: safeParseJson(f.value), omitted: !!f.omitted })),
+        }));
+
+        res.json({
+            events:  result,
+            total,
+            count:   result.length,
+            hasMore: offsetN + result.length < total,
+        });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/value-search/events] error:');
         res.status(500).json({ error: e.message });
     }
 });

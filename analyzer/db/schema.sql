@@ -346,8 +346,10 @@ CREATE TABLE IF NOT EXISTS value_index (
     source      TEXT NOT NULL,   -- 'write' / 'read' / 'field'
     PRIMARY KEY (session_id, event_id, source)
 );
-CREATE INDEX IF NOT EXISTS idx_vi_num ON value_index(session_id, val_num) WHERE val_type = 'num';
-CREATE INDEX IF NOT EXISTS idx_vi_str ON value_index(session_id, val_str) WHERE val_type = 'str';
+CREATE INDEX IF NOT EXISTS idx_vi_num     ON value_index(session_id, val_num) WHERE val_type = 'num';
+CREATE INDEX IF NOT EXISTS idx_vi_str     ON value_index(session_id, val_str) WHERE val_type = 'str';
+-- var_name 过滤：按变量名反查事件（P1 值追踪增强）
+CREATE INDEX IF NOT EXISTS idx_vi_varname ON value_index(session_id, var_name);
 
 -- ─── 索引 ────────────────────────────────────────────────────────────────────
 

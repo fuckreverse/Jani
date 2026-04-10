@@ -300,6 +300,8 @@ function _runMigrations(db) {
         ['idx_call_edges_retval',  'call_edges',  'session_id, return_value'],
         // 调用栈查询：owner-fn + call-stack API 的范围查询（call_seq <= N AND return_seq >= N）
         ['idx_call_edges_stack',   'call_edges',  'session_id, call_seq, return_seq, depth'],
+        // var_name 过滤：按变量名反查事件（P1 值追踪增强）
+        ['idx_vi_varname',         'value_index', 'session_id, var_name'],
     ];
     for (const [idxName, tbl, cols] of newIndexes) {
         try {

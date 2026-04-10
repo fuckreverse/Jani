@@ -97,6 +97,11 @@
       <!-- 跳转错误提示（独立显示，不影响表格渲染） -->
       <div v-if="gotoFnError" class="goto-fn-error">{{ gotoFnError }}</div>
 
+      <!-- 值搜索命中数提示 -->
+      <div v-if="valueSearchTotal > 0" class="value-search-total">
+        共命中 <strong>{{ valueSearchTotal }}</strong> 条事件
+      </div>
+
       <!-- 事件表格 -->
       <div v-if="events.length > 0" class="events-table-wrapper">
         <table class="events-table">
@@ -106,6 +111,7 @@
               <th>类型</th>
               <th>行:列</th>
               <th>源码</th>
+              <th v-if="valueSearchTotal > 0">命中值</th>
               <th>写入</th>
               <th>读取</th>
               <th>属性</th>
@@ -129,6 +135,16 @@
               </td>
               <td class="td-src">
                 <code class="src-text">{{ truncate(event.srcText, 60) }}</code>
+              </td>
+              <td v-if="valueSearchTotal > 0" class="td-match">
+                <span v-if="event.matchInfo" class="match-chip"
+                      :title="`${event.matchInfo.source}: ${event.matchInfo.varName ?? ''}`">
+                  <em v-if="event.matchInfo.varName" class="match-var">{{ event.matchInfo.varName }}</em>
+                  <span class="match-eq" v-if="event.matchInfo.varName">=</span>
+                  <span class="match-val">{{ truncate(event.matchInfo.valType === 'num'
+                    ? String(event.matchInfo.valNum)
+                    : (event.matchInfo.valStr ?? ''), 24) }}</span>
+                </span>
               </td>
               <td class="td-vars">
                 <span
@@ -291,95 +307,81 @@ async function loadEventTypes() {
 
 // ─── 事件列表加载 ─────────────────────────────────────────────────────────────
 
-// 值搜索结果：event_id 集合（null 表示不过滤）
-const valueSearchIds = ref(null);
 const valueSearchLoading = ref(false);
-const valueSearchError  = ref('');
+const valueSearchError   = ref('');
+// 值搜索模式下的总命中数（用于分页显示）
+const valueSearchTotal   = ref(0);
 
-async function resolveValueSearch() {
+/** 判断当前是否处于值搜索模式（使用 value-search/events 接口） */
+function isValueSearchMode() {
     const { valueMode, valueQuery, valueQuery2 } = filters.value;
-    if (!valueMode || !valueQuery.trim()) {
-        valueSearchIds.value = null;
-        valueSearchError.value = '';
-        return true;
+    if (!valueMode) return false;
+    if (valueMode === 'numRange') return !!(valueQuery.trim() || valueQuery2.trim());
+    return !!valueQuery.trim();
+}
+
+/** 构建值搜索查询参数（共用于 value-search 和 value-search/events） */
+function buildValueSearchParams() {
+    const { valueMode, valueQuery, valueQuery2 } = filters.value;
+    const p = new URLSearchParams();
+    if (valueMode === 'str')          p.set('str',     valueQuery.trim());
+    else if (valueMode === 'strLike') p.set('strLike', valueQuery.trim());
+    else if (valueMode === 'num')     p.set('num',     valueQuery.trim());
+    else if (valueMode === 'numRange') {
+        if (valueQuery.trim())  p.set('numMin', valueQuery.trim());
+        if (valueQuery2.trim()) p.set('numMax', valueQuery2.trim());
     }
-    valueSearchLoading.value = true;
-    valueSearchError.value = '';
-    try {
-        const p = new URLSearchParams({ limit: '1000' });
-        if (valueMode === 'str')      p.set('str',     valueQuery.trim());
-        else if (valueMode === 'strLike') p.set('strLike', valueQuery.trim());
-        else if (valueMode === 'num') p.set('num',     valueQuery.trim());
-        else if (valueMode === 'numRange') {
-            if (valueQuery.trim())  p.set('numMin', valueQuery.trim());
-            if (valueQuery2.trim()) p.set('numMax', valueQuery2.trim());
-        }
-        const res = await fetch(`/api/sessions/${props.sessionId}/value-search?${p}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        valueSearchIds.value = new Set(data.matches.map(m => m.event_id));
-        if (valueSearchIds.value.size === 0) valueSearchError.value = '值搜索无匹配';
-        return true;
-    } catch (e) {
-        valueSearchError.value = `值搜索失败: ${e.message}`;
-        valueSearchIds.value = null;
-        return false;
-    } finally {
-        valueSearchLoading.value = false;
-    }
+    return p;
 }
 
 async function loadEvents(reset = false) {
     if (reset) currentPage.value = 1;
+    eventsLoading.value  = true;
+    valueSearchError.value = '';
 
-    // 有值搜索条件时先解析 event_id 集合
-    const hasValueFilter = filters.value.valueMode && filters.value.valueQuery.trim();
-    if (hasValueFilter) {
-        const ok = await resolveValueSearch();
-        if (!ok) return;
-    } else {
-        valueSearchIds.value = null;
-        valueSearchError.value = '';
-    }
-
-    eventsLoading.value = true;
     try {
-        const params = new URLSearchParams({
-            limit: PAGE_SIZE,
-            offset: (currentPage.value - 1) * PAGE_SIZE,
-        });
-        if (filters.value.types.length > 0) params.set('types', filters.value.types.join(','));
-        if (filters.value.line)    params.set('line',    filters.value.line);
-        if (filters.value.varName) params.set('varName', filters.value.varName.trim());
+        if (isValueSearchMode()) {
+            // ── 值搜索模式：使用 value-search/events 合并接口，支持正确分页 ──
+            const p = buildValueSearchParams();
+            p.set('limit',  PAGE_SIZE);
+            p.set('offset', (currentPage.value - 1) * PAGE_SIZE);
+            // varName 过滤同时传给值搜索接口
+            if (filters.value.varName) p.set('varName', filters.value.varName.trim());
 
-        // 值搜索：把匹配的 event_id 转为 seqFrom/seqTo 范围 + 后端过滤
-        // 当命中数量少时，改用多次精确 seqFrom 查询效果更好；
-        // 这里采用简单方案：取 min/max 作为范围，前端再过滤一次
-        if (valueSearchIds.value && valueSearchIds.value.size > 0) {
-            const ids = [...valueSearchIds.value].sort((a, b) => a - b);
-            params.set('seqFrom', ids[0]);
-            params.set('seqTo',   ids[ids.length - 1]);
-        } else if (valueSearchIds.value && valueSearchIds.value.size === 0) {
-            // 无匹配，直接返回空
-            events.value = [];
-            hasMore.value = false;
-            return;
+            valueSearchLoading.value = true;
+            const res = await fetch(`/api/sessions/${props.sessionId}/value-search/events?${p}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+
+            events.value          = data.events || [];
+            hasMore.value         = data.hasMore || false;
+            valueSearchTotal.value = data.total  ?? 0;
+
+            if (data.total === 0) valueSearchError.value = '值搜索无匹配';
+        } else {
+            // ── 普通模式：使用 events 接口 ──
+            valueSearchTotal.value = 0;
+            const params = new URLSearchParams({
+                limit:  PAGE_SIZE,
+                offset: (currentPage.value - 1) * PAGE_SIZE,
+            });
+            if (filters.value.types.length > 0) params.set('types', filters.value.types.join(','));
+            if (filters.value.line)    params.set('line',    filters.value.line);
+            if (filters.value.varName) params.set('varName', filters.value.varName.trim());
+
+            const res = await fetch(`/api/sessions/${props.sessionId}/events?${params}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+
+            events.value  = data.events || [];
+            hasMore.value = data.hasMore || false;
         }
-
-        const res = await fetch(`/api/sessions/${props.sessionId}/events?${params}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-
-        // 前端二次过滤：只保留命中 event_id 的事件
-        const raw = data.events || [];
-        events.value = valueSearchIds.value
-            ? raw.filter(e => valueSearchIds.value.has(e.seq))
-            : raw;
-        hasMore.value = data.hasMore || false;
     } catch (e) {
         console.error('loadEvents error:', e);
+        valueSearchError.value = e.message ? `加载失败: ${e.message}` : '';
     } finally {
-        eventsLoading.value = false;
+        eventsLoading.value      = false;
+        valueSearchLoading.value = false;
     }
 }
 
@@ -393,7 +395,7 @@ function nextPage() {
 
 function clearFilters() {
     filters.value = { types: [], line: '', varName: '', valueMode: '', valueQuery: '', valueQuery2: '' };
-    valueSearchIds.value = null;
+    valueSearchTotal.value = 0;
     valueSearchError.value = '';
     typeDropdownOpen.value = false;
     loadEvents(true);
@@ -594,4 +596,21 @@ onUnmounted(() => {
 .value-search-error {
     font-size: 11px; color: #f87171; margin-top: 6px; padding: 0 4px;
 }
+.value-search-total {
+    font-size: 11px; color: var(--text-muted); margin-bottom: 8px; padding: 0 4px;
+}
+.value-search-total strong { color: #a5b4fc; }
+
+/* 命中值列 */
+.td-match { min-width: 100px; max-width: 180px; }
+.match-chip {
+    display: inline-flex; align-items: center; gap: 2px;
+    font-family: monospace; font-size: 11px;
+    background: rgba(99,102,241,0.12); color: #a5b4fc;
+    border-radius: 3px; padding: 1px 5px;
+    max-width: 160px; overflow: hidden;
+}
+.match-var { color: #c4b5fd; font-style: normal; }
+.match-eq  { color: var(--text-muted); margin: 0 1px; }
+.match-val { color: #fcd34d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
