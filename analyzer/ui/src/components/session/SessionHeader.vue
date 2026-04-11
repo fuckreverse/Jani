@@ -3,11 +3,7 @@
     <div class="header-left">
       <router-link to="/" class="back-btn">← 返回列表</router-link>
       <h1 class="session-title">{{ session.name || session.id.slice(0, 8) }}</h1>
-      <div class="header-meta">
-        <span class="badge" :class="`badge-${session.status}`">{{ statusLabel(session.status) }}</span>
-        <span class="meta-text">{{ session.event_count?.toLocaleString('zh-CN') ?? 0 }} 条事件</span>
-        <span class="meta-text">创建于 {{ formatDate(session.created_at) }}</span>
-      </div>
+      <span class="badge" :class="`badge-${session.status}`">{{ statusLabel(session.status) }}</span>
     </div>
     <div class="header-right">
       <!-- 内联进度条（处理中时显示）-->
@@ -34,7 +30,7 @@
 </template>
 
 <script setup>
-import { formatDate, statusLabel } from '../../composables/useSessionUtils.js';
+import { statusLabel } from '../../composables/useSessionUtils.js';
 
 defineProps({
     session:           { type: Object,  required: true },
@@ -49,13 +45,15 @@ defineEmits(['openProgress']);
 
 <style scoped>
 .session-header {
-    display: flex; justify-content: space-between; align-items: flex-start;
-    margin-bottom: 20px;
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 16px; padding: 10px 18px;
 }
-.back-btn { font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px; }
-.session-title { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
-.header-meta { display: flex; align-items: center; gap: 12px; }
-.meta-text { font-size: 12px; color: var(--text-muted); }
+.header-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; overflow: hidden; }
+.back-btn { font-size: 12px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
+.session-title {
+    font-size: 15px; font-weight: 700; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; max-width: 400px;
+}
 .header-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
 
 /* 内联进度条 */

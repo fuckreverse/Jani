@@ -3,6 +3,15 @@
     <!-- 全局值查看器 modal -->
     <ValueViewer />
 
+    <!-- 帮助抽屉 -->
+    <HelpDrawer
+      :visible="showHelpDrawer"
+      :tabs="tabs"
+      :active-tab="activeTab"
+      @close="showHelpDrawer = false"
+      @goto-tab="id => { activeTab = id; showHelpDrawer = false; }"
+    />
+
     <!-- 进度抽屉 -->
     <ProgressDrawer
       :visible="showProgressDrawer"
@@ -12,7 +21,7 @@
       @view-session="showProgressDrawer = false"
     />
 
-    <!-- 顶部：会话信息 -->
+    <!-- 顶部：极简导航栏（始终显示） -->
     <SessionHeader
       v-if="session"
       :session="session"
@@ -33,13 +42,6 @@
     </div>
 
     <div v-else class="detail-body">
-      <!-- 文件信息区 -->
-      <FileInfoBar
-        v-if="session?.fileInfo"
-        :file-info="session.fileInfo"
-        :smap-count="session.smapCount || 0"
-      />
-
       <!-- 标签页导航 -->
       <div class="tab-nav card">
         <button
@@ -47,36 +49,21 @@
           :key="tab.id"
           class="tab-btn"
           :class="{ 'tab-active': activeTab === tab.id }"
-          :title="tab.desc"
           @click="onTabClick(tab.id)"
         >{{ tab.label }}</button>
 
-        <!-- 进度入口按钮 -->
-        <button
-          class="tab-btn btn-open-progress"
-          style="margin-left:auto"
-          @click="showProgressDrawer = true"
-        >{{ isAnalyzing ? '⏳ 分析中...' : '🔍 分析进度' }}</button>
-      </div>
-
-      <!-- Tab 说明横幅 -->
-      <transition name="tab-desc-slide">
-        <div v-if="activeTabInfo && !tabDescDismissed" class="tab-desc-bar card">
-          <div class="tab-desc-icon">ℹ️</div>
-          <div class="tab-desc-body">
-            <div class="tab-desc-headline">{{ activeTabInfo.label }} — {{ activeTabInfo.desc }}</div>
-            <div v-if="activeTabInfo.capabilities?.length" class="tab-desc-caps">
-              <span v-for="cap in activeTabInfo.capabilities" :key="cap" class="tab-cap-tag">{{ cap }}</span>
-            </div>
-          </div>
-          <button class="tab-desc-close" title="收起说明" @click="tabDescDismissed = true">✕</button>
+        <!-- 右侧工具按钮组 -->
+        <div class="tab-nav-actions">
+          <button class="tab-btn btn-help" @click="showHelpDrawer = true" title="使用帮助">？</button>
+          <button
+            class="tab-btn btn-open-progress"
+            @click="showProgressDrawer = true"
+          >{{ isAnalyzing ? '⏳ 分析中...' : '🔍 进度' }}</button>
         </div>
-      </transition>
-      <div v-if="activeTabInfo && tabDescDismissed" class="tab-desc-hint">
-        <button class="tab-desc-reopen" @click="tabDescDismissed = false" title="展开说明">ℹ️ 功能说明</button>
       </div>
 
       <!-- Tab 内容区域（使用 v-show 保留已加载组件状态） -->
+      <OverviewTab    v-show="activeTab === 'overview'"   :session="session" :plugin-status="pluginStatus" :plugin-duration="wsPluginDuration" :is-analyzing="isAnalyzing" :inline-progress-pct="inlineProgressPct" :running-plugin="runningPlugin" @open-progress="showProgressDrawer = true" />
       <EventsTab      v-show="activeTab === 'events'"      ref="eventsTabRef"      :session-id="sessionId" :target-seq="targetSeq" @goto-function="onGotoFunction" />
       <FunctionsTab   v-show="activeTab === 'functions'"   ref="functionsTabRef"   :session-id="sessionId" :plugin-status="pluginStatus" :target-call="targetCall" />
       <LoopsTab       v-show="activeTab === 'loops'"       ref="loopsTabRef"       :session-id="sessionId" />
@@ -98,9 +85,10 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 
 import ProgressDrawer  from './ProgressDrawer.vue';
+import HelpDrawer      from './HelpDrawer.vue';
 import ValueViewer     from '../components/ValueViewer.vue';
 import SessionHeader   from '../components/session/SessionHeader.vue';
-import FileInfoBar     from '../components/session/FileInfoBar.vue';
+import OverviewTab     from '../components/session/OverviewTab.vue';
 import EventsTab       from '../components/session/EventsTab.vue';
 import FunctionsTab    from '../components/session/FunctionsTab.vue';
 import LoopsTab        from '../components/session/LoopsTab.vue';
@@ -120,6 +108,9 @@ const sessionId = computed(() => route.params.id);
 
 // ─── 进度抽屉 ─────────────────────────────────────────────────────────────────
 const showProgressDrawer = ref(false);
+
+// ─── 帮助抽屉 ─────────────────────────────────────────────────────────────────
+const showHelpDrawer = ref(false);
 
 // ─── WS 驱动的插件进度状态 ────────────────────────────────────────────────────
 const wsPluginStatus   = ref({});  // pluginId → 'pending'|'running'|'done'|'failed'|'skipped'
@@ -183,76 +174,98 @@ function onGotoEvent({ eventId }) {
 
 const tabs = [
     {
+        id: 'overview', label: 'ℹ️ 概览',
+        desc: '查看当前会话的基本信息、上传的文件列表及各分析插件的运行状态。',
+        capabilities: ['会话基础元数据', '文件上传状态（Trace / smap / 源码）', '分析插件运行进度总览'],
+        tips: ['分析完成前可在此实时追踪各插件进度', '点击「详细进度」可查看每秒处理速率'],
+    },
+    {
         id: 'events', label: '📋 事件流',
         desc: '以时间顺序展示 JS 运行时捕获的所有原始事件，是最底层的执行记录。',
         capabilities: ['按事件类型/行号/变量名/函数筛选', '查看读写值与调用参数', '跳转到对应函数分析', '支持分页与 SEQ 定位'],
+        tips: ['点击事件行可展开查看完整值', '点击函数名可跳转到函数 Tab 精确定位'],
     },
     {
         id: 'functions', label: '📌 函数',
+        plugin: 'F3 · F4 · A3',
         desc: '函数调用统计与执行追踪，展示每个函数的调用次数、事件量及执行热度。',
         capabilities: ['按函数名 / 调用次数 / 事件量筛选', '查看函数体内事件详情', '热路径高亮（A3）', '与事件流双向跳转'],
+        tips: ['调用次数越多、事件越密集的函数越值得重点分析', '热路径（橙色）是性能或逻辑核心'],
     },
     {
         id: 'loops', label: '🔁 循环迭代',
-        desc: '展开循环的每一次迭代，记录迭代范围和循环变量快照（由 A5 · LoopDetector 提供）。',
+        plugin: 'A5 · LoopDetector',
+        desc: '展开循环的每一次迭代，记录迭代范围和循环变量快照，适合分析迭代加密算法。',
         capabilities: ['列出所有循环及迭代次数', '查看每轮迭代的变量值快照', '定位循环 SEQ 范围'],
+        tips: ['迭代次数异常多（>1000）往往是加密/哈希算法的特征', '可结合值模式 Tab 交叉印证'],
     },
     {
         id: 'patterns', label: '🔢 值模式',
-        desc: '检测运行时反复出现的特殊数值（如密码学魔术常数），辅助识别算法实现（由 A8 · ValuePatternDetector 提供）。',
+        plugin: 'A8 · ValuePatternDetector',
+        desc: '检测运行时反复出现的特殊数值（如密码学魔术常数），辅助识别算法实现。',
         capabilities: ['发现高频出现的值指纹', '匹配 AES/SHA/MD5 等已知密码学常数', '过滤仅显示密码学相关模式', '关联变量名与代码行号'],
+        tips: ['开启「仅密码学」过滤可快速排除噪音', '0x6a09e667 等常数是 SHA-256 的标志'],
     },
     {
         id: 'crypto', label: '🔐 加密检测',
-        desc: '综合多维特征（魔术常数 / XOR 操作 / 库调用）对加密算法进行置信度评估（由 I1 · CryptoDetector 提供）。',
+        plugin: 'I1 · CryptoDetector',
+        desc: '综合多维特征（魔术常数 / XOR 操作 / 库调用）对加密算法进行置信度评估。',
         capabilities: ['识别 AES / DES / RSA / MD5 / SHA 等常见算法', '显示置信度条与支持证据', '定位算法实现的代码位置'],
+        tips: ['置信度 > 70% 的结果可信度较高', '多条证据共同指向同一算法时结论更可靠'],
     },
     {
         id: 'signatures', label: '✍️ 签名路径',
-        desc: '追踪签名/Token 字段从数据源到最终输出的完整数据流路径（由 I2 · SignatureAnalyzer 提供）。',
+        plugin: 'I2 · SignatureAnalyzer',
+        desc: '追踪签名/Token 字段从数据源到最终输出的完整数据流路径。',
         capabilities: ['识别 sign / token / _sign 等字段', '展示多跳数据传递链路', '显示输入变量与最终 sink'],
+        tips: ['路径越短的签名往往越容易理解', '关注 source→sink 之间经过的转换函数'],
     },
     {
         id: 'dataflow', label: '🔗 数据流图',
-        desc: '记录变量间的赋值 / 返回 / 参数传递关系，构建运行时数据流图（由 A2 · DataFlowGraph 提供）。',
+        plugin: 'A2 · DataFlowGraph',
+        desc: '记录变量间的赋值 / 返回 / 参数传递关系，构建运行时数据流图。',
         capabilities: ['展示 assign / return / arg / call 等边类型', '按边类型过滤查看', '关联来源/目标 SEQ 与行号'],
+        tips: ['从 sign/token 变量出发追踪数据来源', 'call 类型边可追踪参数如何传入函数'],
     },
     {
         id: 'strings', label: '🔤 字符串追踪',
-        desc: '追踪运行时出现的字符串值，自动识别 Base64 / Hex / URL 等编码格式（由 A4 · StringTracker 提供）。',
+        plugin: 'A4 · StringTracker',
+        desc: '追踪运行时出现的字符串值，自动识别 Base64 / Hex / URL 等编码格式。',
         capabilities: ['按编码类型（Base64/Hex/URL/plain）过滤', '查看变量名与完整字符串值', '一键跳转到事件流或函数面板', '支持解码预览'],
+        tips: ['Base64 字符串往往是加密结果或密钥的常见形式', '点击字符串可跳转到产生它的原始事件'],
     },
     {
         id: 'objmut', label: '🔄 对象变异',
-        desc: '记录对象属性的读写历史，追踪属性值随时间的变化轨迹（由 A7 · ObjectMutationTracker 提供）。',
+        plugin: 'A7 · ObjectMutationTracker',
+        desc: '记录对象属性的读写历史，追踪属性值随时间的变化轨迹。',
         capabilities: ['按对象变量过滤', '查看属性的旧值→新值变化', '仅显示写入操作', '关联代码行号与 SEQ'],
+        tips: ['追踪 XMLHttpRequest / fetch 等对象的属性变化可还原请求构造过程', '写入次数最多的对象是关键状态容器'],
     },
     {
         id: 'obfuscation', label: '🕵️ 混淆检测',
-        desc: '识别混淆特征（字符串解码器 / 控制流平坦化 / 十六进制编码 / 死代码等），评估整体混淆程度（由 I3 · ObfuscationDetector 提供）。',
+        plugin: 'I3 · ObfuscationDetector',
+        desc: '识别混淆特征（字符串解码器 / 控制流平坦化 / 十六进制编码 / 死代码等），评估整体混淆程度。',
         capabilities: ['多维度混淆特征检测', '给出每项特征的置信度', '标注混淆函数并跳转查看', '综合评估是否为混淆代码'],
+        tips: ['字符串解码器函数通常是逆向的首要突破口', '综合评分 > 60 分说明代码经过了刻意混淆'],
     },
     {
         id: 'summary', label: '📝 算法报告',
-        desc: '整合所有分析插件的结果，生成结构化的算法汇总报告（由 I4 · AlgorithmSummarizer 提供）。',
+        plugin: 'I4 · AlgorithmSummarizer',
+        desc: '整合所有分析插件的结果，生成结构化的算法汇总报告，是分析的最终结论。',
         capabilities: ['概览总事件数 / 函数数 / 数据流边数', '显示识别出的算法标签', '混淆评分总览', '输出 Markdown 格式分析报告'],
+        tips: ['分析完成后先看报告，快速锁定重点 Tab', '算法标签可作为进一步搜索的关键词'],
     },
     {
         id: 'cfg', label: '🗺 控制流图',
-        desc: '基于真实执行数据构建的动态控制流图（Dynamic CFG），以图形化方式展示函数调用拓扑、热点节点及循环结构（由 F3 + A5 驱动）。',
+        plugin: 'F3 + A5',
+        desc: '基于真实执行数据构建的动态控制流图（Dynamic CFG），以图形化方式展示函数调用拓扑、热点节点及循环结构。',
         capabilities: ['函数调用有向图（可调深度）', '循环节点标注（循环回边）', '热点代码节点高亮', '可指定根函数子树视角', '节点点击显示详情'],
+        tips: ['从顶层入口函数出发，逐层下钻是最高效的路径', '循环回边节点往往是核心算法所在'],
     },
 ];
-const activeTab = ref('events');
-const tabDescDismissed = ref(false);
+const activeTab = ref('overview');
 
-const activeTabInfo = computed(() => tabs.find(t => t.id === activeTab.value));
-
-// 切换 tab 时自动展开说明
 function onTabClick(tabId) {
-    if (activeTab.value !== tabId) {
-        tabDescDismissed.value = false;
-    }
     activeTab.value = tabId;
 }
 
@@ -452,50 +465,12 @@ onUnmounted(() => {
 }
 .btn-open-progress:hover { background: rgba(99,102,241,0.18); color: #c7d2fe; }
 
-/* ── Tab 说明横幅 ─────────────────────────────────────────────────────────── */
-.tab-desc-bar {
-    display: flex; align-items: flex-start; gap: 10px;
-    padding: 10px 14px;
-    background: rgba(99,102,241,0.06);
-    border: 1px solid rgba(99,102,241,0.2);
-    border-radius: 8px;
-    margin-bottom: 0;
+/* ── 右侧工具按钮组 ──────────────────────────────────────────────────────── */
+.tab-nav-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.btn-help {
+    font-size: 13px; font-weight: 700; min-width: 30px; padding: 6px 10px;
+    color: var(--text-muted); border-color: var(--border-color);
 }
-.tab-desc-icon { font-size: 15px; flex-shrink: 0; margin-top: 1px; opacity: 0.8; }
-.tab-desc-body { flex: 1; min-width: 0; }
-.tab-desc-headline {
-    font-size: 12.5px; color: var(--text-secondary);
-    line-height: 1.5; margin-bottom: 6px;
-}
-.tab-desc-caps {
-    display: flex; flex-wrap: wrap; gap: 5px;
-}
-.tab-cap-tag {
-    display: inline-block; padding: 2px 8px;
-    background: rgba(99,102,241,0.12); border: 1px solid rgba(99,102,241,0.25);
-    border-radius: 12px; font-size: 11px; color: #a5b4fc;
-    white-space: nowrap;
-}
-.tab-desc-close {
-    flex-shrink: 0; background: none; border: none;
-    color: var(--text-muted); font-size: 12px; cursor: pointer;
-    padding: 2px 6px; border-radius: 4px; line-height: 1;
-    transition: color 0.15s, background 0.15s;
-}
-.tab-desc-close:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+.btn-help:hover { color: #a5b4fc; border-color: rgba(99,102,241,0.4); background: rgba(99,102,241,0.1); }
 
-/* 收起后的小提示按钮 */
-.tab-desc-hint { display: flex; justify-content: flex-end; margin-top: -10px; }
-.tab-desc-reopen {
-    background: none; border: none; color: var(--text-muted);
-    font-size: 11px; cursor: pointer; padding: 2px 6px;
-    border-radius: 4px; transition: color 0.15s;
-}
-.tab-desc-reopen:hover { color: #a5b4fc; }
-
-/* 进入/离开动画 */
-.tab-desc-slide-enter-active { transition: all 0.2s ease; }
-.tab-desc-slide-leave-active { transition: all 0.15s ease; }
-.tab-desc-slide-enter-from { opacity: 0; transform: translateY(-6px); }
-.tab-desc-slide-leave-to   { opacity: 0; transform: translateY(-4px); }
 </style>
