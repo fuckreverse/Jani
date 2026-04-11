@@ -306,6 +306,14 @@ function _runMigrations(db) {
         ['idx_call_edges_depth',   'call_edges',  'session_id, depth, call_seq, return_seq'],
         // object-timelines 时间窗口过滤：change_seq 范围查询
         ['idx_obj_timeline_seq',   'object_timelines', 'session_id, change_seq'],
+        // ── compare API 专用覆盖索引 ─────────────────────────────────────────
+        // compare/functions：GROUP BY session_id, fn_name, fn_iid + ORDER BY call_count
+        // 消除 idx_call_edges_fn_name 的回表，直接覆盖 COUNT(*) 聚合
+        ['idx_call_edges_fn_iid',  'call_edges',  'session_id, fn_name, fn_iid'],
+        // compare/loops：GROUP BY session_id, iid + ORDER BY total_iters
+        ['idx_loops_session_iid',  'loops',       'session_id, iid'],
+        // compare/sessions MAX(depth)：GROUP BY session_id
+        ['idx_call_edges_ses_dep', 'call_edges',  'session_id, depth'],
     ];
     // ── TypedArray 值类型索引（val_type = 'ta' 的 partial index）──────────────
     // SQLite partial index 不能通过普通 CREATE INDEX IF NOT EXISTS 在旧库上追加，

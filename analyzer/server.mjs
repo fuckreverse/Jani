@@ -35,6 +35,7 @@ import sessionsRouter from './routes/sessions.mjs';
 import instrumentRouter from './routes/instrument.mjs';
 import projectsRouter from './routes/projects.mjs';
 import storageRouter from './routes/storage.mjs';
+import compareRouter from './routes/compare.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -177,6 +178,7 @@ app.use('/api/sessions',    sessionsRouter);
 app.use('/api/instrument',  instrumentRouter);
 app.use('/api/projects',    projectsRouter);
 app.use('/api/storage',     storageRouter);
+app.use('/api/compare',     compareRouter);
 
 // 健康检查
 app.get('/api/health', (req, res) => {

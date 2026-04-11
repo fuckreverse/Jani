@@ -12,6 +12,7 @@
         <router-link to="/instrument" class="nav-link">插桩工作台</router-link>
         <router-link to="/trace" class="nav-link">Trace 监控</router-link>
         <router-link to="/storage" class="nav-link">空间分析</router-link>
+        <router-link to="/diff" class="nav-link">Trace 对比</router-link>
       </nav>
     </header>
 

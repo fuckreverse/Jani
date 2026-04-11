@@ -8,6 +8,7 @@ import TraceMonitor from './views/TraceMonitor.vue';
 import WorkspaceList from './views/WorkspaceList.vue';
 import WorkspaceDetail from './views/WorkspaceDetail.vue';
 import StorageAnalyzer from './views/StorageAnalyzer.vue';
+import TraceDiff from './views/TraceDiff.vue';
 
 const routes = [
     { path: '/',                  component: SessionList,      name: 'home' },
@@ -17,6 +18,7 @@ const routes = [
     { path: '/workspaces',        component: WorkspaceList,    name: 'workspaces' },
     { path: '/workspaces/:id',    component: WorkspaceDetail,  name: 'workspace-detail' },
     { path: '/storage',           component: StorageAnalyzer,  name: 'storage-analyzer' },
+    { path: '/diff',              component: TraceDiff,        name: 'trace-diff' },
 ];
 
 const router = createRouter({

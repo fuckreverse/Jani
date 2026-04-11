@@ -88,6 +88,7 @@
       <ObjMutTab      v-show="activeTab === 'objmut'"      ref="objmutTabRef"      :session-id="sessionId" />
       <ObfuscationTab v-show="activeTab === 'obfuscation'" ref="obfuscationTabRef" :session-id="sessionId" @goto-function="onGotoFunction" />
       <SummaryTab     v-show="activeTab === 'summary'"     ref="summaryTabRef"     :session-id="sessionId" />
+      <CfgTab        v-show="activeTab === 'cfg'"         ref="cfgTabRef"         :session-id="sessionId" />
     </div>
   </div>
 </template>
@@ -111,6 +112,7 @@ import StringsTab      from '../components/session/StringsTab.vue';
 import ObjMutTab       from '../components/session/ObjMutTab.vue';
 import ObfuscationTab  from '../components/session/ObfuscationTab.vue';
 import SummaryTab      from '../components/session/SummaryTab.vue';
+import CfgTab          from '../components/session/CfgTab.vue';
 
 // ─── 路由 ─────────────────────────────────────────────────────────────────────
 const route = useRoute();
@@ -235,6 +237,11 @@ const tabs = [
         desc: '整合所有分析插件的结果，生成结构化的算法汇总报告（由 I4 · AlgorithmSummarizer 提供）。',
         capabilities: ['概览总事件数 / 函数数 / 数据流边数', '显示识别出的算法标签', '混淆评分总览', '输出 Markdown 格式分析报告'],
     },
+    {
+        id: 'cfg', label: '🗺 控制流图',
+        desc: '基于真实执行数据构建的动态控制流图（Dynamic CFG），以图形化方式展示函数调用拓扑、热点节点及循环结构（由 F3 + A5 驱动）。',
+        capabilities: ['函数调用有向图（可调深度）', '循环节点标注（循环回边）', '热点代码节点高亮', '可指定根函数子树视角', '节点点击显示详情'],
+    },
 ];
 const activeTab = ref('events');
 const tabDescDismissed = ref(false);
@@ -274,6 +281,7 @@ const stringsTabRef     = ref(null);
 const objmutTabRef      = ref(null);
 const obfuscationTabRef = ref(null);
 const summaryTabRef     = ref(null);
+const cfgTabRef         = ref(null);
 
 
 // ─── 会话加载 ─────────────────────────────────────────────────────────────────

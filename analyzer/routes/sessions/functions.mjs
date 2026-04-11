@@ -380,57 +380,42 @@ router.get('/calls/:callId/own-events', (req, res) => {
             baseParams.push(Number(cursor));
         }
 
-        let events;
-        if (children.length > 0 && children.length <= 200) {
-            // 子调用数量合理：直接在 SQL 里排除内部区间（保留头尾）
-            const innerChildren = children.filter(c => c.call_seq + 1 <= c.return_seq - 1);
-            const excludeClauses = innerChildren.map(() => 'e.id NOT BETWEEN ? AND ?');
-            const excludeParams  = innerChildren.flatMap(c => [c.call_seq + 1, c.return_seq - 1]);
-            const where = excludeClauses.length > 0
-                ? [...baseConditions, ...excludeClauses].join(' AND ')
-                : baseConditions.join(' AND ');
+        // 统一策略：SQL 只做基础范围+游标过滤，子调用排除全部在 JS 侧完成。
+        // 避免 NOT BETWEEN 链过长触发 SQLite "Expression tree is too large" 错误。
+        // 多取倍数是为了应对过滤损耗（子调用越多，损耗越大）；子调用少时损耗接近 0。
+        const fetchMultiplier = children.length > 50 ? 5 : children.length > 10 ? 3 : 1;
+        const rawEvents = db.all(
+            `SELECT e.id AS seq, e.type, e.iid,
+                    s.sl AS line, s.sc AS col, s.src_text
+             FROM events e
+             LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
+             WHERE ${baseConditions.join(' AND ')}
+             ORDER BY e.id ASC
+             LIMIT ?`,
+            ...baseParams, limitN * fetchMultiplier
+        );
 
-            events = db.all(
-                `SELECT e.id AS seq, e.type, e.iid,
-                        s.sl AS line, s.sc AS col, s.src_text
-                 FROM events e
-                 LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
-                 WHERE ${where}
-                 ORDER BY e.id ASC
-                 LIMIT ?`,
-                ...baseParams, ...excludeParams, limitN
-            );
-        } else if (children.length > 200) {
-            // 子调用数量过多：先取全量 event，Node.js 侧过滤
-            const rawEvents = db.all(
-                `SELECT e.id AS seq, e.type, e.iid,
-                        s.sl AS line, s.sc AS col, s.src_text
-                 FROM events e
-                 LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
-                 WHERE ${baseConditions.join(' AND ')}
-                 ORDER BY e.id ASC
-                 LIMIT ?`,
-                ...baseParams, limitN * 3  // 多取以应对过滤损耗
-            );
-            events = rawEvents.filter(e => {
-                for (const c of children) {
-                    if (e.seq > c.call_seq && e.seq < c.return_seq) return false;
-                }
-                return true;
-            }).slice(0, limitN);
+        // JS 侧排除子调用内部区间（保留 call_seq 和 return_seq 两个边界事件）
+        let events;
+        if (children.length === 0) {
+            events = rawEvents.slice(0, limitN);
         } else {
-            // 无子调用：直接返回全量
-            const where = baseConditions.join(' AND ');
-            events = db.all(
-                `SELECT e.id AS seq, e.type, e.iid,
-                        s.sl AS line, s.sc AS col, s.src_text
-                 FROM events e
-                 LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
-                 WHERE ${where}
-                 ORDER BY e.id ASC
-                 LIMIT ?`,
-                ...baseParams, limitN
-            );
+            // 对子调用区间排序，方便提前 break
+            const sortedChildren = children.slice().sort((a, b) => a.call_seq - b.call_seq);
+            const filtered = [];
+            for (const e of rawEvents) {
+                let inInner = false;
+                for (const c of sortedChildren) {
+                    if (c.call_seq > e.seq) break;          // 后续子调用不可能匹配
+                    if (e.seq > c.call_seq && e.seq < c.return_seq) {
+                        inInner = true;
+                        break;
+                    }
+                }
+                if (!inInner) filtered.push(e);
+                if (filtered.length >= limitN) break;
+            }
+            events = filtered;
         }
 
         // ── Step 3: 批量查 writes/reads/fields ────────────────────────────────

@@ -1,7 +1,7 @@
 # Jani Trace Analyzer — 设计文档
 
-**版本：** v1.5（已实现）  
-**日期：** 2026-04-10  
+**版本：** v1.6（已实现）  
+**日期：** 2026-04-11  
 **目标：** 为 JS 动态 trace 提供一站式逆向分析平台，支持算法识别、污点追踪、签名还原等场景。
 
 ---
@@ -56,6 +56,7 @@ Jani 的插桩引擎已能产出高质量 trace（`.bin` + `.smap.json`），包
 │  │  sessions | events | writes | reads | fields | smap   │  │
 │  │  call_edges | taint_paths | var_lifetime | scopes      │  │
 │  │  value_dict | value_patterns | bookmarks | value_index  │  │
+│  │  iid_counts | loops | object_timelines | oid_aliases   │  │
 │  │  plugin_checkpoints（断点恢复 / 进度持久化）            │  │
 │  └────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
@@ -636,6 +637,7 @@ JTA 包含以下独立页面：
 | **插桩工作台** | `/instrument` | 独立插桩页面，见 6.4 节 |
 | **Trace 监控** | `/trace` | WebSocket Trace 收集状态监控，见 6.6 节 |
 | **空间分析** | `/storage` | 扫描 data 目录、统计各类文件占用、提供一键清理建议；`StorageAnalyzer.vue` |
+| **Trace 对比** | `/diff` | 多会话执行行为差异对比页面；`TraceDiff.vue` |
 
 ---
 
@@ -993,6 +995,18 @@ GET  /api/sessions/:id/calls/:callId/own-events?limit=50&offset=0
     查询单次调用自身事件流（排除子调用事件），支持分页
     返回：{ events: [...], total, ownEventCount }
 
+GET  /api/sessions/:id/functions/:fnName/callers?fnIid=&limit=100&offset=0
+    反向调用图：查询调用了指定函数的所有调用者（按调用次数降序）
+    fnIid：同名不同位置的函数精确 iid 过滤（可选）
+    实现：以 call_edges 的 depth/call_seq/return_seq 字段做 CTE 父帧关联，O(log N) 索引扫描
+    返回：{
+      callers: [{ callerFnName, callerFnIid, callCount, calleeMinLine,
+                  callerMinDepth, callerMaxDepth, callerMinLine }],
+      total,
+      totalCalls   -- 目标函数被调用总次数（用于前端显示百分比）
+    }
+    说明：顶层调用（depth=0）的调用者 callerFnName = '(top-level)'
+
 GET  /api/sessions/:id/call-stack?callSeq=N&returnSeq=M&depth=D
     查询某次函数调用的完整调用栈（祖先帧列表，按深度升序）
     返回：{ stack: [{ fnName, fnIid, callerLine, depth, args, returnValue, callSeq, returnSeq }] }
@@ -1007,6 +1021,32 @@ GET  /api/sessions/:id/flamegraph?seqFrom=&seqTo=&maxDepth=20&minSelf=0
     maxDepth：最大调用深度（默认 20）；minSelf：过滤 self time 过小的函数（默认 0，不过滤）
     实现：查询 call_edges → Node.js 端重建调用树 → 计算 total/self time → 拼装 Speedscope JSON
     返回：Speedscope $schema 格式 JSON，profiles[0] 为 sampled profile
+
+GET  /api/sessions/:id/cfg?rootFn=&depth=3&minCount=10&foldLoops=true&includeIids=true
+    动态控制流图（Dynamic CFG）— 基于真实执行数据的函数调用拓扑图
+    rootFn：以指定函数名为根（仅返回其子树），不填返回完整 CFG
+    depth：展开深度（默认 3，最大 8）
+    minCount：iid_counts 执行次数阈值，过滤低频节点（默认 10）
+    foldLoops：是否折叠循环块（默认 true）
+    includeIids：是否显示热点 IID 节点（默认 true）
+    返回：{
+      nodes: [{ id, type: 'function'|'loop'|'hotspot', fnName?, fnIid?, callCount?,
+                minLine?, hasLoop?, iid?, totalIters?, count?, srcText?, isRoot? }],
+      edges: [{ source, target, count, type: 'call'|'loop' }],
+      stats: { nodeCount, edgeCount, fnCount, hotspotCount, loopCount }
+    }
+
+GET  /api/sessions/:id/fn-cfg?fnName=&maxCalls=20
+    IDA 风格单函数内部控制流图（基本块 + 块间跳转边）
+    fnName：目标函数名（必填）
+    maxCalls：采样调用次数上限（默认 20，最大 100）
+    实现：采样 N 次调用 → union 自身事件的 iid 序列 → 按行号分块 → 统计块间 iid 转移频率 → 构建边
+    返回：{
+      fnName, totalCalls, sampledCalls,
+      blocks: [{ id, iids, lines, srcTexts, execCounts, presence, subCalls, isEntry }],
+      edges:  [{ source, target, count, type: 'sequential'|'branch'|'loop_back' }],
+      stats:  { blockCount, edgeCount, iidCount }
+    }
 
 GET  /api/sessions/:id/value-search?num=0.5&str=foo&strLike=*secret*&varName=key&source=write&limit=200
     按值搜索 value_index 表，返回匹配的 event_id 列表
@@ -1154,6 +1194,53 @@ POST /api/storage/delete
     删除 session_dir 时同步删除 DB 中对应 sessions + plugin_checkpoints 记录
     删除 project_dir 时同步删除 DB 中对应 projects 记录并将关联 sessions.project_id 置 null
     返回：{ results: [{ ok, path, type, freedSize?, error? }], freed, freedStr, successCount, errorCount }
+
+# ── 多会话对比分析 ───────────────────────────────────────────
+# 所有接口均为 POST，body 中传 sessionIds 数组（2~8 个会话 ID）
+# 性能原则：多 session 数据用 IN 子句单次查询 + GROUP BY session_id 聚合，不串行 N 次查询
+
+POST /api/compare/sessions
+    对比多个 Session 的整体指标（事件数、函数数、调用数、循环、最大深度、热点 IID）
+    body: { sessionIds: string[] }   -- 2~8 个 sessionId
+    返回：{
+      sessions: [{ sessionId, name, createdAt, eventCount, typeDist, fnCount, callCount,
+                   loopCount, totalIters, maxDepth, hotIids: [{iid, count, line, src_text}] }],
+      divergence: [{ sessionId, name, deltaEvents, deltaFns, deltaCalls,
+                     typeDelta: { [type]: {base, curr, delta, pct} },
+                     deltaLoops, deltaIters, deltaDepth }]  -- 基准为 sessions[0]
+    }
+
+POST /api/compare/functions
+    对比多个 Session 的函数调用分布（按调用次数排序，可隐藏内建函数）
+    body: { sessionIds: string[], limit?: number, hideBuiltin?: boolean }
+    返回：{
+      sessions: [{ sessionId, name }],
+      functions: [{ fnName, sessions: { [sessionId]: { callCount, eventCount, minLine } } }]
+    }
+
+POST /api/compare/hot-iids
+    对比多个 Session 的热点 IID（Top-N 执行次数）
+    body: { sessionIds: string[], topN?: number }
+    返回：{
+      sessions: [{ sessionId, name }],
+      iids: [{ iid, line, src_text, counts: { [sessionId]: number } }]
+    }
+
+POST /api/compare/events
+    对比多个 Session 的事件类型分布
+    body: { sessionIds: string[] }
+    返回：{
+      sessions: [{ sessionId, name }],
+      types: [{ type, counts: { [sessionId]: number } }]
+    }
+
+POST /api/compare/loops
+    对比多个 Session 的循环执行情况（循环数、总迭代次数）
+    body: { sessionIds: string[] }
+    返回：{
+      sessions: [{ sessionId, name }],
+      loops: [{ iid, line, iterCounts: { [sessionId]: number } }]
+    }
 ```
 
 ### 7.2 WebSocket
@@ -1246,7 +1333,8 @@ Jani/
 │   │   │   └── utils.mjs      # 共享工具（safeParseJson / groupBy / BUILTIN_FN_NAMES）
 │   │   ├── instrument.mjs     # 插桩 API（显式 --output，支持 wsUrl/wsSab，支持预处理）
 │   │   ├── projects.mjs       # 工作空间 API（上传/插桩/fork/下载/关联会话，支持预处理）
-│   │   └── storage.mjs        # 空间分析 API（stats 统计 + delete 批量清理）
+│   │   ├── storage.mjs        # 空间分析 API（stats 统计 + delete 批量清理）
+│   │   └── compare.mjs        # 多会话对比 API（sessions/functions/hot-iids/events/loops）
 │   └── ui/                    # Vue 3 前端
 │       ├── index.html
 │       ├── src/
@@ -1261,7 +1349,7 @@ Jani/
 │   │   │       #   值搜索模式：offset 分页（结果集有限，随机翻页需求高）
 │   │   │       #   跨Tab跳转：seqFrom 精确定位（无需估算页码）
 │   │   │       ├── FileInfoBar.vue     # 文件信息栏
-│   │   │       ├── FunctionsTab.vue    # 函数列表标签页（事件数过滤、内建函数隐藏、调用定位）
+│   │   │       ├── FunctionsTab.vue    # 函数列表标签页（事件数过滤、内建函数隐藏、调用定位、被谁调用子面板、内嵌火焰图）
 │   │   │       ├── CallDetail.vue      # 函数调用详情面板（调用栈 / 事件流，由 FunctionsTab 使用）
 │       │   │       ├── LoopsTab.vue        # 循环分析标签页
 │       │   │       ├── ObfuscationTab.vue  # 混淆检测标签页
@@ -1272,6 +1360,7 @@ Jani/
 │       │   │       ├── SignaturesTab.vue   # 签名分析标签页
 │       │   │       ├── StringsTab.vue      # 字符串追踪标签页
 │       │   │       ├── SummaryTab.vue      # 算法摘要标签页
+│       │   │       ├── CfgTab.vue          # 控制流图标签页（Dynamic CFG + fn-cfg，Cytoscape 渲染）
 │       │   │       ├── UploadDialog.vue    # 上传 trace 对话框
 │       │   │       ├── ImportFromTraceDialog.vue   # 从 trace 目录导入对话框
 │       │   │       └── DeleteConfirmDialog.vue      # 删除确认对话框
@@ -1288,7 +1377,8 @@ Jani/
 │       │       ├── PreprocessOptions.vue   # 预处理选项面板（嵌入式组件，可折叠）
 │       │       ├── ProgressDrawer.vue      # 分析进度侧边抽屉
 │       │       ├── TraceMonitor.vue        # Trace 收集状态监控（/trace）
-│       │       └── StorageAnalyzer.vue     # 空间分析页（/storage）
+│       │       ├── StorageAnalyzer.vue     # 空间分析页（/storage）
+│       │       └── TraceDiff.vue           # Trace 对比页（/diff），多会话执行行为差异对比
 │       └── vite.config.js               # Vite 代理端口 → 33000
 │   ├── data/                  # 运行时生成的数据目录
 │   │   ├── jta.db             # SQLite 数据库（主库）
@@ -1417,6 +1507,22 @@ Jani/
 - [x] **`WorkspaceDetail.vue` 拆分**：Fork Modal 逻辑提取为独立组件 `ForkModal.vue`（props + emits 接口）
 - [x] **`FunctionsTab.vue` 拆分**：函数调用详情面板（调用栈 / 事件流）提取为独立组件 `CallDetail.vue`
 
+### Phase 10：高级可视化与多维分析 ✅ 已完成
+- [x] **值字典（value_dict）**：全局唯一字符串池，`writes/reads/fields.value_id` 引用去重存储
+  - 内存 `Map<val_text, id>` 零额外查询，`INSERT OR IGNORE` 批量幂等写入
+  - 三条 API：`GET /value-dict`（条目查询）、`GET /value-dict/stats`（统计）
+  - `_runMigrations` 自动升级旧库（`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ADD COLUMN`）
+- [x] **TypedArray 支持**：`EventSerializer` 增加 TypedArray/ArrayBuffer 编解码；`value_dict` 和 `value_index` 新增 `val_type='ta'`；新增 `idx_vi_ta` 部分索引优化查询
+- [x] **事件列表游标分页**：普通模式由 offset 分页改为游标分页（`cursor=<last_seq>`，O(log N) B-tree 定位），彻底消除深页线性扫描问题；跨 Tab 跳转使用 `seqFrom` 精确定位；值搜索模式保留 offset 分页
+- [x] **火焰图接口**（`GET /flamegraph`）：Speedscope 格式 JSON，可直接导入 speedscope.app；支持 `seqFrom/seqTo` 时间窗口过滤和 `minSelf` 阈值
+- [x] **反向调用图**（`GET /functions/:fnName/callers`）：CTE 父帧关联，O(log N) 索引扫描；`FunctionsTab.vue` 新增"被谁调用"子面板，含调用次数占比和调用者跳转
+- [x] **内嵌火焰图组件**（`FunctionsTab.vue`）：支持渲染、缩放、下钻及导出 Speedscope JSON
+- [x] **动态控制流图**（`GET /cfg`）：函数调用拓扑图，支持循环节点标注、热点 IID 节点、深度过滤、根函数子树视角；Cytoscape.js 渲染
+- [x] **单函数内部 CFG**（`GET /fn-cfg`）：IDA 风格基本块划分，采样多次调用取 union 路径，块间 iid 转移频率统计；`CfgTab.vue` 新增控制流图标签页
+- [x] **多会话对比分析**（`POST /api/compare/*`）：5 个对比维度（整体指标 / 函数分布 / 热点 IID / 事件类型 / 循环），所有维度均用 `IN + GROUP BY session_id` 单次查询，支持 2~8 个会话并发对比；分歧计算（delta/pct）纯 JS 层实现
+- [x] **Trace 对比页面**（`TraceDiff.vue`，路由 `/diff`）：多会话执行行为差异可视化，导航栏新增入口
+- [x] **`routes/compare.mjs`（新文件）**：多对比 API 全部实现，内建函数黑名单预拼 SQL 供 LRU 缓存
+
 ---
 
 ## 10. 关键设计决策
@@ -1459,6 +1565,13 @@ Jani/
 | 预处理默认关闭 | `preprocess.enabled = false`，UI 有明确开关 | 预处理会改变代码结构，对不需要的用户不应静默生效 |
 | 空间分析安全约束 | 删除 path 必须在 `data/` 目录内，不可删除 DB 文件，删除前二次检查 upload 引用 | 防止路径穿越攻击；不可逆操作须保守处理 |
 | 空间清理级联 | 删除 session_dir 时同步清理 DB + checkpoints；删除 project_dir 时 sessions.project_id 置 null 而非级联删除会话 | 会话数据有独立价值，仅解除工作空间关联，不连带删除 |
+| 游标分页策略 | 普通事件浏览用 `cursor=last_seq`（O(log N) B-tree 扫）；值搜索用 offset（结果集有限，随机翻页需求高）；跨 Tab 跳转用 `seqFrom`（精确定位，无需估算） | 三种场景性能需求不同，混合策略兼顾速度与正确性；游标分页消除百万行 trace 深页卡顿 |
+| TypedArray 编解码格式 | `"[TypeName(N):MB:hexpreview]"` 文本格式写入 DB | 保留完整类型信息和大小，十六进制预览可视，不破坏 SQLite 文本索引 |
+| 反向调用图实现 | CTE + `call_seq ≤ X ≤ return_seq AND depth = child.depth-1` 父帧关联；顶层调用 `fn_name = '(top-level)'` | 利用已有 `idx_call_edges_stack` 索引，避免 N² 全表关联；单次 SQL 返回全部调用者 |
+| 动态 CFG 节点类型 | 三类节点：function（函数）/ loop（循环块）/ hotspot（热点 IID），Cytoscape 统一渲染 | 异构图结构可在同一视图展示调用关系、循环和热点，逆向分析时一眼看清执行重心 |
+| 单函数 CFG 基本块划分 | 按行号聚类（相邻行号差 ≤ LINE_GAP=3），采样多次调用取 union iid 集合 | 无需静态分析，纯动态数据；采样 union 确保覆盖不同执行路径；行号差阈值过滤无关 iid |
+| 多会话对比查询优化 | 所有维度用 `IN(${ph})` 一次查询 + `GROUP BY session_id` 聚合，最多 6 次 SQL（原来 6N 次） | N=8 会话时性能提升 8×；预拼 BUILTIN_NOT_IN_SQL 常量供 LRU 缓存 |
+| 对比页 `/diff` 分歧计算 | delta/pct 纯 JS 层计算（以 sessions[0] 为基准），不下推 SQL | 计算量 O(N × |types|)，远小于 DB 往返时延；保持 SQL 结构简单，LRU 友好 |
 
 ---
 
