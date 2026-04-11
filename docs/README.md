@@ -22,6 +22,18 @@ Jani 是一个面向 JavaScript 的**动态分析框架**，通过 AST 插桩在
 | DOC-13 | [Dynamic-Analysis-Design-Philosophy.md](./Dynamic-Analysis-Design-Philosophy.md) | 动态分析框架设计哲学与核心概念 |
 | DOC-14 | [Code-Issues.md](./Code-Issues.md) | 已知代码问题与待修复 Bug 记录 |
 
+## Jani Trace Analyzer（JTA）文档
+
+JTA 是独立的本地 Web 分析平台，文档位于 [`analyzer/docs/`](../analyzer/docs/)：
+
+| 文件 | 内容简介 |
+|------|---------|
+| [analyzer/docs/Overview.md](../analyzer/docs/Overview.md) | 概览、架构图、目录结构、开发路线图、关键设计决策 |
+| [analyzer/docs/DataModel.md](../analyzer/docs/DataModel.md) | 数据模型（Schema + 索引）、Database.mjs 实现、性能优化 |
+| [analyzer/docs/Plugins.md](../analyzer/docs/Plugins.md) | 插件架构（接口 / 调度器）、F/A/I 三层插件清单 |
+| [analyzer/docs/API.md](../analyzer/docs/API.md) | REST API 完整参考、WebSocket 协议 |
+| [analyzer/docs/WebUI.md](../analyzer/docs/WebUI.md) | Web UI 页面设计、交互说明、MCP Server 设计 |
+
 ## 快速开始
 
 ### 安装依赖

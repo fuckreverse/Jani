@@ -20,7 +20,7 @@ src/logger/       日志系统（RingBuffer / LogManager / 多后端）→ 详�
 src/preprocess/   预处理（反混淆 / 语法降级）→ 详见 docs/Preprocessing.md
 src/plugins/      示例分析插件（ExecutionTrace / dlint / tutorial / coverage 等）→ 详见 docs/Analysis-Plugins.md
 tools/            离线 Trace 后处理工具链（trace-parse / render / filter / call-tree 等）→ 详见 docs/Offline-Analysis-Tools.md
-analyzer/         Jani Trace Analyzer（JTA）本地 Web 分析平台 → 详见 docs/TraceAnalyzer-Design.md
+analyzer/         Jani Trace Analyzer（JTA）本地 Web 分析平台 → 详见 analyzer/docs/
 test/             测试套件（unit / integration）→ 详见 docs/Testing-System.md
 docs/             全量文档索引，见下方「文档索引」
 ```
@@ -114,6 +114,10 @@ npm run test:unit / test:integration / test:logging  # 分组
 | DOC-12 | [`docs/Testing-System.md`](docs/Testing-System.md) | `test/` 测试体系结构、方法、TODO |
 | DOC-13 | [`docs/Dynamic-Analysis-Design-Philosophy.md`](docs/Dynamic-Analysis-Design-Philosophy.md) | 动态分析框架设计哲学与核心概念 |
 | DOC-14 | [`docs/Code-Issues.md`](docs/Code-Issues.md) | 已知代码问题与待修复 Bug 记录 |
-| DOC-15 | [`docs/TraceAnalyzer-Design.md`](docs/TraceAnalyzer-Design.md) | `analyzer/` JTA 完整设计（架构 / 数据模型 / 插件体系 / REST+WS API / MCP Server）|
+| DOC-15 | [`analyzer/docs/Overview.md`](analyzer/docs/Overview.md) | `analyzer/` JTA 概览、架构图、目录结构、路线图、关键设计决策 |
+| DOC-16 | [`analyzer/docs/DataModel.md`](analyzer/docs/DataModel.md) | `analyzer/` JTA 数据模型（Schema + 索引）、Database.mjs 实现、性能优化 |
+| DOC-17 | [`analyzer/docs/Plugins.md`](analyzer/docs/Plugins.md) | `analyzer/` JTA 插件架构（接口 / 调度器）与 F/A/I 三层插件清单 |
+| DOC-18 | [`analyzer/docs/API.md`](analyzer/docs/API.md) | `analyzer/` JTA REST API 完整参考、WebSocket 协议 |
+| DOC-19 | [`analyzer/docs/WebUI.md`](analyzer/docs/WebUI.md) | `analyzer/` JTA Web UI 设计、MCP Server 设计与 Tool 列表 |
 
 **文档同步原则**：代码变更时同步更新对应文档；只更新受影响的文档，不整体重写；以代码为准。
