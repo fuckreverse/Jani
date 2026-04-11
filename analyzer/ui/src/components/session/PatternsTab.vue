@@ -7,7 +7,7 @@
     </div>
 
     <!-- 筛选栏 -->
-    <div class="filter-bar" style="margin-bottom:12px">
+    <div class="filter-bar" style="margin-bottom:8px">
       <!-- 变量名搜索 -->
       <div class="search-box">
         <span class="search-icon">📛</span>
@@ -47,18 +47,56 @@
         />
       </label>
 
-      <!-- 仅密码学常数 -->
-      <label class="filter-toggle" :class="{ 'toggle-active': onlyCrypto }" @click="onlyCrypto = !onlyCrypto; loadValuePatterns()">
-        <span class="toggle-dot"></span>
-        仅密码学
+      <!-- 长度过滤 -->
+      <label class="filter-label">
+        长度
+        <input
+          v-model.number="lenMin"
+          type="number"
+          min="0"
+          class="count-input count-input-len"
+          placeholder="最小"
+          @input="onLenFilterInput"
+        />
+        <span class="filter-range-sep">–</span>
+        <input
+          v-model.number="lenMax"
+          type="number"
+          min="0"
+          class="count-input count-input-len"
+          placeholder="最大"
+          @input="onLenFilterInput"
+        />
       </label>
 
       <button class="btn-secondary" @click="resetFilters">重置</button>
     </div>
 
+    <!-- 模式类型 chip 过滤栏（含「仅密码学」） -->
+    <div class="type-filter-bar" style="margin-bottom:12px">
+      <span class="type-filter-label">类型：</span>
+      <!-- 「仅密码学」作为特殊 chip，与 patternType 互斥 -->
+      <button
+        class="type-chip type-chip-crypto"
+        :class="{ 'type-chip-active': onlyCrypto }"
+        :style="onlyCrypto ? { background: 'rgba(245,158,11,0.15)', borderColor: 'rgba(245,158,11,0.45)', color: '#fcd34d' } : {}"
+        title="只显示已匹配密码学常数的值"
+        @click="onCryptoChipClick"
+      >🔐 密码学常数</button>
+      <button
+        v-for="t in PATTERN_TYPES"
+        :key="t.value"
+        class="type-chip"
+        :class="{ 'type-chip-active': selectedPatternType === t.value }"
+        :style="selectedPatternType === t.value ? { background: t.bg, borderColor: t.border, color: t.color } : {}"
+        @click="onPatternTypeClick(t.value)"
+        :title="t.desc"
+      >{{ t.label }}</button>
+    </div>
+
     <div v-if="patternsLoading" class="loading"><div class="spinner"></div><span>加载中...</span></div>
     <div v-else-if="filteredPatterns.length === 0" class="empty-state">
-      <p v-if="varSearch || valueSearch || minCount">无匹配的值模式</p>
+      <p v-if="varSearch || valueSearch || minCount || lenMin || lenMax || selectedPatternType || onlyCrypto">无匹配的值模式</p>
       <p v-else>暂无值模式数据（请先运行 A8 · ValuePatternDetector）</p>
     </div>
     <div v-else>
@@ -67,6 +105,7 @@
           <thead>
             <tr>
               <th>值内容</th>
+              <th>类型</th>
               <th>出现次数</th>
               <th>首次 SEQ</th>
               <th>iid</th>
@@ -90,6 +129,16 @@
                   @click="openValue(p)"
                 >{{ loadingSet.has(p.id) ? '加载中…' : truncate(p.value_hash, 60) }}</code>
                 <span v-if="!loadingSet.has(p.id) && p.value_hash && p.value_hash.length > 60" class="len-hint">{{ p.value_hash.length }}+ 字符</span>
+              </td>
+
+              <!-- 模式类型 badge -->
+              <td>
+                <span
+                  v-if="p.pattern_type"
+                  class="pattern-type-badge"
+                  :class="'ptype-' + p.pattern_type"
+                >{{ PATTERN_TYPE_LABELS[p.pattern_type] ?? p.pattern_type }}</span>
+                <span v-else class="text-muted">—</span>
               </td>
 
               <!-- 出现次数 -->
@@ -120,7 +169,9 @@
         </table>
       </div>
       <div class="table-hint">
-        共 {{ filteredPatterns.length }} 条 · 点击值内容可展开完整值并复制
+        共 {{ filteredPatterns.length }} 条
+        <span v-if="selectedPatternType"> · 类型过滤：{{ PATTERN_TYPE_LABELS[selectedPatternType] ?? selectedPatternType }}</span>
+        · 点击值内容可展开完整值并复制
       </div>
     </div>
   </div>
@@ -142,20 +193,61 @@ const patternsLoading = ref(false);
 // ── 点击加载完整值的状态追踪 ──────────────────────────────────────────────────
 const loadingSet = ref(new Set());
 
-// ── 筛选条件 ──────────────────────────────────────────────────────────────────
-const varSearch   = ref('');   // 前端过滤：变量名
-const valueSearch = ref('');   // 服务端过滤：值内容
-const minCount    = ref('');   // 前端过滤：最小次数
-const onlyCrypto  = ref(false);
+// ── 模式类型常量表 ────────────────────────────────────────────────────────────
+const PATTERN_TYPES = [
+    { value: 'timestamp_ms',   label: '⏱ 时间戳(ms)',    desc: '13 位 Unix 毫秒时间戳',        color: '#fde68a', bg: 'rgba(245,158,11,0.15)', border: 'rgba(245,158,11,0.4)' },
+    { value: 'timestamp_s',    label: '⏱ 时间戳(s)',     desc: '10 位 Unix 秒时间戳',          color: '#fde68a', bg: 'rgba(245,158,11,0.15)', border: 'rgba(245,158,11,0.4)' },
+    { value: 'uuid',           label: '🆔 UUID',          desc: 'UUID v1-v5 格式',              color: '#a5f3fc', bg: 'rgba(6,182,212,0.12)',  border: 'rgba(6,182,212,0.35)'  },
+    { value: 'hex_str',        label: '🔣 Hex',           desc: '纯十六进制字符串（偶数长度≥8）', color: '#c4b5fd', bg: 'rgba(139,92,246,0.12)', border: 'rgba(139,92,246,0.35)' },
+    { value: 'base64_charset', label: '📋 B64字符表',     desc: '标准/URL-safe/魔改 Base64 字符表', color: '#86efac', bg: 'rgba(34,197,94,0.12)',  border: 'rgba(34,197,94,0.35)'  },
+    { value: 'custom_alphabet',label: '🔀 自定义字母表',  desc: '64 个唯一字符的自定义编码字典', color: '#f9a8d4', bg: 'rgba(236,72,153,0.12)', border: 'rgba(236,72,153,0.35)' },
+    { value: 'base64_encoded', label: '📦 Base64编码',    desc: '看起来像 Base64 编码结果',      color: '#6ee7b7', bg: 'rgba(16,185,129,0.12)', border: 'rgba(16,185,129,0.35)' },
+    { value: 'ip_addr',        label: '🌐 IP地址',        desc: 'IPv4 地址（带或不带端口）',     color: '#93c5fd', bg: 'rgba(59,130,246,0.12)', border: 'rgba(59,130,246,0.35)' },
+    { value: 'url',            label: '🔗 URL',           desc: 'HTTP/HTTPS URL',               color: '#93c5fd', bg: 'rgba(59,130,246,0.12)', border: 'rgba(59,130,246,0.35)' },
+    { value: 'json_obj',       label: '📄 JSON',          desc: 'JSON 对象/数组字符串',          color: '#d1d5db', bg: 'rgba(107,114,128,0.12)', border: 'rgba(107,114,128,0.35)' },
+    { value: 'byte_array',     label: '📊 字节数组',      desc: '纯整数数组（16~512 元素，每个 0-255）', color: '#fca5a5', bg: 'rgba(239,68,68,0.12)',  border: 'rgba(239,68,68,0.35)'  },
+];
 
-// ── 服务端搜索防抖 ────────────────────────────────────────────────────────────
+// 用于显示徽章文字（不含 emoji，更紧凑）
+const PATTERN_TYPE_LABELS = {
+    timestamp_ms:    '时间戳ms',
+    timestamp_s:     '时间戳s',
+    uuid:            'UUID',
+    hex_str:         'Hex',
+    base64_charset:  'B64字符表',
+    custom_alphabet: '自定义字母表',
+    base64_encoded:  'Base64',
+    ip_addr:         'IP地址',
+    url:             'URL',
+    json_obj:        'JSON',
+    byte_array:      '字节数组',
+};
+
+// ── 筛选条件 ──────────────────────────────────────────────────────────────────
+const varSearch          = ref('');   // 前端过滤：变量名
+const valueSearch        = ref('');   // 服务端过滤：值内容
+const minCount           = ref('');   // 前端过滤：最小次数
+const lenMin             = ref('');   // 服务端过滤：值长度最小值
+const lenMax             = ref('');   // 服务端过滤：值长度最大值
+const onlyCrypto         = ref(false); // 仅密码学常数（与 selectedPatternType 互斥）
+const selectedPatternType = ref('');   // 服务端过滤：语义类型（单选，空=全部）
+
+// ── 服务端搜索/过滤防抖 ──────────────────────────────────────────────────────
 let valueSearchTimer = null;
+let lenFilterTimer   = null;
 
 function onValueSearchInput() {
     clearTimeout(valueSearchTimer);
     valueSearchTimer = setTimeout(() => {
         loadValuePatterns();
     }, 350);
+}
+
+function onLenFilterInput() {
+    clearTimeout(lenFilterTimer);
+    lenFilterTimer = setTimeout(() => {
+        loadValuePatterns();
+    }, 400);
 }
 
 function clearValueSearch() {
@@ -183,22 +275,42 @@ const filteredPatterns = computed(() => {
 
 const cryptoCount = computed(() => allPatterns.value.filter(p => p.matched_constant).length);
 
-// ── 重置所有过滤条件 ──────────────────────────────────────────────────────────
-function resetFilters() {
-    varSearch.value   = '';
-    valueSearch.value = '';
-    minCount.value    = '';
-    onlyCrypto.value  = false;
+// ── 密码学 chip 点击（与 patternType 互斥）─────────────────────────────────────
+function onCryptoChipClick() {
+    onlyCrypto.value = !onlyCrypto.value;
+    if (onlyCrypto.value) selectedPatternType.value = ''; // 互斥：取消 patternType 选中
     loadValuePatterns();
 }
 
-// ── 加载数据（服务端过滤：onlyCrypto + valueSearch）──────────────────────────
+// ── 模式类型 chip 点击（单选切换，与 onlyCrypto 互斥）───────────────────────────
+function onPatternTypeClick(typeVal) {
+    selectedPatternType.value = selectedPatternType.value === typeVal ? '' : typeVal;
+    if (selectedPatternType.value) onlyCrypto.value = false; // 互斥：取消密码学选中
+    loadValuePatterns();
+}
+
+// ── 重置所有过滤条件 ──────────────────────────────────────────────────────────
+function resetFilters() {
+    varSearch.value           = '';
+    valueSearch.value         = '';
+    minCount.value            = '';
+    lenMin.value              = '';
+    lenMax.value              = '';
+    onlyCrypto.value          = false;
+    selectedPatternType.value = '';
+    loadValuePatterns();
+}
+
+// ── 加载数据（服务端过滤：onlyCrypto + valueSearch + patternType）────────────
 async function loadValuePatterns() {
     patternsLoading.value = true;
     try {
         const params = new URLSearchParams({ limit: '2000' });
         if (onlyCrypto.value) params.set('onlyCrypto', '1');
         if (valueSearch.value.trim()) params.set('valueSearch', valueSearch.value.trim());
+        if (selectedPatternType.value) params.set('patternType', selectedPatternType.value);
+        if (lenMin.value !== '' && lenMin.value !== null) params.set('lenMin', String(lenMin.value));
+        if (lenMax.value !== '' && lenMax.value !== null) params.set('lenMax', String(lenMax.value));
         const res = await fetch(`/api/sessions/${props.sessionId}/value-patterns?${params}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -282,33 +394,25 @@ onMounted(loadValuePatterns);
 }
 .search-clear:hover { opacity: 1; color: var(--danger, #f87171); }
 
-/* 最小次数输入 */
+/* 数字输入框（次数 + 长度） */
 .count-input {
     width: 60px; padding: 4px 6px; font-size: 12px;
     border: 1px solid var(--border-color); border-radius: 4px;
     background: var(--bg-secondary); color: var(--text-primary);
 }
+.count-input-len { width: 54px; }
 .count-input:focus { outline: none; border-color: rgba(99,102,241,0.5); }
 .count-input::-webkit-inner-spin-button,
 .count-input::-webkit-outer-spin-button { -webkit-appearance: none; }
 .count-input { -moz-appearance: textfield; }
+.filter-range-sep { font-size: 11px; color: var(--text-muted); padding: 0 1px; }
 
-/* 仅密码学 toggle */
-.filter-toggle {
-    display: flex; align-items: center; gap: 6px; cursor: pointer;
-    padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border-color);
-    background: var(--bg-secondary); user-select: none;
-    transition: background 0.15s, border-color 0.15s; font-size: 12px; color: var(--text-muted);
+/* 密码学 chip 悬停色（偏金色，与普通 chip 区分） */
+.type-chip-crypto:hover {
+    border-color: rgba(245,158,11,0.4) !important;
+    background: rgba(245,158,11,0.08) !important;
+    color: #fde68a !important;
 }
-.filter-toggle:hover { border-color: rgba(245,158,11,0.4); background: var(--bg-tertiary); }
-.filter-toggle.toggle-active {
-    background: rgba(245,158,11,0.1); border-color: rgba(245,158,11,0.45); color: #fcd34d;
-}
-.toggle-dot {
-    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-    background: var(--text-muted); transition: background 0.15s;
-}
-.filter-toggle.toggle-active .toggle-dot { background: #fcd34d; }
 
 /* 表格 */
 .events-table-wrapper { overflow-x: auto; }
@@ -378,5 +482,61 @@ onMounted(loadValuePatterns);
 .table-hint {
     margin-top: 10px; font-size: 11px; color: var(--text-muted);
     text-align: right; padding-right: 4px;
+}
+
+/* ── 模式类型 chip 过滤栏 ──────────────────────────────────────────────────── */
+.type-filter-bar {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.type-filter-label {
+    font-size: 11px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0;
+}
+.type-chip {
+    padding: 2px 9px; border-radius: 10px; font-size: 11px; white-space: nowrap;
+    border: 1px solid var(--border-color); background: transparent;
+    color: var(--text-muted); cursor: pointer;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.type-chip:hover {
+    border-color: rgba(99,102,241,0.4); background: rgba(99,102,241,0.08);
+    color: var(--text-primary);
+}
+.type-chip-active { font-weight: 600; }
+
+/* ── 模式类型 badge（表格内）──────────────────────────────────────────────── */
+.pattern-type-badge {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    font-size: 10px; font-weight: 600; font-family: monospace;
+    white-space: nowrap;
+    background: rgba(107,114,128,0.15); color: var(--text-muted);
+    border: 1px solid rgba(107,114,128,0.25);
+}
+/* 各类型独立配色 */
+.ptype-timestamp_ms, .ptype-timestamp_s {
+    background: rgba(245,158,11,0.15); color: #fde68a; border-color: rgba(245,158,11,0.35);
+}
+.ptype-uuid {
+    background: rgba(6,182,212,0.12); color: #a5f3fc; border-color: rgba(6,182,212,0.3);
+}
+.ptype-hex_str {
+    background: rgba(139,92,246,0.12); color: #c4b5fd; border-color: rgba(139,92,246,0.3);
+}
+.ptype-base64_charset {
+    background: rgba(34,197,94,0.12); color: #86efac; border-color: rgba(34,197,94,0.3);
+}
+.ptype-custom_alphabet {
+    background: rgba(236,72,153,0.12); color: #f9a8d4; border-color: rgba(236,72,153,0.3);
+}
+.ptype-base64_encoded {
+    background: rgba(16,185,129,0.12); color: #6ee7b7; border-color: rgba(16,185,129,0.3);
+}
+.ptype-ip_addr, .ptype-url {
+    background: rgba(59,130,246,0.12); color: #93c5fd; border-color: rgba(59,130,246,0.3);
+}
+.ptype-json_obj {
+    background: rgba(107,114,128,0.12); color: #d1d5db; border-color: rgba(107,114,128,0.3);
+}
+.ptype-byte_array {
+    background: rgba(239,68,68,0.12); color: #fca5a5; border-color: rgba(239,68,68,0.3);
 }
 </style>

@@ -3,6 +3,9 @@
  * 依赖：F1-EventIndex（writes 表已填充）
  *
  * 扫描所有 writes 值，检测高频值和已知密码学魔术常数，写入 value_patterns 表。
+ * v2：新增 pattern_type 字段（语义类型标签），涵盖：
+ *   timestamp_ms · timestamp_s · uuid · hex_str · base64_charset · custom_alphabet
+ *   base64_encoded · ip_addr · url · json_obj · byte_array
  *
  * 性能优化：
  *  - 用一次批量 JOIN 替代对每个 valueStats 的 N 次 db.get
@@ -241,6 +244,114 @@ const CRYPTO_CONSTANTS = new Map([
 
 const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
+// ─── 正则预编译（模块级，避免每次调用重建）────────────────────────────────────
+const RE_UUID         = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const RE_HEX_STR      = /^[0-9a-f]+$/i;
+const RE_IP           = /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$/;
+const RE_URL          = /^https?:\/\//i;
+// Base64 字符集：字母+数字+[+/=]，长度至少 4，且能被 4 整除（允许末尾 1-2 个 = pad）
+const RE_BASE64_ENC   = /^[A-Za-z0-9+/]+={0,2}$/;
+// URL-safe Base64
+const RE_BASE64_URL   = /^[A-Za-z0-9_-]+={0,2}$/;
+
+/**
+ * 检测值的语义类型标签，用于 pattern_type 字段。
+ * 返回字符串枚举值（见下），或 null（无特殊语义）。
+ *
+ * 枚举值：
+ *   timestamp_ms   — 13 位 Unix 毫秒时间戳（2001-01-01 ~ 2035-01-01）
+ *   timestamp_s    — 10 位 Unix 秒时间戳（同窗口）
+ *   uuid           — UUID v1-v5 格式字符串
+ *   hex_str        — 纯十六进制字符串（偶数长度 ≥ 8，不含 "0x" 前缀）
+ *   base64_charset — 标准 / URL-safe / 魔改 Base64 字符表（长度 64 或 65，唯一字符 = 64）
+ *   custom_alphabet— 长度 64，所有字符唯一但非标准 Base64 字符表（自定义编码字典）
+ *   base64_encoded — 看起来像 Base64 编码结果（长度 ≥ 16，mod4=0 或可 pad，高熵）
+ *   ip_addr        — IPv4 地址（带或不带端口）
+ *   url            — HTTP/HTTPS URL
+ *   json_obj       — JSON 对象/数组字符串（非空）
+ *   byte_array     — 纯整数数组（16~512 个元素，每个 0-255）
+ */
+function detectValueType(value) {
+    if (value === null || value === undefined) return null;
+    const str = String(value).trim();
+    if (str === '') return null;
+
+    // ── 数值型特判（时间戳）────────────────────────────────────────────────
+    const numVal = Number(str);
+    if (!isNaN(numVal) && isFinite(numVal) && String(numVal) === str) {
+        // 13 位毫秒时间戳：约 2001-09-09 01:46:40 000 ~ 2035-01-01 00:00:00 000
+        if (numVal >= 1_000_000_000_000 && numVal <= 2_051_222_400_000) return 'timestamp_ms';
+        // 10 位秒时间戳
+        if (numVal >= 1_000_000_000 && numVal <= 2_051_222_400) return 'timestamp_s';
+        return null; // 普通数字，无语义
+    }
+
+    // ── URL ────────────────────────────────────────────────────────────────
+    if (RE_URL.test(str)) return 'url';
+
+    // ── IP 地址 ────────────────────────────────────────────────────────────
+    if (RE_IP.test(str)) {
+        const parts = str.split(':')[0].split('.').map(Number);
+        if (parts.every(p => p >= 0 && p <= 255)) return 'ip_addr';
+    }
+
+    // ── UUID ────────────────────────────────────────────────────────────────
+    if (str.length === 36 && RE_UUID.test(str)) return 'uuid';
+
+    // ── JSON 对象/数组（字符串形式，非空）─────────────────────────────────
+    if ((str.startsWith('{') && str.endsWith('}')) || (str.startsWith('[') && str.endsWith(']'))) {
+        try {
+            const parsed = JSON.parse(str);
+            // 数组：如果是整数字节数组给 byte_array 更准确的标签
+            if (Array.isArray(parsed)) {
+                const len = parsed.length;
+                if (len >= 16 && len <= 512) {
+                    const allBytes = parsed.every(n => typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= 255);
+                    if (allBytes) return 'byte_array';
+                }
+            }
+            return 'json_obj';
+        } catch { /* not valid JSON */ }
+    }
+
+    // ── 字符串型检测 ────────────────────────────────────────────────────────
+    const len = str.length;
+
+    // Base64 字符表（标准 / URL-safe / 魔改）
+    // 判据：长度 64 或 65（含 =），且字符唯一数 = 64（每个字符只出现一次）
+    if (len === 64 || len === 65) {
+        const chars = str.endsWith('=') ? str.slice(0, -1) : str;
+        if (chars.length === 64) {
+            const unique = new Set(chars).size;
+            if (unique === 64) {
+                // 再区分：是否是标准 Base64 字符表
+                if (chars === BASE64_CHARS) return 'base64_charset';
+                // 是否是 URL-safe Base64 字符表
+                const URL_SAFE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+                if (chars === URL_SAFE) return 'base64_charset';
+                // 全部字符唯一但非标准 → 自定义编码字母表
+                return 'custom_alphabet';
+            }
+        }
+    }
+
+    // 纯十六进制字符串（偶数长度 ≥ 8，不含 "0x"）
+    if (len >= 8 && len % 2 === 0 && RE_HEX_STR.test(str)) return 'hex_str';
+
+    // Base64 编码结果（长度 ≥ 16，mod4=0 或加 pad 后 mod4=0，符合 Base64 字符集，高熵）
+    if (len >= 16) {
+        const isStdB64 = RE_BASE64_ENC.test(str) && (len % 4 === 0);
+        const isUrlB64 = RE_BASE64_URL.test(str) && str.indexOf('=') === -1; // URL-safe 通常不 pad
+        if (isStdB64 || isUrlB64) {
+            // 简单熵估计：字符集多样性（Base64 编码的信息密度较高）
+            const unique = new Set(str.replace(/=/g, '')).size;
+            if (unique >= 20) return 'base64_encoded';
+        }
+    }
+
+    return null;
+}
+
 function detectConstant(value) {
     if (value === null || value === undefined) return null;
     const str = String(value).trim().replace(/^"|"$/g, '');
@@ -319,11 +430,14 @@ export default class A8ValuePatternDetector extends BasePlugin {
 
         // 过滤出需要获取 detail 的条目
         const needDetail = [];
-        const matchedMap = new Map(); // value_id → matched constant name
+        const matchedMap     = new Map(); // value_id → matched constant name
+        const patternTypeMap = new Map(); // value_id → pattern_type string | null
         for (const vs of valueStats) {
-            const matched = detectConstant(vs.value);
+            const matched     = detectConstant(vs.value);
+            const patternType = detectValueType(vs.value);
             matchedMap.set(vs.value_id, matched);
-            if (vs.count >= 2 || matched) {
+            patternTypeMap.set(vs.value_id, patternType);
+            if (vs.count >= 2 || matched || patternType) {
                 needDetail.push(vs);
             }
         }
@@ -389,17 +503,18 @@ export default class A8ValuePatternDetector extends BasePlugin {
         // 组装写入数据
         const toInsert = [];
         for (const vs of needDetail) {
-            let matched   = matchedMap.get(vs.value_id);
-            const detail  = detailMap.get(vs.value_id);
-            const varName = detail?.name ?? null;
+            let matched         = matchedMap.get(vs.value_id);
+            const patternType   = patternTypeMap.get(vs.value_id) ?? null;
+            const detail        = detailMap.get(vs.value_id);
+            const varName       = detail?.name ?? null;
 
             // 循环/临时变量名过滤
             if (matched && varName && LOOP_VAR_NAMES.has(varName)) {
                 matched = null;
             }
 
-            // 仍需写入：有常数匹配、或出现次数 >= 2
-            if (!matched && vs.count < 2) continue;
+            // 仍需写入：有常数匹配、有语义类型标签、或出现次数 >= 2
+            if (!matched && !patternType && vs.count < 2) continue;
 
             toInsert.push([
                 sessionId,
@@ -411,12 +526,13 @@ export default class A8ValuePatternDetector extends BasePlugin {
                 detail?.line ?? null,
                 matched ?? null,
                 vs.value_id,     // value_dict_id：直接引用，full-value 一跳搞定
+                patternType,     // 语义类型标签（timestamp_ms / uuid / hex_str 等）
             ]);
         }
 
         if (toInsert.length > 0) {
             const stmt = rawDb.prepare(
-                'INSERT INTO value_patterns (session_id, value_hash, count, first_seq, iid, var_name, line, matched_constant, value_dict_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                'INSERT INTO value_patterns (session_id, value_hash, count, first_seq, iid, var_name, line, matched_constant, value_dict_id, pattern_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
             const insertBatch = rawDb.transaction((batch) => {
                 for (const row of batch) stmt.run(...row);

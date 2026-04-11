@@ -277,16 +277,18 @@ CREATE INDEX IF NOT EXISTS idx_oid_aliases_session ON oid_aliases(session_id, oi
 -- ─── 值模式（A8 ValuePatternDetector 填充）──────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS value_patterns (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id      TEXT NOT NULL,
-    value_hash      TEXT,
-    count           INTEGER DEFAULT 0,
-    first_seq       INTEGER,
-    iid             INTEGER,
-    var_name        TEXT,
-    line            INTEGER,
-    matched_constant TEXT,
-    value_dict_id   INTEGER  -- 引用 value_dict.id，A8 v2 填充，可直接查完整原始值
+id              INTEGER PRIMARY KEY AUTOINCREMENT,
+session_id      TEXT NOT NULL,
+value_hash      TEXT,
+count           INTEGER DEFAULT 0,
+first_seq       INTEGER,
+iid             INTEGER,
+var_name        TEXT,
+line            INTEGER,
+matched_constant TEXT,
+value_dict_id   INTEGER,  -- 引用 value_dict.id，A8 v2 填充，可直接查完整原始值
+pattern_type    TEXT       -- 语义类型标签（A8 v3）：timestamp_ms/timestamp_s/uuid/hex_str/
+                           -- base64_charset/custom_alphabet/base64_encoded/ip_addr/url/json_obj/byte_array
 );
 
 -- ─── 加密检测（I1 CryptoDetector 填充）──────────────────────────────────────
@@ -444,6 +446,8 @@ CREATE INDEX IF NOT EXISTS idx_iid_counts_count    ON iid_counts(session_id, cou
 CREATE INDEX IF NOT EXISTS idx_loops_iter_count    ON loops(session_id, iteration_count DESC);
 -- value_patterns 按 matched_constant 过滤：I1 密码学检测
 CREATE INDEX IF NOT EXISTS idx_vp_matched          ON value_patterns(session_id, matched_constant);
+-- value_patterns 按 pattern_type 过滤：A8 v3 语义类型标签
+CREATE INDEX IF NOT EXISTS idx_vp_pattern_type     ON value_patterns(session_id, pattern_type);
 -- 调用栈查询：按 call_seq/return_seq 范围查找祖先帧（owner-fn + call-stack API）
 CREATE INDEX IF NOT EXISTS idx_call_edges_stack    ON call_edges(session_id, call_seq, return_seq, depth);
 -- own-events 子调用查询：depth 前置，消除 (session_id, depth=N, call_seq>=X, return_seq<=Y) 的全扫

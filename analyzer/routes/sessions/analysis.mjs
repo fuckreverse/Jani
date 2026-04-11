@@ -173,11 +173,14 @@ router.get('/loop-iterations', (req, res) => {
 // ── GET /api/sessions/:id/value-patterns ──────────────────────────────────
 // 支持 valueSearch：按值内容（value_hash 字段）模糊搜索
 // 支持 seqFrom/seqTo：按首次出现 SEQ（first_seq）范围过滤
+// 支持 patternType：按语义类型标签精确过滤（A8 v3）
+//   可选值：timestamp_ms | timestamp_s | uuid | hex_str | base64_charset |
+//           custom_alphabet | base64_encoded | ip_addr | url | json_obj | byte_array
 
 router.get('/value-patterns', (req, res) => {
     try {
         const { id } = req.params;
-        const { onlyCrypto, varName, valueSearch, minCount, limit = '2000', seqFrom, seqTo } = req.query;
+        const { onlyCrypto, varName, valueSearch, minCount, patternType, lenMin, lenMax, limit = '2000', seqFrom, seqTo } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -201,6 +204,20 @@ router.get('/value-patterns', (req, res) => {
             conditions.push('count >= ?');
             params.push(Number(minCount) || 1);
         }
+        // 按语义类型标签精确过滤（A8 v3 新增）
+        if (patternType) {
+            conditions.push('pattern_type = ?');
+            params.push(patternType);
+        }
+        // 按值内容长度范围过滤（LENGTH(value_hash) 即完整值长度）
+        if (lenMin !== undefined && lenMin !== '') {
+            conditions.push('LENGTH(value_hash) >= ?');
+            params.push(Number(lenMin));
+        }
+        if (lenMax !== undefined && lenMax !== '') {
+            conditions.push('LENGTH(value_hash) <= ?');
+            params.push(Number(lenMax));
+        }
         // 时间窗口过滤：按首次出现 SEQ（first_seq 在 [seqFrom, seqTo] 内）
         if (seqFrom !== undefined && seqFrom !== '') {
             conditions.push('first_seq >= ?');
@@ -214,7 +231,7 @@ router.get('/value-patterns', (req, res) => {
         const limitN = Math.min(Number(limit) || 2000, 2000);
 
         const rows = db.all(
-            `SELECT id, value_hash, count, first_seq, iid, var_name, line, matched_constant
+            `SELECT id, value_hash, count, first_seq, iid, var_name, line, matched_constant, pattern_type
              FROM value_patterns
              WHERE ${conditions.join(' AND ')}
              ORDER BY count DESC

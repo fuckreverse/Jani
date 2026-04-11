@@ -294,8 +294,10 @@ function _runMigrations(db) {
         ['idx_iid_counts_count',   'iid_counts',  'session_id, count DESC'],
         // loops 按迭代次数降序：A5 取高频循环
         ['idx_loops_iter_count',   'loops',       'session_id, iteration_count DESC'],
-        // value_patterns 按 matched_constant 过滤：I1 密码学检测
-        ['idx_vp_matched',         'value_patterns', 'session_id, matched_constant'],
+// value_patterns 按 matched_constant 过滤：I1 密码学检测
+['idx_vp_matched',         'value_patterns', 'session_id, matched_constant'],
+// value_patterns 按 pattern_type 过滤：A8 v3 语义类型标签
+['idx_vp_pattern_type',    'value_patterns', 'session_id, pattern_type'],
         // call_edges 按 return_value：I3 字符串解密函数检测
         ['idx_call_edges_retval',  'call_edges',  'session_id, return_value'],
         // 调用栈查询：owner-fn + call-stack API 的范围查询（call_seq <= N AND return_seq >= N）
@@ -514,8 +516,13 @@ function _runMigrations(db) {
         if (vpCols.size > 0 && !vpCols.has('value_dict_id')) {
             db.exec('ALTER TABLE value_patterns ADD COLUMN value_dict_id INTEGER');
         }
+        // ── value_patterns.pattern_type 列迁移 ─────────────────────────────
+        // A8 v3：语义类型标签（timestamp_ms / uuid / hex_str / base64_encoded 等）
+        if (vpCols.size > 0 && !vpCols.has('pattern_type')) {
+            db.exec('ALTER TABLE value_patterns ADD COLUMN pattern_type TEXT');
+        }
     } catch (e) {
-        console.warn('[Database] add value_patterns.value_dict_id failed (non-fatal):', e.message);
+        console.warn('[Database] add value_patterns columns failed (non-fatal):', e.message);
     }
 
     // ── obfuscation_hints.fn_name 列迁移 ─────────────────────────────────────
