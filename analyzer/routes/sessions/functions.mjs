@@ -215,6 +215,110 @@ router.get('/functions/:fnName/calls', (req, res) => {
     }
 });
 
+// ── GET /api/sessions/:id/functions/:fnName/callers ────────────────────────
+// 反向调用图：查询调用了指定函数的所有调用者（按调用次数降序）
+//
+// 实现：
+//   1. 找到 fn_name=X 的所有 call_edges（目标调用集合）
+//   2. 对每个调用帧，查 depth-1 层中包含其 call_seq 的帧（即父帧）
+//   3. 以父帧 fn_name 聚合，统计调用次数、行号等
+//
+// 查询参数：
+//   fnIid  — 精确 iid 过滤（同名不同位置的函数）
+//   limit  — 返回条数（默认 100）
+//   offset — 分页偏移（默认 0）
+
+router.get('/functions/:fnName/callers', (req, res) => {
+    try {
+        const { id, fnName } = req.params;
+        const { fnIid, limit = '100', offset = '0' } = req.query;
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: `Session ${id} not found` });
+
+        const limitN  = Math.min(Number(limit)  || 100, 500);
+        const offsetN = Number(offset) || 0;
+
+        // 目标函数的过滤条件
+        const targetConds  = ['t.session_id = ?', 't.fn_name = ?'];
+        const targetParams = [id, fnName];
+        if (fnIid !== undefined && fnIid !== '') {
+            targetConds.push('t.fn_iid = ?');
+            targetParams.push(Number(fnIid));
+        }
+
+        // 用 CTE 先取出目标函数的所有调用记录，再 JOIN 父帧
+        //
+        // 父帧条件：
+        //   p.session_id = id
+        //   p.call_seq  <= t.call_seq      （父帧开始不晚于子帧）
+        //   p.return_seq >= t.call_seq     （父帧结束不早于子帧开始）
+        //   p.depth      = t.depth - 1    （严格父层深度）
+        //
+        // 如果 t.depth = 0（顶层调用），无父帧，GROUP BY 时 p.fn_name 为 NULL → 用 '(top-level)' 代替
+        //
+        // 索引利用：idx_call_edges_stack(session_id, call_seq, return_seq, depth)
+        //   对 p.call_seq <= X AND p.return_seq >= X 使用范围扫描
+
+        const rows = db.all(
+            `WITH target AS (
+               SELECT t.call_seq, t.return_seq, t.depth, t.caller_line
+               FROM call_edges t
+               WHERE ${targetConds.join(' AND ')}
+             )
+             SELECT
+               COALESCE(p.fn_name, '(top-level)') AS caller_fn_name,
+               p.fn_iid                            AS caller_fn_iid,
+               COUNT(*)                            AS call_count,
+               MIN(t.caller_line)                  AS callee_min_line,
+               MIN(p.depth)                        AS caller_min_depth,
+               MAX(p.depth)                        AS caller_max_depth,
+               MIN(p.caller_line)                  AS caller_min_line
+             FROM target t
+             LEFT JOIN call_edges p
+               ON p.session_id = ?
+               AND p.call_seq  <= t.call_seq
+               AND p.return_seq >= t.call_seq
+               AND p.depth      = t.depth - 1
+             GROUP BY p.fn_name, p.fn_iid
+             ORDER BY call_count DESC
+             LIMIT ? OFFSET ?`,
+            ...targetParams, id, limitN, offsetN
+        );
+
+        // 总调用次数（目标函数被调用的总次数，用于前端显示百分比）
+        // 注：targetConds 使用了 't.' 表别名前缀，这里需要去掉别名前缀后再查询
+        const countConds  = ['session_id = ?', 'fn_name = ?'];
+        const countParams = [id, fnName];
+        if (fnIid !== undefined && fnIid !== '') {
+            countConds.push('fn_iid = ?');
+            countParams.push(Number(fnIid));
+        }
+        const totalRow = db.get(
+            `SELECT COUNT(*) AS cnt FROM call_edges WHERE ${countConds.join(' AND ')}`,
+            ...countParams
+        );
+        const totalCalls = totalRow?.cnt ?? 0;
+
+        return res.json({
+            callers: rows.map(r => ({
+                callerFnName:    r.caller_fn_name,
+                callerFnIid:     r.caller_fn_iid,
+                callCount:       r.call_count,
+                calleeMinLine:   r.callee_min_line,
+                callerMinDepth:  r.caller_min_depth,
+                callerMaxDepth:  r.caller_max_depth,
+                callerMinLine:   r.caller_min_line,
+            })),
+            total:       rows.length,
+            totalCalls,
+        });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/functions/:fnName/callers] error:');
+        return res.status(500).json({ error: e.message });
+    }
+});
+
 // ── GET /api/sessions/:id/calls/:callId/own-events ────────────────────────
 // 返回某次具体调用的「自身事件流」：[call_seq, return_seq] 区间内去除所有直接子调用占据的 SEQ
 //

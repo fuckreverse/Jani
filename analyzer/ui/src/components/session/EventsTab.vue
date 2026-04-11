@@ -404,9 +404,10 @@ async function loadEvents(reset = false, seqFromVal = null) {
             const params = new URLSearchParams({ limit: PAGE_SIZE });
 
             if (seqFromVal != null) {
-                // 跨 Tab 跳转：用 seqFrom 精确定位，重置游标栈
+                // 跨 Tab 跳转：用 seqFrom 精确定位，将 seqFrom-1 存为入场游标
+                // 这样"上一页"也能正确定位到 seqFrom 之前的事件，而不是跳回最头部
                 params.set('seqFrom', seqFromVal);
-                cursorStack.value = [0];  // 跳转后若再翻页，重新从第 1 页走游标
+                cursorStack.value = [Math.max(0, seqFromVal - 1)];  // 入场游标
             } else {
                 // 普通翻页：从游标栈取当前页的起始游标
                 const cursor = cursorStack.value[currentPage.value - 1] ?? 0;
