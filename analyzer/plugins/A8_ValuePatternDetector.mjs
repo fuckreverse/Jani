@@ -291,14 +291,17 @@ export default class A8ValuePatternDetector extends BasePlugin {
 
         db.run('DELETE FROM value_patterns WHERE session_id = ?', [sessionId]);
 
-        this.emitProgress(ctx, '扫描 writes 值...', 5);
+        this.emitProgress(ctx, '扫描 value_dict 值...', 5);
 
-        // 按 value 分组统计（TOP 2000 高频值）
+        // ── 按 value_id 分组统计（JOIN value_dict 拿完整原始值）────────────────
+        // GROUP BY INTEGER value_id 比 GROUP BY TEXT value 快得多
+        // val_text 是 value_dict 里的权威完整值，无任何截断
         const valueStats = db.all(
-            `SELECT value, COUNT(*) AS count, MIN(event_id) AS first_seq
-             FROM writes
-             WHERE session_id = ? AND value IS NOT NULL
-             GROUP BY value
+            `SELECT w.value_id, vd.val_text AS value, COUNT(*) AS count, MIN(w.event_id) AS first_seq
+             FROM writes w
+             JOIN value_dict vd ON vd.id = w.value_id AND vd.session_id = w.session_id
+             WHERE w.session_id = ? AND w.value_id IS NOT NULL
+             GROUP BY w.value_id
              ORDER BY count DESC
              LIMIT 2000`,
             [sessionId]
@@ -314,12 +317,12 @@ export default class A8ValuePatternDetector extends BasePlugin {
             'result', 'count', 'index', 'value', 'offset', 'pos',
         ]);
 
-        // 过滤出需要获取 detail 的 value
+        // 过滤出需要获取 detail 的条目
         const needDetail = [];
-        const matchedMap = new Map(); // value → matched constant name
+        const matchedMap = new Map(); // value_id → matched constant name
         for (const vs of valueStats) {
             const matched = detectConstant(vs.value);
-            matchedMap.set(vs.value, matched);
+            matchedMap.set(vs.value_id, matched);
             if (vs.count >= 2 || matched) {
                 needDetail.push(vs);
             }
@@ -327,15 +330,13 @@ export default class A8ValuePatternDetector extends BasePlugin {
 
         this.emitProgress(ctx, `批量加载 ${needDetail.length} 个值的详情...`, 40);
 
-        // ── 一次批量 JOIN 获取所有 detail，代替 N 次单行 db.get ──────────────
-        // 用 first_seq (MIN event_id) 直接 JOIN events，不需要多余查询
-        // first_seq 就是 writes 里的 MIN(event_id)，只需要再 JOIN 一次取 iid/line/name
-        const detailMap = new Map(); // value → {iid, name, line}
+        // ── 一次批量 JOIN 获取所有 detail（iid / name / line）───────────────────
+        const detailMap = new Map(); // value_id → {iid, name, line}
 
-        // 构建临时 value→first_seq 映射，分批 JOIN
         const CHUNK = 900;
         const firstSeqIds = needDetail.map(vs => vs.first_seq).filter(Boolean);
-        // event_id → {iid, line}
+
+        // event_id → {iid}
         const eventMetaMap = new Map();
         for (let i = 0; i < firstSeqIds.length; i += CHUNK) {
             const chunk = firstSeqIds.slice(i, i + CHUNK);
@@ -343,10 +344,10 @@ export default class A8ValuePatternDetector extends BasePlugin {
             const rows = rawDb.prepare(
                 `SELECT id, iid FROM events WHERE session_id = ? AND id IN (${ph})`
             ).all(sessionId, ...chunk);
-            for (const r of rows) eventMetaMap.set(r.id, { iid: r.iid, line: r.line });
+            for (const r of rows) eventMetaMap.set(r.id, { iid: r.iid });
         }
 
-        // writes.event_id=first_seq → name
+        // writes.event_id=first_seq → name（取变量名）
         const writeNameMap = new Map(); // event_id → name
         for (let i = 0; i < firstSeqIds.length; i += CHUNK) {
             const chunk = firstSeqIds.slice(i, i + CHUNK);
@@ -359,11 +360,26 @@ export default class A8ValuePatternDetector extends BasePlugin {
             }
         }
 
+        // smap iid → line
+        const iidLineMap = new Map();
+        const allIids = [...new Set(
+            needDetail.map(vs => eventMetaMap.get(vs.first_seq)?.iid).filter(x => x != null)
+        )];
+        for (let i = 0; i < allIids.length; i += CHUNK) {
+            const chunk = allIids.slice(i, i + CHUNK);
+            const ph = chunk.map(() => '?').join(',');
+            const rows = rawDb.prepare(
+                `SELECT iid, sl FROM smap WHERE session_id = ? AND iid IN (${ph})`
+            ).all(sessionId, ...chunk);
+            for (const r of rows) iidLineMap.set(r.iid, r.sl);
+        }
+
         for (const vs of needDetail) {
             const evMeta = eventMetaMap.get(vs.first_seq);
-            detailMap.set(vs.value, {
-                iid:  evMeta?.iid  ?? null,
-                line: evMeta?.line ?? null,
+            const iid    = evMeta?.iid ?? null;
+            detailMap.set(vs.value_id, {
+                iid,
+                line: iid != null ? (iidLineMap.get(iid) ?? null) : null,
                 name: writeNameMap.get(vs.first_seq) ?? null,
             });
         }
@@ -373,12 +389,11 @@ export default class A8ValuePatternDetector extends BasePlugin {
         // 组装写入数据
         const toInsert = [];
         for (const vs of needDetail) {
-            let matched    = matchedMap.get(vs.value);
-            const detail   = detailMap.get(vs.value);
-            const varName  = detail?.name ?? null;
+            let matched   = matchedMap.get(vs.value_id);
+            const detail  = detailMap.get(vs.value_id);
+            const varName = detail?.name ?? null;
 
-            // 循环/临时变量名过滤：如果首次出现的变量名在黑名单中，
-            // 说明该值很可能是普通的循环变量（如 i=1,2,4,8...），不标记为密码学常数
+            // 循环/临时变量名过滤
             if (matched && varName && LOOP_VAR_NAMES.has(varName)) {
                 matched = null;
             }
@@ -388,19 +403,20 @@ export default class A8ValuePatternDetector extends BasePlugin {
 
             toInsert.push([
                 sessionId,
-                String(vs.value).substring(0, 64),
+                vs.value,        // val_text：完整原始值，直接来自 value_dict
                 vs.count,
                 vs.first_seq,
                 detail?.iid  ?? null,
                 varName,
                 detail?.line ?? null,
                 matched ?? null,
+                vs.value_id,     // value_dict_id：直接引用，full-value 一跳搞定
             ]);
         }
 
         if (toInsert.length > 0) {
             const stmt = rawDb.prepare(
-                'INSERT INTO value_patterns (session_id, value_hash, count, first_seq, iid, var_name, line, matched_constant) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+                'INSERT INTO value_patterns (session_id, value_hash, count, first_seq, iid, var_name, line, matched_constant, value_dict_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
             const insertBatch = rawDb.transaction((batch) => {
                 for (const row of batch) stmt.run(...row);

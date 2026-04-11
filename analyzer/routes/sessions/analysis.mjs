@@ -171,12 +171,13 @@ router.get('/loop-iterations', (req, res) => {
 });
 
 // ── GET /api/sessions/:id/value-patterns ──────────────────────────────────
-// 新增 seqFrom/seqTo：按首次出现 SEQ（first_seq）范围过滤
+// 支持 valueSearch：按值内容（value_hash 字段）模糊搜索
+// 支持 seqFrom/seqTo：按首次出现 SEQ（first_seq）范围过滤
 
 router.get('/value-patterns', (req, res) => {
     try {
         const { id } = req.params;
-        const { onlyCrypto, varName, minCount, limit = '2000', seqFrom, seqTo } = req.query;
+        const { onlyCrypto, varName, valueSearch, minCount, limit = '2000', seqFrom, seqTo } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -190,6 +191,11 @@ router.get('/value-patterns', (req, res) => {
         if (varName) {
             conditions.push('var_name LIKE ?');
             params.push(`%${varName}%`);
+        }
+        // 按值内容搜索（value_hash 字段模糊匹配）
+        if (valueSearch) {
+            conditions.push('value_hash LIKE ?');
+            params.push(`%${valueSearch}%`);
         }
         if (minCount) {
             conditions.push('count >= ?');
@@ -219,6 +225,33 @@ router.get('/value-patterns', (req, res) => {
         res.json({ patterns: rows, count: rows.length, total: rows.length });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/value-patterns] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/value-patterns/:patternId/full-value ─────────────
+// 优先通过 value_dict_id 直接查 value_dict.val_text（A8 v2 写入的完整原始值）
+// value_hash 本身已是完整值（A8 v2 不再截断），此接口作为统一入口保留
+
+router.get('/value-patterns/:patternId/full-value', (req, res) => {
+    try {
+        const { id, patternId } = req.params;
+
+        const pattern = db.get(
+            'SELECT id, value_dict_id FROM value_patterns WHERE id = ? AND session_id = ?',
+            patternId, id
+        );
+        if (!pattern) return res.status(404).json({ error: 'Pattern not found' });
+
+        const vd = db.get(
+            'SELECT val_text FROM value_dict WHERE id = ? AND session_id = ?',
+            pattern.value_dict_id, id
+        );
+        if (!vd) return res.status(404).json({ error: 'Value not found in dictionary' });
+
+        res.json({ fullValue: vd.val_text, patternId: pattern.id });
+    } catch (e) {
+        log.error({ err: e }, '[GET /value-patterns/:patternId/full-value] error:');
         res.status(500).json({ error: e.message });
     }
 });

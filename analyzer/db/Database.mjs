@@ -425,26 +425,53 @@ function _runMigrations(db) {
         console.warn('[Database] migrate events table failed (non-fatal):', e.message);
     }
 
-    // ── value_dict 表创建（值字典：全局唯一字符串池）────────────────────────
-    // 新表：schema.sql 中已有 CREATE TABLE IF NOT EXISTS，此处补充索引（幂等）
+    // ── value_dict 表创建 / 迁移（值字典：session 内局部 id）──────────────────
+    // 历史 Bug：旧版本的 value_dict.id 是全局 INTEGER PRIMARY KEY，
+    // 导致多个 session 共用 id 空间，新 session 从 1 开始分配时 INSERT OR IGNORE
+    // 全部被旧 session 的行冲突跳过。
+    // 修复：改为 PRIMARY KEY (session_id, id)，id 在 session 内局部递增。
+    // 迁移策略：检测旧建表语句是否含 "INTEGER PRIMARY KEY"，是则重建表。
     try {
+        const vdSql = db.prepare(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='value_dict'"
+        ).get();
+        if (!vdSql) {
+            // 表不存在，首次创建
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS value_dict (
+                    id          INTEGER NOT NULL,
+                    session_id  TEXT NOT NULL,
+                    val_text    TEXT NOT NULL,
+                    val_type    TEXT NOT NULL,
+                    val_num     REAL,
+                    PRIMARY KEY (session_id, id),
+                    UNIQUE (session_id, val_text)
+                );
+            `);
+        } else if (vdSql.sql && vdSql.sql.includes('INTEGER PRIMARY KEY')) {
+            // 旧结构（全局 PK），需重建
+            console.warn('[Database] value_dict has old schema (global PK), rebuilding...');
+            db.exec(`
+                DROP TABLE IF EXISTS value_dict;
+                CREATE TABLE value_dict (
+                    id          INTEGER NOT NULL,
+                    session_id  TEXT NOT NULL,
+                    val_text    TEXT NOT NULL,
+                    val_type    TEXT NOT NULL,
+                    val_num     REAL,
+                    PRIMARY KEY (session_id, id),
+                    UNIQUE (session_id, val_text)
+                );
+            `);
+            console.warn('[Database] value_dict rebuilt. All sessions need to re-run F1.');
+        }
         db.exec(`
-            CREATE TABLE IF NOT EXISTS value_dict (
-                id          INTEGER PRIMARY KEY,
-                session_id  TEXT NOT NULL,
-                val_text    TEXT NOT NULL,
-                val_type    TEXT NOT NULL,
-                val_num     REAL,
-                UNIQUE (session_id, val_text)
-            );
             CREATE INDEX IF NOT EXISTS idx_vd_session_text ON value_dict(session_id, val_text);
             CREATE INDEX IF NOT EXISTS idx_vd_num ON value_dict(session_id, val_num) WHERE val_type = 'num';
             CREATE INDEX IF NOT EXISTS idx_vd_type ON value_dict(session_id, val_type);
         `);
     } catch (e) {
-        if (!e.message.includes('already exists')) {
-            console.warn('[Database] create value_dict failed (non-fatal):', e.message);
-        }
+        console.warn('[Database] value_dict migration failed (non-fatal):', e.message);
     }
 
     // ── writes/reads/fields 新增 value_id 列（兼容旧数据库）────────────────
@@ -476,6 +503,19 @@ function _runMigrations(db) {
         } catch (e) {
             console.warn(`[Database] create index ${idxName} failed (non-fatal):`, e.message);
         }
+    }
+
+    // ── value_patterns.value_dict_id 列迁移 ──────────────────────────────────
+    // A8 v2：引用 value_dict.id，直接一跳拿完整原始值，无需再绕 first_seq→writes
+    try {
+        const vpCols = new Set(
+            db.pragma('table_info(value_patterns)').map(r => r.name)
+        );
+        if (vpCols.size > 0 && !vpCols.has('value_dict_id')) {
+            db.exec('ALTER TABLE value_patterns ADD COLUMN value_dict_id INTEGER');
+        }
+    } catch (e) {
+        console.warn('[Database] add value_patterns.value_dict_id failed (non-fatal):', e.message);
     }
 
     // ── obfuscation_hints.fn_name 列迁移 ─────────────────────────────────────

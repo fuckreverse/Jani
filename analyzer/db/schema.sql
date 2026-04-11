@@ -285,7 +285,8 @@ CREATE TABLE IF NOT EXISTS value_patterns (
     iid             INTEGER,
     var_name        TEXT,
     line            INTEGER,
-    matched_constant TEXT
+    matched_constant TEXT,
+    value_dict_id   INTEGER  -- 引用 value_dict.id，A8 v2 填充，可直接查完整原始值
 );
 
 -- ─── 加密检测（I1 CryptoDetector 填充）──────────────────────────────────────
@@ -363,11 +364,12 @@ CREATE INDEX IF NOT EXISTS idx_df_session ON dataflow_edges(session_id);
 -- 典型压缩比：循环场景下同一个数值 100k 次写入 → 只存 1 行
 
 CREATE TABLE IF NOT EXISTS value_dict (
-    id          INTEGER PRIMARY KEY,
+    id          INTEGER NOT NULL,  -- session 内局部 id，从 1 开始，跨 session 可重复
     session_id  TEXT NOT NULL,
     val_text    TEXT NOT NULL,   -- 原始序列化字符串（同 writes/reads/fields.value）
     val_type    TEXT NOT NULL,   -- 'num' / 'bool' / 'str' / 'null' / 'obj' / 'ta'
     val_num     REAL,            -- val_type='num' 时有效，用于数值范围查询
+    PRIMARY KEY (session_id, id),
     UNIQUE (session_id, val_text)
 );
 -- 按 session + val_text 查找：F1 写入时查重
