@@ -58,8 +58,7 @@ CREATE TABLE IF NOT EXISTS writes (
     event_id    INTEGER NOT NULL,
     session_id  TEXT NOT NULL,
     name        TEXT,
-    value       TEXT,
-    value_id    INTEGER,        -- 引用 value_dict.id，与 value 列冗余但压缩友好
+    value_id    INTEGER,        -- 引用 value_dict.(session_id, id)，通过 JOIN 获取完整值
     omitted     INTEGER DEFAULT 0
 );
 
@@ -70,8 +69,7 @@ CREATE TABLE IF NOT EXISTS reads (
     event_id    INTEGER NOT NULL,
     session_id  TEXT NOT NULL,
     name        TEXT,
-    value       TEXT,
-    value_id    INTEGER,        -- 引用 value_dict.id，与 value 列冗余但压缩友好
+    value_id    INTEGER,        -- 引用 value_dict.(session_id, id)，通过 JOIN 获取完整值
     omitted     INTEGER DEFAULT 0
 );
 
@@ -83,8 +81,7 @@ event_id    INTEGER NOT NULL,
 session_id  TEXT NOT NULL,
 offset      TEXT,
 is_write    INTEGER,
-value       TEXT,
-value_id    INTEGER,            -- 引用 value_dict.id，与 value 列冗余但压缩友好
+value_id    INTEGER,            -- 引用 value_dict.(session_id, id)，通过 JOIN 获取完整值
 omitted     INTEGER DEFAULT 0,
 base_oid    INTEGER             -- 运行时对象唯一 ID（OID），NULL 表示非对象或 OID 未知
 );

@@ -135,15 +135,24 @@ router.get('/events', (req, res) => {
         if (eventIds.length > 0) {
             const placeholders = eventIds.map(() => '?').join(',');
             writes = db.all(
-                `SELECT event_id, name, value, omitted FROM writes WHERE session_id = ? AND event_id IN (${placeholders})`,
+                `SELECT w.event_id, w.name, vd.val_text AS value, w.omitted
+                 FROM writes w
+                 LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
+                 WHERE w.session_id = ? AND w.event_id IN (${placeholders})`,
                 id, ...eventIds
             );
             reads = db.all(
-                `SELECT event_id, name, value, omitted FROM reads WHERE session_id = ? AND event_id IN (${placeholders})`,
+                `SELECT r.event_id, r.name, vd.val_text AS value, r.omitted
+                 FROM reads r
+                 LEFT JOIN value_dict vd ON vd.session_id = r.session_id AND vd.id = r.value_id
+                 WHERE r.session_id = ? AND r.event_id IN (${placeholders})`,
                 id, ...eventIds
             );
             fields = db.all(
-                `SELECT event_id, offset, is_write, value, omitted, base_oid FROM fields WHERE session_id = ? AND event_id IN (${placeholders})`,
+                `SELECT f.event_id, f.offset, f.is_write, vd.val_text AS value, f.omitted, f.base_oid
+                 FROM fields f
+                 LEFT JOIN value_dict vd ON vd.session_id = f.session_id AND vd.id = f.value_id
+                 WHERE f.session_id = ? AND f.event_id IN (${placeholders})`,
                 id, ...eventIds
             );
         }
@@ -385,17 +394,26 @@ router.get('/value-search/events', (req, res) => {
             id, ...eventIds
         );
 
-        // 批量取 writes/reads/fields
+        // 批量取 writes/reads/fields（JOIN value_dict 获取完整值）
         const writes = db.all(
-            `SELECT event_id, name, value, omitted FROM writes WHERE session_id = ? AND event_id IN (${placeholders})`,
+            `SELECT w.event_id, w.name, vd.val_text AS value, w.omitted
+             FROM writes w
+             LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
+             WHERE w.session_id = ? AND w.event_id IN (${placeholders})`,
             id, ...eventIds
         );
         const reads = db.all(
-            `SELECT event_id, name, value, omitted FROM reads WHERE session_id = ? AND event_id IN (${placeholders})`,
+            `SELECT r.event_id, r.name, vd.val_text AS value, r.omitted
+             FROM reads r
+             LEFT JOIN value_dict vd ON vd.session_id = r.session_id AND vd.id = r.value_id
+             WHERE r.session_id = ? AND r.event_id IN (${placeholders})`,
             id, ...eventIds
         );
         const fields = db.all(
-            `SELECT event_id, offset, is_write, value, omitted, base_oid FROM fields WHERE session_id = ? AND event_id IN (${placeholders})`,
+            `SELECT f.event_id, f.offset, f.is_write, vd.val_text AS value, f.omitted, f.base_oid
+             FROM fields f
+             LEFT JOIN value_dict vd ON vd.session_id = f.session_id AND vd.id = f.value_id
+             WHERE f.session_id = ? AND f.event_id IN (${placeholders})`,
             id, ...eventIds
         );
 

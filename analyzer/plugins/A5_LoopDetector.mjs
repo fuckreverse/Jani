@@ -2,13 +2,16 @@
  * A5_LoopDetector.mjs — 循环迭代状态展开
  * 依赖：A3-HotPathAnalyzer（loops 表已填充）
  *
- * 性能设计（OOM 安全版）：
+ * 性能设计（OOM 安全 + value_dict 版）：
  *  - 不再全量预加载 events + writes（100M 事件时会 OOM）
  *  - 改为按循环的 [start_seq, end_seq] 范围按需查询，每次只加载当前循环所需数据
  *  - 每个循环独立查询 writes，避免批次合并范围覆盖整个 trace 导致 OOM
  *    （若 50 个稀疏循环 start_seq/end_seq 分布在整个 trace，合并范围 = 全量数据）
- *  - LOOP_BATCH_SIZE 仅用于进度报告和 INSERT 批量写入，不再合并 writes 查询范围
- *  - 每个循环处理完立即释放内存，峰值内存 ≈ O(single_loop_writes + BATCH_SIZE rows)
+ *  - value_dict 一次性预加载到内存 Map，stmtWrites 只取 value_id，JS 侧查 Map
+ *    ── 循环内的 stmtWrites 是纯范围扫描，完全无 JOIN 开销
+ *    ── value_dict 内存占用：平均每行 50~100B，100k 不同值 ≈ 5~10MB，可接受
+ *  - LOOP_BATCH_SIZE 仅用于进度报告和 INSERT 批量写入，不再合并 writes 范围查询
+ *  - 每个循环处理完立即释放内存，峰值内存 ≈ O(vd_size + single_loop_writes + BATCH_SIZE rows)
  *  - 单事务批量写入，完全无 N+1 查询
  */
 import BasePlugin from './BasePlugin.mjs';
@@ -81,14 +84,27 @@ export default class A5LoopDetector extends BasePlugin {
 
         this.emitProgress(ctx, `找到 ${allLoops.length} 个循环（处理前 ${loops.length} 个）...`, 5);
 
+        // ── Step 1.5: 预加载 value_dict 到内存 Map（一次性，避免循环内 JOIN）────
+        // stmtWrites 只取 value_id（整数），JS 侧查此 Map 得完整值，零 DB 开销
+        // value_dict 行数 ≈ 去重后的唯一值数量，远小于 writes 行数
+        this.emitProgress(ctx, '预加载值字典...', 6);
+        const vdMap = new Map(); // value_id → val_text
+        {
+            const vdRows = rawDb.prepare(
+                'SELECT id, val_text FROM value_dict WHERE session_id = ?'
+            ).all(sessionId);
+            for (const r of vdRows) vdMap.set(r.id, r.val_text);
+        }
+
         // ── 预编译语句 ────────────────────────────────────────────────────────
         // 按 iid + seq 范围查询该循环内的所有 event id（已有 idx_events_type_id 覆盖）
         const stmtEvents = rawDb.prepare(
             'SELECT id FROM events WHERE session_id = ? AND iid = ? AND id >= ? AND id <= ? ORDER BY id ASC'
         );
         // 按 event_id 范围批量查询 writes（利用 idx_writes_event 索引）
+        // 只取 value_id，不做 JOIN——完整值通过 vdMap 内存查找，零 DB 开销
         const stmtWrites = rawDb.prepare(
-            'SELECT event_id, name, value FROM writes WHERE session_id = ? AND event_id >= ? AND event_id <= ? AND name IS NOT NULL ORDER BY event_id ASC'
+            'SELECT event_id, name, value_id FROM writes WHERE session_id = ? AND event_id >= ? AND event_id <= ? AND name IS NOT NULL ORDER BY event_id ASC'
         );
 
         const stmtInsert = rawDb.prepare(
@@ -129,7 +145,8 @@ export default class A5LoopDetector extends BasePlugin {
             const eventsInLoop = iidEventRows.map(r => r.id);
 
             // 仅查询本循环范围内的 writes（范围精确，不会加载无关数据）
-            const writesByEventId = new Map(); // event_id → [{name, value}]
+            // 只取 value_id，通过 vdMap 内存查找完整值，零 JOIN 开销
+            const writesByEventId = new Map(); // event_id → [{name, value_id}]
             {
                 const rows = stmtWrites.all(sessionId, loop.start_seq, loop.end_seq);
                 for (const r of rows) {
@@ -155,7 +172,8 @@ export default class A5LoopDetector extends BasePlugin {
                     const eid = writeEventIds[k];
                     const wrs = writesByEventId.get(eid);
                     if (wrs) {
-                        for (const w of wrs) snapshot[w.name] = w.value;
+                        // vdMap.get 是内存 Map 查找，O(1)，零 DB 开销
+                        for (const w of wrs) snapshot[w.name] = vdMap.get(w.value_id) ?? null;
                     }
                 }
 

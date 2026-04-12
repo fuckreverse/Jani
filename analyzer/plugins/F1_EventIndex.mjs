@@ -107,13 +107,13 @@ export default class F1EventIndex extends BasePlugin {
             'INSERT OR IGNORE INTO value_dict (id, session_id, val_text, val_type, val_num) VALUES (?, ?, ?, ?, ?)'
         );
         const stmtWrite = rawDb.prepare(
-            'INSERT INTO writes (event_id, session_id, name, value, value_id, omitted) VALUES (?, ?, ?, ?, ?, ?)'
+            'INSERT INTO writes (event_id, session_id, name, value_id, omitted) VALUES (?, ?, ?, ?, ?)'
         );
         const stmtRead = rawDb.prepare(
-            'INSERT INTO reads (event_id, session_id, name, value, value_id, omitted) VALUES (?, ?, ?, ?, ?, ?)'
+            'INSERT INTO reads (event_id, session_id, name, value_id, omitted) VALUES (?, ?, ?, ?, ?)'
         );
         const stmtField = rawDb.prepare(
-            'INSERT INTO fields (event_id, session_id, offset, is_write, value, value_id, omitted, base_oid) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO fields (event_id, session_id, offset, is_write, value_id, omitted, base_oid) VALUES (?, ?, ?, ?, ?, ?, ?)'
         );
         const stmtVI = rawDb.prepare(
             'INSERT OR IGNORE INTO value_index (session_id, event_id, val_type, val_num, val_str, var_name, source) VALUES (?, ?, ?, ?, ?, ?, ?)'
@@ -322,7 +322,7 @@ export default class F1EventIndex extends BasePlugin {
                 for (const w of event.writes) {
                     const sv = serializeValue(w.value);
                     const vid = internValue(sv, vdBatch);
-                    writeBatch.push([eventId, sessionId, w.name ?? null, sv, vid, w.omitted ? 1 : 0]);
+                    writeBatch.push([eventId, sessionId, w.name ?? null, vid, w.omitted ? 1 : 0]);
                     if (!w.omitted) pushVI(eventId, sv, w.name, 'write');
                     // 方向三：v2 格式时，write.oid != null 表示写入值是对象引用
                     // 记录到 oid_aliases 表（UNIQUE，同一变量只记最早出现的）
@@ -335,7 +335,7 @@ export default class F1EventIndex extends BasePlugin {
                 for (const r of event.reads) {
                     const sv = serializeValue(r.value);
                     const vid = internValue(sv, vdBatch);
-                    readBatch.push([eventId, sessionId, r.name ?? null, sv, vid, r.omitted ? 1 : 0]);
+                    readBatch.push([eventId, sessionId, r.name ?? null, vid, r.omitted ? 1 : 0]);
                     if (!r.omitted) pushVI(eventId, sv, r.name, 'read');
                 }
             }
@@ -346,7 +346,7 @@ export default class F1EventIndex extends BasePlugin {
                 if (event.fn) {
                     const sv = JSON.stringify(event.fn);
                     const vid = internValue(sv, vdBatch);
-                    readBatch.push([eventId, sessionId, 'callee', sv, vid, 0]);
+                    readBatch.push([eventId, sessionId, 'callee', vid, 0]);
                 }
                 // 把参数列表写入 writes 表（name='arg0','arg1',...），F3 读取 args 时依赖此数据
                 if (event.args?.length > 0) {
@@ -355,7 +355,7 @@ export default class F1EventIndex extends BasePlugin {
                         const v = event.args[i];
                         const sv = serializeValue(v);
                         const vid = internValue(sv, vdBatch);
-                        writeBatch.push([eventId, sessionId, `arg${i}`, sv, vid, v === undefined ? 1 : 0]);
+                        writeBatch.push([eventId, sessionId, `arg${i}`, vid, v === undefined ? 1 : 0]);
                     }
                 }
             }
@@ -367,7 +367,7 @@ export default class F1EventIndex extends BasePlugin {
                 const omitted = event.result === undefined ? 1 : 0;
                 const sv = serializeValue(event.result);
                 const vid = internValue(sv, vdBatch);
-                writeBatch.push([eventId, sessionId, 'return', sv, vid, omitted]);
+                writeBatch.push([eventId, sessionId, 'return', vid, omitted]);
             }
             if (event.fields?.length > 0) {
                 for (const f of event.fields) {
@@ -377,7 +377,6 @@ export default class F1EventIndex extends BasePlugin {
                         eventId, sessionId,
                         f.offset ?? null,
                         f.isWrite ? 1 : 0,
-                        sv,
                         vid,
                         f.omitted ? 1 : 0,
                         f.baseOid ?? null,

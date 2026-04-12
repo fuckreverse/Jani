@@ -51,9 +51,10 @@ export default class A7ObjectMutationTracker extends BasePlugin {
 
         this.emitProgress(ctx, '读取 fields 表...', 5);
         const fields = db.all(
-            `SELECT f.event_id, f.offset, f.value, f.is_write, f.base_oid,
+            `SELECT f.event_id, f.offset, vd.val_text AS value, f.value_id, f.is_write, f.base_oid,
                     s.sl AS line, s.src_text
              FROM fields f
+             LEFT JOIN value_dict vd ON vd.session_id = f.session_id AND vd.id = f.value_id
              JOIN events e ON f.event_id = e.id AND e.session_id = f.session_id
              LEFT JOIN smap s ON s.session_id = f.session_id AND s.iid = e.iid
              WHERE f.session_id = ? AND f.base_oid IS NOT NULL
@@ -69,7 +70,10 @@ export default class A7ObjectMutationTracker extends BasePlugin {
 
         this.emitProgress(ctx, `处理 ${fields.length} 条 field 记录...`, 20);
 
-        const lastValues = new Map(); // `#${base_oid}\x00${offset}` → lastValue
+        // 用 value_id（整数）作为快照 key 进行变化検测。
+        // 字符串比较慢且可能被截断（旧架构 value 列限制 512 字符），改用 value_id 整数比较更准确。
+        // 必要时取 val_text 展示完整值。
+        const lastValueIds = new Map(); // `#${base_oid}\x00${offset}` → {id: value_id, text: val_text}
         let rows = [];
         let totalWritten = 0;
 
@@ -103,22 +107,23 @@ export default class A7ObjectMutationTracker extends BasePlugin {
 
             const key     = `#${f.base_oid}\x00${f.offset}`;
             const baseVar = formatBaseVar(f.base_oid);
-            const prev    = lastValues.get(key);
+            const prev    = lastValueIds.get(key);  // {id, text} | undefined
 
             if (f.is_write) {
-                if (prev !== f.value) {
+                // 用 value_id 整数比较变化（比字符串比较更快且无截断问题）
+                if (prev?.id !== f.value_id) {
                     rows.push([
                         sessionId,
                         baseVar,
                         String(f.offset),
                         f.event_id,
-                        prev !== undefined ? prev : null,
+                        prev !== undefined ? prev.text : null,
                         f.value,
                         f.line,
                         1,
                         f.src_text ?? null,
                     ]);
-                    lastValues.set(key, f.value);
+                    lastValueIds.set(key, { id: f.value_id, text: f.value });
                 }
             } else {
                 rows.push([
@@ -126,7 +131,7 @@ export default class A7ObjectMutationTracker extends BasePlugin {
                     baseVar,
                     String(f.offset),
                     f.event_id,
-                    prev !== undefined ? prev : null,
+                    prev !== undefined ? prev.text : null,
                     f.value,
                     f.line,
                     0,

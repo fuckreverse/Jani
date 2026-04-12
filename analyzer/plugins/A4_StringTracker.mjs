@@ -38,16 +38,16 @@ export default class A4StringTracker extends BasePlugin {
 
         this.emitProgress(ctx, '提取字符串 writes...', 5);
 
-        // 找所有 value 是字符串类型（以双引号包裹）的 write（JOIN events 取 line/iid）
-        // line 已从 events 移除（Phase D），改 LEFT JOIN smap 获取
+        // 先从 value_dict 按 val_type='str' 过滤（走 idx_vd_type 索引，避免全表 LIKE）
+        // 再 JOIN writes + events + smap 取 event_id / var_name / line / iid
+        // 性能：value_dict 行数 << writes 行数，且有类型索引，消除了全量 LIKE 扫描
         const strWrites = rawDb.prepare(
-            `SELECT w.event_id, w.name, w.value, s.sl AS line, e.iid
-             FROM writes w
-             JOIN events e ON w.event_id = e.id
+            `SELECT w.event_id, w.name, vd.val_text AS value, s.sl AS line, e.iid
+             FROM value_dict vd
+             JOIN writes w ON w.session_id = vd.session_id AND w.value_id = vd.id
+             JOIN events e ON e.id = w.event_id AND e.session_id = w.session_id
              LEFT JOIN smap s ON s.session_id = w.session_id AND s.iid = e.iid
-             WHERE w.session_id = ?
-               AND w.value IS NOT NULL
-               AND w.value LIKE '"%"'`
+             WHERE vd.session_id = ? AND vd.val_type = 'str'`
         ).all(sessionId);
 
         this.emitProgress(ctx, `分析 ${strWrites.length} 个字符串写入...`, 30);
@@ -62,6 +62,7 @@ export default class A4StringTracker extends BasePlugin {
 
         const rows = [];
         for (const sw of strWrites) {
+            // val_text 是带引号的序列化字符串（如 '"hello"'），去掉外层引号
             let rawVal = sw.value || '';
             if (rawVal.startsWith('"') && rawVal.endsWith('"')) {
                 rawVal = rawVal.slice(1, -1);

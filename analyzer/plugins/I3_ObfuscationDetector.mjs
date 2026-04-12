@@ -154,16 +154,14 @@ export default class I3ObfuscationDetector extends BasePlugin {
         );
 
         if (hotIids.length > 0) {
+            // 通过 value_dict 按 val_type='num' 过滤数值型写入（走 idx_vd_type 索引，避免全表 LIKE）
+            // COUNT(DISTINCT w.value_id) 等价于旧的 COUNT(DISTINCT value)，且用整数比较更快
             const numericWrites = db.all(
-                `SELECT name, COUNT(*) as cnt, COUNT(DISTINCT value) as distinct_vals
-                 FROM writes
-                 WHERE session_id = ? AND value IS NOT NULL
-                   AND value NOT LIKE '"%"'
-                   AND value NOT LIKE 'null'
-                   AND value NOT LIKE 'undefined'
-                   AND value NOT LIKE 'true'
-                   AND value NOT LIKE 'false'
-                 GROUP BY name
+                `SELECT w.name, COUNT(*) as cnt, COUNT(DISTINCT w.value_id) as distinct_vals
+                 FROM writes w
+                 JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
+                 WHERE w.session_id = ? AND vd.val_type = 'num'
+                 GROUP BY w.name
                  HAVING cnt >= 5 AND distinct_vals >= 3`,
                 [sessionId]
             );

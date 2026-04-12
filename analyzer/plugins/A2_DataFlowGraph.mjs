@@ -37,8 +37,12 @@ export default class A2DataFlowGraph extends BasePlugin {
         rawDb.prepare('DELETE FROM dataflow_edges WHERE session_id = ?').run(sessionId);
 
         this.emitProgress(ctx, '读取所有 writes...', 5);
+        // JOIN value_dict 获取完整展示值（A2 算法层只用 name，但 dataflow_edges 未存 value，此处取完整展示用）
         const writes = rawDb.prepare(
-            'SELECT event_id, name, value FROM writes WHERE session_id = ? AND name IS NOT NULL ORDER BY event_id ASC'
+            `SELECT w.event_id, w.name, vd.val_text AS value
+             FROM writes w
+             LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
+             WHERE w.session_id = ? AND w.name IS NOT NULL ORDER BY w.event_id ASC`
         ).all(sessionId);
 
         this.emitProgress(ctx, '读取所有 reads...', 15);

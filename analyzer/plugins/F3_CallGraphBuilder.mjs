@@ -1,9 +1,12 @@
 /**
  * F3_CallGraphBuilder.mjs — 配对 CALL_PRE/CALL 事件，重建调用图
  *
- * 性能设计（最终版）：
+ * 性能设计（value_dict 版）：
  *  - 只做 3 次全量顺序扫描（events × 1、reads × 1、writes × 1），完全无 IN 查询
  *  - 利用 (session_id, name) / (session_id, type) 索引，每次扫描 O(N_session)
+ *  - reads / writes 单次全量扫描时 JOIN value_dict（一次扫描，不分批）
+ *    ── value_dict 行数 << writes 行数；JOIN 走 (session_id,id) PK，每行 O(log vd_size)
+ *    ── 比分批 IN 查询（N 次 prepare + 随机 B-Tree 跳转）快数倍
  *  - writes 表一次扫描同时收集 args（CALL_PRE）和 return（CALL），无重复 IO
  *  - 所有数据全部加载到 Map 后纯内存配对，无 N+1
  *  - 批量写入用单事务 + 预编译 stmt，BATCH_SIZE=10000
@@ -52,27 +55,35 @@ export default class F3CallGraphBuilder extends BasePlugin {
             8
         );
 
-        // ── Step 2: 单次扫描 reads 取 callee 名 ──────────────────────────────────
+        // ── Step 2: 单次扫描 reads 取 callee 名，JOIN value_dict 取完整函数名 ──
         // 利用 idx_reads_name(session_id, name) 索引，只扫 name='callee' 的行
+        // 单次全量扫描 + JOIN，避免分批 IN 导致的 N 次 prepare + 随机 B-Tree 跳转
         const calleeMap = new Map(); // event_id → callee name string
         {
             const rows = rawDb.prepare(
-                "SELECT event_id, value FROM reads WHERE session_id = ? AND name = 'callee'"
+                `SELECT r.event_id, vd.val_text AS value
+                 FROM reads r
+                 LEFT JOIN value_dict vd ON vd.session_id = r.session_id AND vd.id = r.value_id
+                 WHERE r.session_id = ? AND r.name = 'callee'`
             ).all(sessionId);
             for (const r of rows) {
                 calleeMap.set(r.event_id, r.value?.replace(/^"|"$/g, '') ?? null);
             }
         }
 
-        this.emitProgress(ctx, '加载参数/返回值数据（单次扫描）...', 20);
+        this.emitProgress(ctx, '加载参数/返回值数据（单次全量扫描）...', 20);
 
         // ── Step 3: 单次扫描 writes，同时收集 args（CALL_PRE）和 return（CALL）──
-        // 全量顺序扫描一次，JS 侧按 Set 分流，比分批 IN 快 10x+
+        // 全量顺序扫描一次（利用顺序 I/O 优势），JOIN value_dict 取完整值
+        // JS 侧按 callPreSet/callSet 分流，比分批 IN 快 10x+
         const argsBuf = new Map(); // callPre event_id → [{name,value}]
         const retMap  = new Map(); // call   event_id → return value string
         {
             const rows = rawDb.prepare(
-                'SELECT event_id, name, value FROM writes WHERE session_id = ?'
+                `SELECT w.event_id, w.name, vd.val_text AS value
+                 FROM writes w
+                 LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
+                 WHERE w.session_id = ?`
             ).all(sessionId);
 
             for (const r of rows) {

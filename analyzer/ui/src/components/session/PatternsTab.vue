@@ -8,19 +8,6 @@
 
     <!-- 筛选栏 -->
     <div class="filter-bar" style="margin-bottom:8px">
-      <!-- 变量名搜索 -->
-      <div class="search-box">
-        <span class="search-icon">📛</span>
-        <input
-          v-model="varSearch"
-          placeholder="变量名..."
-          class="search-input"
-          title="按变量名搜索（前端过滤）"
-          @input="onLocalFilterChange"
-        />
-        <button v-if="varSearch" class="search-clear" @click="varSearch = ''" title="清空">✕</button>
-      </div>
-
       <!-- 值内容搜索（走服务端） -->
       <div class="search-box">
         <span class="search-icon">🔍</span>
@@ -33,19 +20,6 @@
         />
         <button v-if="valueSearch" class="search-clear" @click="clearValueSearch" title="清空">✕</button>
       </div>
-
-      <!-- 最小出现次数 -->
-      <label class="filter-label">
-        次数 ≥
-        <input
-          v-model.number="minCount"
-          type="number"
-          min="1"
-          class="count-input"
-          placeholder="不限"
-          @input="onLocalFilterChange"
-        />
-      </label>
 
       <!-- 长度过滤 -->
       <label class="filter-label">
@@ -107,7 +81,7 @@
 
     <div v-if="patternsLoading" class="loading"><div class="spinner"></div><span>加载中...</span></div>
     <div v-else-if="filteredPatterns.length === 0" class="empty-state">
-      <p v-if="varSearch || valueSearch || minCount || lenMin || lenMax || selectedPatternType || onlyCrypto">无匹配的值模式</p>
+      <p v-if="valueSearch || lenMin || lenMax || selectedPatternType || onlyCrypto">无匹配的值模式</p>
       <p v-else>暂无值模式数据（请先运行 A8 · ValuePatternDetector）</p>
     </div>
     <div v-else>
@@ -118,11 +92,6 @@
               <th>值内容</th>
               <th>类型</th>
               <th>熵値</th>
-              <th>出现次数</th>
-              <th>首次 SEQ</th>
-              <th>iid</th>
-              <th>变量名</th>
-              <th>行号</th>
               <th>匹配常数</th>
               <th></th>
             </tr>
@@ -168,24 +137,6 @@
                 >{{ p.entropy }}</span>
                 <span v-else class="text-muted">—</span>
               </td>
-
-              <!-- 出现次数 -->
-              <td class="td-seq td-count">{{ p.count }}</td>
-
-              <!-- 首次 SEQ -->
-              <td class="td-seq">{{ p.first_seq }}</td>
-
-              <!-- iid -->
-              <td class="td-seq">{{ p.iid ?? '—' }}</td>
-
-              <!-- 变量名 -->
-              <td>
-                <span v-if="p.var_name" class="var-chip var-write">{{ p.var_name }}</span>
-                <span v-else class="text-muted">—</span>
-              </td>
-
-              <!-- 行号 -->
-              <td class="td-seq">{{ p.line ?? '—' }}</td>
 
               <!-- 匹配常数 -->
               <td>
@@ -358,9 +309,9 @@ const PATTERN_TYPE_LABELS = {
 };
 
 // ── 筛选条件 ──────────────────────────────────────────────────────────────────
-const varSearch          = ref('');   // 前端过滤：变量名
+const varSearch          = ref('');   // 前端过滤：变量名（已废弃，保留避免引用报错）
 const valueSearch        = ref('');   // 服务端过滤：值内容
-const minCount           = ref('');   // 前端过滤：最小次数
+const minCount           = ref('');   // 已废弃（count 字段已移除）
 const lenMin             = ref('');   // 服务端过滤：值长度最小值
 const lenMax             = ref('');   // 服务端过滤：值长度最大值
 const onlyCrypto         = ref(false); // 仅密码学常数（与 selectedPatternType 互斥）
@@ -398,16 +349,8 @@ function onLocalFilterChange() {
 }
 
 const filteredPatterns = computed(() => {
-    let list = allPatterns.value;
-    const q = varSearch.value.trim().toLowerCase();
-    if (q) {
-        list = list.filter(p => (p.var_name ?? '').toLowerCase().includes(q));
-    }
-    const mc = Number(minCount.value) || 0;
-    if (mc > 0) {
-        list = list.filter(p => (p.count ?? 0) >= mc);
-    }
-    return list;
+    // count/var_name 字段已移除，无需前端过滤，直接返回全部
+    return allPatterns.value;
 });
 
 const cryptoCount = computed(() => allPatterns.value.filter(p => p.matched_constant).length);
@@ -432,7 +375,6 @@ function onPatternTypeClick(typeVal) {
 function resetFilters() {
     varSearch.value           = '';
     valueSearch.value         = '';
-    minCount.value            = '';
     lenMin.value              = '';
     lenMax.value              = '';
     onlyCrypto.value          = false;
@@ -501,9 +443,7 @@ async function openValue(p) {
         try { parsed = JSON.parse(rawFull); } catch { parsed = rawFull; }
     }
 
-    const label = p.var_name
-        ? `${p.var_name}（出现 ${p.count} 次，行 ${p.line ?? '?'}）`
-        : `值 · 出现 ${p.count} 次，行 ${p.line ?? '?'}`;
+    const label = p.value_hash ? `值：${String(p.value_hash).slice(0, 40)}` : '值详情';
     openValueViewer(parsed, label);
 }
 

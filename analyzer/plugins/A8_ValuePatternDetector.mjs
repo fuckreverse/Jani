@@ -428,138 +428,48 @@ export default class A8ValuePatternDetector extends BasePlugin {
         const rawDb = db.raw();
 
         this.emitProgress(ctx, '清空旧数据...', 0);
-
         db.run('DELETE FROM value_patterns WHERE session_id = ?', [sessionId]);
 
-        this.emitProgress(ctx, '扫描 value_dict 值...', 5);
+        this.emitProgress(ctx, '扫描 value_dict...', 5);
 
-        // ── 按 value_id 分组统计（JOIN value_dict 拿完整原始值）────────────────
-        // GROUP BY INTEGER value_id 比 GROUP BY TEXT value 快得多
-        // val_text 是 value_dict 里的权威完整值，无任何截断
-        const valueStats = db.all(
-            `SELECT w.value_id, vd.val_text AS value, COUNT(*) AS count, MIN(w.event_id) AS first_seq
-             FROM writes w
-             JOIN value_dict vd ON vd.id = w.value_id AND vd.session_id = w.session_id
-             WHERE w.session_id = ? AND w.value_id IS NOT NULL
-             GROUP BY w.value_id
-             ORDER BY count DESC
-             LIMIT 2000`,
+        // ── 直接扫 value_dict（唯一值表，无需聚合 writes 全表）──────────────────
+        // value_dict 每个唯一值只有一行，数据量远小于 writes 表，扫描极快。
+        // count/first_seq/iid/var_name/line 需要回查 writes/events/smap，
+        // 对分析意义有限但性能代价巨大，已去掉，直接填 NULL。
+        const allValues = db.all(
+            `SELECT id AS value_id, val_text AS value
+             FROM value_dict
+             WHERE session_id = ?`,
             [sessionId]
         );
 
-        this.emitProgress(ctx, `分析 ${valueStats.length} 个唯一值...`, 25);
+        this.emitProgress(ctx, `检测 ${allValues.length} 个唯一值的模式...`, 20);
 
-        // 循环/临时变量名黑名单：这些变量名出现的值不应被标记为密码学常数
-        // （即使值本身在常数表中，循环变量恰好取到该值只是巧合）
-        const LOOP_VAR_NAMES = new Set([
-            'i', 'j', 'k', 'l', 'm', 'n', 't', 'x', 'y', 'z',
-            'idx', 'cnt', 'len', 'num', 'val', 'ret', 'tmp', 'res',
-            'result', 'count', 'index', 'value', 'offset', 'pos',
-        ]);
-
-        // 过滤出需要获取 detail 的条目
-        const needDetail = [];
-        const matchedMap     = new Map(); // value_id → matched constant name
-        const patternTypeMap = new Map(); // value_id → pattern_type string | null
-        for (const vs of valueStats) {
-            const matched     = detectConstant(vs.value);
-            const patternType = detectValueType(vs.value);
-            matchedMap.set(vs.value_id, matched);
-            patternTypeMap.set(vs.value_id, patternType);
-            if (vs.count >= 2 || matched || patternType) {
-                needDetail.push(vs);
-            }
-        }
-
-        this.emitProgress(ctx, `批量加载 ${needDetail.length} 个值的详情...`, 40);
-
-        // ── 一次批量 JOIN 获取所有 detail（iid / name / line）───────────────────
-        const detailMap = new Map(); // value_id → {iid, name, line}
-
-        const CHUNK = 900;
-        const firstSeqIds = needDetail.map(vs => vs.first_seq).filter(Boolean);
-
-        // event_id → {iid}
-        const eventMetaMap = new Map();
-        for (let i = 0; i < firstSeqIds.length; i += CHUNK) {
-            const chunk = firstSeqIds.slice(i, i + CHUNK);
-            const ph = chunk.map(() => '?').join(',');
-            const rows = rawDb.prepare(
-                `SELECT id, iid FROM events WHERE session_id = ? AND id IN (${ph})`
-            ).all(sessionId, ...chunk);
-            for (const r of rows) eventMetaMap.set(r.id, { iid: r.iid });
-        }
-
-        // writes.event_id=first_seq → name（取变量名）
-        const writeNameMap = new Map(); // event_id → name
-        for (let i = 0; i < firstSeqIds.length; i += CHUNK) {
-            const chunk = firstSeqIds.slice(i, i + CHUNK);
-            const ph = chunk.map(() => '?').join(',');
-            const rows = rawDb.prepare(
-                `SELECT event_id, name FROM writes WHERE session_id = ? AND event_id IN (${ph})`
-            ).all(sessionId, ...chunk);
-            for (const r of rows) {
-                if (!writeNameMap.has(r.event_id)) writeNameMap.set(r.event_id, r.name);
-            }
-        }
-
-        // smap iid → line
-        const iidLineMap = new Map();
-        const allIids = [...new Set(
-            needDetail.map(vs => eventMetaMap.get(vs.first_seq)?.iid).filter(x => x != null)
-        )];
-        for (let i = 0; i < allIids.length; i += CHUNK) {
-            const chunk = allIids.slice(i, i + CHUNK);
-            const ph = chunk.map(() => '?').join(',');
-            const rows = rawDb.prepare(
-                `SELECT iid, sl FROM smap WHERE session_id = ? AND iid IN (${ph})`
-            ).all(sessionId, ...chunk);
-            for (const r of rows) iidLineMap.set(r.iid, r.sl);
-        }
-
-        for (const vs of needDetail) {
-            const evMeta = eventMetaMap.get(vs.first_seq);
-            const iid    = evMeta?.iid ?? null;
-            detailMap.set(vs.value_id, {
-                iid,
-                line: iid != null ? (iidLineMap.get(iid) ?? null) : null,
-                name: writeNameMap.get(vs.first_seq) ?? null,
-            });
-        }
-
-        this.emitProgress(ctx, `写入模式...`, 70);
-
-        // 组装写入数据
         const toInsert = [];
-        for (const vs of needDetail) {
-            let matched         = matchedMap.get(vs.value_id);
-            const patternType   = patternTypeMap.get(vs.value_id) ?? null;
-            const detail        = detailMap.get(vs.value_id);
-            const varName       = detail?.name ?? null;
+        for (const vd of allValues) {
+            const matched     = detectConstant(vd.value);
+            const patternType = detectValueType(vd.value);
 
-            // 循环/临时变量名过滤
-            if (matched && varName && LOOP_VAR_NAMES.has(varName)) {
-                matched = null;
-            }
+            // 只保留有密码学常数、有语义类型标签的值（无意义的普通值跳过）
+            if (!matched && !patternType) continue;
 
-            // 仍需写入：有常数匹配、有语义类型标签、或出现次数 >= 2
-            if (!matched && !patternType && vs.count < 2) continue;
-
-            const entropy = shannonEntropy(vs.value);
+            const entropy = shannonEntropy(vd.value);
             toInsert.push([
                 sessionId,
-                vs.value,        // val_text：完整原始值，直接来自 value_dict
-                vs.count,
-                vs.first_seq,
-                detail?.iid  ?? null,
-                varName,
-                detail?.line ?? null,
+                vd.value,       // val_text：完整原始值
+                null,           // count：不再计算（需要全表扫 writes，性能代价过高）
+                null,           // first_seq：同上
+                null,           // iid
+                null,           // var_name
+                null,           // line
                 matched ?? null,
-                vs.value_id,     // value_dict_id：直接引用，full-value 一跳搞定
-                patternType,     // 语义类型标签（timestamp_ms / uuid / hex_str 等）
-                entropy,         // Shannon 熵值（bits/char），非字符串型为 null
+                vd.value_id,    // value_dict_id：直接引用，full-value 一跳搞定
+                patternType,
+                entropy,
             ]);
         }
+
+        this.emitProgress(ctx, `写入 ${toInsert.length} 个模式...`, 80);
 
         if (toInsert.length > 0) {
             const stmt = rawDb.prepare(

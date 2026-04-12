@@ -44,8 +44,9 @@ export default class I2SignatureAnalyzer extends BasePlugin {
         // 用一次 SQL 取所有 writes，然后 JS 侧过滤（避免逐字段多次查询）
         // line 已从 events 移除（Phase D），改 JOIN smap 获取
         const allWrites = rawDb.prepare(
-            `SELECT w.event_id, w.name, w.value, s.sl AS line, e.iid
+            `SELECT w.event_id, w.name, vd.val_text AS value, s.sl AS line, e.iid
              FROM writes w
+             LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
              JOIN events e ON w.event_id = e.id
              LEFT JOIN smap s ON s.session_id = w.session_id AND s.iid = e.iid
              WHERE w.session_id = ?
@@ -53,8 +54,9 @@ export default class I2SignatureAnalyzer extends BasePlugin {
         ).all(sessionId);
 
         const allFieldWrites = rawDb.prepare(
-            `SELECT f.event_id, f.offset AS name, f.value, s.sl AS line, e.iid
+            `SELECT f.event_id, f.offset AS name, vd.val_text AS value, s.sl AS line, e.iid
              FROM fields f
+             LEFT JOIN value_dict vd ON vd.session_id = f.session_id AND vd.id = f.value_id
              JOIN events e ON f.event_id = e.id
              LEFT JOIN smap s ON s.session_id = f.session_id AND s.iid = e.iid
              WHERE f.session_id = ? AND f.is_write = 1
@@ -95,6 +97,7 @@ export default class I2SignatureAnalyzer extends BasePlugin {
 
         // 预加载 writes 按名称索引（name → sorted [{event_id}]）用于前向追踪
         const writesNameIndex = new Map(); // name → sorted event_id[] DESC
+        // 只需 event_id + name 用于前向追踪索引，无需取 value
         const allWritesForTrace = rawDb.prepare(
             'SELECT event_id, name FROM writes WHERE session_id = ? AND name IS NOT NULL ORDER BY event_id DESC'
         ).all(sessionId);

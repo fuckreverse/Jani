@@ -507,6 +507,41 @@ function _runMigrations(db) {
         }
     }
 
+    // ── writes/reads/fields 删除冗余 value 列（迁移到纯 value_id 架构）────────
+    // 历史：value 列存储截断版本字符串，现在完整值由 value_dict.val_text 提供。
+    // SQLite 不支持 DROP COLUMN（3.35 以下），通过重建表实现。
+    // 幂等判断：检测列是否仍存在。
+    for (const tbl of ['writes', 'reads', 'fields']) {
+        try {
+            const cols = db.pragma(`table_info(${tbl})`).map(r => r.name);
+            if (!cols.includes('value')) continue; // 已迁移，跳过
+
+            console.warn(`[Database] removing ${tbl}.value column (redundant, replaced by value_dict)...`);
+
+            // 获取当前建表 SQL，用于重建（去掉 value 列）
+            const colDefs = {
+                writes: 'id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL, session_id TEXT NOT NULL, name TEXT, value_id INTEGER, omitted INTEGER DEFAULT 0',
+                reads:  'id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL, session_id TEXT NOT NULL, name TEXT, value_id INTEGER, omitted INTEGER DEFAULT 0',
+                fields: 'id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL, session_id TEXT NOT NULL, offset TEXT, is_write INTEGER, value_id INTEGER, omitted INTEGER DEFAULT 0, base_oid INTEGER',
+            };
+            const copyColsStr = {
+                writes: 'id, event_id, session_id, name, value_id, omitted',
+                reads:  'id, event_id, session_id, name, value_id, omitted',
+                fields: 'id, event_id, session_id, offset, is_write, value_id, omitted, base_oid',
+            };
+
+            db.exec(`
+                ALTER TABLE ${tbl} RENAME TO _${tbl}_old;
+                CREATE TABLE ${tbl} (${colDefs[tbl]});
+                INSERT INTO ${tbl} (${copyColsStr[tbl]}) SELECT ${copyColsStr[tbl]} FROM _${tbl}_old;
+                DROP TABLE _${tbl}_old;
+            `);
+            console.warn(`[Database] ${tbl}.value column removed. Session data intact; re-run F1 to populate value_dict.`);
+        } catch (e) {
+            console.warn(`[Database] remove ${tbl}.value failed (non-fatal):`, e.message);
+        }
+    }
+
     // ── value_patterns.value_dict_id 列迁移 ──────────────────────────────────
     // A8 v2：引用 value_dict.id，直接一跳拿完整原始值，无需再绕 first_seq→writes
     try {
