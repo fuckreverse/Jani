@@ -1118,12 +1118,18 @@ export default class I1CryptoDetector extends BasePlugin {
         }
 
         this.emitProgress(ctx, `完成，检测到 ${hints.length} 个算法特征`, 100);
+
+        // 按置信度排序
+        const sortedHints = [...hints].sort((a, b) => b.confidence - a.confidence);
+        const topConf     = sortedHints.length > 0 ? Math.round((sortedHints[0].confidence ?? 0) * 100) : 0;
+        const uniqueAlgos = [...new Set(hints.map(h => h.algorithm).filter(Boolean))];
+
         this.emitDone(ctx, {
-            hintCount: hints.length,
-            algorithms: hints.map(h => h.algorithm),
-            // 按置信度排序后的摘要
-            topAlgorithms: hints
-                .sort((a, b) => b.confidence - a.confidence)
+            hintCount:     hints.length,
+            algCount:      uniqueAlgos.length,
+            topConf,
+            algorithms:    uniqueAlgos,
+            topAlgorithms: sortedHints
                 .slice(0, 5)
                 .map(h => `${h.algorithm}(${(h.confidence * 100).toFixed(0)}%)`),
         });

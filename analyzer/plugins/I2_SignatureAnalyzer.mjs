@@ -169,9 +169,10 @@ export default class I2SignatureAnalyzer extends BasePlugin {
         }
 
         this.emitProgress(ctx, `完成，${results.length} 条签名路径`, 100);
+        const fieldNames = [...new Set(results.map(r => r.field_name))].filter(Boolean);
         this.emitDone(ctx, {
-            pathCount: results.length,
-            fields: [...new Set(results.map(r => r.field_name))],
+            sigCount: results.length,
+            fieldNames,
         });
     }
 

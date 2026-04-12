@@ -103,6 +103,6 @@ export default class F2SmapLoader extends BasePlugin {
         // Phase D：events 表已无 line/col/src_text 列，smap 是唯一来源，无需回填。
 
         this.emitProgress(ctx, `完成，共 ${count} 个 iid 条目`, 100);
-        this.emitDone(ctx, { iidCount: count });
+        this.emitDone(ctx, { smapCount: count });
     }
 }

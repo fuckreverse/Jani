@@ -213,6 +213,16 @@ function _runMigrations(db) {
         db.exec('ALTER TABLE plugin_checkpoints ADD COLUMN is_stale INTEGER DEFAULT 0');
     }
 
+    // ── 迁移：plugin_checkpoints 加 summary_json 列 ───────────────────────────
+    // 记录每个插件 emitDone() 的统计摘要，避免每次查询概览页都重新 COUNT
+    if (checkpointCols.size > 0 && !checkpointCols.has('summary_json')) {
+        try {
+            db.exec('ALTER TABLE plugin_checkpoints ADD COLUMN summary_json TEXT');
+        } catch (e) {
+            console.warn('[Database] add plugin_checkpoints.summary_json failed (non-fatal):', e.message);
+        }
+    }
+
     // ── 性能迁移：writes/reads/fields 去掉 AUTOINCREMENT + FOREIGN KEY ────────
     // SQLite 中 AUTOINCREMENT 需要维护 sqlite_sequence 表，每次 INSERT 有额外开销。
     // FOREIGN KEY 在批量写入时会对每行做父表查找。两者对 F1 的百万级 INSERT 有显著影响。

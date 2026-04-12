@@ -177,10 +177,13 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
 
         this.emitProgress(ctx, '报告生成完成', 100);
         this.emitDone(ctx, {
-            algorithmTags,
+            algorithms:      algorithmTags,
             isObfuscated,
+            obfuscationScore: report.overview.obfuscationScore ?? null,
             hasCrypto,
-            eventCount: report.overview.eventCount,
+            totalEvents:     report.overview.eventCount,
+            totalFunctions:  report.callGraph?.uniqueFunctions ?? null,
+            totalEdges:      report.dataFlow?.totalEdges ?? null,
         });
     }
 }

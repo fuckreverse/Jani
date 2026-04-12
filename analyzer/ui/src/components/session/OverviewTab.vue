@@ -162,10 +162,10 @@
               {{ pluginSummaryText(pid) }}
             </span>
             <span class="plugin-badge" :class="'plugin-badge-' + status">{{ statusText(status) }}</span>
-            <span class="plugin-duration" v-if="pluginDuration[pid]">
-              {{ pluginDuration[pid] >= 1000
-                ? (pluginDuration[pid] / 1000).toFixed(1) + 's'
-                : pluginDuration[pid] + 'ms' }}
+            <span class="plugin-duration" v-if="pluginDurationMs(pid)">
+              {{ pluginDurationMs(pid) >= 1000
+                ? (pluginDurationMs(pid) / 1000).toFixed(1) + 's'
+                : pluginDurationMs(pid) + 'ms' }}
             </span>
             <!-- 展开指示箭头 -->
             <span class="expand-chevron" :class="{ expanded: expandedPlugins.has(pid) }">▸</span>
@@ -177,8 +177,13 @@
               <!-- 插件描述 -->
               <div class="plugin-desc-text">{{ PLUGIN_META[pid]?.desc || '' }}</div>
 
+              <!-- 数据过期提示 -->
+              <div v-if="pluginPerf[pid]?.isStale" class="plugin-stale-tip">
+                ⚠️ 上游数据已更新，此插件结果可能过期
+              </div>
+
               <!-- 耗时进度条（相对于最慢插件） -->
-              <div v-if="pluginDuration[pid]" class="plugin-time-bar-wrap">
+              <div v-if="pluginDurationMs(pid)" class="plugin-time-bar-wrap">
                 <div class="plugin-time-label">耗时</div>
                 <div class="plugin-time-bar-track">
                   <div
@@ -186,7 +191,12 @@
                     :style="{ width: durationBarPct(pid) + '%', background: phaseColorForPlugin(pid) }"
                   ></div>
                 </div>
-                <div class="plugin-time-value">{{ formatDuration(pluginDuration[pid]) }}</div>
+                <div class="plugin-time-value">{{ formatDuration(pluginDurationMs(pid)) }}</div>
+              </div>
+
+              <!-- 完成时间 -->
+              <div v-if="pluginPerf[pid]?.completedAt" class="plugin-completed-at">
+                完成于 {{ new Date(pluginPerf[pid].completedAt).toLocaleString('zh-CN') }}
               </div>
 
               <!-- 产出统计 -->
@@ -401,6 +411,7 @@ function toggleExpand(pid) {
 
 // ── plugin-stats（懒加载，首次展开某插件时触发） ──────────────────────────
 const pluginStats = ref(null);
+const pluginPerf  = ref({});  // 持久化的性能数据（来自 plugin_checkpoints）
 const statsLoading = ref(false);
 
 async function loadPluginStats() {
@@ -411,6 +422,7 @@ async function loadPluginStats() {
         if (res.ok) {
             const data = await res.json();
             pluginStats.value = data.stats ?? {};
+            pluginPerf.value  = data.perf  ?? {};
         }
     } catch { /* ignore */ } finally {
         statsLoading.value = false;
@@ -434,6 +446,7 @@ watch(() => props.pluginStatus, (newStatus) => {
     prevDoneSet = newDoneSet;
     if (hasNewDone && expandedPlugins.value.size > 0) {
         pluginStats.value = null;
+        pluginPerf.value  = {};
         loadPluginStats();
     }
 }, { deep: true });
@@ -448,27 +461,32 @@ function formatDuration(ms) {
     return `${m}m${s}s`;
 }
 
+// 合并耗时来源：优先用 perf（持久化，刷新后仍有），降级用 pluginDuration（实时推送）
+function pluginDurationMs(pid) {
+    return pluginPerf.value[pid]?.durationMs ?? props.pluginDuration[pid] ?? 0;
+}
+
 const totalDurationMs = computed(() => {
-    return Object.values(props.pluginDuration).reduce((s, v) => s + (v || 0), 0);
+    return ALL_PLUGIN_IDS.reduce((s, pid) => s + (pluginDurationMs(pid) || 0), 0);
 });
 
 const maxSingleDuration = computed(() => {
-    const vals = Object.values(props.pluginDuration);
+    const vals = ALL_PLUGIN_IDS.map(pid => pluginDurationMs(pid));
     return vals.length ? Math.max(...vals) : 1;
 });
 
 const phaseDurations = computed(() => {
     const maxTotal = Math.max(...PHASE_GROUPS.map(g =>
-        g.plugins.reduce((s, pid) => s + (props.pluginDuration[pid] || 0), 0)
+        g.plugins.reduce((s, pid) => s + (pluginDurationMs(pid) || 0), 0)
     ), 1);
     return PHASE_GROUPS.map(g => {
-        const total = g.plugins.reduce((s, pid) => s + (props.pluginDuration[pid] || 0), 0);
+        const total = g.plugins.reduce((s, pid) => s + (pluginDurationMs(pid) || 0), 0);
         return { ...g, total, pct: Math.round(total / maxTotal * 100) };
     });
 });
 
 function durationBarPct(pid) {
-    const dur = props.pluginDuration[pid] || 0;
+    const dur = pluginDurationMs(pid) || 0;
     const max = maxSingleDuration.value || 1;
     return Math.round(dur / max * 100);
 }
@@ -771,6 +789,19 @@ function projCopyClass(state) {
 
 .plugin-not-run-tip { font-size: 11px; color: var(--text-muted); padding: 4px 0; }
 .err-tip { color: #fca5a5; }
+
+/* 数据过期警告 */
+.plugin-stale-tip {
+    font-size: 11px; color: #f59e0b; background: rgba(245,158,11,0.08);
+    border: 1px solid rgba(245,158,11,0.2); border-radius: 4px;
+    padding: 4px 8px; margin-bottom: 8px;
+}
+
+/* 完成时间 */
+.plugin-completed-at {
+    font-size: 10.5px; color: var(--text-muted);
+    margin-top: 6px; margin-bottom: 2px;
+}
 
 .no-plugins { font-size: 12px; color: var(--text-muted); text-align: center; padding: 20px; }
 

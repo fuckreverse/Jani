@@ -276,6 +276,22 @@ export default class A5LoopDetector extends BasePlugin {
             `完成，${loops.length} 个循环，${totalIter} 次迭代${skipped > 0 ? `（跳过 ${skipped} 个低优先级循环）` : ''}`,
             100
         );
-        this.emitDone(ctx, { loopCount: loops.length, skippedLoops: skipped, iterationCount: totalIter });
+
+        // 补充前端期望字段
+        const maxIter = loops.length > 0 ? Math.max(...loops.map(l => l.iteration_count ?? 0)) : 0;
+        let iterSnapshots = 0;
+        try {
+            iterSnapshots = rawDb.prepare(
+                'SELECT COUNT(*) AS cnt FROM loop_iterations WHERE session_id = ?'
+            ).get(sessionId)?.cnt ?? 0;
+        } catch { /* 非致命 */ }
+
+        this.emitDone(ctx, {
+            loopCount:      loops.length,
+            skippedLoops:   skipped,
+            iterationCount: totalIter,
+            maxIter,
+            iterSnapshots,
+        });
     }
 }

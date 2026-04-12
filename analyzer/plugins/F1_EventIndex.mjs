@@ -423,7 +423,27 @@ export default class F1EventIndex extends BasePlugin {
         db.run('UPDATE sessions SET event_count = ? WHERE id = ?', totalEvents, sessionId);
 
         this.emitProgress(ctx, `完成，共 ${totalEvents} 条事件`, 100);
-        this.emitDone(ctx, { eventCount: totalEvents });
+
+        // 补充分项计数（数据已写入 DB，一次聚合查询）
+        let writeCount = 0, readCount = 0, fieldCount = 0, valueDictCnt = 0;
+        try {
+            const rows = rawDb.prepare(`
+                SELECT 'wr' k, COUNT(*) v FROM writes     WHERE session_id = ?
+                UNION ALL
+                SELECT 'rd', COUNT(*)    FROM reads       WHERE session_id = ?
+                UNION ALL
+                SELECT 'fd', COUNT(*)    FROM fields      WHERE session_id = ?
+                UNION ALL
+                SELECT 'vd', COUNT(*)    FROM value_dict  WHERE session_id = ?
+            `).all(sessionId, sessionId, sessionId, sessionId);
+            const m = Object.fromEntries(rows.map(r => [r.k, r.v]));
+            writeCount   = m.wr ?? 0;
+            readCount    = m.rd ?? 0;
+            fieldCount   = m.fd ?? 0;
+            valueDictCnt = m.vd ?? 0;
+        } catch { /* 非致命，保持默认 0 */ }
+
+        this.emitDone(ctx, { eventCount: totalEvents, writeCount, readCount, fieldCount, valueDictCnt });
     }
 }
 

@@ -148,9 +148,13 @@ export default class A7ObjectMutationTracker extends BasePlugin {
         }
         flush();
 
-        const total = db.get('SELECT COUNT(*) as cnt FROM object_timelines WHERE session_id = ?', [sessionId]);
-        const cnt = total ? total.cnt : 0;
-        this.emitProgress(ctx, `完成，${cnt} 条时间线记录`, 100);
-        this.emitDone(ctx, { timelineCount: cnt });
+        const aggRow = db.get(
+            'SELECT COUNT(DISTINCT base_var) AS obj_count, COUNT(*) AS change_count FROM object_timelines WHERE session_id = ?',
+            [sessionId]
+        );
+        const objCount    = aggRow?.obj_count    ?? 0;
+        const changeCount = aggRow?.change_count ?? 0;
+        this.emitProgress(ctx, `完成，${changeCount} 条时间线记录`, 100);
+        this.emitDone(ctx, { objCount, changeCount });
     }
 }

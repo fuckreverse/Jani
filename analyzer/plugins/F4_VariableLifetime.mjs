@@ -91,6 +91,12 @@ export default class F4VariableLifetime extends BasePlugin {
         }
 
         this.emitProgress(ctx, `完成，共 ${writeStats.length} 个变量`, 100);
-        this.emitDone(ctx, { varCount: writeStats.length });
+
+        // 统计总读写次数（writeStats/readStats 在内存中，O(N) 求和）
+        const totalWrites = writeStats.reduce((s, w) => s + (w.write_count || 0), 0);
+        const totalReads  = readStats.reduce((s, r) => s + (r.read_count  || 0), 0);
+        const varCount    = writeStats.length + readStats.filter(r => !writeStats.some(w => w.name === r.name)).length;
+
+        this.emitDone(ctx, { varCount, totalWrites, totalReads });
     }
 }

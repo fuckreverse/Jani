@@ -511,6 +511,9 @@ export default class A8ValuePatternDetector extends BasePlugin {
         }
 
         this.emitProgress(ctx, `完成，${toInsert.length} 个模式`, 100);
-        this.emitDone(ctx, { patternCount: toInsert.length });
+
+        // 统计密码学常数匹配数（matched_constant 在 toInsert 的 index 7）
+        const cryptoMatchCount = toInsert.filter(r => r[7] != null && r[7] !== '').length;
+        this.emitDone(ctx, { patternCount: toInsert.length, cryptoMatchCount });
     }
 }

@@ -472,13 +472,14 @@ CREATE INDEX IF NOT EXISTS idx_call_edges_depth    ON call_edges(session_id, dep
 -- phase: 'phase1' / 'phase3' / 'phase4' / 'manual'
 
 CREATE TABLE IF NOT EXISTS plugin_checkpoints (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT NOT NULL,
-    plugin_id   TEXT NOT NULL,
-    phase       TEXT,
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL,
+    plugin_id    TEXT NOT NULL,
+    phase        TEXT,
     completed_at INTEGER NOT NULL,
     duration_ms  INTEGER,
-    is_stale    INTEGER DEFAULT 0,  -- 1 = 上游数据已更新，本插件结果可能过期
+    is_stale     INTEGER DEFAULT 0,  -- 1 = 上游数据已更新，本插件结果可能过期
+    summary_json TEXT,               -- emitDone() 的统计摘要（JSON）
     UNIQUE (session_id, plugin_id)
 );
 -- loop_iterations 核心查询索引：(session_id, loop_id, iteration_idx) covering ORDER BY

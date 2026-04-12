@@ -193,6 +193,19 @@ export default class F3CallGraphBuilder extends BasePlugin {
         flushEdges();
 
         this.emitProgress(ctx, `完成，共 ${edgeCount} 条调用边`, 100);
-        this.emitDone(ctx, { edgeCount });
+
+        // 补充 fnCount / maxDepth（call_edges 已写入 DB）
+        let fnCount = 0, maxDepth = 0;
+        try {
+            const rawDb = db.raw();
+            const rows = rawDb.prepare(`
+                SELECT COUNT(DISTINCT fn_iid) AS fn_count, MAX(depth) AS max_depth
+                FROM call_edges WHERE session_id = ?
+            `).get(sessionId);
+            fnCount  = rows?.fn_count  ?? 0;
+            maxDepth = rows?.max_depth ?? 0;
+        } catch { /* 非致命 */ }
+
+        this.emitDone(ctx, { callCount: edgeCount, fnCount, maxDepth });
     }
 }

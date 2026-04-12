@@ -237,7 +237,8 @@ export default class A3HotPathAnalyzer extends BasePlugin {
 
         if (hotIidSet.size === 0) {
             this.emitProgress(ctx, '完成，无热点 iid', 100);
-            this.emitDone(ctx, { iidCount: counts.length, loopCount: 0 });
+            const topHitCount = counts.length > 0 ? counts[0].count : 0;
+            this.emitDone(ctx, { iidCount: counts.length, loopCount: 0, topHitCount });
             return;
         }
 
@@ -412,7 +413,8 @@ export default class A3HotPathAnalyzer extends BasePlugin {
 
         if (candidateLoops.length === 0) {
             this.emitProgress(ctx, '完成，无循环检测到', 100);
-            this.emitDone(ctx, { iidCount: counts.length, loopCount: 0 });
+            const topHitCount = counts.length > 0 ? counts[0].count : 0;
+            this.emitDone(ctx, { iidCount: counts.length, loopCount: 0, topHitCount });
             return;
         }
 
@@ -515,9 +517,11 @@ export default class A3HotPathAnalyzer extends BasePlugin {
             `（顶层 ${topLevel}，嵌套 ${nested}）`,
             100
         );
+        const topHitCount = counts.length > 0 ? counts[0].count : 0; // counts 已按 count DESC 排序
         this.emitDone(ctx, {
             iidCount:    counts.length,
             loopCount:   candidateLoops.length,
+            topHitCount,
             topLevel,
             nested,
         });

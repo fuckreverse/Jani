@@ -213,6 +213,12 @@ export default class I3ObfuscationDetector extends BasePlugin {
         }
 
         this.emitProgress(ctx, `完成，发现 ${hints.length} 个混淆特征`, 100);
-        this.emitDone(ctx, { hintCount: hints.length });
+
+        // 计算综合混淆评分（confidence 加权均值，映射到 0-100）
+        const obfuscationScore = hints.length > 0
+            ? Math.round(hints.reduce((s, h) => s + (h[5] ?? 0), 0) / hints.length * 100)
+            : 0;
+
+        this.emitDone(ctx, { hintCount: hints.length, obfuscationScore });
     }
 }

@@ -135,13 +135,19 @@ function hasCheckpoint(sessionId, pluginId) {
 
 /**
  * 写入插件检查点（同时清除 is_stale 标记，表示数据已是最新）
+ * @param {string} sessionId
+ * @param {string} pluginId
+ * @param {string|null} phase
+ * @param {number} durationMs
+ * @param {object|null} summary  - emitDone() 携带的统计摘要
  */
-function writeCheckpoint(sessionId, pluginId, phase, durationMs) {
+function writeCheckpoint(sessionId, pluginId, phase, durationMs, summary) {
     try {
+        const summaryJson = summary ? JSON.stringify(summary) : null;
         db.run(
-            `INSERT OR REPLACE INTO plugin_checkpoints (session_id, plugin_id, phase, completed_at, duration_ms, is_stale)
-             VALUES (?, ?, ?, ?, ?, 0)`,
-            sessionId, pluginId, phase || null, Date.now(), durationMs
+            `INSERT OR REPLACE INTO plugin_checkpoints (session_id, plugin_id, phase, completed_at, duration_ms, is_stale, summary_json)
+             VALUES (?, ?, ?, ?, ?, 0, ?)`,
+            sessionId, pluginId, phase || null, Date.now(), durationMs, summaryJson
         );
     } catch (e) {
         log.warn({ err: e }, 'writeCheckpoint error');
@@ -176,7 +182,7 @@ export function markStale(sessionId, pluginIds) {
 export function getCheckpoints(sessionId) {
     try {
         return db.all(
-            'SELECT plugin_id, phase, completed_at, duration_ms, is_stale FROM plugin_checkpoints WHERE session_id = ? ORDER BY completed_at ASC',
+            'SELECT plugin_id, phase, completed_at, duration_ms, is_stale, summary_json FROM plugin_checkpoints WHERE session_id = ? ORDER BY completed_at ASC',
             sessionId
         );
     } catch {
@@ -322,7 +328,14 @@ async function runPlugin(sessionId, pluginId, options = {}) {
     // 更新状态为 running
     updatePluginStatus(sessionId, pluginId, 'running');
 
+    // 捕获最后一次 emitDone 的 summary（由 BasePlugin.emitDone 发出）
+    let lastSummary = null;
+
     const emit = (event) => {
+        // 拦截 done 事件，记录 summary 供 writeCheckpoint 使用
+        if (event.status === 'done' && event.summary !== undefined) {
+            lastSummary = event.summary;
+        }
         if (typeof onProgress === 'function') {
             onProgress({ ...event, sessionId });
         }
@@ -348,11 +361,11 @@ async function runPlugin(sessionId, pluginId, options = {}) {
         const duration = Date.now() - startTime;
         updatePluginStatus(sessionId, pluginId, 'done');
 
-        // 写入检查点（断点恢复）
-        writeCheckpoint(sessionId, pluginId, phase, duration);
+        // 写入检查点（断点恢复）+ summary 持久化
+        writeCheckpoint(sessionId, pluginId, phase, duration, lastSummary);
 
         log.info({ sessionId, pluginId, durationMs: duration }, `插件 ${pluginId} 执行完成 (${duration}ms)`);
-        emit({ type: 'plugin_done', plugin: pluginId, status: 'done', durationMs: duration });
+        emit({ type: 'plugin_done', plugin: pluginId, status: 'done', durationMs: duration, summary: lastSummary });
 
     } catch (e) {
         const duration = Date.now() - startTime;
