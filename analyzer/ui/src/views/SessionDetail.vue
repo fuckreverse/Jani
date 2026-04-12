@@ -86,6 +86,7 @@
       <ObjMutTab      v-show="activeTab === 'objmut'"      ref="objmutTabRef"      :session-id="sessionId" />
       <ObfuscationTab v-show="activeTab === 'obfuscation'" ref="obfuscationTabRef" :session-id="sessionId" @goto-function="onGotoFunction" />
       <CfgTab        v-show="activeTab === 'cfg'"         ref="cfgTabRef"         :session-id="sessionId" />
+      <WebApiTab     v-show="activeTab === 'webapi'"      ref="webapiTabRef"      :session-id="sessionId" />
     </div>
   </div>
 </template>
@@ -109,6 +110,7 @@ import DataflowTab     from '../components/session/DataflowTab.vue';
 import ObjMutTab       from '../components/session/ObjMutTab.vue';
 import ObfuscationTab  from '../components/session/ObfuscationTab.vue';
 import CfgTab          from '../components/session/CfgTab.vue';
+import WebApiTab       from '../components/session/WebApiTab.vue';
 
 // ─── 路由 ─────────────────────────────────────────────────────────────────────
 const route = useRoute();
@@ -128,6 +130,7 @@ const wsStalePlugins   = ref(new Set()); // 已过期的插件集合（上游数
 
 // ─── Tab → 所依赖的插件 ID（用于 stale 警告） ────────────────────────────────
 const TAB_PLUGIN_MAP = {
+    webapi:      ['I5-WebApiDetector'],
     functions:   ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'],
     loops:       ['A5-LoopDetector'],
     patterns:    ['A8-ValuePatternDetector'],
@@ -154,6 +157,7 @@ const ALL_PLUGIN_IDS = [
     'A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer',
     'A2-DataFlowGraph',
     'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer',
+    'I5-WebApiDetector',
 ];
 
 const isAnalyzing = computed(() => {
@@ -170,8 +174,9 @@ const runningPlugin = computed(() => {
         'A3-HotPathAnalyzer': 'A3 热路径', 'A5-LoopDetector': 'A5 循环检测',
         'A8-ValuePatternDetector': 'A8 值模式', 'I1-CryptoDetector': 'I1 加密检测',
         'I2-SignatureAnalyzer': 'I2 签名分析', 'A2-DataFlowGraph': 'A2 数据流',
-        'A7-ObjectMutationTracker': 'A7 对象变异', 'I3-ObfuscationDetector': 'I3 混淆检测',
+        'I3-ObfuscationDetector': 'I3 混淆检测',
         'I4-AlgorithmSummarizer': 'I4 算法汇总',
+        'I5-WebApiDetector':     'I5 Web API',
     };
     return labels[entry[0]] || entry[0];
 });
@@ -287,6 +292,13 @@ const tabs = [
         tips: ['字符串解码器函数通常是逆向的首要突破口', '综合评分 > 60 分说明代码经过了刻意混淆', '深调用栈 + 控制流混淆同时出现是 CFF/VMP 的强信号'],
     },
     {
+        id: 'webapi', label: '🌐 Web API',
+        plugin: 'I5 · WebApiDetector',
+        desc: '检测运行时对 BOM/DOM 宿主对象（document / window / navigator / fetch 等）的属性访问与方法调用，辅助分析 JS 代码与外部环境的交互行为。',
+        capabilities: ['按宿主对象分类展示（document / window / navigator / storage / XHR / fetch 等）', '精确匹配（OID 对象追踪）与启发式匹配（属性名语义推断）两级置信度', '展示调用参数、返回值与源码行号', '支持按类型/置信度/关键字过滤'],
+        tips: ['confirmed（✓）表示通过运行时 OID 精确确认 receiver 身份，可信度高', 'inferred（~）表示基于属性名语义推断，极少情况下可能误判', '分类卡片点击可快速按宿主对象筛选'],
+    },
+    {
         id: 'cfg', label: '🗺 控制流图',
         plugin: 'F3 + A5',
         desc: '基于真实执行数据构建的动态控制流图（Dynamic CFG），以图形化方式展示函数调用拓扑、热点节点及循环结构。',
@@ -324,6 +336,7 @@ const dataflowTabRef    = ref(null);
 const objmutTabRef      = ref(null);
 const obfuscationTabRef = ref(null);
 const cfgTabRef         = ref(null);
+const webapiTabRef      = ref(null);
 
 
 // ─── 会话加载 ─────────────────────────────────────────────────────────────────
@@ -350,6 +363,7 @@ function reloadAllTabs() {
     dataflowTabRef.value?.reload();
     objmutTabRef.value?.reload();
     obfuscationTabRef.value?.reload();
+    webapiTabRef.value?.reload();
 }
 
 // ─── 插件完成时通知对应 Tab 刷新 ──────────────────────────────────────────────
@@ -366,6 +380,7 @@ function onPluginDone(pluginId) {
         'A2-DataFlowGraph':         () => dataflowTabRef.value?.reload(),
         'A7-ObjectMutationTracker': () => objmutTabRef.value?.reload(),
         'I3-ObfuscationDetector':   () => obfuscationTabRef.value?.reload(),
+        'I5-WebApiDetector':        () => webapiTabRef.value?.reload(),
     };
     pluginTabMap[pluginId]?.();
 }

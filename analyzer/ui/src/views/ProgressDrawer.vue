@@ -48,6 +48,14 @@
                         <span v-if="isPluginStale(pid)" class="plugin-stale-badge" title="上游数据已更新，该插件结果可能过期，建议重新分析">⚠️ 已过期</span>
                         <span v-if="getPluginDuration(pid)" class="plugin-duration">{{ formatDuration(getPluginDuration(pid)) }}</span>
                         <span v-if="getPluginStatus(pid) === 'running'" class="plugin-spinner"></span>
+                        <button
+                          v-if="getPluginStatus(pid) !== 'idle' && getPluginStatus(pid) !== 'running' && getPluginStatus(pid) !== 'pending'"
+                          class="btn-plugin-rerun"
+                          :class="{ 'btn-plugin-stale': isPluginStale(pid) }"
+                          :disabled="isAnalyzingAny"
+                          :title="'重新运行 ' + ((PLUGIN_META[pid] || {}).label || pid)"
+                          @click.stop="triggerPlugin(pid)"
+                        >🔄</button>
                       </div>
                       <!-- 运行中：进度条 + message -->
                       <template v-if="getPluginStatus(pid) === 'running' && getPluginProgress(pid)">
@@ -107,7 +115,7 @@
                 :class="{ 'btn-rerun': isPhaseRun('phase4'), 'btn-stale': isPhaseStale('phase4') }"
                 :disabled="isPhaseRunning('phase4') || isAnalyzingAny"
                 @click="triggerPhase('phase4')"
-                :title="isPhaseStale('phase4') ? '⚠️ 该阶段含过期数据，建议重新分析 | A2 数据流 / A4 字符串 / A7 对象变异 / I3 混淆 / I4 算法汇总' : 'A2 数据流 / A4 字符串 / A7 对象变异 / I3 混淆 / I4 算法汇总'"
+                :title="isPhaseStale('phase4') ? '⚠️ 该阶段含过期数据，建议重新分析 | A2 数据流 / A7 对象变异 / I3 混淆 / I4 算法汇总 / I5 Web API' : 'A2 数据流 / A7 对象变异 / I3 混淆 / I4 算法汇总 / I5 Web API'"
               >
                 <span class="phase-btn-icon">{{ isPhaseRunning('phase4') ? '⏳' : isPhaseStale('phase4') ? '⚠️' : isPhaseRun('phase4') ? '🔄' : '✨' }}</span>
                 {{ isPhaseRunning('phase4') ? 'P4 分析中...' : isPhaseStale('phase4') ? '重分析 P4 (过期)' : isPhaseRun('phase4') ? '重新分析 P4' : '分析 Phase 4' }}
@@ -155,13 +163,14 @@ const PLUGIN_META = {
     'A7-ObjectMutationTracker':  { label: 'A7 对象变异',      desc: '重建对象属性变化时间线' },
     'I3-ObfuscationDetector':    { label: 'I3 混淆检测',      desc: '识别变量名混淆和控制流平坦化' },
     'I4-AlgorithmSummarizer':    { label: 'I4 算法汇总',      desc: '生成综合分析报告' },
+    'I5-WebApiDetector':         { label: 'I5 Web API',       desc: '检测 BOM/DOM 宿主对象属性访问与调用' },
 };
 
 const PHASES_CONFIG = [
     { id: 'phase1', label: 'Phase 1 · 基础解析', plugins: ['F1-EventIndex', 'F2-SmapLoader'] },
     { id: 'phase2', label: 'Phase 2 · 索引构建', plugins: ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'] },
     { id: 'phase3', label: 'Phase 3 · 深度分析', plugins: ['A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer'] },
-    { id: 'phase4', label: 'Phase 4 · 完整分析', plugins: ['A2-DataFlowGraph', 'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer'] },
+    { id: 'phase4', label: 'Phase 4 · 完整分析', plugins: ['A2-DataFlowGraph', 'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer', 'I5-WebApiDetector'] },
 ];
 
 // ── 状态 ─────────────────────────────────────────────────────────────────────
@@ -273,7 +282,7 @@ function handleWsEvent(evt) {
 const PHASE_PLUGIN_MAP = {
     phase2: ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'],
     phase3: ['A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer'],
-    phase4: ['A2-DataFlowGraph', 'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer'],
+    phase4: ['A2-DataFlowGraph', 'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer', 'I5-WebApiDetector'],
 };
 
 // 该阶段是否已运行过（至少有一个插件 done/skipped/failed）
@@ -315,6 +324,20 @@ async function triggerPhase(phaseId) {
         if (!res.ok) console.error(`triggerPhase ${phaseId} HTTP ${res.status}`);
     } catch (e) {
         console.error(`triggerPhase ${phaseId} error:`, e);
+    }
+}
+
+async function triggerPlugin(pluginId) {
+    if (!props.sessionId) return;
+    try {
+        const res = await fetch(`/api/sessions/${props.sessionId}/re-run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ plugins: [pluginId], forceRerun: true }),
+        });
+        if (!res.ok) console.error(`triggerPlugin ${pluginId} HTTP ${res.status}`);
+    } catch (e) {
+        console.error(`triggerPlugin ${pluginId} error:`, e);
     }
 }
 
@@ -592,6 +615,32 @@ onUnmounted(() => disconnectWs());
     border-radius: 50%; animation: spin .8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* 插件级别单独重跑按钮 */
+.btn-plugin-rerun {
+    margin-left: auto;
+    padding: 1px 5px;
+    border-radius: 4px;
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    background: rgba(99, 102, 241, 0.08);
+    color: #a5b4fc;
+    font-size: 10px;
+    cursor: pointer;
+    line-height: 1.4;
+    flex-shrink: 0;
+    opacity: 0;
+    transition: opacity .15s, background .15s;
+}
+.plugin-row:hover .btn-plugin-rerun { opacity: 1; }
+.btn-plugin-rerun:hover:not(:disabled) { background: rgba(99, 102, 241, 0.2); }
+.btn-plugin-rerun:disabled { opacity: 0.3; cursor: not-allowed; }
+.btn-plugin-rerun.btn-plugin-stale {
+    border-color: rgba(251, 146, 60, 0.4);
+    background: rgba(251, 146, 60, 0.08);
+    color: #fb923c;
+    opacity: 1;
+}
+.btn-plugin-rerun.btn-plugin-stale:hover:not(:disabled) { background: rgba(251, 146, 60, 0.18); }
 
 /* 插件内部进度条 */
 .plugin-progress-track {

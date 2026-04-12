@@ -1739,4 +1739,80 @@ router.get('/plugin-stats', (req, res) => {
     }
 });
 
+// ── GET /api/sessions/:id/web-api ─────────────────────────────────────────
+// 返回 web_api_calls 表数据，支持按 category / host_obj / access_type /
+// confidence_level 过滤，以及按 property_name 关键字搜索。
+// 同时返回各分类的统计摘要（summary）。
+
+router.get('/web-api', (req, res) => {
+    try {
+        const { id } = req.params;
+        const {
+            category,
+            host_obj,
+            access_type,
+            confidence_level,
+            search,
+            limit = '500',
+            offset = '0',
+        } = req.query;
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        // ── 汇总统计：按 category + host_obj + access_type 分组 ───────────
+        const summary = db.all(
+            `SELECT category, host_obj, access_type, confidence_level, COUNT(*) as cnt
+             FROM web_api_calls WHERE session_id = ?
+             GROUP BY category, host_obj, access_type, confidence_level
+             ORDER BY cnt DESC`,
+            id
+        );
+
+        // ── 明细列表（带过滤）────────────────────────────────────────────
+        const conds = ['session_id = ?'];
+        const params = [id];
+
+        if (category)          { conds.push('category = ?');         params.push(category); }
+        if (host_obj)          { conds.push('host_obj = ?');          params.push(host_obj); }
+        if (access_type)       { conds.push('access_type = ?');       params.push(access_type); }
+        if (confidence_level)  { conds.push('confidence_level = ?');  params.push(confidence_level); }
+        if (search)            { conds.push('property_name LIKE ?');  params.push(`%${search}%`); }
+
+        const limitN  = Math.min(Number(limit)  || 500, 2000);
+        const offsetN = Number(offset) || 0;
+
+        const rows = db.all(
+            `SELECT id, event_id, call_edge_id, category, host_obj, property_name,
+                    access_type, confidence_level, receiver_var,
+                    args_json, return_value, line, src_text
+             FROM web_api_calls
+             WHERE ${conds.join(' AND ')}
+             ORDER BY event_id ASC
+             LIMIT ? OFFSET ?`,
+            ...params, limitN, offsetN
+        );
+
+        const totalRow = db.get(
+            `SELECT COUNT(*) as total FROM web_api_calls WHERE ${conds.join(' AND ')}`,
+            ...params
+        );
+
+        const items = rows.map(r => ({
+            ...r,
+            args_json: safeParseJson(r.args_json, []),
+        }));
+
+        res.json({
+            items,
+            total: totalRow?.total ?? 0,
+            offset: offsetN,
+            summary,
+        });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/web-api] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
 export default router;

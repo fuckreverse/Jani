@@ -38,8 +38,9 @@ const DOWNSTREAM_STALE_MAP = {
         'A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector',
         'I2-SignatureAnalyzer', 'A2-DataFlowGraph',
         'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer',
+        'I5-WebApiDetector',
     ],
-    phase2: ['A5-LoopDetector', 'I1-CryptoDetector', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer'],
+    phase2: ['A5-LoopDetector', 'I1-CryptoDetector', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer', 'I5-WebApiDetector'],
     phase3: ['I4-AlgorithmSummarizer'],
     phase4: [],
 };
@@ -68,6 +69,7 @@ export const PHASE4_PLUGINS = [
     'A7-ObjectMutationTracker',
     'I3-ObfuscationDetector',
     'I4-AlgorithmSummarizer',
+    'I5-WebApiDetector',
 ];
 
 // ── 内部：后台调度 Phase 2 ─────────────────────────────────────────────────────
@@ -362,13 +364,15 @@ router.post('/:id/re-run', async (req, res) => {
 
         const {
             plugins,
-            phase = 'phase3',
+            phase,
             forceRerun = false,
         } = req.body ?? {};
 
         // 确定要运行的插件列表
         let targetPlugins;
+        let resolvedPhase = phase; // 可能是 undefined（单插件模式）
         if (plugins && Array.isArray(plugins) && plugins.length > 0) {
+            // 显式传入插件列表（单插件或自定义组合）：直接使用，不依赖 phase
             targetPlugins = plugins;
         } else if (phase === 'phase1') {
             targetPlugins = [...PHASE1_PLUGINS];
@@ -390,9 +394,11 @@ router.post('/:id/re-run', async (req, res) => {
             for (const pluginId of targetPlugins) {
                 clearCheckpoints(id, pluginId);
             }
-            // 将依赖本阶段输出的下游插件标记为 stale（数据可能已过期）
-            const downstreamPlugins = DOWNSTREAM_STALE_MAP[phase] ?? [];
-            markStale(id, downstreamPlugins);
+            // 仅在按阶段重跑时才标记下游 stale（单插件模式下 resolvedPhase 为 undefined，跳过）
+            if (resolvedPhase) {
+                const downstreamPlugins = DOWNSTREAM_STALE_MAP[resolvedPhase] ?? [];
+                markStale(id, downstreamPlugins);
+            }
         }
 
         const sessionDir = resolve(DATA_DIR, id);
@@ -403,7 +409,7 @@ router.post('/:id/re-run', async (req, res) => {
         schedule(id, {
             plugins: targetPlugins,
             dataDir: sessionDir,
-            phase,
+            phase: resolvedPhase,
             skipCompleted: !forceRerun,
             onProgress: (evt) => {
                 wsProgressBroadcast?.(id, evt);
@@ -413,7 +419,7 @@ router.post('/:id/re-run', async (req, res) => {
             wsProgressBroadcast?.(id, { type: 'error', sessionId: id, message: e.message });
         });
 
-        return res.json({ status: 'scheduled', plugins: targetPlugins, phase, forceRerun });
+        return res.json({ status: 'scheduled', plugins: targetPlugins, phase: resolvedPhase, forceRerun });
     } catch (e) {
         log.error({ err: e }, '[POST /api/sessions/:id/re-run] error:');
         return res.status(500).json({ error: e.message });

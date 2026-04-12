@@ -356,6 +356,36 @@ CREATE TABLE IF NOT EXISTS analysis_summary (
     summary_md      TEXT
 );
 
+-- ─── Web API 调用（I5 WebApiDetector 填充）──────────────────────────────────
+-- 记录运行时对 BOM/DOM 接口的访问与调用，含两级置信度推断：
+--   confidence_level: 'confirmed' = oid_aliases 精确匹配 + 属性名命中
+--                     'inferred'  = 仅通过属性名/函数名启发式推断
+-- category: 'window' / 'document' / 'navigator' / 'location' / 'storage' /
+--           'xhr' / 'fetch' / 'timing' / 'observer' / 'event' / 'canvas' / 'other'
+-- access_type: 'call' (方法调用) / 'read' (属性读取) / 'write' (属性写入)
+
+CREATE TABLE IF NOT EXISTS web_api_calls (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    event_id        INTEGER NOT NULL,   -- 对应 events.id（字段访问事件 seq）
+    call_edge_id    INTEGER,            -- 关联的 call_edges.id（若紧接着有调用）
+    category        TEXT NOT NULL,      -- 宿主对象分类
+    host_obj        TEXT NOT NULL,      -- 推断的宿主对象名（'document'/'window' 等）
+    property_name   TEXT NOT NULL,      -- 属性名 / 方法名
+    access_type     TEXT NOT NULL,      -- 'call' / 'read' / 'write'
+    confidence_level TEXT NOT NULL,     -- 'confirmed' / 'inferred'
+    receiver_var    TEXT,               -- oid_aliases 中找到的变量名（confirmed 时有值）
+    args_json       TEXT,               -- 若 access_type='call'，来自 call_edges.args_json
+    return_value    TEXT,               -- 若 access_type='call'，来自 call_edges.return_value
+    line            INTEGER,            -- 来自 smap.sl
+    src_text        TEXT                -- 来自 smap.src_text
+);
+CREATE INDEX IF NOT EXISTS idx_web_api_session     ON web_api_calls(session_id);
+CREATE INDEX IF NOT EXISTS idx_web_api_category    ON web_api_calls(session_id, category);
+CREATE INDEX IF NOT EXISTS idx_web_api_host        ON web_api_calls(session_id, host_obj);
+CREATE INDEX IF NOT EXISTS idx_web_api_property    ON web_api_calls(session_id, property_name);
+CREATE INDEX IF NOT EXISTS idx_web_api_access_type ON web_api_calls(session_id, access_type);
+
 -- ─── A2: 数据流图边（Phase 4 新增）─────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS dataflow_edges (
