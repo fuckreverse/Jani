@@ -251,6 +251,7 @@
                     :call="call"
                     :initial-view="callView[call.id] || 'events'"
                     @update:child-count="callChildCount[call.id] = $event"
+                    @open-dataflow="$emit('open-dataflow', $event)"
                   />
 
                 </div>
@@ -399,6 +400,9 @@ const props = defineProps({
     pluginStatus: { type: Object,  default: () => ({}) },
     targetCall:   { type: Object,  default: null },  // { fnName, fnIid, callSeq } — 来自事件流跳转
 });
+
+// open-dataflow: 从函数/调用面板跳转到数据流图（由 CallDetail 冒泡）
+const emit = defineEmits(['open-dataflow']);
 
 const f3Status = computed(() => props.pluginStatus?.['F3-CallGraphBuilder'] ?? '');
 

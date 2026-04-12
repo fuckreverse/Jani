@@ -19,6 +19,12 @@
         @click.stop="toggleView('cfg')"
         title="查看该次调用内部的控制流图（IDA 风格）"
       >🧩 CFG</button>
+      <button
+        v-if="call.fnName"
+        class="call-panel-tab"
+        @click.stop="openDataflow"
+        title="在数据流图中追踪该函数相关的变量流向"
+      >🔗 数据流</button>
       <!-- 自身/全部切换：仅在事件流面板时显示 -->
       <template v-if="activeView === 'events'">
         <span class="call-panel-sep">|</span>
@@ -198,7 +204,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(['update:childCount']);
+const emit = defineEmits(['update:childCount', 'open-dataflow']);
 
 // ── 状态 ─────────────────────────────────────────────────────────────────────
 
@@ -267,6 +273,16 @@ async function toggleView(view) {
   if (view === 'stack'  && stack.value.length  === 0) await loadStack();
   if (view === 'events' && events.value.length === 0) await loadEvents();
   if (view === 'cfg'    && cfgData.value === null && !cfgLoading.value) await loadCfg();
+}
+
+// ── 数据流联动 ────────────────────────────────────────────────────────────────
+// 点击"数据流"按钮：通知父组件切换到数据流 Tab，并展开以函数名为起点的子图
+function openDataflow() {
+    emit('open-dataflow', {
+        varName:   props.call.fnName,
+        direction: 'both',
+        mode:      'graph',
+    });
 }
 
 async function setOwnOnly(val) {

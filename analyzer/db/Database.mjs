@@ -660,4 +660,25 @@ function _runMigrations(db) {
     } catch (e) {
         console.warn('[Database] add loops v2/v3 columns failed (non-fatal):', e.message);
     }
+
+    // ── dataflow_edges 性能索引（v2 新增，用于子图 BFS / 变量搜索）──────────
+    const dfIndexes = [
+        ['idx_df_from_event', 'dataflow_edges', 'session_id, from_event_id'],
+        ['idx_df_to_event',   'dataflow_edges', 'session_id, to_event_id'],
+        ['idx_df_from_var',   'dataflow_edges', 'session_id, from_var'],
+        ['idx_df_to_var',     'dataflow_edges', 'session_id, to_var'],
+        ['idx_df_edge_type',  'dataflow_edges', 'session_id, edge_type'],
+    ];
+    for (const [idxName, tbl, cols] of dfIndexes) {
+        try {
+            const exists = db.prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name=?"
+            ).get(idxName);
+            if (!exists) {
+                db.exec(`CREATE INDEX IF NOT EXISTS ${idxName} ON ${tbl}(${cols})`);
+            }
+        } catch (e) {
+            console.warn(`[Database] create dataflow index ${idxName} failed (non-fatal):`, e.message);
+        }
+    }
 }

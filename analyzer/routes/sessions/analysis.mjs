@@ -412,12 +412,19 @@ router.get('/signature-paths', (req, res) => {
 });
 
 // ── GET /api/sessions/:id/dataflow ────────────────────────────────────────
-// 新增 seqFrom/seqTo：按事件 SEQ 范围过滤（from_event_id 或 to_event_id 在区间内）
+// 查询参数：
+//   edgeType  string    边类型精确过滤（assign/call_arg/call_ret/field_write/field_read）
+//   varName   string    变量名模糊搜索（LIKE %x%，匹配 from_var 或 to_var）
+//   varExact  string    变量名精确匹配（= 匹配，优先级高于 varName）
+//   limit     number    每页数量（默认 200，最大 1000）
+//   offset    number    分页偏移
+//   seqFrom   number    from_event_id >= seqFrom
+//   seqTo     number    from_event_id <= seqTo
 
 router.get('/dataflow', (req, res) => {
     try {
         const { id } = req.params;
-        const { edgeType, varName, limit = '200', offset = '0', seqFrom, seqTo } = req.query;
+        const { edgeType, varName, varExact, limit = '200', offset = '0', seqFrom, seqTo } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -429,11 +436,17 @@ router.get('/dataflow', (req, res) => {
             conditions.push('edge_type = ?');
             params.push(edgeType);
         }
-        if (varName) {
+        if (varExact) {
+            // 精确匹配（直接用索引，O(log N)）
             conditions.push('(from_var = ? OR to_var = ?)');
-            params.push(varName, varName);
+            params.push(varExact, varExact);
+        } else if (varName) {
+            // 模糊匹配（LIKE，走 idx_df_from_var / idx_df_to_var 前缀优化）
+            const pat = `%${varName}%`;
+            conditions.push('(from_var LIKE ? OR to_var LIKE ?)');
+            params.push(pat, pat);
         }
-        // 时间窗口过滤：from_event_id（边的起点事件）在 [seqFrom, seqTo] 内
+        // 时间窗口过滤：from_event_id 在 [seqFrom, seqTo] 内
         if (seqFrom !== undefined && seqFrom !== '') {
             conditions.push('from_event_id >= ?');
             params.push(Number(seqFrom));
@@ -455,7 +468,7 @@ router.get('/dataflow', (req, res) => {
             [...params, limitN, offsetN]
         );
 
-        // 汇总统计（始终用全量统计）
+        // 汇总统计（始终用全量统计，不受过滤影响）
         const stats = db.all(
             'SELECT edge_type, COUNT(*) as cnt FROM dataflow_edges WHERE session_id = ? GROUP BY edge_type ORDER BY cnt DESC',
             [id]
@@ -469,6 +482,293 @@ router.get('/dataflow', (req, res) => {
         res.json({ edges, stats, count: edges.length, total: totalRow?.total ?? 0, offset: offsetN });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/dataflow] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/dataflow/vars ───────────────────────────────────
+// 变量名建议接口：返回所有出现在数据流边中的唯一变量名（前缀搜索）
+// 查询参数：
+//   prefix  string  变量名前缀过滤（可选，最多返回 100 条）
+//   limit   number  最大返回数量（默认 100）
+
+router.get('/dataflow/vars', (req, res) => {
+    try {
+        const { id } = req.params;
+        const { prefix, limit = '100' } = req.query;
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const limitN = Math.min(Number(limit) || 100, 500);
+
+        let vars;
+        if (prefix) {
+            const pat = `${prefix}%`;
+            // 利用 idx_df_from_var + idx_df_to_var 前缀扫描，然后去重
+            vars = db.all(
+                `SELECT DISTINCT var FROM (
+                    SELECT from_var AS var FROM dataflow_edges
+                    WHERE session_id = ? AND from_var LIKE ? AND from_var NOT LIKE '#%'
+                    UNION
+                    SELECT to_var AS var FROM dataflow_edges
+                    WHERE session_id = ? AND to_var LIKE ? AND to_var NOT LIKE '#%'
+                 ) ORDER BY var ASC LIMIT ?`,
+                [id, pat, id, pat, limitN]
+            );
+        } else {
+            vars = db.all(
+                `SELECT DISTINCT var FROM (
+                    SELECT from_var AS var FROM dataflow_edges
+                    WHERE session_id = ? AND from_var IS NOT NULL AND from_var NOT LIKE '#%'
+                    UNION
+                    SELECT to_var AS var FROM dataflow_edges
+                    WHERE session_id = ? AND to_var IS NOT NULL AND to_var NOT LIKE '#%'
+                 ) ORDER BY var ASC LIMIT ?`,
+                [id, id, limitN]
+            );
+        }
+
+        res.json({ vars: vars.map(r => r.var) });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/dataflow/vars] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/dataflow/subgraph ───────────────────────────────
+// N-hop 数据流子图（以指定变量名或 event_id 为中心，BFS 展开）
+// 用于前端图形化可视化、后向切片（Backward Slice）
+//
+// 查询参数：
+//   varName   string    起始变量名（从该变量的所有边出发）
+//   eventId   number    起始事件 ID（从该事件的边出发）
+//   direction string    'forward'(下游) | 'backward'(上游) | 'both'（默认 both）
+//   hops      number    最大跳数（默认 3，最大 6）
+//   maxNodes  number    最大节点数上限（默认 80，最大 200）
+//
+// 返回格式：
+//   nodes[]   节点列表（变量节点 / 事件节点）
+//   edges[]   边列表（包含原始 dataflow_edges 字段）
+//   stats     统计（节点数、边数、是否截断）
+
+router.get('/dataflow/subgraph', (req, res) => {
+    try {
+        const { id } = req.params;
+        const {
+            varName,
+            eventId,
+            direction = 'both',
+            hops      = '3',
+            maxNodes  = '80',
+        } = req.query;
+
+        if (!varName && !eventId) {
+            return res.status(400).json({ error: 'varName or eventId is required' });
+        }
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const hopsN    = Math.min(Number(hops)     || 3, 6);
+        const maxNodesN = Math.min(Number(maxNodes) || 80, 200);
+
+        // ── BFS 状态 ──────────────────────────────────────────────────────
+        // 节点：以变量名（字符串）或事件 ID（整数前缀 "e:"）为键
+        // 边：dataflow_edges 行（去重）
+        const nodeSet  = new Map();  // nodeKey → nodeObj
+        const edgeSet  = new Map();  // edgeId(number) → edgeObj
+        const visitedVars   = new Set();  // 已 BFS 展开的变量节点
+        const visitedEvents = new Set();  // 已 BFS 展开的事件节点
+
+        // 添加节点（幂等）
+        const addVarNode = (varN, edgeType) => {
+            const key = `var:${varN}`;
+            if (!nodeSet.has(key)) {
+                nodeSet.set(key, {
+                    id:       key,
+                    type:     'var',
+                    label:    varN,
+                    edgeTypes: new Set(),
+                });
+            }
+            if (edgeType) nodeSet.get(key).edgeTypes.add(edgeType);
+        };
+        const addEventNode = (eventId, varN, line, iid) => {
+            const key = `ev:${eventId}`;
+            if (!nodeSet.has(key)) {
+                nodeSet.set(key, {
+                    id:      key,
+                    type:    'event',
+                    eventId,
+                    varName: varN,
+                    line,
+                    iid,
+                });
+            }
+        };
+
+        // 把一批 edge 加入结果集，并注册相关节点
+        const addEdges = (rows) => {
+            for (const e of rows) {
+                if (edgeSet.has(e.id)) continue;
+                edgeSet.set(e.id, e);
+                if (e.from_var) addVarNode(e.from_var, e.edge_type);
+                if (e.to_var)   addVarNode(e.to_var,   e.edge_type);
+                if (e.from_event_id != null) addEventNode(e.from_event_id, e.from_var, e.line, e.iid);
+                if (e.to_event_id   != null) addEventNode(e.to_event_id,   e.to_var,   e.line, e.iid);
+            }
+        };
+
+        // ── BFS 队列 ──────────────────────────────────────────────────────
+        // 每个队列元素：{ type: 'var'|'event', key: string|number, hop: number }
+        const queue = [];
+
+        // 初始化：根据起始参数设置种子节点
+        if (varName) {
+            addVarNode(varName, null);
+            queue.push({ type: 'var', key: varName, hop: 0 });
+        }
+        if (eventId) {
+            const eid = Number(eventId);
+            // 先查一下这个事件有没有 dataflow 边
+            const seedEdges = db.all(
+                `SELECT id, from_event_id, to_event_id, from_var, to_var, edge_type, iid, line
+                 FROM dataflow_edges WHERE session_id = ? AND (from_event_id = ? OR to_event_id = ?)`,
+                [id, eid, eid]
+            );
+            addEdges(seedEdges);
+            addEventNode(eid, null, null, null);
+            queue.push({ type: 'event', key: eid, hop: 0 });
+        }
+
+        // BFS 主循环
+        let qi = 0;
+        while (qi < queue.length && nodeSet.size < maxNodesN) {
+            const { type, key, hop } = queue[qi++];
+            if (hop >= hopsN) continue;
+
+            if (type === 'var') {
+                const vn = key;
+                if (visitedVars.has(vn)) continue;
+                visitedVars.add(vn);
+
+                let rows = [];
+                if (direction === 'forward' || direction === 'both') {
+                    // from_var = vn → 找下游（该变量被 read 后流向哪）
+                    const fwd = db.all(
+                        `SELECT id, from_event_id, to_event_id, from_var, to_var, edge_type, iid, line
+                         FROM dataflow_edges WHERE session_id = ? AND from_var = ?
+                         LIMIT 50`,
+                        [id, vn]
+                    );
+                    rows = rows.concat(fwd);
+                }
+                if (direction === 'backward' || direction === 'both') {
+                    // to_var = vn → 找上游（谁写了该变量）
+                    const bwd = db.all(
+                        `SELECT id, from_event_id, to_event_id, from_var, to_var, edge_type, iid, line
+                         FROM dataflow_edges WHERE session_id = ? AND to_var = ?
+                         LIMIT 50`,
+                        [id, vn]
+                    );
+                    rows = rows.concat(bwd);
+                }
+                addEdges(rows);
+
+                // 把新出现的变量节点加入队列
+                for (const e of rows) {
+                    if (direction !== 'backward' && e.to_var && !visitedVars.has(e.to_var)) {
+                        queue.push({ type: 'var', key: e.to_var, hop: hop + 1 });
+                    }
+                    if (direction !== 'forward' && e.from_var && !visitedVars.has(e.from_var)) {
+                        queue.push({ type: 'var', key: e.from_var, hop: hop + 1 });
+                    }
+                }
+
+            } else if (type === 'event') {
+                const eid = key;
+                if (visitedEvents.has(eid)) continue;
+                visitedEvents.add(eid);
+
+                let rows = [];
+                if (direction === 'forward' || direction === 'both') {
+                    const fwd = db.all(
+                        `SELECT id, from_event_id, to_event_id, from_var, to_var, edge_type, iid, line
+                         FROM dataflow_edges WHERE session_id = ? AND from_event_id = ?
+                         LIMIT 30`,
+                        [id, eid]
+                    );
+                    rows = rows.concat(fwd);
+                }
+                if (direction === 'backward' || direction === 'both') {
+                    const bwd = db.all(
+                        `SELECT id, from_event_id, to_event_id, from_var, to_var, edge_type, iid, line
+                         FROM dataflow_edges WHERE session_id = ? AND to_event_id = ?
+                         LIMIT 30`,
+                        [id, eid]
+                    );
+                    rows = rows.concat(bwd);
+                }
+                addEdges(rows);
+
+                // 把相邻事件加入队列（通过 var 节点中转，避免爆炸）
+                for (const e of rows) {
+                    if (direction !== 'backward' && e.to_event_id != null && !visitedEvents.has(e.to_event_id)) {
+                        queue.push({ type: 'event', key: e.to_event_id, hop: hop + 1 });
+                    }
+                    if (direction !== 'forward' && e.from_event_id != null && !visitedEvents.has(e.from_event_id)) {
+                        queue.push({ type: 'event', key: e.from_event_id, hop: hop + 1 });
+                    }
+                }
+            }
+        }
+
+        // ── 序列化节点（Set → Array）──────────────────────────────────────
+        const nodes = [...nodeSet.values()].map(n => ({
+            ...n,
+            edgeTypes: n.edgeTypes ? [...n.edgeTypes] : undefined,
+        }));
+        const edges = [...edgeSet.values()];
+
+        // ── 获取事件节点的 srcText（来自 smap）──────────────────────────
+        // 只补充新采集到的事件节点
+        const eventNodes = nodes.filter(n => n.type === 'event' && n.iid != null);
+        if (eventNodes.length > 0) {
+            const iids = [...new Set(eventNodes.map(n => n.iid))];
+            const BATCH = 200;
+            const smapMap = new Map();
+            for (let i = 0; i < iids.length; i += BATCH) {
+                const chunk = iids.slice(i, i + BATCH);
+                const rows = db.all(
+                    `SELECT iid, src_text FROM smap WHERE session_id = ? AND iid IN (${chunk.map(() => '?').join(',')})`,
+                    [id, ...chunk]
+                );
+                for (const r of rows) smapMap.set(r.iid, r.src_text);
+            }
+            for (const n of nodes) {
+                if (n.type === 'event' && n.iid != null) {
+                    n.srcText = smapMap.get(n.iid) || null;
+                }
+            }
+        }
+
+        const truncated = nodeSet.size >= maxNodesN;
+
+        res.json({
+            nodes,
+            edges,
+            stats: {
+                nodeCount:  nodes.length,
+                edgeCount:  edges.length,
+                varNodes:   nodes.filter(n => n.type === 'var').length,
+                eventNodes: nodes.filter(n => n.type === 'event').length,
+                truncated,
+                hops:       hopsN,
+            },
+        });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/dataflow/subgraph] error:');
         res.status(500).json({ error: e.message });
     }
 });

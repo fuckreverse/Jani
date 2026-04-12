@@ -77,7 +77,7 @@
       <!-- Tab 内容区域（使用 v-show 保留已加载组件状态） -->
       <OverviewTab    v-show="activeTab === 'overview'"   :session="session" :plugin-status="pluginStatus" :plugin-duration="wsPluginDuration" :is-analyzing="isAnalyzing" :inline-progress-pct="inlineProgressPct" :running-plugin="runningPlugin" @open-progress="showProgressDrawer = true" />
       <EventsTab      v-show="activeTab === 'events'"      ref="eventsTabRef"      :session-id="sessionId" :target-seq="targetSeq" @goto-function="onGotoFunction" />
-      <FunctionsTab   v-show="activeTab === 'functions'"   ref="functionsTabRef"   :session-id="sessionId" :plugin-status="pluginStatus" :target-call="targetCall" />
+      <FunctionsTab   v-show="activeTab === 'functions'"   ref="functionsTabRef"   :session-id="sessionId" :plugin-status="pluginStatus" :target-call="targetCall" @open-dataflow="onOpenDataflow" />
       <LoopsTab       v-show="activeTab === 'loops'"       ref="loopsTabRef"       :session-id="sessionId" @goto-seq="onGotoSeq" />
       <PatternsTab    v-show="activeTab === 'patterns'"    ref="patternsTabRef"    :session-id="sessionId" @goto-event-by-value="onGotoEventByValue" />
       <CryptoTab      v-show="activeTab === 'crypto'"      ref="cryptoTabRef"      :session-id="sessionId" />
@@ -208,6 +208,13 @@ async function onGotoEventByValue({ value, mode }) {
 async function onGotoSeq(seq) {
     targetSeq.value = seq;
     activeTab.value = 'events';
+}
+
+/** 来自 FunctionsTab → CallDetail：跳转到数据流 Tab 并展开子图 */
+async function onOpenDataflow({ varName, direction = 'both', mode = 'graph' }) {
+    activeTab.value = 'dataflow';
+    await nextTick();
+    dataflowTabRef.value?.openDataflowFor(varName, mode, direction);
 }
 
 const tabs = [

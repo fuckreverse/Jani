@@ -369,7 +369,17 @@ CREATE TABLE IF NOT EXISTS dataflow_edges (
     iid             INTEGER,
     line            INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_df_session ON dataflow_edges(session_id);
+-- 主查询索引
+CREATE INDEX IF NOT EXISTS idx_df_session         ON dataflow_edges(session_id);
+-- 子图 BFS：从 from_event_id 出发找下游 / from_var 搜索
+CREATE INDEX IF NOT EXISTS idx_df_from_event      ON dataflow_edges(session_id, from_event_id);
+-- 子图 BFS：从 to_event_id 出发找上游（backward slice）/ to_var 搜索
+CREATE INDEX IF NOT EXISTS idx_df_to_event        ON dataflow_edges(session_id, to_event_id);
+-- 变量名搜索（covering: session_id + from_var/to_var）
+CREATE INDEX IF NOT EXISTS idx_df_from_var        ON dataflow_edges(session_id, from_var);
+CREATE INDEX IF NOT EXISTS idx_df_to_var          ON dataflow_edges(session_id, to_var);
+-- edge_type 过滤（统计/筛选）
+CREATE INDEX IF NOT EXISTS idx_df_edge_type       ON dataflow_edges(session_id, edge_type);
 
 -- ─── 值字典（F1 EventIndex 填充，全局唯一字符串池）──────────────────────────
 -- 将 writes/reads/fields 中的 value 文本去重存储，每个 session 独立字典。
