@@ -410,7 +410,7 @@ const PLUGIN_META = {
     'I2-SignatureAnalyzer':      { label: 'I2 · 签名分析',        desc: '追踪 sign/token/_sign 等签名字段从数据源到最终输出的完整数据流路径，还原签名计算过程。' },
     'A2-DataFlowGraph':         { label: 'A2 · 数据流图',        desc: '记录变量间的赋值 / 返回值 / 参数传递关系，构建运行时 def-use 数据流图，支持变量追踪分析。' },
     'A7-ObjectMutationTracker': { label: 'A7 · 对象变异追踪',    desc: '记录对象属性的读写历史，重建属性值随时间的变化轨迹，适合分析请求对象构造过程。' },
-    'I3-ObfuscationDetector':   { label: 'I3 · 混淆检测',        desc: '识别字符串解码器 / 控制流平坦化 / 十六进制编码 / 变量名混淆等特征，评估代码整体混淆程度。' },
+    'I3-ObfuscationDetector':   { label: 'I3 · 混淆检测',        desc: '识别字符串解码器 / 深调用栈 / 字符串池 / 控制流平坦化 / 动态 eval / 变量名混淆等 8 类特征，评估代码整体混淆程度。' },
     'I4-AlgorithmSummarizer':   { label: 'I4 · 算法汇总',        desc: '整合所有分析插件的结果，生成结构化算法汇总报告（Markdown + JSON），是分析流程的最终结论。' },
 };
 
