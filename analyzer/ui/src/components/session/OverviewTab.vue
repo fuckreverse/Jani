@@ -314,6 +314,63 @@
       </div>
     </div>
 
+    <!-- ── 算法报告 ─────────────────────────────────────────────────────── -->
+    <div class="section card algo-report-card">
+      <div class="section-title-row">
+        <span class="section-title">📝 算法报告</span>
+        <button class="btn-detail" @click="loadSummaryReport" :disabled="summaryLoading">🔄 刷新</button>
+      </div>
+
+      <div v-if="summaryLoading" class="summary-loading">
+        <div class="spinner-sm"></div><span>加载报告中…</span>
+      </div>
+      <div v-else-if="!summaryReport" class="summary-pending-tip">
+        <template v-if="allPluginStatus['I4-AlgorithmSummarizer'] === 'running'">
+          <span class="summary-pending-icon">⏳</span> I4 · AlgorithmSummarizer 正在运行，报告生成后将自动显示…
+        </template>
+        <template v-else-if="allPluginStatus['I4-AlgorithmSummarizer'] === 'skipped'">
+          <span class="summary-pending-icon">⏭</span> I4 · AlgorithmSummarizer 已跳过（依赖文件未上传）
+        </template>
+        <template v-else-if="allPluginStatus['I4-AlgorithmSummarizer'] === 'failed'">
+          <span class="summary-pending-icon">❌</span> I4 · AlgorithmSummarizer 执行失败，请前往「详细进度抽屉」查看日志
+        </template>
+        <template v-else>
+          <span class="summary-pending-icon">⏸</span> 算法报告将在完成全部四个分析阶段（P4 · I4-AlgorithmSummarizer）后生成
+        </template>
+      </div>
+      <div v-else>
+        <!-- 概览数字卡片 -->
+        <div class="summary-stat-cards">
+          <div class="summary-stat-card" v-if="summaryReport.overview?.eventCount != null">
+            <div class="summary-stat-label">总事件数</div>
+            <div class="summary-stat-val">{{ fmtNum(summaryReport.overview.eventCount) }}</div>
+          </div>
+          <div class="summary-stat-card" v-if="summaryReport.callGraph?.uniqueFunctions != null">
+            <div class="summary-stat-label">唯一函数</div>
+            <div class="summary-stat-val">{{ fmtNum(summaryReport.callGraph.uniqueFunctions) }}</div>
+          </div>
+          <div class="summary-stat-card" v-if="summaryReport.dataFlow?.totalEdges != null">
+            <div class="summary-stat-label">数据流边</div>
+            <div class="summary-stat-val">{{ fmtNum(summaryReport.dataFlow.totalEdges) }}</div>
+          </div>
+          <div class="summary-stat-card summary-stat-card--obf"
+               v-if="summaryReport.overview?.isObfuscated">
+            <div class="summary-stat-label">混淆评分</div>
+            <div class="summary-stat-val summary-val--obf">{{ summaryReport.overview.obfuscationScore }}%</div>
+          </div>
+        </div>
+
+        <!-- 算法标签 -->
+        <div v-if="summaryReport.overview?.algorithmTags?.length" class="summary-tags-row">
+          <span class="summary-tags-label">识别标签</span>
+          <span class="algo-tag" v-for="tag in summaryReport.overview.algorithmTags" :key="tag">{{ tag }}</span>
+        </div>
+
+        <!-- Markdown 报告 -->
+        <div v-if="summaryMd" class="summary-md-block">{{ summaryMd }}</div>
+      </div>
+    </div>
+
   </div>
 </template>
 
@@ -525,6 +582,35 @@ function obfScoreClass(score) {
     if (score >= 30) return 'score-mid';
     return 'score-low';
 }
+
+// ── 算法报告（来自 I4-AlgorithmSummarizer）────────────────────────────────────
+const summaryReport  = ref(null);
+const summaryMd      = ref('');
+const summaryLoading = ref(false);
+
+async function loadSummaryReport() {
+    if (summaryLoading.value) return;
+    summaryLoading.value = true;
+    try {
+        const res = await fetch(`/api/sessions/${props.session.id}/summary`);
+        if (!res.ok) {
+            if (res.status === 404) { summaryReport.value = null; summaryMd.value = ''; return; }
+            throw new Error(`HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        summaryReport.value = data.report || null;
+        summaryMd.value     = data.markdown || '';
+    } catch (e) {
+        console.error('loadSummaryReport error:', e);
+    } finally {
+        summaryLoading.value = false;
+    }
+}
+
+// I4 完成后自动加载报告（仅一次）
+watch(() => props.pluginStatus['I4-AlgorithmSummarizer'], (newVal) => {
+    if (newVal === 'done' && !summaryReport.value) loadSummaryReport();
+}, { immediate: true });
 
 // ── 项目文件复制到剪贴板 ──────────────────────────────────────────────────────
 const projCopyStates = ref({});
@@ -804,6 +890,59 @@ function projCopyClass(state) {
 }
 
 .no-plugins { font-size: 12px; color: var(--text-muted); text-align: center; padding: 20px; }
+
+/* ── 算法报告卡片 ─────────────────────────────────────────────────────────── */
+.algo-report-card { border-color: rgba(168,85,247,0.2); background: rgba(168,85,247,0.03); }
+
+.summary-pending-tip {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text-muted);
+    padding: 10px 12px;
+    background: var(--bg-tertiary); border: 1px dashed var(--border-color);
+    border-radius: 8px;
+}
+.summary-pending-icon { font-size: 14px; flex-shrink: 0; }
+
+.summary-loading {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--text-muted); padding: 10px 0;
+}
+.spinner-sm {
+    width: 14px; height: 14px; border: 2px solid var(--border-color);
+    border-top-color: #a78bfa; border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.summary-stat-cards {
+    display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px;
+}
+.summary-stat-card {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 12px 18px; background: var(--bg-secondary);
+    border: 1px solid var(--border-color); border-radius: 8px;
+    min-width: 120px; flex: 0 0 auto;
+}
+.summary-stat-card--obf { border-color: rgba(239,68,68,0.3); }
+.summary-stat-label { font-size: 10px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.3px; }
+.summary-stat-val { font-size: 24px; font-weight: 800; color: #a5b4fc; font-family: monospace; }
+.summary-val--obf  { color: #fca5a5; }
+
+.summary-tags-row {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+    margin-bottom: 14px;
+}
+.summary-tags-label {
+    font-size: 10px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.3px; margin-right: 4px; white-space: nowrap;
+}
+
+.summary-md-block {
+    font-family: monospace; font-size: 12px; white-space: pre-wrap;
+    line-height: 1.65; color: var(--text-secondary);
+    background: var(--bg-secondary); border: 1px solid var(--border-color);
+    border-radius: 8px; padding: 14px 16px;
+    max-height: 500px; overflow-y: auto;
+}
 
 /* ── 展开动画 ─────────────────────────────────────────────────────────────── */
 .plugin-expand-enter-active,

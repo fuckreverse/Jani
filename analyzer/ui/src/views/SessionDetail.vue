@@ -85,7 +85,6 @@
       <DataflowTab    v-show="activeTab === 'dataflow'"    ref="dataflowTabRef"    :session-id="sessionId" />
       <ObjMutTab      v-show="activeTab === 'objmut'"      ref="objmutTabRef"      :session-id="sessionId" />
       <ObfuscationTab v-show="activeTab === 'obfuscation'" ref="obfuscationTabRef" :session-id="sessionId" @goto-function="onGotoFunction" />
-      <SummaryTab     v-show="activeTab === 'summary'"     ref="summaryTabRef"     :session-id="sessionId" />
       <CfgTab        v-show="activeTab === 'cfg'"         ref="cfgTabRef"         :session-id="sessionId" />
     </div>
   </div>
@@ -109,7 +108,6 @@ import SignaturesTab   from '../components/session/SignaturesTab.vue';
 import DataflowTab     from '../components/session/DataflowTab.vue';
 import ObjMutTab       from '../components/session/ObjMutTab.vue';
 import ObfuscationTab  from '../components/session/ObfuscationTab.vue';
-import SummaryTab      from '../components/session/SummaryTab.vue';
 import CfgTab          from '../components/session/CfgTab.vue';
 
 // ─── 路由 ─────────────────────────────────────────────────────────────────────
@@ -138,7 +136,6 @@ const TAB_PLUGIN_MAP = {
     dataflow:    ['A2-DataFlowGraph'],
     objmut:      ['A7-ObjectMutationTracker'],
     obfuscation: ['I3-ObfuscationDetector'],
-    summary:     ['I4-AlgorithmSummarizer'],
     cfg:         ['F3-CallGraphBuilder', 'A5-LoopDetector'],
 };
 
@@ -283,13 +280,6 @@ const tabs = [
         tips: ['字符串解码器函数通常是逆向的首要突破口', '综合评分 > 60 分说明代码经过了刻意混淆'],
     },
     {
-        id: 'summary', label: '📝 算法报告',
-        plugin: 'I4 · AlgorithmSummarizer',
-        desc: '整合所有分析插件的结果，生成结构化的算法汇总报告，是分析的最终结论。',
-        capabilities: ['概览总事件数 / 函数数 / 数据流边数', '显示识别出的算法标签', '混淆评分总览', '输出 Markdown 格式分析报告'],
-        tips: ['分析完成后先看报告，快速锁定重点 Tab', '算法标签可作为进一步搜索的关键词'],
-    },
-    {
         id: 'cfg', label: '🗺 控制流图',
         plugin: 'F3 + A5',
         desc: '基于真实执行数据构建的动态控制流图（Dynamic CFG），以图形化方式展示函数调用拓扑、热点节点及循环结构。',
@@ -326,7 +316,6 @@ const signaturesTabRef  = ref(null);
 const dataflowTabRef    = ref(null);
 const objmutTabRef      = ref(null);
 const obfuscationTabRef = ref(null);
-const summaryTabRef     = ref(null);
 const cfgTabRef         = ref(null);
 
 
@@ -354,7 +343,6 @@ function reloadAllTabs() {
     dataflowTabRef.value?.reload();
     objmutTabRef.value?.reload();
     obfuscationTabRef.value?.reload();
-    summaryTabRef.value?.reload();
 }
 
 // ─── 插件完成时通知对应 Tab 刷新 ──────────────────────────────────────────────
@@ -371,7 +359,6 @@ function onPluginDone(pluginId) {
         'A2-DataFlowGraph':         () => dataflowTabRef.value?.reload(),
         'A7-ObjectMutationTracker': () => objmutTabRef.value?.reload(),
         'I3-ObfuscationDetector':   () => obfuscationTabRef.value?.reload(),
-        'I4-AlgorithmSummarizer':   () => summaryTabRef.value?.reload(),
     };
     pluginTabMap[pluginId]?.();
 }
