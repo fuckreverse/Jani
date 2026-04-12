@@ -148,9 +148,19 @@ router.get('/:id', (req, res) => {
             try { return p && existsSync(p) ? statSync(p).size : null; } catch { return null; }
         };
 
+        // 文件名辅助（路径不存在则为 null）
+        const fileName = (p) => (p && existsSync(p) ? basename(p) : null);
+
         return res.json({
             ...row,
             sessions,
+            // 文件名
+            source_name:         fileName(row.source_file),
+            instrumented_name:   fileName(row.instrumented_path),
+            smap_name:           fileName(row.smap_path),
+            preprocessed_name:   fileName(row.preprocessed_path),
+            // 文件大小
+            source_size:         fileSize(row.source_file),
             instrumented_size:   fileSize(row.instrumented_path),
             smap_size:           fileSize(row.smap_path),
             preprocessed_size:   fileSize(row.preprocessed_path),
@@ -377,6 +387,26 @@ router.get('/:id/sessions', (req, res) => {
     }
 });
 
+// ── GET /api/projects/:id/source ─────────────────────────────────────────────
+// 下载原始源码
+
+router.get('/:id/source', (req, res) => {
+    try {
+        const { id } = req.params;
+        const project = db.get('SELECT * FROM projects WHERE id = ?', id);
+        if (!project) return res.status(404).json({ error: 'Project not found' });
+        if (!project.source_file || !existsSync(project.source_file)) {
+            return res.status(404).json({ error: 'Source file not found' });
+        }
+
+        res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${basename(project.source_file)}"`);
+        res.send(readFileSync(project.source_file, 'utf8'));
+    } catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+});
+
 // ── GET /api/projects/:id/instrumented ──────────────────────────────────────
 // 下载插桩后代码
 
@@ -462,8 +492,11 @@ async function _runInstrumentation(projectId, projectDir, sourcePath, originalNa
     mkdirSync(workDir, { recursive: true });
 
     const baseName         = originalName.replace(/\.js$/, '');
-    const instrumentedPath = resolve(workDir, `${baseName}_jalangi_.js`);
-    const smapPath         = resolve(workDir, `${baseName}_jalangi_.map.json`);
+    // 启用预处理时，产物文件名带 _preprocessed_ 以反映是基于预处理结果插桩的
+    const willPreprocess   = !!(preprocess && preprocess.enabled);
+    const buildBaseName    = willPreprocess ? `${baseName}_preprocessed` : baseName;
+    const instrumentedPath = resolve(workDir, `${buildBaseName}_jalangi_.js`);
+    const smapPath         = resolve(workDir, `${buildBaseName}_jalangi_.map.json`);
 
     // ── 步骤 1：预处理（可选）────────────────────────────────────────────────
     let sourceToInstrument = sourcePath;
@@ -570,8 +603,8 @@ async function _runInstrumentation(projectId, projectDir, sourcePath, originalNa
     }
 
     // 把产物复制到项目目录（稳定路径）
-    const destInstrumented = resolve(projectDir, `${baseName}_jalangi_.js`);
-    const destSmap         = resolve(projectDir, `${baseName}_jalangi_.map.json`);
+    const destInstrumented = resolve(projectDir, `${buildBaseName}_jalangi_.js`);
+    const destSmap         = resolve(projectDir, `${buildBaseName}_jalangi_.map.json`);
 
     let iidCount = 0;
     if (existsSync(instrumentedPath)) {

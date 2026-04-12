@@ -1399,4 +1399,163 @@ router.get('/fn-cfg', (req, res) => {
     }
 });
 
+// ── GET /api/sessions/:id/plugin-stats ────────────────────────────────────
+// 返回每个分析插件的产出统计摘要，用于概览页展示
+
+router.get('/plugin-stats', (req, res) => {
+    try {
+        const { id } = req.params;
+        const session = db.get('SELECT id, event_count, smap_path FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        // 所有 COUNT/MAX/SUM 查询在同一只读事务中执行，大幅减少事务开销
+        const stats = db.transaction(() => {
+            const s = {};
+
+            // F1-EventIndex: 事件总数 + 写/读/属性事件数
+            // 合并为单条 UNION ALL 查询，避免多次全扫描
+            try {
+                const rows = db.all(`
+                    SELECT 'ev' k, COUNT(*) v FROM events      WHERE session_id = ?
+                    UNION ALL
+                    SELECT 'wr', COUNT(*)    FROM writes        WHERE session_id = ?
+                    UNION ALL
+                    SELECT 'rd', COUNT(*)    FROM reads         WHERE session_id = ?
+                    UNION ALL
+                    SELECT 'fd', COUNT(*)    FROM fields        WHERE session_id = ?
+                    UNION ALL
+                    SELECT 'vd', COUNT(*)    FROM value_dict    WHERE session_id = ?
+                `, id, id, id, id, id);
+                const m = Object.fromEntries(rows.map(r => [r.k, r.v]));
+                s['F1-EventIndex'] = {
+                    eventCount:   m.ev ?? 0,
+                    writeCount:   m.wr ?? 0,
+                    readCount:    m.rd ?? 0,
+                    fieldCount:   m.fd ?? 0,
+                    valueDictCnt: m.vd ?? 0,
+                };
+            } catch { s['F1-EventIndex'] = null; }
+
+            // F2-SmapLoader: IID 映射数
+            try {
+                s['F2-SmapLoader'] = session.smap_path
+                    ? { smapCount: db.get('SELECT COUNT(*) as cnt FROM smap WHERE session_id = ?', id)?.cnt ?? 0 }
+                    : null;
+            } catch { s['F2-SmapLoader'] = null; }
+
+            // F3-CallGraphBuilder: 函数数 + 调用边数 + 最大深度（单条 UNION ALL）
+            try {
+                const rows = db.all(`
+                    SELECT 'fn',  COUNT(DISTINCT fn_iid) FROM call_edges WHERE session_id = ?
+                    UNION ALL
+                    SELECT 'ca',  COUNT(*)               FROM call_edges WHERE session_id = ?
+                    UNION ALL
+                    SELECT 'dp',  MAX(depth)             FROM call_edges WHERE session_id = ?
+                `, id, id, id);
+                const m = Object.fromEntries(rows.map(r => [r.k ?? Object.keys(r)[0], Object.values(r)[1]]));
+                const [fn, ca, dp] = rows.map(r => Object.values(r)[1]);
+                s['F3-CallGraphBuilder'] = { fnCount: fn ?? 0, callCount: ca ?? 0, maxDepth: dp ?? 0 };
+            } catch { s['F3-CallGraphBuilder'] = null; }
+
+            // F4-VariableLifetime: 变量数 + 读写统计（单条聚合）
+            try {
+                const row = db.get(
+                    'SELECT COUNT(*) as varCount, SUM(write_count) as totalWrites, SUM(read_count) as totalReads FROM var_lifetime WHERE session_id = ?',
+                    id
+                );
+                s['F4-VariableLifetime'] = { varCount: row?.varCount ?? 0, totalWrites: row?.totalWrites ?? 0, totalReads: row?.totalReads ?? 0 };
+            } catch { s['F4-VariableLifetime'] = null; }
+
+            // A3-HotPathAnalyzer: 热点 IID 数 + 最高执行次数（单条聚合）
+            try {
+                const row = db.get('SELECT COUNT(*) as iidCount, MAX(count) as topHitCount FROM iid_counts WHERE session_id = ?', id);
+                s['A3-HotPathAnalyzer'] = { iidCount: row?.iidCount ?? 0, topHitCount: row?.topHitCount ?? 0 };
+            } catch { s['A3-HotPathAnalyzer'] = null; }
+
+            // A5-LoopDetector: 循环数 + 最大迭代次数 + 迭代快照数
+            try {
+                const row  = db.get('SELECT COUNT(*) as loopCount, MAX(iteration_count) as maxIter FROM loops WHERE session_id = ?', id);
+                const snaps = db.get('SELECT COUNT(*) as cnt FROM loop_iterations WHERE session_id = ?', id)?.cnt ?? 0;
+                s['A5-LoopDetector'] = { loopCount: row?.loopCount ?? 0, maxIter: row?.maxIter ?? 0, iterSnapshots: snaps };
+            } catch { s['A5-LoopDetector'] = null; }
+
+            // A8-ValuePatternDetector: 值模式数 + 密码学匹配数（单条聚合）
+            try {
+                const row = db.get(`
+                    SELECT COUNT(*) as patternCount,
+                           SUM(CASE WHEN matched_constant IS NOT NULL AND matched_constant != '' THEN 1 ELSE 0 END) as cryptoMatchCount
+                    FROM value_patterns WHERE session_id = ?
+                `, id);
+                s['A8-ValuePatternDetector'] = { patternCount: row?.patternCount ?? 0, cryptoMatchCount: row?.cryptoMatchCount ?? 0 };
+            } catch { s['A8-ValuePatternDetector'] = null; }
+
+            // I1-CryptoDetector: 算法数 + 最高置信度（单条聚合）
+            try {
+                const row = db.get('SELECT COUNT(DISTINCT algorithm) as algCount, MAX(confidence) as topConf FROM crypto_hints WHERE session_id = ?', id);
+                const algorithms = db.all(
+                    'SELECT DISTINCT algorithm FROM crypto_hints WHERE session_id = ? AND confidence >= 0.5 ORDER BY algorithm',
+                    id
+                ).map(r => r.algorithm).filter(Boolean);
+                s['I1-CryptoDetector'] = { algCount: row?.algCount ?? 0, topConf: Math.round((row?.topConf ?? 0) * 100), algorithms };
+            } catch { s['I1-CryptoDetector'] = null; }
+
+            // I2-SignatureAnalyzer: 签名路径数
+            try {
+                const sigCount  = db.get('SELECT COUNT(*) as cnt FROM signature_paths WHERE session_id = ?', id)?.cnt ?? 0;
+                const fieldNames = db.all('SELECT DISTINCT field_name FROM signature_paths WHERE session_id = ? LIMIT 5', id)
+                    .map(r => r.field_name).filter(Boolean);
+                s['I2-SignatureAnalyzer'] = { sigCount, fieldNames };
+            } catch { s['I2-SignatureAnalyzer'] = null; }
+
+            // A2-DataFlowGraph: 数据流边数 + 边类型分布
+            try {
+                const edgeCount = db.get('SELECT COUNT(*) as cnt FROM dataflow_edges WHERE session_id = ?', id)?.cnt ?? 0;
+                const edgeTypes = db.all(
+                    'SELECT edge_type, COUNT(*) as cnt FROM dataflow_edges WHERE session_id = ? GROUP BY edge_type ORDER BY cnt DESC',
+                    id
+                );
+                s['A2-DataFlowGraph'] = { edgeCount, edgeTypes };
+            } catch { s['A2-DataFlowGraph'] = null; }
+
+            // A7-ObjectMutationTracker: 对象数 + 变更记录数（单条聚合）
+            try {
+                const row = db.get('SELECT COUNT(DISTINCT base_var) as objCount, COUNT(*) as changeCount FROM object_timelines WHERE session_id = ?', id);
+                s['A7-ObjectMutationTracker'] = { objCount: row?.objCount ?? 0, changeCount: row?.changeCount ?? 0 };
+            } catch { s['A7-ObjectMutationTracker'] = null; }
+
+            // I3 + I4 共用 analysis_summary（只查一次）
+            let summaryJson = null;
+            try {
+                const summaryRow = db.get('SELECT summary_json FROM analysis_summary WHERE session_id = ?', id);
+                if (summaryRow?.summary_json) summaryJson = JSON.parse(summaryRow.summary_json);
+            } catch { /* ignore */ }
+
+            // I3-ObfuscationDetector: 混淆特征数 + 综合评分
+            try {
+                const hintCount = db.get('SELECT COUNT(*) as cnt FROM obfuscation_hints WHERE session_id = ?', id)?.cnt ?? 0;
+                const obfuscationScore = summaryJson?.obfuscationScore ?? summaryJson?.obfuscation_score ?? null;
+                s['I3-ObfuscationDetector'] = { hintCount, obfuscationScore };
+            } catch { s['I3-ObfuscationDetector'] = null; }
+
+            // I4-AlgorithmSummarizer: 算法标签 + 报告摘要
+            try {
+                s['I4-AlgorithmSummarizer'] = summaryJson ? {
+                    algorithms:       summaryJson.algorithms ?? summaryJson.detectedAlgorithms ?? [],
+                    obfuscationScore: summaryJson.obfuscationScore ?? summaryJson.obfuscation_score ?? null,
+                    totalEvents:      summaryJson.totalEvents ?? null,
+                    totalFunctions:   summaryJson.totalFunctions ?? null,
+                    totalEdges:       summaryJson.totalEdges ?? null,
+                } : null;
+            } catch { s['I4-AlgorithmSummarizer'] = null; }
+
+            return s;
+        })();
+
+        return res.json({ stats });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/plugin-stats] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
 export default router;

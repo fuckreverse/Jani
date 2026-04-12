@@ -246,11 +246,48 @@ router.get('/:id', (req, res) => {
             ? (db.get('SELECT COUNT(*) as cnt FROM smap WHERE session_id = ?', id)?.cnt ?? 0)
             : 0;
 
+        // 关联项目基础信息（如有）
+        let projectInfo = null;
+        if (session.project_id) {
+            try {
+                const proj = db.get(
+                    'SELECT id, name, status, smap_path, instrumented_path, preprocessed_path, iid_count, source_file FROM projects WHERE id = ?',
+                    session.project_id
+                );
+                if (proj) {
+                    // 辅助：获取文件信息（文件名 + 大小），文件不存在时返回 null
+                    const fileInfo2 = (p) => {
+                        if (!p || !existsSync(p)) return null;
+                        try {
+                            const st = statSync(p);
+                            return { name: basename(p), size: st.size };
+                        } catch { return null; }
+                    };
+                    projectInfo = {
+                        id:          proj.id,
+                        name:        proj.name,
+                        status:      proj.status,
+                        iidCount:    proj.iid_count ?? 0,
+                        source:      fileInfo2(proj.source_file),
+                        preprocessed: fileInfo2(proj.preprocessed_path),
+                        instrumented: fileInfo2(proj.instrumented_path),
+                        smap:        fileInfo2(proj.smap_path),
+                        // 向后兼容字段（OverviewTab 原有使用）
+                        hasInstrumented:     !!(proj.instrumented_path && existsSync(proj.instrumented_path)),
+                        hasSmap:             !!(proj.smap_path && existsSync(proj.smap_path)),
+                        hasPreprocessed:     !!(proj.preprocessed_path && existsSync(proj.preprocessed_path)),
+                        hasSource:           !!(proj.source_file && existsSync(proj.source_file)),
+                    };
+                }
+            } catch { /* 查询失败不影响主接口 */ }
+        }
+
         return res.json({
             ...session,
             plugin_status: safeParseJson(session.plugin_status, {}),
             fileInfo,
             smapCount,
+            projectInfo,
         });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id] error:');

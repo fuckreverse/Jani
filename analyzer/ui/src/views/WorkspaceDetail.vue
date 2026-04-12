@@ -35,23 +35,6 @@
             </div>
           </div>
           <div class="info-actions">
-            <button v-if="project.status === 'ready'" class="btn-secondary btn-sm" @click="downloadInstrumented">
-              ⬇ 插桩后代码
-            </button>
-            <button v-if="project.status === 'ready'" class="btn-secondary btn-sm" @click="downloadSmap">
-              ⬇ smap.json
-            </button>
-            <button
-              v-if="project.status === 'ready'"
-              class="btn-secondary btn-sm"
-              :disabled="copyingCode"
-              @click="copyInstrumentedCode"
-            >
-              <span v-if="copyingCode">⏳ 复制中...</span>
-              <span v-else-if="copyCodeMsg === 'ok'">✅ 已复制</span>
-              <span v-else-if="copyCodeMsg === 'fail'">❌ 复制失败</span>
-              <span v-else>📋 复制代码</span>
-            </button>
             <button
               v-if="project.status === 'ready' || project.status === 'failed'"
               class="btn-accent btn-sm"
@@ -81,14 +64,6 @@
             <span class="stat-label">IID 数量</span>
             <span class="stat-value">{{ project.iid_count?.toLocaleString() || 0 }}</span>
           </div>
-          <div class="stat-item" v-if="project.instrumented_size != null">
-            <span class="stat-label">插桩后代码</span>
-            <span class="stat-value">{{ formatBytes(project.instrumented_size) }}</span>
-          </div>
-          <div class="stat-item" v-if="project.smap_size != null">
-            <span class="stat-label">smap.json</span>
-            <span class="stat-value">{{ formatBytes(project.smap_size) }}</span>
-          </div>
           <div class="stat-item">
             <span class="stat-label">会话数</span>
             <span class="stat-value">{{ project.sessions?.length || 0 }}</span>
@@ -100,6 +75,46 @@
           <div class="stat-item" v-if="project.instrument_options">
             <span class="stat-label">目标平台</span>
             <span class="stat-value">{{ parsedOptions?.target || 'browser' }}</span>
+          </div>
+        </div>
+
+        <!-- 文件信息（就绪状态显示） -->
+        <div v-if="project.status === 'ready'" class="ws-files-section">
+          <!-- 原始源码 -->
+          <div v-if="project.source_name" class="ws-file-row">
+            <span class="ws-file-icon">📄</span>
+            <span class="ws-file-label">原始源码</span>
+            <code class="ws-file-name">{{ project.source_name }}</code>
+            <span class="ws-file-size">{{ formatBytes(project.source_size) }}</span>
+            <button class="ws-cp-btn" :class="copyStateClass(copyStates[`/api/projects/${projectId}/source`])" @click="copyFile(`/api/projects/${projectId}/source`)" :title="copyStateTitle(copyStates[`/api/projects/${projectId}/source`])">{{ copyStateIcon(copyStates[`/api/projects/${projectId}/source`]) }}</button>
+            <a :href="`/api/projects/${projectId}/source`" download class="ws-dl-btn" title="下载原始源码">⬇</a>
+          </div>
+          <!-- 预处理代码 -->
+          <div v-if="project.preprocessed_name" class="ws-file-row ws-file-row--preprocess">
+            <span class="ws-file-icon">🔧</span>
+            <span class="ws-file-label">预处理代码</span>
+            <code class="ws-file-name">{{ project.preprocessed_name }}</code>
+            <span class="ws-file-size">{{ formatBytes(project.preprocessed_size) }}</span>
+            <button class="ws-cp-btn" :class="copyStateClass(copyStates[`/api/projects/${projectId}/preprocessed`])" @click="copyFile(`/api/projects/${projectId}/preprocessed`)" :title="copyStateTitle(copyStates[`/api/projects/${projectId}/preprocessed`])">{{ copyStateIcon(copyStates[`/api/projects/${projectId}/preprocessed`]) }}</button>
+            <a :href="`/api/projects/${projectId}/preprocessed`" download class="ws-dl-btn" title="下载预处理后代码">⬇</a>
+          </div>
+          <!-- smap -->
+          <div v-if="project.smap_name" class="ws-file-row ws-file-row--smap">
+            <span class="ws-file-icon">🗺️</span>
+            <span class="ws-file-label">smap</span>
+            <code class="ws-file-name">{{ project.smap_name }}</code>
+            <span class="ws-file-size">{{ formatBytes(project.smap_size) }}</span>
+            <button class="ws-cp-btn" :class="copyStateClass(copyStates[`/api/projects/${projectId}/smap`])" @click="copyFile(`/api/projects/${projectId}/smap`)" :title="copyStateTitle(copyStates[`/api/projects/${projectId}/smap`])">{{ copyStateIcon(copyStates[`/api/projects/${projectId}/smap`]) }}</button>
+            <a :href="`/api/projects/${projectId}/smap`" download class="ws-dl-btn" title="下载 smap.json">⬇</a>
+          </div>
+          <!-- 插桩代码 -->
+          <div v-if="project.instrumented_name" class="ws-file-row ws-file-row--instrumented">
+            <span class="ws-file-icon">⚙️</span>
+            <span class="ws-file-label">插桩代码</span>
+            <code class="ws-file-name">{{ project.instrumented_name }}</code>
+            <span class="ws-file-size">{{ formatBytes(project.instrumented_size) }}</span>
+            <button class="ws-cp-btn" :class="copyStateClass(copyStates[`/api/projects/${projectId}/instrumented`])" @click="copyFile(`/api/projects/${projectId}/instrumented`)" :title="copyStateTitle(copyStates[`/api/projects/${projectId}/instrumented`])">{{ copyStateIcon(copyStates[`/api/projects/${projectId}/instrumented`]) }}</button>
+            <a :href="`/api/projects/${projectId}/instrumented`" download class="ws-dl-btn" title="下载插桩后代码">⬇</a>
           </div>
         </div>
       </div>
@@ -528,28 +543,45 @@ async function downloadSmap() {
     a.click();
 }
 
-// ── 复制插桩后代码到剪贴板 ────────────────────────────────────────────────────
-const copyingCode = ref(false);
-const copyCodeMsg = ref('');   // '' | 'ok' | 'fail'
+// ── 通用文件复制到剪贴板 ──────────────────────────────────────────────────────
+// copyStates: url → '' | 'loading' | 'ok' | 'fail'
+const copyStates = ref({});
 
-async function copyInstrumentedCode() {
-    if (copyingCode.value) return;
-    copyingCode.value = true;
-    copyCodeMsg.value  = '';
+async function copyFile(url) {
+    if (copyStates.value[url] === 'loading') return;
+    copyStates.value = { ...copyStates.value, [url]: 'loading' };
     try {
-        const res = await fetch(`/api/projects/${projectId}/instrumented`);
+        const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const text = await res.text();
         await navigator.clipboard.writeText(text);
-        copyCodeMsg.value = 'ok';
+        copyStates.value = { ...copyStates.value, [url]: 'ok' };
     } catch (e) {
-        console.error('copyInstrumentedCode error:', e);
-        copyCodeMsg.value = 'fail';
+        console.error('copyFile error:', e);
+        copyStates.value = { ...copyStates.value, [url]: 'fail' };
     } finally {
-        copyingCode.value = false;
-        setTimeout(() => { copyCodeMsg.value = ''; }, 2500);
+        setTimeout(() => { copyStates.value = { ...copyStates.value, [url]: '' }; }, 2500);
     }
 }
+
+function copyStateIcon(state) {
+    if (state === 'loading') return '⏳';
+    if (state === 'ok')      return '✅';
+    if (state === 'fail')    return '❌';
+    return '📋';
+}
+function copyStateTitle(state) {
+    if (state === 'loading') return '复制中...';
+    if (state === 'ok')      return '已复制！';
+    if (state === 'fail')    return '复制失败';
+    return '复制到剪贴板';
+}
+function copyStateClass(state) {
+    if (state === 'ok')   return 'ws-cp-btn--ok';
+    if (state === 'fail') return 'ws-cp-btn--fail';
+    return '';
+}
+
 
 // ── Fork（重新插桩）Modal ─────────────────────────────────────────────────────
 const showForkModal   = ref(false);
@@ -754,6 +786,41 @@ onUnmounted(() => {
 
 .stat-label { font-size: 11px; color: var(--text-muted); }
 .stat-value { font-size: 15px; font-weight: 600; color: var(--text-primary); font-family: monospace; }
+
+/* 文件信息区 */
+.ws-files-section {
+    display: flex; flex-direction: column; gap: 6px;
+    margin-top: 16px; padding-top: 14px;
+    border-top: 1px solid var(--border-color);
+}
+.ws-file-row {
+    display: grid;
+    grid-template-columns: 22px 90px 1fr auto 28px 28px;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    font-size: 12px;
+}
+.ws-file-row--preprocess  { border-color: rgba(251,191,36,0.25); background: rgba(251,191,36,0.04); }
+.ws-file-row--smap        { border-color: rgba(34,197,94,0.25);  background: rgba(34,197,94,0.04);  }
+.ws-file-row--instrumented{ border-color: rgba(99,102,241,0.25); background: rgba(99,102,241,0.04); }
+
+.ws-file-icon  { font-size: 14px; text-align: center; }
+.ws-file-label { font-size: 10px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; }
+.ws-file-name  { font-family: monospace; font-size: 11px; color: var(--text-secondary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-file-size  { font-size: 11px; color: var(--text-muted); white-space: nowrap; text-align: right; }
+.ws-dl-btn, .ws-cp-btn {
+    font-size: 13px; text-align: center; text-decoration: none;
+    color: var(--text-muted); padding: 2px 6px; border-radius: 5px;
+    border: 1px solid var(--border-color); transition: all 0.15s;
+    background: none; cursor: pointer; line-height: 1;
+}
+.ws-dl-btn:hover, .ws-cp-btn:hover { color: var(--text-primary); border-color: var(--text-muted); background: var(--bg-hover); }
+.ws-cp-btn--ok   { color: #86efac !important; border-color: rgba(34,197,94,0.4) !important; }
+.ws-cp-btn--fail { color: #fca5a5 !important; border-color: rgba(239,68,68,0.4) !important; }
 
 /* 上传区 */
 .upload-section {
