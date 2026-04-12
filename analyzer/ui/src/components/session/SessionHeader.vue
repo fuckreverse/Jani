@@ -15,15 +15,20 @@
         <span class="inline-progress-hint">点击查看详情 ›</span>
       </div>
       <!-- 就绪时，显示插件小点 + 进度按钮 -->
-      <div v-else class="header-plugin-dots">
+      <div v-else class="header-plugin-dots" :class="{ 'has-stale': hasStale }">
         <div
           v-for="(status, pid) in pluginStatus"
           :key="pid"
           class="plugin-dot"
-          :class="'plugin-dot-' + status"
-          :title="pid + ': ' + status"
+          :class="['plugin-dot-' + status, { 'plugin-dot-stale': stalePlugins.has(pid) }]"
+          :title="stalePlugins.has(pid) ? pid + ': ' + status + ' ⚠️ 已过期' : pid + ': ' + status"
         ></div>
-        <button class="btn-show-progress" @click="$emit('openProgress')">🔍 进度</button>
+        <button
+          class="btn-show-progress"
+          :class="{ 'btn-show-progress-stale': hasStale }"
+          :title="hasStale ? '⚠️ 有分析数据已过期，点击查看进度' : undefined"
+          @click="$emit('openProgress')"
+        >{{ hasStale ? '⚠️ 进度' : '🔍 进度' }}</button>
       </div>
     </div>
   </div>
@@ -32,15 +37,19 @@
 <script setup>
 import { statusLabel } from '../../composables/useSessionUtils.js';
 
-defineProps({
+const props = defineProps({
     session:           { type: Object,  required: true },
     pluginStatus:      { type: Object,  default: () => ({}) },
     isAnalyzing:       { type: Boolean, default: false },
     inlineProgressPct: { type: Number,  default: 0 },
     runningPlugin:     { type: String,  default: '' },
+    stalePlugins:      { type: Set,     default: () => new Set() },
 });
 
 defineEmits(['openProgress']);
+
+import { computed } from 'vue';
+const hasStale = computed(() => props.stalePlugins.size > 0);
 </script>
 
 <style scoped>
@@ -81,10 +90,22 @@ defineEmits(['openProgress']);
 .plugin-dot-pending { background: #475569; }
 .plugin-dot-skipped { background: #374151; }
 .plugin-dot-idle    { background: #1e2235; border: 1px solid #2d3148; }
+/* stale 小圆点：橙色覆盖原状态色 */
+.plugin-dot-stale   { background: #fb923c !important; box-shadow: 0 0 4px rgba(251,146,60,0.6); }
 .btn-show-progress {
     margin-left: 6px; padding: 4px 10px; border-radius: 6px;
     border: 1px solid var(--border-color); background: transparent;
     color: var(--text-muted); font-size: 11px; cursor: pointer; transition: all 0.15s;
 }
 .btn-show-progress:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+/* stale 状态：进度按钮变橙色 */
+.btn-show-progress-stale {
+    border-color: rgba(251,146,60,0.5) !important;
+    background: rgba(251,146,60,0.1) !important;
+    color: #fb923c !important;
+}
+.btn-show-progress-stale:hover {
+    background: rgba(251,146,60,0.2) !important;
+    color: #fed7aa !important;
+}
 </style>

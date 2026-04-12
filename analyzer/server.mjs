@@ -557,7 +557,7 @@ wss.on('connection', (ws, req) => {
                 let checkpoints = [];
                 try {
                     checkpoints = db.all(
-                        'SELECT plugin_id, phase, completed_at, duration_ms FROM plugin_checkpoints WHERE session_id = ? ORDER BY completed_at ASC',
+                        'SELECT plugin_id, phase, completed_at, duration_ms, is_stale FROM plugin_checkpoints WHERE session_id = ? ORDER BY completed_at ASC',
                         sessionId
                     );
                 } catch { /* table may not exist on old db */ }

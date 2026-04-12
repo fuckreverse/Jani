@@ -29,6 +29,7 @@
       :is-analyzing="isAnalyzing"
       :inline-progress-pct="inlineProgressPct"
       :running-plugin="runningPlugin"
+      :stale-plugins="wsStalePlugins"
       @open-progress="showProgressDrawer = true"
     />
 
@@ -48,9 +49,10 @@
           v-for="tab in tabs"
           :key="tab.id"
           class="tab-btn"
-          :class="{ 'tab-active': activeTab === tab.id }"
+          :class="{ 'tab-active': activeTab === tab.id, 'tab-stale': isTabStale(tab.id) }"
           @click="onTabClick(tab.id)"
-        >{{ tab.label }}</button>
+          :title="isTabStale(tab.id) ? `${tab.label} — 上游数据已更新，结果可能过期，建议重新分析此阶段` : undefined"
+        >{{ tab.label }}<span v-if="isTabStale(tab.id)" class="tab-stale-dot" title="">⚠</span></button>
 
         <!-- 右侧工具按钮组 -->
         <div class="tab-nav-actions">
@@ -60,6 +62,16 @@
             @click="showProgressDrawer = true"
           >{{ isAnalyzing ? '⏳ 分析中...' : '🔍 进度' }}</button>
         </div>
+      </div>
+
+      <!-- stale 警告横幅：当前 Tab 依赖的插件数据可能已过期 -->
+      <div v-if="isTabStale(activeTab)" class="stale-banner card">
+        <span class="stale-banner-icon">⚠️</span>
+        <span class="stale-banner-text">
+          当前 Tab 的分析数据可能已过期——上游阶段已重新分析，但本阶段尚未跟进重跑。
+          如需最新结果，请前往 <strong>进度抽屉</strong> 重新分析对应阶段。
+        </span>
+        <button class="stale-banner-btn" @click="showProgressDrawer = true">⏩ 前往重分析</button>
       </div>
 
       <!-- Tab 内容区域（使用 v-show 保留已加载组件状态） -->
@@ -116,6 +128,31 @@ const showHelpDrawer = ref(false);
 const wsPluginStatus   = ref({});  // pluginId → 'pending'|'running'|'done'|'failed'|'skipped'
 const wsPluginDuration = ref({});
 const wsSessionStatus  = ref('');
+const wsStalePlugins   = ref(new Set()); // 已过期的插件集合（上游数据已更新，结果可能不一致）
+
+// ─── Tab → 所依赖的插件 ID（用于 stale 警告） ────────────────────────────────
+const TAB_PLUGIN_MAP = {
+    functions:   ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'],
+    loops:       ['A5-LoopDetector'],
+    patterns:    ['A8-ValuePatternDetector'],
+    crypto:      ['I1-CryptoDetector'],
+    signatures:  ['I2-SignatureAnalyzer'],
+    dataflow:    ['A2-DataFlowGraph'],
+    strings:     ['A4-StringTracker'],
+    objmut:      ['A7-ObjectMutationTracker'],
+    obfuscation: ['I3-ObfuscationDetector'],
+    summary:     ['I4-AlgorithmSummarizer'],
+    cfg:         ['F3-CallGraphBuilder', 'A5-LoopDetector'],
+};
+
+/** 判断指定 Tab 的依赖插件是否有 stale 数据 */
+const isTabStale = computed(() => {
+    return (tabId) => {
+        const plugins = TAB_PLUGIN_MAP[tabId];
+        if (!plugins) return false;
+        return plugins.some(pid => wsStalePlugins.value.has(pid));
+    };
+});
 
 const ALL_PLUGIN_IDS = [
     'F1-EventIndex', 'F2-SmapLoader',
@@ -356,6 +393,7 @@ function onPluginDone(pluginId) {
 // ─── WebSocket 进度订阅 ───────────────────────────────────────────────────────
 let ws = null;
 let wsReconnectTimer = null;
+let wsDestroyed = false; // 组件卸载时设为 true，停止重连
 
 function handleDetailWsEvent(msg) {
     if (msg.type === 'init') {
@@ -369,6 +407,9 @@ function handleDetailWsEvent(msg) {
             for (const cp of msg.checkpoints) {
                 wsPluginStatus.value[cp.plugin_id] = 'done';
                 if (cp.duration_ms) wsPluginDuration.value[cp.plugin_id] = cp.duration_ms;
+                if (cp.is_stale) {
+                    wsStalePlugins.value = new Set([...wsStalePlugins.value, cp.plugin_id]);
+                }
             }
         }
         loadSession();
@@ -389,6 +430,12 @@ function handleDetailWsEvent(msg) {
     } else if (msg.type === 'plugin_done') {
         wsPluginStatus.value[msg.plugin] = 'done';
         if (msg.durationMs) wsPluginDuration.value[msg.plugin] = msg.durationMs;
+        // 插件重跑完成，清除 stale 标记
+        if (wsStalePlugins.value.has(msg.plugin)) {
+            const next = new Set(wsStalePlugins.value);
+            next.delete(msg.plugin);
+            wsStalePlugins.value = next;
+        }
         onPluginDone(msg.plugin);
         loadSession();
 
@@ -413,6 +460,7 @@ function handleDetailWsEvent(msg) {
 }
 
 function connectWs() {
+    if (wsDestroyed) return;
     const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/sessions/${sessionId.value}/progress`;
     ws = new WebSocket(wsUrl);
     ws.onmessage = (e) => {
@@ -420,7 +468,9 @@ function connectWs() {
     };
     ws.onerror = () => ws?.close();
     ws.onclose = () => {
-        if (wsSessionStatus.value !== 'ready') {
+        // 始终尝试重连（除非组件已卸载）
+        // 注意：即使分析已完成(ready)，后续仍可能触发重跑，需要收到新的 init/stale 消息
+        if (!wsDestroyed) {
             wsReconnectTimer = setTimeout(connectWs, 5000);
         }
     };
@@ -436,6 +486,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+    wsDestroyed = true;
     if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
     if (ws) { ws.onclose = null; ws.close(); }
     if (refreshTimer) clearInterval(refreshTimer);
@@ -480,5 +531,45 @@ onUnmounted(() => {
     color: var(--text-muted); border-color: var(--border-color);
 }
 .btn-help:hover { color: #a5b4fc; border-color: rgba(99,102,241,0.4); background: rgba(99,102,241,0.1); }
+
+/* ── stale Tab 徽标 ───────────────────────────────────────────────────────── */
+.tab-stale-dot {
+    display: inline-block;
+    margin-left: 4px;
+    font-size: 10px;
+    color: #fb923c;
+    vertical-align: middle;
+    line-height: 1;
+}
+.tab-stale { border-color: rgba(251, 146, 60, 0.35) !important; }
+.tab-stale:not(.tab-active) { color: #fb923c !important; }
+
+/* ── stale 警告横幅 ───────────────────────────────────────────────────────── */
+.stale-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    background: rgba(251, 146, 60, 0.08);
+    border: 1px solid rgba(251, 146, 60, 0.3);
+    border-radius: 8px;
+    color: #fdba74;
+    font-size: 13px;
+    line-height: 1.5;
+}
+.stale-banner-icon { font-size: 16px; flex-shrink: 0; }
+.stale-banner-text { flex: 1; }
+.stale-banner-text strong { color: #fed7aa; }
+.stale-banner-btn {
+    flex-shrink: 0;
+    padding: 4px 12px; border-radius: 6px; border: 1px solid rgba(251, 146, 60, 0.4);
+    background: rgba(251, 146, 60, 0.15); color: #fb923c;
+    font-size: 12px; cursor: pointer; white-space: nowrap;
+    transition: all 0.15s;
+}
+.stale-banner-btn:hover {
+    background: rgba(251, 146, 60, 0.25);
+    color: #fed7aa;
+}
 
 </style>

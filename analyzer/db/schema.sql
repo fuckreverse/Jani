@@ -463,6 +463,7 @@ CREATE TABLE IF NOT EXISTS plugin_checkpoints (
     phase       TEXT,
     completed_at INTEGER NOT NULL,
     duration_ms  INTEGER,
+    is_stale    INTEGER DEFAULT 0,  -- 1 = 上游数据已更新，本插件结果可能过期
     UNIQUE (session_id, plugin_id)
 );
 CREATE INDEX IF NOT EXISTS idx_loop_iter_session   ON loop_iterations(session_id, loop_id);

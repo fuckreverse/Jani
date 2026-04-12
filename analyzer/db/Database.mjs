@@ -201,6 +201,18 @@ function _runMigrations(db) {
         db.exec('ALTER TABLE projects ADD COLUMN preprocessed_path TEXT');
     }
 
+    // ── 迁移：plugin_checkpoints 加 is_stale 列 ───────────────────────────────
+    // is_stale=1 表示上游数据已更新，该插件的输出结果可能已过期
+    const checkpointCols = new Set();
+    try {
+        const rows = db.pragma('table_info(plugin_checkpoints)');
+        for (const row of rows) checkpointCols.add(row.name);
+    } catch { /* table may not exist yet */ }
+
+    if (checkpointCols.size > 0 && !checkpointCols.has('is_stale')) {
+        db.exec('ALTER TABLE plugin_checkpoints ADD COLUMN is_stale INTEGER DEFAULT 0');
+    }
+
     // ── 性能迁移：writes/reads/fields 去掉 AUTOINCREMENT + FOREIGN KEY ────────
     // SQLite 中 AUTOINCREMENT 需要维护 sqlite_sequence 表，每次 INSERT 有额外开销。
     // FOREIGN KEY 在批量写入时会对每行做父表查找。两者对 F1 的百万级 INSERT 有显著影响。

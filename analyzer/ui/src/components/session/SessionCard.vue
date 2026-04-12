@@ -21,7 +21,11 @@
     </div>
 
     <!-- 插件状态 -->
-    <div v-if="session.plugin_status && Object.keys(session.plugin_status).length > 0" class="plugin-status-bar">
+    <div
+      v-if="session.plugin_status && Object.keys(session.plugin_status).length > 0"
+      class="plugin-status-bar"
+      :class="{ 'plugin-status-bar-stale': session.has_stale }"
+    >
       <div
         v-for="(status, pluginId) in session.plugin_status"
         :key="pluginId"
@@ -29,12 +33,17 @@
         :class="`plugin-dot-${status}`"
         :title="`${pluginId}: ${status}`"
       ></div>
-      <!-- 进行中时，显示「查看进度」按钮 -->
+      <!-- 进行中时，显示「查看进度」按钮；完成且有 stale 时，显示过期提示 -->
       <button
         v-if="['parsing','indexing','processing'].includes(session.status)"
         class="btn-progress"
         @click.stop="$emit('openProgress', session)"
       >⚡ 进度</button>
+      <span
+        v-else-if="session.has_stale"
+        class="stale-hint"
+        title="部分分析数据已过期，进入会话后可重新分析"
+      >⚠️ 已过期</span>
     </div>
 
     <!-- 会话操作栏 -->
@@ -84,7 +93,8 @@ function getFilename(path) {
 .meta-value { color: var(--text-primary); font-family: monospace; }
 
 /* 插件状态点 */
-.plugin-status-bar { display: flex; gap: 4px; padding-top: 8px; border-top: 1px solid var(--border-color); }
+.plugin-status-bar { display: flex; gap: 4px; padding-top: 8px; border-top: 1px solid var(--border-color); align-items: center; }
+.plugin-status-bar-stale { border-top-color: rgba(251, 146, 60, 0.35); }
 .plugin-dot { width: 8px; height: 8px; border-radius: 50%; }
 .plugin-dot-pending  { background: #475569; }
 .plugin-dot-running  { background: #3b82f6; animation: pulse 1s infinite; }
@@ -99,6 +109,15 @@ function getFilename(path) {
     color: #a5b4fc; font-size: 10px; cursor: pointer; transition: all .15s; flex-shrink: 0;
 }
 .btn-progress:hover { background: rgba(99,102,241,.25); border-color: rgba(99,102,241,.6); }
+
+/* stale 提示标签 */
+.stale-hint {
+    margin-left: auto; font-size: 10px; font-weight: 600;
+    padding: 1px 6px; border-radius: 4px;
+    background: rgba(251, 146, 60, 0.15);
+    border: 1px solid rgba(251, 146, 60, 0.35);
+    color: #fb923c; white-space: nowrap; cursor: help;
+}
 
 /* 会话操作栏 */
 .session-actions {

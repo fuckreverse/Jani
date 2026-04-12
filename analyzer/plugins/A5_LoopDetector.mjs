@@ -49,24 +49,21 @@ export default class A5LoopDetector extends BasePlugin {
 
         this.emitProgress(ctx, '清空旧数据...', 0);
 
-        // 确保表结构正确
-        try {
-            rawDb.exec(`
-                DROP TABLE IF EXISTS loop_iterations;
-                CREATE TABLE IF NOT EXISTS loop_iterations (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id      TEXT NOT NULL,
-                    loop_id         INTEGER NOT NULL,
-                    iteration_idx   INTEGER NOT NULL,
-                    start_seq       INTEGER,
-                    end_seq         INTEGER,
-                    vars_snapshot   TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_loop_iter_session ON loop_iterations(session_id, loop_id);
-            `);
-        } catch {
-            rawDb.prepare('DELETE FROM loop_iterations WHERE session_id = ?').run(sessionId);
-        }
+        // 确保表结构存在（幂等，不影响其他 session 的数据）
+        rawDb.exec(`
+            CREATE TABLE IF NOT EXISTS loop_iterations (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id      TEXT NOT NULL,
+                loop_id         INTEGER NOT NULL,
+                iteration_idx   INTEGER NOT NULL,
+                start_seq       INTEGER,
+                end_seq         INTEGER,
+                vars_snapshot   TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_loop_iter_session ON loop_iterations(session_id, loop_id);
+        `);
+        // 只删除当前 session 的旧数据（不影响其他 session）
+        rawDb.prepare('DELETE FROM loop_iterations WHERE session_id = ?').run(sessionId);
 
         // ── Step 1: 加载所有循环（按迭代次数降序，最多 MAX_LOOPS 个）─────────────
         const allLoops = rawDb.prepare(

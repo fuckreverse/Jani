@@ -19,7 +19,30 @@ import { existsSync, mkdirSync, copyFileSync, rmSync, statSync } from 'fs';
 import { resolve, basename } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import * as db from '../../db/Database.mjs';
-import { schedule, autoDiscover, getCheckpoints, clearCheckpoints } from '../../PluginEngine.mjs';
+import { schedule, autoDiscover, getCheckpoints, clearCheckpoints, markStale } from '../../PluginEngine.mjs';
+
+// ── 各阶段重跑时需要标记为 stale 的下游插件 ───────────────────────────────────
+// 键：被重跑的阶段；值：依赖该阶段输出的下游插件 ID 列表
+// 逻辑依据：
+//   Phase1 重跑 → F1/F2 的输出（events/writes/reads/smap）是所有插件的基础，
+//               因此全部下游都应标记 stale（P2/P3/P4 全部）
+//   Phase2 重跑 → 重写 call_edges / var_lifetime / iid_counts / loops，
+//               依赖这些表的下游：A5(loops)、I1(loops+value_patterns)、
+//               I3(iid_counts)、I4(iid_counts+loops+call_edges+var_lifetime)
+//   Phase3 重跑 → 重写 value_patterns / crypto_hints / loop_iterations / signature_paths，
+//               I4 依赖 crypto_hints，需标记 stale
+//   Phase4 重跑 → 无下游依赖它的插件
+const DOWNSTREAM_STALE_MAP = {
+    phase1: [
+        'F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer',
+        'A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector',
+        'I2-SignatureAnalyzer', 'A2-DataFlowGraph', 'A4-StringTracker',
+        'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer',
+    ],
+    phase2: ['A5-LoopDetector', 'I1-CryptoDetector', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer'],
+    phase3: ['I4-AlgorithmSummarizer'],
+    phase4: [],
+};
 import { safeParseJson } from './utils.mjs';
 
 const router = Router();
@@ -171,14 +194,19 @@ router.post('/', async (req, res) => {
 router.get('/', (req, res) => {
     try {
         const sessions = db.all(
-            `SELECT id, name, created_at, source_file, status, event_count, plugin_status
-             FROM sessions
-             ORDER BY created_at DESC`
+            `SELECT s.id, s.name, s.created_at, s.source_file, s.status, s.event_count, s.plugin_status,
+                    EXISTS(
+                        SELECT 1 FROM plugin_checkpoints pc
+                        WHERE pc.session_id = s.id AND pc.is_stale = 1
+                    ) AS has_stale
+             FROM sessions s
+             ORDER BY s.created_at DESC`
         );
 
         const result = sessions.map(s => ({
             ...s,
             plugin_status: safeParseJson(s.plugin_status, {}),
+            has_stale: Boolean(s.has_stale), // SQLite 返回 0/1，转成 bool
         }));
 
         return res.json(result);
@@ -321,11 +349,14 @@ router.post('/:id/re-run', async (req, res) => {
             });
         }
 
-        // 强制重跑：清除指定插件的检查点
+        // 强制重跑：清除指定插件的检查点，并将下游插件标记为 stale
         if (forceRerun) {
             for (const pluginId of targetPlugins) {
                 clearCheckpoints(id, pluginId);
             }
+            // 将依赖本阶段输出的下游插件标记为 stale（数据可能已过期）
+            const downstreamPlugins = DOWNSTREAM_STALE_MAP[phase] ?? [];
+            markStale(id, downstreamPlugins);
         }
 
         const sessionDir = resolve(DATA_DIR, id);
@@ -368,6 +399,7 @@ router.post('/:id/run-phase3', async (req, res) => {
 
         if (forceRerun) {
             for (const pluginId of plugins) clearCheckpoints(id, pluginId);
+            markStale(id, DOWNSTREAM_STALE_MAP.phase3);
         }
 
         // 异步执行，不阻塞响应
@@ -405,6 +437,7 @@ router.post('/:id/run-phase4', async (req, res) => {
 
         if (forceRerun) {
             for (const pluginId of plugins) clearCheckpoints(id, pluginId);
+            markStale(id, DOWNSTREAM_STALE_MAP.phase4);
         }
 
         schedule(id, {

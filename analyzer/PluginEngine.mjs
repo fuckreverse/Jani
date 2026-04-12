@@ -134,17 +134,37 @@ function hasCheckpoint(sessionId, pluginId) {
 }
 
 /**
- * 写入插件检查点
+ * 写入插件检查点（同时清除 is_stale 标记，表示数据已是最新）
  */
 function writeCheckpoint(sessionId, pluginId, phase, durationMs) {
     try {
         db.run(
-            `INSERT OR REPLACE INTO plugin_checkpoints (session_id, plugin_id, phase, completed_at, duration_ms)
-             VALUES (?, ?, ?, ?, ?)`,
+            `INSERT OR REPLACE INTO plugin_checkpoints (session_id, plugin_id, phase, completed_at, duration_ms, is_stale)
+             VALUES (?, ?, ?, ?, ?, 0)`,
             sessionId, pluginId, phase || null, Date.now(), durationMs
         );
     } catch (e) {
         log.warn({ err: e }, 'writeCheckpoint error');
+    }
+}
+
+/**
+ * 将指定插件列表的检查点标记为 stale（上游数据已更新，结果可能过期）
+ * 只影响已存在的 checkpoint，不影响尚未运行的插件。
+ * @param {string} sessionId
+ * @param {string[]} pluginIds - 需要标记为 stale 的下游插件 ID 列表
+ */
+export function markStale(sessionId, pluginIds) {
+    if (!pluginIds || pluginIds.length === 0) return;
+    try {
+        for (const pluginId of pluginIds) {
+            db.run(
+                'UPDATE plugin_checkpoints SET is_stale = 1 WHERE session_id = ? AND plugin_id = ?',
+                sessionId, pluginId
+            );
+        }
+    } catch (e) {
+        log.warn({ err: e }, 'markStale error');
     }
 }
 
@@ -156,7 +176,7 @@ function writeCheckpoint(sessionId, pluginId, phase, durationMs) {
 export function getCheckpoints(sessionId) {
     try {
         return db.all(
-            'SELECT plugin_id, phase, completed_at, duration_ms FROM plugin_checkpoints WHERE session_id = ? ORDER BY completed_at ASC',
+            'SELECT plugin_id, phase, completed_at, duration_ms, is_stale FROM plugin_checkpoints WHERE session_id = ? ORDER BY completed_at ASC',
             sessionId
         );
     } catch {

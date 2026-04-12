@@ -29,6 +29,7 @@
               <div class="phase-header" @click="phase.expanded = !phase.expanded">
                 <span class="phase-icon">{{ phaseIcon(phase) }}</span>
                 <span class="phase-label">{{ phase.label }}</span>
+                <span v-if="isPhaseStale(phase.id)" class="phase-stale-badge" title="该阶段含有过期数据，建议重新分析">⚠️ 已过期</span>
                 <span class="phase-badge" :class="phaseBadgeClass(phase)">{{ phaseSummary(phase) }}</span>
                 <span class="phase-chevron">{{ phase.expanded ? '▾' : '▸' }}</span>
               </div>
@@ -44,6 +45,7 @@
                     <div class="plugin-main">
                       <div class="plugin-top-row">
                         <span class="plugin-name">{{ (PLUGIN_META[pid] || {}).label || pid }}</span>
+                        <span v-if="isPluginStale(pid)" class="plugin-stale-badge" title="上游数据已更新，该插件结果可能过期，建议重新分析">⚠️ 已过期</span>
                         <span v-if="getPluginDuration(pid)" class="plugin-duration">{{ formatDuration(getPluginDuration(pid)) }}</span>
                         <span v-if="getPluginStatus(pid) === 'running'" class="plugin-spinner"></span>
                       </div>
@@ -80,35 +82,35 @@
               <!-- Phase 2 -->
               <button
                 class="btn-phase btn-phase2"
-                :class="{ 'btn-rerun': isPhaseRun('phase2') }"
+                :class="{ 'btn-rerun': isPhaseRun('phase2'), 'btn-stale': isPhaseStale('phase2') }"
                 :disabled="isPhaseRunning('phase2') || isAnalyzingAny"
                 @click="triggerPhase('phase2')"
-                title="F3 调用图 / F4 变量生命周期 / A3 热路径"
+                :title="isPhaseStale('phase2') ? '⚠️ 该阶段含过期数据，建议重新分析 | F3 调用图 / F4 变量生命周期 / A3 热路径' : 'F3 调用图 / F4 变量生命周期 / A3 热路径'"
               >
-                <span class="phase-btn-icon">{{ isPhaseRunning('phase2') ? '⏳' : isPhaseRun('phase2') ? '🔄' : '▶' }}</span>
-                {{ isPhaseRunning('phase2') ? 'P2 分析中...' : isPhaseRun('phase2') ? '重新分析 P2' : '分析 Phase 2' }}
+                <span class="phase-btn-icon">{{ isPhaseRunning('phase2') ? '⏳' : isPhaseStale('phase2') ? '⚠️' : isPhaseRun('phase2') ? '🔄' : '▶' }}</span>
+                {{ isPhaseRunning('phase2') ? 'P2 分析中...' : isPhaseStale('phase2') ? '重分析 P2 (过期)' : isPhaseRun('phase2') ? '重新分析 P2' : '分析 Phase 2' }}
               </button>
               <!-- Phase 3 -->
               <button
                 class="btn-phase btn-phase3"
-                :class="{ 'btn-rerun': isPhaseRun('phase3') }"
+                :class="{ 'btn-rerun': isPhaseRun('phase3'), 'btn-stale': isPhaseStale('phase3') }"
                 :disabled="isPhaseRunning('phase3') || isAnalyzingAny"
                 @click="triggerPhase('phase3')"
-                title="A5 循环 / A8 值模式 / I1 加密检测 / I2 签名"
+                :title="isPhaseStale('phase3') ? '⚠️ 该阶段含过期数据，建议重新分析 | A5 循环 / A8 值模式 / I1 加密检测 / I2 签名' : 'A5 循环 / A8 值模式 / I1 加密检测 / I2 签名'"
               >
-                <span class="phase-btn-icon">{{ isPhaseRunning('phase3') ? '⏳' : isPhaseRun('phase3') ? '🔄' : '▶' }}</span>
-                {{ isPhaseRunning('phase3') ? 'P3 分析中...' : isPhaseRun('phase3') ? '重新分析 P3' : '分析 Phase 3' }}
+                <span class="phase-btn-icon">{{ isPhaseRunning('phase3') ? '⏳' : isPhaseStale('phase3') ? '⚠️' : isPhaseRun('phase3') ? '🔄' : '▶' }}</span>
+                {{ isPhaseRunning('phase3') ? 'P3 分析中...' : isPhaseStale('phase3') ? '重分析 P3 (过期)' : isPhaseRun('phase3') ? '重新分析 P3' : '分析 Phase 3' }}
               </button>
               <!-- Phase 4 -->
               <button
                 class="btn-phase btn-phase4"
-                :class="{ 'btn-rerun': isPhaseRun('phase4') }"
+                :class="{ 'btn-rerun': isPhaseRun('phase4'), 'btn-stale': isPhaseStale('phase4') }"
                 :disabled="isPhaseRunning('phase4') || isAnalyzingAny"
                 @click="triggerPhase('phase4')"
-                title="A2 数据流 / A4 字符串 / A7 对象变异 / I3 混淆 / I4 算法汇总"
+                :title="isPhaseStale('phase4') ? '⚠️ 该阶段含过期数据，建议重新分析 | A2 数据流 / A4 字符串 / A7 对象变异 / I3 混淆 / I4 算法汇总' : 'A2 数据流 / A4 字符串 / A7 对象变异 / I3 混淆 / I4 算法汇总'"
               >
-                <span class="phase-btn-icon">{{ isPhaseRunning('phase4') ? '⏳' : isPhaseRun('phase4') ? '🔄' : '✨' }}</span>
-                {{ isPhaseRunning('phase4') ? 'P4 分析中...' : isPhaseRun('phase4') ? '重新分析 P4' : '分析 Phase 4' }}
+                <span class="phase-btn-icon">{{ isPhaseRunning('phase4') ? '⏳' : isPhaseStale('phase4') ? '⚠️' : isPhaseRun('phase4') ? '🔄' : '✨' }}</span>
+                {{ isPhaseRunning('phase4') ? 'P4 分析中...' : isPhaseStale('phase4') ? '重分析 P4 (过期)' : isPhaseRun('phase4') ? '重新分析 P4' : '分析 Phase 4' }}
               </button>
             </div>
             <div class="footer-status">
@@ -167,6 +169,7 @@ const PHASES_CONFIG = [
 const pluginStatusMap   = ref({});
 const pluginDurationMap = ref({});
 const pluginProgressMap = ref({}); // pluginId → { pct, message, eventsPerSec, totalEvents }
+const pluginStaleMap    = ref({}); // pluginId → true/false（上游数据已更新，结果可能过期）
 const sessionStatus     = ref('');
 const errors            = ref([]);
 const enabledPlugins    = ref(new Set());
@@ -211,6 +214,7 @@ function handleWsEvent(evt) {
             for (const cp of evt.checkpoints) {
                 pluginStatusMap.value[cp.plugin_id] = 'done';
                 if (cp.duration_ms) pluginDurationMap.value[cp.plugin_id] = cp.duration_ms;
+                if (cp.is_stale) pluginStaleMap.value[cp.plugin_id] = true;
                 enabledPlugins.value.add(cp.plugin_id);
             }
         }
@@ -245,6 +249,8 @@ function handleWsEvent(evt) {
         pluginStatusMap.value[evt.plugin] = 'done';
         if (evt.durationMs) pluginDurationMap.value[evt.plugin] = evt.durationMs;
         delete pluginProgressMap.value[evt.plugin];
+        // 插件重跑完成，清除 stale 标记
+        delete pluginStaleMap.value[evt.plugin];
 
     } else if (evt.type === 'plugin_failed') {
         pluginStatusMap.value[evt.plugin] = 'failed';
@@ -294,11 +300,11 @@ const isAnalyzingAny = computed(() =>
     Object.values(pluginStatusMap.value).some(s => s === 'running' || s === 'pending')
 );
 
-// 触发阶段
+// 触发阶段（统一使用 /re-run 接口，forceRerun: true 确保重跑已完成的插件）
 const phaseApiMap = {
-    phase2: (id) => fetch(`/api/sessions/${id}/re-run`,      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phase: 'phase2', forceRerun: true }) }),
-    phase3: (id) => fetch(`/api/sessions/${id}/run-phase3`,  { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }),
-    phase4: (id) => fetch(`/api/sessions/${id}/run-phase4`,  { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }),
+    phase2: (id) => fetch(`/api/sessions/${id}/re-run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phase: 'phase2', forceRerun: true }) }),
+    phase3: (id) => fetch(`/api/sessions/${id}/re-run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phase: 'phase3', forceRerun: true }) }),
+    phase4: (id) => fetch(`/api/sessions/${id}/re-run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phase: 'phase4', forceRerun: true }) }),
 };
 
 async function triggerPhase(phaseId) {
@@ -402,6 +408,12 @@ function phaseBadgeClass(phase) {
 function getPluginStatus(id)   { return pluginStatusMap.value[id] || 'idle'; }
 function getPluginDuration(id) { return pluginDurationMap.value[id] || null; }
 function getPluginProgress(id) { return pluginProgressMap.value[id] || null; }
+function isPluginStale(id)     { return !!pluginStaleMap.value[id]; }
+/** 判断某阶段是否含有任何 stale 插件（用于阶段标题行和按钮高亮） */
+function isPhaseStale(phaseId) {
+    const plugins = PHASE_PLUGIN_MAP[phaseId] || [];
+    return plugins.some(id => !!pluginStaleMap.value[id]);
+}
 
 function pluginIcon(status) {
     const icons = { done: '✓', skipped: '↩', running: '…', failed: '✗', pending: '○', idle: '·' };
@@ -424,6 +436,7 @@ watch(() => props.sessionId, (id) => {
     pluginStatusMap.value = {};
     pluginDurationMap.value = {};
     pluginProgressMap.value = {};
+    pluginStaleMap.value = {};
     errors.value = [];
     enabledPlugins.value = new Set();
     phases.value = PHASES_CONFIG.map((p, i) => ({ ...p, expanded: i < 2 }));
@@ -545,6 +558,34 @@ onUnmounted(() => disconnectWs());
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .plugin-duration { font-size: 10px; color: var(--text-muted, #64748b); font-family: monospace; margin-left: auto; flex-shrink: 0; }
+
+/* 阶段标题行 stale 徽标 */
+.phase-stale-badge {
+    font-size: 10px; font-weight: 600;
+    padding: 1px 5px; border-radius: 4px;
+    background: rgba(251, 146, 60, 0.15);
+    border: 1px solid rgba(251, 146, 60, 0.35);
+    color: #fb923c;
+    cursor: help;
+    flex-shrink: 0;
+}
+
+/* 阶段按钮 stale 状态（橙色高亮覆盖默认 rerun 样式） */
+.btn-phase2.btn-stale { background: rgba(251,146,60,0.12); border-color: rgba(251,146,60,0.5); color: #fb923c; }
+.btn-phase2.btn-stale:hover:not(:disabled) { background: rgba(251,146,60,0.22); color: #fed7aa; }
+.btn-phase3.btn-stale { background: rgba(251,146,60,0.12); border-color: rgba(251,146,60,0.5); color: #fb923c; }
+.btn-phase3.btn-stale:hover:not(:disabled) { background: rgba(251,146,60,0.22); color: #fed7aa; }
+.btn-phase4.btn-stale { background: rgba(251,146,60,0.12); border-color: rgba(251,146,60,0.5); color: #fb923c; }
+.btn-phase4.btn-stale:hover:not(:disabled) { background: rgba(251,146,60,0.22); color: #fed7aa; }
+
+.plugin-stale-badge {
+    font-size: 10px; font-weight: 600; flex-shrink: 0;
+    padding: 1px 5px; border-radius: 4px;
+    background: rgba(251, 146, 60, 0.15);
+    border: 1px solid rgba(251, 146, 60, 0.35);
+    color: #fb923c;
+    cursor: help;
+}
 .plugin-spinner {
     display: inline-block; width: 10px; height: 10px; flex-shrink: 0;
     border: 2px solid rgba(99, 102, 241, .3);
