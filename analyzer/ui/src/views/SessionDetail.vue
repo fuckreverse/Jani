@@ -78,7 +78,7 @@
       <OverviewTab    v-show="activeTab === 'overview'"   :session="session" :plugin-status="pluginStatus" :plugin-duration="wsPluginDuration" :is-analyzing="isAnalyzing" :inline-progress-pct="inlineProgressPct" :running-plugin="runningPlugin" @open-progress="showProgressDrawer = true" />
       <EventsTab      v-show="activeTab === 'events'"      ref="eventsTabRef"      :session-id="sessionId" :target-seq="targetSeq" @goto-function="onGotoFunction" />
       <FunctionsTab   v-show="activeTab === 'functions'"   ref="functionsTabRef"   :session-id="sessionId" :plugin-status="pluginStatus" :target-call="targetCall" />
-      <LoopsTab       v-show="activeTab === 'loops'"       ref="loopsTabRef"       :session-id="sessionId" />
+      <LoopsTab       v-show="activeTab === 'loops'"       ref="loopsTabRef"       :session-id="sessionId" @goto-seq="onGotoSeq" />
       <PatternsTab    v-show="activeTab === 'patterns'"    ref="patternsTabRef"    :session-id="sessionId" @goto-event-by-value="onGotoEventByValue" />
       <CryptoTab      v-show="activeTab === 'crypto'"      ref="cryptoTabRef"      :session-id="sessionId" />
       <SignaturesTab  v-show="activeTab === 'signatures'"  ref="signaturesTabRef"  :session-id="sessionId" />
@@ -205,6 +205,12 @@ async function onGotoEventByValue({ value, mode }) {
     // 切换 Tab 后等 nextTick，确保 EventsTab v-show 已激活
     await nextTick();
     eventsTabRef.value?.gotoValueSearch(value, mode);
+}
+
+/** 来自 LoopsTab（循环迭代）的跳转到事件流指定 SEQ */
+async function onGotoSeq(seq) {
+    targetSeq.value = seq;
+    activeTab.value = 'events';
 }
 
 const tabs = [

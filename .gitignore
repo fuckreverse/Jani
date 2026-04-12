@@ -6,3 +6,5 @@ data
 *.ndjson
 *.bin
 *.db
+jalangi-trace.bin
+analyzer/traces/_project_map.json

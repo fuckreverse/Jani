@@ -204,8 +204,8 @@
                     </td>
                     <td v-for="varName in loopDrawer.varNames" :key="varName" class="iter-val"
                         :class="{ 'val-changed': iter._changedVars?.has(varName) }"
-                        :title="String(iter.vars_snapshot[varName] ?? '')">
-                      {{ formatVal(iter.vars_snapshot[varName]) }}
+                        :title="String(iter._writeSnap?.[varName] ?? '')">
+                      {{ formatVal(iter._writeSnap?.[varName]) }}
                     </td>
                   </tr>
                 </tbody>
@@ -962,24 +962,38 @@ async function loadIterPage(page) {
     }
 }
 
+/**
+ * 从 vars_snapshot 中提取写快照（兼容 v1 纯对象格式和 v2 { v:2, w:{...}, r:{...} } 格式）
+ * CfgTab 的表格仅展示写快照（主要是迭代变量 i/j/k 等），读快照太多会挤爆列。
+ */
+function extractWriteSnap(snap) {
+    if (!snap || typeof snap !== 'object') return {};
+    // v2 格式
+    if (snap.v === 2) return snap.w ?? {};
+    // v1 旧格式（纯对象，直接是变量名→值）
+    return snap;
+}
+
 function processIterations(iters) {
     return iters.map((iter, idx) => {
-        const prev = idx > 0 ? iters[idx - 1].vars_snapshot : null;
+        const snap     = extractWriteSnap(iter.vars_snapshot);
+        const prevSnap = idx > 0 ? extractWriteSnap(iters[idx - 1].vars_snapshot) : null;
         const changedVars = new Set();
-        if (prev) {
-            const allKeys = new Set([...Object.keys(prev), ...Object.keys(iter.vars_snapshot)]);
+        if (prevSnap) {
+            const allKeys = new Set([...Object.keys(prevSnap), ...Object.keys(snap)]);
             for (const k of allKeys) {
-                if (String(prev[k] ?? '') !== String(iter.vars_snapshot[k] ?? '')) changedVars.add(k);
+                if (String(prevSnap[k] ?? '') !== String(snap[k] ?? '')) changedVars.add(k);
             }
         }
-        return { ...iter, _changedVars: changedVars, _hasChange: changedVars.size > 0 };
+        return { ...iter, _writeSnap: snap, _changedVars: changedVars, _hasChange: changedVars.size > 0 };
     });
 }
 
 function buildVarNames(iters) {
     const seen = new Map();
     for (const iter of iters) {
-        for (const k of Object.keys(iter.vars_snapshot)) {
+        const snap = extractWriteSnap(iter.vars_snapshot);
+        for (const k of Object.keys(snap)) {
             if (!seen.has(k)) seen.set(k, iter.iteration_idx);
         }
     }

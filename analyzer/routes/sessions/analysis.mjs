@@ -36,7 +36,10 @@ router.get('/hot-iids', (req, res) => {
             id
         );
         const loops = db.all(
-            'SELECT * FROM loops WHERE session_id = ? ORDER BY iteration_count DESC',
+            `SELECT id, iid, start_seq, end_seq, iteration_count, line,
+                    src_text, median_gap, loop_depth, parent_loop_id,
+                    call_edge_id, fn_name
+             FROM loops WHERE session_id = ? ORDER BY iteration_count DESC`,
             id
         );
         res.json({ hotIids, loops });
@@ -102,11 +105,37 @@ router.post('/taint', async (req, res) => {
 router.get('/loop-iterations', (req, res) => {
     try {
         const { id } = req.params;
-        const { loopId, limit = '100', offset = '0', seqFrom, seqTo } = req.query;
+        const { loopId, limit = '100', offset = '0', seqFrom, seqTo, loopsOnly } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: 'Session not found' });
 
+        // 循环列表（按迭代次数降序，高频循环优先；支持 seqFrom/seqTo 时间窗口）
+        const loopConds = ['session_id = ?'];
+        const loopParams = [id];
+        if (seqFrom !== undefined && seqFrom !== '') {
+            loopConds.push('start_seq >= ?');
+            loopParams.push(Number(seqFrom));
+        }
+        if (seqTo !== undefined && seqTo !== '') {
+            loopConds.push('start_seq <= ?');
+            loopParams.push(Number(seqTo));
+        }
+        const loops = db.all(
+            `SELECT id, iid, start_seq, end_seq, iteration_count, line,
+                    src_text, median_gap, loop_depth, parent_loop_id,
+                    call_edge_id, fn_name
+             FROM loops WHERE ${loopConds.join(' AND ')}
+             ORDER BY iteration_count DESC`,
+            ...loopParams
+        );
+
+        // loopsOnly=1：只需循环列表（初始加载），跳过迭代查询节省耗时
+        if (loopsOnly === '1') {
+            return res.json({ loops, iterations: [], count: 0, total: 0, offset: 0 });
+        }
+
+        // 迭代记录查询
         const conditions = ['session_id = ?'];
         const params = [id];
 
@@ -141,22 +170,7 @@ router.get('/loop-iterations', (req, res) => {
             vars_snapshot: safeParseJson(r.vars_snapshot, {}),
         }));
 
-        // 同时返回循环列表（供前端 loop_id 选择，按时间窗口过滤）
-        const loopConds = ['session_id = ?'];
-        const loopParams = [id];
-        if (seqFrom !== undefined && seqFrom !== '') {
-            loopConds.push('start_seq >= ?');
-            loopParams.push(Number(seqFrom));
-        }
-        if (seqTo !== undefined && seqTo !== '') {
-            loopConds.push('start_seq <= ?');
-            loopParams.push(Number(seqTo));
-        }
-        const loops = db.all(
-            `SELECT id, iid, start_seq, end_seq, iteration_count, line FROM loops WHERE ${loopConds.join(' AND ')} ORDER BY id ASC`,
-            ...loopParams
-        );
-
+        // COUNT：索引 (session_id, loop_id, iteration_idx) 已覆盖此查询
         const totalRow = db.get(
             `SELECT COUNT(*) as total FROM loop_iterations WHERE ${conditions.join(' AND ')}`,
             ...params

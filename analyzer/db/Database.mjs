@@ -624,4 +624,30 @@ function _runMigrations(db) {
             console.warn('[Database] create oid_aliases failed (non-fatal):', e.message);
         }
     }
+
+    // ── loops 表 v2/v3 列迁移 ────────────────────────────────────────────────
+    // v2 新增 4 列：src_text / median_gap / loop_depth / parent_loop_id
+    // v3 新增 2 列：call_edge_id / fn_name
+    // 旧数据这些列为 NULL；重跑 A3 后自动填充
+    try {
+        const loopsCols = new Set(
+            db.pragma('table_info(loops)').map(r => r.name)
+        );
+        if (loopsCols.size > 0) {
+            if (!loopsCols.has('src_text'))
+                db.exec('ALTER TABLE loops ADD COLUMN src_text TEXT');
+            if (!loopsCols.has('median_gap'))
+                db.exec('ALTER TABLE loops ADD COLUMN median_gap INTEGER');
+            if (!loopsCols.has('loop_depth'))
+                db.exec('ALTER TABLE loops ADD COLUMN loop_depth INTEGER DEFAULT 0');
+            if (!loopsCols.has('parent_loop_id'))
+                db.exec('ALTER TABLE loops ADD COLUMN parent_loop_id INTEGER');
+            if (!loopsCols.has('call_edge_id'))
+                db.exec('ALTER TABLE loops ADD COLUMN call_edge_id INTEGER');
+            if (!loopsCols.has('fn_name'))
+                db.exec('ALTER TABLE loops ADD COLUMN fn_name TEXT');
+        }
+    } catch (e) {
+        console.warn('[Database] add loops v2/v3 columns failed (non-fatal):', e.message);
+    }
 }

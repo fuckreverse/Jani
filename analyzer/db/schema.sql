@@ -184,6 +184,15 @@ CREATE TABLE IF NOT EXISTS run_tasks (
 );
 
 -- ─── 循环（A3/A5 填充）──────────────────────────────────────────────────────
+-- v2 新增字段（A3 改进版）：
+--   src_text      — 循环首行源码（来自 smap），便于 UI 直接展示，无需二次 JOIN
+--   median_gap    — 循环 iid 命中的中位数间距（衡量循环体体积，A3 自适应阈值依据）
+--   loop_depth    — 嵌套深度（0 = 顶层，1 = 外层循环内的循环，...）
+--   parent_loop_id — 直接父循环的 id（NULL = 顶层）
+-- v3 新增字段（A3 函数边界感知版）：
+--   call_edge_id  — 产生该循环的函数调用帧 id（引用 call_edges.id）；
+--                   NULL 表示在顶层脚本执行中检测到的循环（无函数帧）
+--   fn_name       — 所属函数名（冗余自 call_edges.fn_name，避免 JOIN，UI 直接展示）
 
 CREATE TABLE IF NOT EXISTS loops (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,7 +201,13 @@ CREATE TABLE IF NOT EXISTS loops (
     start_seq       INTEGER,
     end_seq         INTEGER,
     iteration_count INTEGER,
-    line            INTEGER
+    line            INTEGER,
+    src_text        TEXT,       -- 循环首行源码片段（v2 新增）
+    median_gap      INTEGER,    -- iid 命中间距中位数（v2 新增，单位：events）
+    loop_depth      INTEGER DEFAULT 0,  -- 嵌套深度（v2 新增）
+    parent_loop_id  INTEGER,    -- 直接父循环 id（v2 新增，NULL=顶层）
+    call_edge_id    INTEGER,    -- 所属函数调用帧（v3 新增，NULL=顶层脚本）
+    fn_name         TEXT        -- 所属函数名（v3 新增，冗余副本供 UI 直接展示）
 );
 
 -- ─── 循环迭代快照（A5 LoopDetector 填充）────────────────────────────────────
@@ -466,7 +481,10 @@ CREATE TABLE IF NOT EXISTS plugin_checkpoints (
     is_stale    INTEGER DEFAULT 0,  -- 1 = 上游数据已更新，本插件结果可能过期
     UNIQUE (session_id, plugin_id)
 );
-CREATE INDEX IF NOT EXISTS idx_loop_iter_session   ON loop_iterations(session_id, loop_id);
+-- loop_iterations 核心查询索引：(session_id, loop_id, iteration_idx) covering ORDER BY
+CREATE INDEX IF NOT EXISTS idx_loop_iter_session   ON loop_iterations(session_id, loop_id, iteration_idx);
+-- loop_iterations 按 start_seq 范围过滤（seqFrom/seqTo 参数）
+CREATE INDEX IF NOT EXISTS idx_loop_iter_start_seq ON loop_iterations(session_id, start_seq);
 CREATE INDEX IF NOT EXISTS idx_value_patterns_session ON value_patterns(session_id);
 CREATE INDEX IF NOT EXISTS idx_crypto_hints_session ON crypto_hints(session_id);
 CREATE INDEX IF NOT EXISTS idx_sig_paths_session   ON signature_paths(session_id);
