@@ -58,19 +58,6 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
             [sessionId]
         );
 
-        // ── 字符串追踪 ──────────────────────────────────────────────────────
-        this.emitProgress(ctx, '读取字符串统计...', 50);
-        const strStats = db.all(
-            'SELECT encoding_hint, COUNT(*) as cnt FROM string_events WHERE session_id = ? GROUP BY encoding_hint ORDER BY cnt DESC',
-            [sessionId]
-        );
-        const interestingStrings = db.all(
-            `SELECT value, var_name, line, encoding_hint FROM string_events
-             WHERE session_id = ? AND encoding_hint IN ('base64', 'hex')
-             ORDER BY line ASC LIMIT 20`,
-            [sessionId]
-        );
-
         // ── 数据流 ──────────────────────────────────────────────────────────
         this.emitProgress(ctx, '读取数据流统计...', 60);
         const dfStats = db.get(
@@ -142,8 +129,6 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
         }
         if (loops.length > 0) algorithmTags.push('循环密集型');
         if (isObfuscated) algorithmTags.push('混淆代码');
-        if (interestingStrings.length > 0) algorithmTags.push('编码字符串');
-
         const report = {
             sessionId,
             sessionName: session ? session.name : null,
@@ -170,10 +155,6 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
             dataFlow: {
                 totalEdges: dfStats ? dfStats.total : 0,
                 edgesByType: dfByType,
-            },
-            stringAnalysis: {
-                byEncoding: strStats,
-                interestingStrings,
             },
             objectMutations: {
                 totalMutations: objMutStats ? objMutStats.total : 0,
@@ -268,19 +249,6 @@ function generateMarkdown(report) {
         lines.push(`- 总边数：${report.dataFlow.totalEdges}`);
         for (const e of report.dataFlow.edgesByType) {
             lines.push(`  - \`${e.edge_type}\`: ${e.cnt} 条`);
-        }
-    }
-
-    // 字符串分析
-    lines.push(`\n## 🔤 字符串分析`);
-    for (const s of report.stringAnalysis.byEncoding) {
-        lines.push(`- \`${s.encoding_hint || 'plain'}\`: ${s.cnt} 个`);
-    }
-    if (report.stringAnalysis.interestingStrings.length > 0) {
-        lines.push(`\n**可疑编码字符串（前10）：**`);
-        for (const s of report.stringAnalysis.interestingStrings.slice(0, 10)) {
-            const val = s.value ? s.value.substring(0, 60) : '';
-            lines.push(`- \`${val}\` (${s.encoding_hint}) 行=${s.line ?? '—'} 变量=${s.var_name || '—'}`);
         }
     }
 

@@ -9,7 +9,6 @@
  * GET  /api/sessions/:id/crypto-hints      加密算法提示
  * GET  /api/sessions/:id/signature-paths   签名路径
  * GET  /api/sessions/:id/dataflow          数据流边
- * GET  /api/sessions/:id/strings           字符串事件
  * GET  /api/sessions/:id/object-timelines  对象属性时间线
  * GET  /api/sessions/:id/obfuscation       混淆检测结果
  * GET  /api/sessions/:id/summary           算法摘要
@@ -214,13 +213,15 @@ router.get('/value-patterns', (req, res) => {
             conditions.push('pattern_type = ?');
             params.push(patternType);
         }
-        // 按值内容长度范围过滤（LENGTH(value_hash) 即完整值长度）
+        // 按值内容长度范围过滤
+        // value_hash 字符串型带 JSON 引号（"hello"），需减去 2 个引号字节才是真实内容长度
+        // 用 CASE 兼容数字型（不带引号）和字符串型（带引号）
         if (lenMin !== undefined && lenMin !== '') {
-            conditions.push('LENGTH(value_hash) >= ?');
+            conditions.push(`CASE WHEN SUBSTR(value_hash,1,1)='"' THEN LENGTH(value_hash)-2 ELSE LENGTH(value_hash) END >= ?`);
             params.push(Number(lenMin));
         }
         if (lenMax !== undefined && lenMax !== '') {
-            conditions.push('LENGTH(value_hash) <= ?');
+            conditions.push(`CASE WHEN SUBSTR(value_hash,1,1)='"' THEN LENGTH(value_hash)-2 ELSE LENGTH(value_hash) END <= ?`);
             params.push(Number(lenMax));
         }
         // 时间窗口过滤：按首次出现 SEQ（first_seq 在 [seqFrom, seqTo] 内）
@@ -283,6 +284,47 @@ router.get('/value-patterns/:patternId/full-value', (req, res) => {
         res.json({ fullValue: vd.val_text, patternId: pattern.id });
     } catch (e) {
         log.error({ err: e }, '[GET /value-patterns/:patternId/full-value] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/value-index-search ──────────────────────────────
+// 在 value_index 表里搜索字符串型值，用于值面板的降级兜底搜索。
+// 对每个唯一字符串值去重（只取 val_str），返回 top 50 条。
+// query param: q（必须），至少 2 字符
+
+router.get('/value-index-search', (req, res) => {
+    try {
+        const { id } = req.params;
+        const { q } = req.query;
+
+        if (!q || String(q).trim().length < 2) {
+            return res.json({ results: [] });
+        }
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const keyword = String(q).trim();
+        // 从 value_dict 里搜索字符串型值（val_type='str'，val_text 是 JSON 序列化带引号）
+        // 用 val_text LIKE 匹配（引号内包含 keyword 即可）
+        const rows = db.all(
+            `SELECT vd.id AS value_dict_id, vd.val_text,
+                    COUNT(w.id) AS occurrence_count
+             FROM value_dict vd
+             LEFT JOIN writes w ON w.value_id = vd.id AND w.session_id = vd.session_id
+             WHERE vd.session_id = ?
+               AND vd.val_type = 'str'
+               AND vd.val_text LIKE ?
+             GROUP BY vd.id
+             ORDER BY occurrence_count DESC
+             LIMIT 50`,
+            id, `%${keyword}%`
+        );
+
+        res.json({ results: rows });
+    } catch (e) {
+        log.error({ err: e }, '[GET /value-index-search] error:');
         res.status(500).json({ error: e.message });
     }
 });
@@ -417,63 +459,6 @@ router.get('/dataflow', (req, res) => {
     }
 });
 
-// ── GET /api/sessions/:id/strings ─────────────────────────────────────────
-// 新增 seqFrom/seqTo：按事件 SEQ 范围（event_id）过滤
-
-router.get('/strings', (req, res) => {
-    try {
-        const { id } = req.params;
-        const { encoding, limit = '500', offset = '0', seqFrom, seqTo } = req.query;
-
-        const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
-        if (!session) return res.status(404).json({ error: 'Session not found' });
-
-        const conditions = ['session_id = ?'];
-        const params = [id];
-
-        if (encoding) {
-            conditions.push('encoding_hint = ?');
-            params.push(encoding);
-        }
-        // 时间窗口过滤：event_id 在 [seqFrom, seqTo] 内
-        if (seqFrom !== undefined && seqFrom !== '') {
-            conditions.push('event_id >= ?');
-            params.push(Number(seqFrom));
-        }
-        if (seqTo !== undefined && seqTo !== '') {
-            conditions.push('event_id <= ?');
-            params.push(Number(seqTo));
-        }
-
-        const limitN = Math.min(Number(limit) || 500, 2000);
-        const offsetN = Number(offset) || 0;
-
-        const rows = db.all(
-            `SELECT id, event_id, value, var_name, line, iid, encoding_hint
-             FROM string_events
-             WHERE ${conditions.join(' AND ')}
-             ORDER BY line ASC, id ASC
-             LIMIT ? OFFSET ?`,
-            [...params, limitN, offsetN]
-        );
-
-        const totalRow = db.get(
-            `SELECT COUNT(*) as cnt FROM string_events WHERE ${conditions.join(' AND ')}`,
-            params
-        );
-        const total = totalRow?.cnt ?? 0;
-
-        const encodingStats = db.all(
-            'SELECT encoding_hint, COUNT(*) as cnt FROM string_events WHERE session_id = ? GROUP BY encoding_hint ORDER BY cnt DESC',
-            [id]
-        );
-
-        res.json({ strings: rows, encodingStats, count: rows.length, total, hasMore: offsetN + rows.length < total });
-    } catch (e) {
-        log.error({ err: e }, '[GET /api/sessions/:id/strings] error:');
-        res.status(500).json({ error: e.message });
-    }
-});
 
 // ── GET /api/sessions/:id/object-timelines ────────────────────────────────
 // 新增 seqFrom/seqTo：按变更 SEQ（change_seq）范围过滤，只看某段时间内的属性变化

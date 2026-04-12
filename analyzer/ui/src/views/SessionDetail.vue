@@ -83,7 +83,6 @@
       <CryptoTab      v-show="activeTab === 'crypto'"      ref="cryptoTabRef"      :session-id="sessionId" />
       <SignaturesTab  v-show="activeTab === 'signatures'"  ref="signaturesTabRef"  :session-id="sessionId" />
       <DataflowTab    v-show="activeTab === 'dataflow'"    ref="dataflowTabRef"    :session-id="sessionId" />
-      <StringsTab     v-show="activeTab === 'strings'"     ref="stringsTabRef"     :session-id="sessionId" @goto-event="onGotoEvent" @goto-function="onGotoFunction" />
       <ObjMutTab      v-show="activeTab === 'objmut'"      ref="objmutTabRef"      :session-id="sessionId" />
       <ObfuscationTab v-show="activeTab === 'obfuscation'" ref="obfuscationTabRef" :session-id="sessionId" @goto-function="onGotoFunction" />
       <SummaryTab     v-show="activeTab === 'summary'"     ref="summaryTabRef"     :session-id="sessionId" />
@@ -108,7 +107,6 @@ import PatternsTab     from '../components/session/PatternsTab.vue';
 import CryptoTab       from '../components/session/CryptoTab.vue';
 import SignaturesTab   from '../components/session/SignaturesTab.vue';
 import DataflowTab     from '../components/session/DataflowTab.vue';
-import StringsTab      from '../components/session/StringsTab.vue';
 import ObjMutTab       from '../components/session/ObjMutTab.vue';
 import ObfuscationTab  from '../components/session/ObfuscationTab.vue';
 import SummaryTab      from '../components/session/SummaryTab.vue';
@@ -138,7 +136,6 @@ const TAB_PLUGIN_MAP = {
     crypto:      ['I1-CryptoDetector'],
     signatures:  ['I2-SignatureAnalyzer'],
     dataflow:    ['A2-DataFlowGraph'],
-    strings:     ['A4-StringTracker'],
     objmut:      ['A7-ObjectMutationTracker'],
     obfuscation: ['I3-ObfuscationDetector'],
     summary:     ['I4-AlgorithmSummarizer'],
@@ -158,7 +155,7 @@ const ALL_PLUGIN_IDS = [
     'F1-EventIndex', 'F2-SmapLoader',
     'F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer',
     'A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer',
-    'A2-DataFlowGraph', 'A4-StringTracker',
+    'A2-DataFlowGraph',
     'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer',
 ];
 
@@ -176,7 +173,6 @@ const runningPlugin = computed(() => {
         'A3-HotPathAnalyzer': 'A3 热路径', 'A5-LoopDetector': 'A5 循环检测',
         'A8-ValuePatternDetector': 'A8 值模式', 'I1-CryptoDetector': 'I1 加密检测',
         'I2-SignatureAnalyzer': 'I2 签名分析', 'A2-DataFlowGraph': 'A2 数据流',
-        'A4-StringTracker': 'A4 字符串',
         'A7-ObjectMutationTracker': 'A7 对象变异', 'I3-ObfuscationDetector': 'I3 混淆检测',
         'I4-AlgorithmSummarizer': 'I4 算法汇总',
     };
@@ -201,12 +197,6 @@ const targetSeq  = ref(null); // event SEQ，用于事件流跳转定位
 function onGotoFunction({ fnName, fnIid, callSeq }) {
     targetCall.value = { fnName, fnIid, callSeq };
     activeTab.value = 'functions';
-}
-
-/** 来自 StringsTab 的跳转到事件流（按 event_id = event SEQ） */
-function onGotoEvent({ eventId }) {
-    targetSeq.value = eventId;
-    activeTab.value = 'events';
 }
 
 /** 来自 PatternsTab 的跳转到事件流（精确匹配指定值，str/num 模式由 PatternsTab 决定） */
@@ -273,13 +263,6 @@ const tabs = [
         tips: ['从 sign/token 变量出发追踪数据来源', 'call 类型边可追踪参数如何传入函数'],
     },
     {
-        id: 'strings', label: '🔤 字符串追踪',
-        plugin: 'A4 · StringTracker',
-        desc: '追踪运行时出现的字符串值，自动识别 Base64 / Hex / URL 等编码格式。',
-        capabilities: ['按编码类型（Base64/Hex/URL/plain）过滤', '查看变量名与完整字符串值', '一键跳转到事件流或函数面板', '支持解码预览'],
-        tips: ['Base64 字符串往往是加密结果或密钥的常见形式', '点击字符串可跳转到产生它的原始事件'],
-    },
-    {
         id: 'objmut', label: '🔄 对象变异',
         plugin: 'A7 · ObjectMutationTracker',
         desc: '记录对象属性的读写历史，追踪属性值随时间的变化轨迹。',
@@ -335,7 +318,6 @@ const patternsTabRef    = ref(null);
 const cryptoTabRef      = ref(null);
 const signaturesTabRef  = ref(null);
 const dataflowTabRef    = ref(null);
-const stringsTabRef     = ref(null);
 const objmutTabRef      = ref(null);
 const obfuscationTabRef = ref(null);
 const summaryTabRef     = ref(null);
@@ -364,7 +346,6 @@ function reloadAllTabs() {
     cryptoTabRef.value?.reload();
     signaturesTabRef.value?.reload();
     dataflowTabRef.value?.reload();
-    stringsTabRef.value?.reload();
     objmutTabRef.value?.reload();
     obfuscationTabRef.value?.reload();
     summaryTabRef.value?.reload();
@@ -382,7 +363,6 @@ function onPluginDone(pluginId) {
         'I1-CryptoDetector':        () => cryptoTabRef.value?.reload(),
         'I2-SignatureAnalyzer':     () => signaturesTabRef.value?.reload(),
         'A2-DataFlowGraph':         () => dataflowTabRef.value?.reload(),
-        'A4-StringTracker':         () => stringsTabRef.value?.reload(),
         'A7-ObjectMutationTracker': () => objmutTabRef.value?.reload(),
         'I3-ObfuscationDetector':   () => obfuscationTabRef.value?.reload(),
         'I4-AlgorithmSummarizer':   () => summaryTabRef.value?.reload(),

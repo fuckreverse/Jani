@@ -244,11 +244,21 @@ const CRYPTO_CONSTANTS = new Map([
 
 const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
+// ─── 时间戳边界：模块加载时计算一次（当前时间 ±10 年）────────────────────────
+const _now      = Date.now();
+const TS_MS_MIN = _now - 10 * 365.25 * 24 * 3600 * 1000;   // 10 年前（ms）
+const TS_MS_MAX = _now + 10 * 365.25 * 24 * 3600 * 1000;   // 10 年后（ms）
+const TS_S_MIN  = Math.floor(TS_MS_MIN / 1000);              // 10 年前（s）
+const TS_S_MAX  = Math.ceil(TS_MS_MAX  / 1000);              // 10 年后（s）
+
 // ─── 正则预编译（模块级，避免每次调用重建）────────────────────────────────────
 const RE_UUID         = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const RE_HEX_STR      = /^[0-9a-f]+$/i;
+// hex：不限制大小写，确保 MD5/SHA 常见大写输出也能命中
+const RE_HEX_STR      = /^[0-9a-fA-F]+$/;
 const RE_IP           = /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$/;
 const RE_URL          = /^https?:\/\//i;
+// URL encoded：含至少一处 %xx 编码（支持带普通字符混合的 URL 参数）
+const RE_URL_ENC      = /%[0-9A-Fa-f]{2}/;
 // Base64 字符集：字母+数字+[+/=]，长度至少 4，且能被 4 整除（允许末尾 1-2 个 = pad）
 const RE_BASE64_ENC   = /^[A-Za-z0-9+/]+={0,2}$/;
 // URL-safe Base64
@@ -259,35 +269,48 @@ const RE_BASE64_URL   = /^[A-Za-z0-9_-]+={0,2}$/;
  * 返回字符串枚举值（见下），或 null（无特殊语义）。
  *
  * 枚举值：
- *   timestamp_ms   — 13 位 Unix 毫秒时间戳（2001-01-01 ~ 2035-01-01）
- *   timestamp_s    — 10 位 Unix 秒时间戳（同窗口）
+ *   timestamp      — Unix 时间戳（10 位秒 或 13 位毫秒，当前时间 ±10 年）
  *   uuid           — UUID v1-v5 格式字符串
  *   hex_str        — 纯十六进制字符串（偶数长度 ≥ 8，不含 "0x" 前缀）
- *   base64_charset — 标准 / URL-safe / 魔改 Base64 字符表（长度 64 或 65，唯一字符 = 64）
- *   custom_alphabet— 长度 64，所有字符唯一但非标准 Base64 字符表（自定义编码字典）
+ *   base64_charset — 标准 / URL-safe / 魔改 Base64 字符表（长度 64-66，无重复可见字符）
+ *   custom_alphabet— 长度 64-66，所有字符唯一但非标准 Base64 字符表（自定义编码字典）
  *   base64_encoded — 看起来像 Base64 编码结果（长度 ≥ 16，mod4=0 或可 pad，高熵）
  *   ip_addr        — IPv4 地址（带或不带端口）
  *   url            — HTTP/HTTPS URL
+ *   url_encoded    — 含 %xx 编码的字符串（URL 参数 / form data）
  *   json_obj       — JSON 对象/数组字符串（非空）
  *   byte_array     — 纯整数数组（16~512 个元素，每个 0-255）
  */
 function detectValueType(value) {
     if (value === null || value === undefined) return null;
-    const str = String(value).trim();
+    let str = String(value).trim();
+    if (str === '') return null;
+
+    // ── val_text 解包：value_dict 存储的字符串型值带 JSON 引号（"hello"）────
+    // 检测前先还原为真实字符串内容，避免引号干扰长度/字符集检测
+    if (str.startsWith('"') && str.endsWith('"') && str.length >= 2) {
+        try { str = JSON.parse(str); } catch { /* 解析失败保持原值 */ }
+    }
+    if (typeof str !== 'string') str = String(str);
     if (str === '') return null;
 
     // ── 数值型特判（时间戳）────────────────────────────────────────────────
+    // 用模块加载时算好的边界（当前时间 ±10 年），比硬编码年份更合理
     const numVal = Number(str);
     if (!isNaN(numVal) && isFinite(numVal) && String(numVal) === str) {
-        // 13 位毫秒时间戳：约 2001-09-09 01:46:40 000 ~ 2035-01-01 00:00:00 000
-        if (numVal >= 1_000_000_000_000 && numVal <= 2_051_222_400_000) return 'timestamp_ms';
+        // 13 位毫秒时间戳（先判，范围更窄）
+        if (numVal >= TS_MS_MIN && numVal <= TS_MS_MAX) return 'timestamp';
         // 10 位秒时间戳
-        if (numVal >= 1_000_000_000 && numVal <= 2_051_222_400) return 'timestamp_s';
+        if (numVal >= TS_S_MIN  && numVal <= TS_S_MAX)  return 'timestamp';
         return null; // 普通数字，无语义
     }
 
-    // ── URL ────────────────────────────────────────────────────────────────
+    // ── URL（含协议头）──────────────────────────────────────────────────────
     if (RE_URL.test(str)) return 'url';
+
+    // ── URL encoded（含 %xx 编码，可混合普通字符）──────────────────────────
+    // 放在 URL 后面，避免 http://foo.com?a=%20 被归到 url_encoded
+    if (RE_URL_ENC.test(str)) return 'url_encoded';
 
     // ── IP 地址 ────────────────────────────────────────────────────────────
     if (RE_IP.test(str)) {
@@ -302,7 +325,6 @@ function detectValueType(value) {
     if ((str.startsWith('{') && str.endsWith('}')) || (str.startsWith('[') && str.endsWith(']'))) {
         try {
             const parsed = JSON.parse(str);
-            // 数组：如果是整数字节数组给 byte_array 更准确的标签
             if (Array.isArray(parsed)) {
                 const len = parsed.length;
                 if (len >= 16 && len <= 512) {
@@ -317,33 +339,23 @@ function detectValueType(value) {
     // ── 字符串型检测 ────────────────────────────────────────────────────────
     const len = str.length;
 
-    // Base64 字符表（标准 / URL-safe / 魔改）
-    // 判据：长度 64 或 65（含 =），且字符唯一数 = 64（每个字符只出现一次）
-    if (len === 64 || len === 65) {
-        const chars = str.endsWith('=') ? str.slice(0, -1) : str;
-        if (chars.length === 64) {
-            const unique = new Set(chars).size;
-            if (unique === 64) {
-                // 再区分：是否是标准 Base64 字符表
-                if (chars === BASE64_CHARS) return 'base64_charset';
-                // 是否是 URL-safe Base64 字符表
-                const URL_SAFE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-                if (chars === URL_SAFE) return 'base64_charset';
-                // 全部字符唯一但非标准 → 自定义编码字母表
-                return 'custom_alphabet';
-            }
-        }
+    // Base64 字符表：64 个唯一可见字符，总长度在 64~70 之间
+    // 宽松范围：允许末尾附带 padding / 分隔符等额外字节，假阳性优于假阴性
+    // 不做任何字符剥离，直接按唯一可见字符数判定
+    if (len >= 64 && len <= 70) {
+        const visibleChars = str.split('').filter(c => c >= '\x21' && c <= '\x7E');
+        const unique = new Set(visibleChars).size;
+        if (unique === 64) return 'base64_charset';
     }
 
-    // 纯十六进制字符串（偶数长度 ≥ 8，不含 "0x"）
+    // 纯十六进制字符串（偶数长度 ≥ 8，不含 "0x"，大小写均支持）
     if (len >= 8 && len % 2 === 0 && RE_HEX_STR.test(str)) return 'hex_str';
 
-    // Base64 编码结果（长度 ≥ 16，mod4=0 或加 pad 后 mod4=0，符合 Base64 字符集，高熵）
+    // Base64 编码结果（长度 ≥ 16，mod4=0，符合 Base64 字符集，字符集多样性足够高）
     if (len >= 16) {
         const isStdB64 = RE_BASE64_ENC.test(str) && (len % 4 === 0);
-        const isUrlB64 = RE_BASE64_URL.test(str) && str.indexOf('=') === -1; // URL-safe 通常不 pad
+        const isUrlB64 = RE_BASE64_URL.test(str) && str.indexOf('=') === -1;
         if (isStdB64 || isUrlB64) {
-            // 简单熵估计：字符集多样性（Base64 编码的信息密度较高）
             const unique = new Set(str.replace(/=/g, '')).size;
             if (unique >= 20) return 'base64_encoded';
         }
@@ -437,7 +449,7 @@ export default class A8ValuePatternDetector extends BasePlugin {
         // count/first_seq/iid/var_name/line 需要回查 writes/events/smap，
         // 对分析意义有限但性能代价巨大，已去掉，直接填 NULL。
         const allValues = db.all(
-            `SELECT id AS value_id, val_text AS value
+            `SELECT id AS value_id, val_text AS value, val_type
              FROM value_dict
              WHERE session_id = ?`,
             [sessionId]
@@ -445,13 +457,28 @@ export default class A8ValuePatternDetector extends BasePlugin {
 
         this.emitProgress(ctx, `检测 ${allValues.length} 个唯一值的模式...`, 20);
 
+        // plain 字符串最低长度（过滤 "ok"/"id"/"el" 等框架噪音）
+        const PLAIN_MIN_LEN = 4;
+
         const toInsert = [];
         for (const vd of allValues) {
             const matched     = detectConstant(vd.value);
             const patternType = detectValueType(vd.value);
 
-            // 只保留有密码学常数、有语义类型标签的值（无意义的普通值跳过）
-            if (!matched && !patternType) continue;
+            // 无特征的普通字符串：val_type='str'，去掉 JSON 引号后长度 >= PLAIN_MIN_LEN
+            // 写入 pattern_type='plain'，供值面板"全量字符串"浏览
+            let finalType = patternType;
+            if (!matched && !patternType && vd.val_type === 'str') {
+                // val_text 对字符串是 JSON 序列化形式（带引号），解码取真实字符串内容
+                let rawStr = vd.value;
+                try { rawStr = JSON.parse(vd.value); } catch { /* 保持原始 */ }
+                if (typeof rawStr === 'string' && rawStr.length >= PLAIN_MIN_LEN) {
+                    finalType = 'plain';
+                }
+            }
+
+            // 无特征且不是有效普通字符串（数字/布尔/null/短字符串）→ 跳过
+            if (!matched && !finalType) continue;
 
             const entropy = shannonEntropy(vd.value);
             toInsert.push([
@@ -464,7 +491,7 @@ export default class A8ValuePatternDetector extends BasePlugin {
                 null,           // line
                 matched ?? null,
                 vd.value_id,    // value_dict_id：直接引用，full-value 一跳搞定
-                patternType,
+                finalType,
                 entropy,
             ]);
         }

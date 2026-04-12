@@ -36,7 +36,7 @@ const DOWNSTREAM_STALE_MAP = {
     phase1: [
         'F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer',
         'A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector',
-        'I2-SignatureAnalyzer', 'A2-DataFlowGraph', 'A4-StringTracker',
+        'I2-SignatureAnalyzer', 'A2-DataFlowGraph',
         'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer',
     ],
     phase2: ['A5-LoopDetector', 'I1-CryptoDetector', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer'],
@@ -58,14 +58,13 @@ mkdirSync(DATA_DIR, { recursive: true });
  * Phase 1（基础解析，创建会话时立即执行）：F1-EventIndex（+F2 如有 smap）
  * Phase 2（自动，Phase1 完成后继续后台执行）：F3 / F4 / A3
  * Phase 3（手动按需）：A5 / A8 / I1 / I2
- * Phase 4（手动按需）：A2 / A4 / A7 / I3 / I4
+ * Phase 4（手动按需）：A2 / A7 / I3 / I4
  */
 export const PHASE1_PLUGINS = ['F1-EventIndex'];
 export const PHASE2_PLUGINS = ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'];
 export const PHASE3_PLUGINS = ['A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer'];
 export const PHASE4_PLUGINS = [
     'A2-DataFlowGraph',
-    'A4-StringTracker',
     'A7-ObjectMutationTracker',
     'I3-ObfuscationDetector',
     'I4-AlgorithmSummarizer',

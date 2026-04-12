@@ -81,7 +81,7 @@
 
     <div v-if="patternsLoading" class="loading"><div class="spinner"></div><span>加载中...</span></div>
     <div v-else-if="filteredPatterns.length === 0" class="empty-state">
-      <p v-if="valueSearch || lenMin || lenMax || selectedPatternType || onlyCrypto">无匹配的值模式</p>
+      <p v-if="valueSearch || lenMin || lenMax || selectedPatternType || onlyCrypto">无匹配的已识别值模式</p>
       <p v-else>暂无值模式数据（请先运行 A8 · ValuePatternDetector）</p>
     </div>
     <div v-else>
@@ -182,6 +182,58 @@
         </div>
       </div>
     </div>
+
+    <!-- ── 降级全量搜索结果区（在 value_dict 全量匹配，不依赖 A8）──────────── -->
+    <!-- 只在有搜索关键词时显示 -->
+    <template v-if="valueSearch && valueSearch.trim().length >= 2">
+      <div class="fallback-divider">
+        <span class="fallback-divider-label">🔍 全量字符串搜索（直接查原始值字典）</span>
+      </div>
+
+      <div v-if="fallbackLoading" class="loading"><div class="spinner"></div><span>搜索中...</span></div>
+      <div v-else-if="fallbackResults.length === 0" class="empty-state">
+        <p>在原始值字典中也未找到包含「{{ valueSearch }}」的字符串</p>
+      </div>
+      <div v-else>
+        <div class="events-table-wrapper">
+          <table class="events-table">
+            <thead>
+              <tr>
+                <th>值内容（原始字典）</th>
+                <th>出现次数</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in fallbackResults" :key="row.value_dict_id">
+                <td>
+                  <code
+                    class="src-text value-clickable"
+                    :title="row.val_text + '\n（点击查看完整值）'"
+                    @click="openFallbackValue(row)"
+                  >{{ truncate(row.val_text, 80) }}</code>
+                </td>
+                <td class="td-count">
+                  <span v-if="row.occurrence_count > 0" class="occurrence-badge">{{ row.occurrence_count }}</span>
+                  <span v-else class="text-muted">—</span>
+                </td>
+                <td class="td-action">
+                  <button
+                    class="btn-goto-events"
+                    title="在事件流中精确匹配这个值"
+                    @click.stop="gotoFallbackEvents(row)"
+                  >📋</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pagination-info" style="margin-top:8px">
+          共 <strong>{{ fallbackTotal }}</strong> 条匹配
+          <span v-if="fallbackTotal >= 50" class="text-muted">（已截断到 Top 50，请缩小关键词范围）</span>
+        </div>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -198,33 +250,13 @@ const emit = defineEmits(['goto-event-by-value']);
 
 /**
  * 点击跳转到事件流。
- * value_hash 是 JSON 序列化格式：字符串型带双引号（"hello"），数字型不含引号（42）。
- * value_index.val_str 存的是去掉引号的原始内容，所以需要先解析再传给事件流搜索。
+ * value_hash 在 loadValuePatterns 时已 JSON 解包，字符串型直接是裸字符串，数字型是数字字符串。
  */
 function gotoEvents(p) {
     const raw = p.value_hash ?? '';
-    let mode  = 'str';
-    let value = raw;
-
-    // 尝试 JSON 解析：去掉字符串外层引号 + 反转义
-    if (raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2) {
-        try {
-            const parsed = JSON.parse(raw);
-            if (typeof parsed === 'string') {
-                mode  = 'str';
-                value = parsed;  // 原始字符串，不含双引号
-            }
-        } catch { /* 解析失败，原样传 */ }
-    } else {
-        // 数字型（val_hash 直接是数字字符串）
-        const n = Number(raw);
-        if (!isNaN(n) && isFinite(n) && raw.trim() !== '') {
-            mode  = 'num';
-            value = raw;
-        }
-    }
-
-    emit('goto-event-by-value', { value, mode });
+    const n = Number(raw);
+    const mode  = (!isNaN(n) && isFinite(n) && raw.trim() !== '') ? 'num' : 'str';
+    emit('goto-event-by-value', { value: raw, mode });
 }
 
 // ── 服务端数据 ────────────────────────────────────────────────────────────────
@@ -280,32 +312,32 @@ const loadingSet = ref(new Set());
 
 // ── 模式类型常量表 ────────────────────────────────────────────────────────────
 const PATTERN_TYPES = [
-    { value: 'timestamp_ms',   label: '⏱ 时间戳(ms)',    desc: '13 位 Unix 毫秒时间戳',        color: '#fde68a', bg: 'rgba(245,158,11,0.15)', border: 'rgba(245,158,11,0.4)' },
-    { value: 'timestamp_s',    label: '⏱ 时间戳(s)',     desc: '10 位 Unix 秒时间戳',          color: '#fde68a', bg: 'rgba(245,158,11,0.15)', border: 'rgba(245,158,11,0.4)' },
+    { value: 'timestamp',      label: '⏱ 时间戳',       desc: 'Unix 时间戳（秒或毫秒）',       color: '#fde68a', bg: 'rgba(245,158,11,0.15)', border: 'rgba(245,158,11,0.4)' },
     { value: 'uuid',           label: '🆔 UUID',          desc: 'UUID v1-v5 格式',              color: '#a5f3fc', bg: 'rgba(6,182,212,0.12)',  border: 'rgba(6,182,212,0.35)'  },
     { value: 'hex_str',        label: '🔣 Hex',           desc: '纯十六进制字符串（偶数长度≥8）', color: '#c4b5fd', bg: 'rgba(139,92,246,0.12)', border: 'rgba(139,92,246,0.35)' },
     { value: 'base64_charset', label: '📋 B64字符表',     desc: '标准/URL-safe/魔改 Base64 字符表', color: '#86efac', bg: 'rgba(34,197,94,0.12)',  border: 'rgba(34,197,94,0.35)'  },
-    { value: 'custom_alphabet',label: '🔀 自定义字母表',  desc: '64 个唯一字符的自定义编码字典', color: '#f9a8d4', bg: 'rgba(236,72,153,0.12)', border: 'rgba(236,72,153,0.35)' },
     { value: 'base64_encoded', label: '📦 Base64编码',    desc: '看起来像 Base64 编码结果',      color: '#6ee7b7', bg: 'rgba(16,185,129,0.12)', border: 'rgba(16,185,129,0.35)' },
     { value: 'ip_addr',        label: '🌐 IP地址',        desc: 'IPv4 地址（带或不带端口）',     color: '#93c5fd', bg: 'rgba(59,130,246,0.12)', border: 'rgba(59,130,246,0.35)' },
     { value: 'url',            label: '🔗 URL',           desc: 'HTTP/HTTPS URL',               color: '#93c5fd', bg: 'rgba(59,130,246,0.12)', border: 'rgba(59,130,246,0.35)' },
+    { value: 'url_encoded',    label: '🔒 URL编码',       desc: '含 %xx 编码的字符串（URL 参数 / form data）', color: '#67e8f9', bg: 'rgba(6,182,212,0.10)', border: 'rgba(6,182,212,0.35)' },
     { value: 'json_obj',       label: '📄 JSON',          desc: 'JSON 对象/数组字符串',          color: '#d1d5db', bg: 'rgba(107,114,128,0.12)', border: 'rgba(107,114,128,0.35)' },
     { value: 'byte_array',     label: '📊 字节数组',      desc: '纯整数数组（16~512 元素，每个 0-255）', color: '#fca5a5', bg: 'rgba(239,68,68,0.12)',  border: 'rgba(239,68,68,0.35)'  },
+    { value: 'plain',          label: '📝 普通字符串',    desc: '无特殊模式的普通字符串（长度≥4）',  color: '#cbd5e1', bg: 'rgba(148,163,184,0.12)', border: 'rgba(148,163,184,0.35)' },
 ];
 
 // 用于显示徽章文字（不含 emoji，更紧凑）
 const PATTERN_TYPE_LABELS = {
-    timestamp_ms:    '时间戳ms',
-    timestamp_s:     '时间戳s',
+    timestamp:       '时间戳',
     uuid:            'UUID',
     hex_str:         'Hex',
     base64_charset:  'B64字符表',
-    custom_alphabet: '自定义字母表',
     base64_encoded:  'Base64',
     ip_addr:         'IP地址',
     url:             'URL',
+    url_encoded:     'URL编码',
     json_obj:        'JSON',
     byte_array:      '字节数组',
+    plain:           '普通字符串',
 };
 
 // ── 筛选条件 ──────────────────────────────────────────────────────────────────
@@ -323,9 +355,14 @@ let lenFilterTimer   = null;
 
 function onValueSearchInput() {
     clearTimeout(valueSearchTimer);
+    clearTimeout(fallbackTimer);
     valueSearchTimer = setTimeout(() => {
         currentPage.value = 1;
         loadValuePatterns();
+    }, 350);
+    // 同步触发降级搜索（不管 value_patterns 是否有结果，均并行查询）
+    fallbackTimer = setTimeout(() => {
+        doFallbackSearch(valueSearch.value);
     }, 350);
 }
 
@@ -338,8 +375,10 @@ function onLenFilterInput() {
 }
 
 function clearValueSearch() {
-    valueSearch.value = '';
-    currentPage.value = 1;
+    valueSearch.value     = '';
+    currentPage.value     = 1;
+    fallbackResults.value = [];
+    fallbackTotal.value   = 0;
     loadValuePatterns();
 }
 
@@ -380,7 +419,56 @@ function resetFilters() {
     onlyCrypto.value          = false;
     selectedPatternType.value = '';
     currentPage.value         = 1;
+    fallbackResults.value     = [];
+    fallbackLoading.value     = false;
     loadValuePatterns();
+}
+
+// ── 降级搜索：在 value_dict 里全量搜索字符串（不依赖 A8 运行结果）────────────
+const fallbackResults  = ref([]);   // 降级搜索命中的结果
+const fallbackLoading  = ref(false);
+const fallbackTotal    = ref(0);
+
+let fallbackTimer = null;
+
+async function doFallbackSearch(keyword) {
+    if (!keyword || keyword.trim().length < 2) {
+        fallbackResults.value = [];
+        fallbackTotal.value   = 0;
+        return;
+    }
+    fallbackLoading.value = true;
+    try {
+        const res = await fetch(
+            `/api/sessions/${props.sessionId}/value-index-search?q=${encodeURIComponent(keyword.trim())}`
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        fallbackResults.value = data.results || [];
+        fallbackTotal.value   = fallbackResults.value.length;
+    } catch (e) {
+        console.error('fallbackSearch error:', e);
+        fallbackResults.value = [];
+    } finally {
+        fallbackLoading.value = false;
+    }
+}
+
+// 点击降级结果行，弹出 ValueViewer
+function openFallbackValue(row) {
+    // val_text 是 JSON 序列化字符串（带引号），解包后展示
+    let parsed = row.val_text;
+    try { parsed = JSON.parse(row.val_text); } catch { /* keep raw */ }
+    const label = typeof parsed === 'string' ? parsed.slice(0, 40) : String(row.val_text).slice(0, 40);
+    openValueViewer(parsed, label);
+}
+
+// 点击降级结果行跳转到事件流
+function gotoFallbackEvents(row) {
+    let value = row.val_text;
+    try { value = JSON.parse(row.val_text); } catch { /* keep raw */ }
+    const strValue = typeof value === 'string' ? value : String(value);
+    emit('goto-event-by-value', { value: strValue, mode: 'str' });
 }
 
 // ── 加载数据（服务端过滤 + 分页）─────────────────────────────────────────────
@@ -400,7 +488,16 @@ async function loadValuePatterns() {
         const res = await fetch(`/api/sessions/${props.sessionId}/value-patterns?${params}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        allPatterns.value = data.patterns || [];
+        // value_hash 是 val_text（JSON 序列化格式），字符串型带双引号，解包后才是真实内容
+        allPatterns.value = (data.patterns || []).map(p => {
+            if (p.value_hash && p.value_hash.startsWith('"') && p.value_hash.endsWith('"')) {
+                try {
+                    const decoded = JSON.parse(p.value_hash);
+                    if (typeof decoded === 'string') return { ...p, value_hash: decoded };
+                } catch { /* 解析失败保持原值 */ }
+            }
+            return p;
+        });
         totalCount.value  = data.total ?? data.patterns?.length ?? 0;
         // 如果当前页超出新的总页数，自动修正
         const maxPage = Math.max(1, Math.ceil(totalCount.value / pageSize.value));
@@ -423,14 +520,21 @@ async function openValue(p) {
 
     let rawFull = p.value_hash ?? '';
     try {
-        // 通过 full-value 接口拿 writes 表里的原始完整值
+        // 通过 full-value 接口拿 val_text（JSON 序列化格式，字符串带引号）
         const res = await fetch(`/api/sessions/${props.sessionId}/value-patterns/${p.id}/full-value`);
         if (res.ok) {
             const data = await res.json();
-            if (data.fullValue != null) rawFull = data.fullValue;
+            if (data.fullValue != null) {
+                // val_text 字符串型带引号，先解包为真实内容
+                let fv = data.fullValue;
+                if (typeof fv === 'string' && fv.startsWith('"') && fv.endsWith('"')) {
+                    try { fv = JSON.parse(fv); } catch { /* 保持原值 */ }
+                }
+                rawFull = fv;
+            }
         }
     } catch {
-        // 网络失败时降级使用 value_hash
+        // 网络失败时降级使用 value_hash（已解包）
     } finally {
         const s = new Set(loadingSet.value);
         s.delete(p.id);
@@ -443,7 +547,16 @@ async function openValue(p) {
         try { parsed = JSON.parse(rawFull); } catch { parsed = rawFull; }
     }
 
-    const label = p.value_hash ? `值：${String(p.value_hash).slice(0, 40)}` : '值详情';
+    let label = p.value_hash ? `值：${String(p.value_hash).slice(0, 40)}` : '值详情';
+    // 时间戳类型：把值转为 Number 传给 ValueViewer，触发格式化展示分支
+    if (p.pattern_type === 'timestamp') {
+        const numStr = String(rawFull ?? p.value_hash ?? '').trim();
+        const num = Number(numStr);
+        if (!isNaN(num) && isFinite(num)) {
+            parsed = num;  // 转为 number，ValueViewer 识别 valueType==='number' 后格式化
+            label = numStr;  // label 只用原始数字，ValueViewer 内部会显示格式化时间
+        }
+    }
     openValueViewer(parsed, label);
 }
 
@@ -525,7 +638,7 @@ onMounted(loadValuePatterns);
     vertical-align: middle;
 }
 
-/* 可点击的值 —— 仿 StringsTab 的 str-value-clickable 风格 */
+/* 可点击的值 */
 .value-clickable {
     cursor: pointer;
     border-bottom: 1px dashed rgba(165, 180, 252, 0.35);
@@ -599,7 +712,7 @@ onMounted(loadValuePatterns);
     border: 1px solid rgba(107,114,128,0.25);
 }
 /* 各类型独立配色 */
-.ptype-timestamp_ms, .ptype-timestamp_s {
+.ptype-timestamp {
     background: rgba(245,158,11,0.15); color: #fde68a; border-color: rgba(245,158,11,0.35);
 }
 .ptype-uuid {
@@ -611,14 +724,14 @@ onMounted(loadValuePatterns);
 .ptype-base64_charset {
     background: rgba(34,197,94,0.12); color: #86efac; border-color: rgba(34,197,94,0.3);
 }
-.ptype-custom_alphabet {
-    background: rgba(236,72,153,0.12); color: #f9a8d4; border-color: rgba(236,72,153,0.3);
-}
 .ptype-base64_encoded {
     background: rgba(16,185,129,0.12); color: #6ee7b7; border-color: rgba(16,185,129,0.3);
 }
 .ptype-ip_addr, .ptype-url {
     background: rgba(59,130,246,0.12); color: #93c5fd; border-color: rgba(59,130,246,0.3);
+}
+.ptype-url_encoded {
+    background: rgba(6,182,212,0.10); color: #67e8f9; border-color: rgba(6,182,212,0.3);
 }
 .ptype-json_obj {
     background: rgba(107,114,128,0.12); color: #d1d5db; border-color: rgba(107,114,128,0.3);
@@ -713,5 +826,30 @@ onMounted(loadValuePatterns);
 }
 .btn-goto-events:hover {
     opacity: 1; background: rgba(99,102,241,0.12);
+}
+
+/* ── plain 类型 badge ── */
+.ptype-plain {
+    background: rgba(148,163,184,0.12); color: #cbd5e1; border-color: rgba(148,163,184,0.3);
+}
+
+/* ── 降级搜索分隔线 ── */
+.fallback-divider {
+    display: flex; align-items: center; gap: 10px;
+    margin: 20px 0 12px;
+    border-top: 1px solid var(--border-color);
+    padding-top: 14px;
+}
+.fallback-divider-label {
+    font-size: 11px; font-weight: 600; color: var(--text-muted);
+    white-space: nowrap; letter-spacing: 0.03em;
+}
+
+/* ── 出现次数 badge ── */
+.occurrence-badge {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; font-family: monospace;
+    background: rgba(99,102,241,0.12); color: #a5b4fc;
+    border: 1px solid rgba(99,102,241,0.25);
 }
 </style>

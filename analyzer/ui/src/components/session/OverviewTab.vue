@@ -138,7 +138,7 @@ const ALL_PLUGIN_IDS = [
     'F1-EventIndex', 'F2-SmapLoader',
     'F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer',
     'A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer',
-    'A2-DataFlowGraph', 'A4-StringTracker',
+    'A2-DataFlowGraph',
     'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer',
 ];
 
@@ -153,7 +153,6 @@ const PLUGIN_LABELS = {
     'I1-CryptoDetector':        'I1 · 加密检测',
     'I2-SignatureAnalyzer':     'I2 · 签名分析',
     'A2-DataFlowGraph':         'A2 · 数据流图',
-    'A4-StringTracker':         'A4 · 字符串追踪',
     'A7-ObjectMutationTracker': 'A7 · 对象变异追踪',
     'I3-ObfuscationDetector':   'I3 · 混淆检测',
     'I4-AlgorithmSummarizer':   'I4 · 算法汇总',

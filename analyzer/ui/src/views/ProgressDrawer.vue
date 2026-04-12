@@ -152,7 +152,6 @@ const PLUGIN_META = {
     'I1-CryptoDetector':         { label: 'I1 加密检测',      desc: '识别 AES/MD5/SHA 等加密算法' },
     'I2-SignatureAnalyzer':      { label: 'I2 签名分析',      desc: '追踪签名/Token 计算路径' },
     'A2-DataFlowGraph':          { label: 'A2 数据流图',      desc: '构建 def-use 数据流图' },
-    'A4-StringTracker':          { label: 'A4 字符串追踪',    desc: '识别 base64/hex/url 编码' },
     'A7-ObjectMutationTracker':  { label: 'A7 对象变异',      desc: '重建对象属性变化时间线' },
     'I3-ObfuscationDetector':    { label: 'I3 混淆检测',      desc: '识别变量名混淆和控制流平坦化' },
     'I4-AlgorithmSummarizer':    { label: 'I4 算法汇总',      desc: '生成综合分析报告' },
@@ -162,7 +161,7 @@ const PHASES_CONFIG = [
     { id: 'phase1', label: 'Phase 1 · 基础解析', plugins: ['F1-EventIndex', 'F2-SmapLoader'] },
     { id: 'phase2', label: 'Phase 2 · 索引构建', plugins: ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'] },
     { id: 'phase3', label: 'Phase 3 · 深度分析', plugins: ['A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer'] },
-    { id: 'phase4', label: 'Phase 4 · 完整分析', plugins: ['A2-DataFlowGraph', 'A4-StringTracker', 'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer'] },
+    { id: 'phase4', label: 'Phase 4 · 完整分析', plugins: ['A2-DataFlowGraph', 'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer'] },
 ];
 
 // ── 状态 ─────────────────────────────────────────────────────────────────────
@@ -274,7 +273,7 @@ function handleWsEvent(evt) {
 const PHASE_PLUGIN_MAP = {
     phase2: ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'],
     phase3: ['A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer'],
-    phase4: ['A2-DataFlowGraph', 'A4-StringTracker', 'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer'],
+    phase4: ['A2-DataFlowGraph', 'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer'],
 };
 
 // 该阶段是否已运行过（至少有一个插件 done/skipped/failed）
