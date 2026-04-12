@@ -521,6 +521,11 @@ function _runMigrations(db) {
         if (vpCols.size > 0 && !vpCols.has('pattern_type')) {
             db.exec('ALTER TABLE value_patterns ADD COLUMN pattern_type TEXT');
         }
+        // ── value_patterns.entropy 列迁移 ──────────────────────────────────
+        // A8 v4：Shannon 熵值，字符串型值计算，高熵（>4.5）暗示加密/压缩
+        if (vpCols.size > 0 && !vpCols.has('entropy')) {
+            db.exec('ALTER TABLE value_patterns ADD COLUMN entropy REAL');
+        }
     } catch (e) {
         console.warn('[Database] add value_patterns columns failed (non-fatal):', e.message);
     }

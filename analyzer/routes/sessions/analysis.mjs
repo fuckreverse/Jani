@@ -180,7 +180,12 @@ router.get('/loop-iterations', (req, res) => {
 router.get('/value-patterns', (req, res) => {
     try {
         const { id } = req.params;
-        const { onlyCrypto, varName, valueSearch, minCount, patternType, lenMin, lenMax, limit = '2000', seqFrom, seqTo } = req.query;
+        const {
+            onlyCrypto, varName, valueSearch, minCount,
+            patternType, lenMin, lenMax,
+            limit = '100', offset = '0',
+            seqFrom, seqTo
+        } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -228,18 +233,27 @@ router.get('/value-patterns', (req, res) => {
             params.push(Number(seqTo));
         }
 
-        const limitN = Math.min(Number(limit) || 2000, 2000);
+        const whereClause = conditions.join(' AND ');
 
-        const rows = db.all(
-            `SELECT id, value_hash, count, first_seq, iid, var_name, line, matched_constant, pattern_type
-             FROM value_patterns
-             WHERE ${conditions.join(' AND ')}
-             ORDER BY count DESC
-             LIMIT ?`,
-            ...params, limitN
+        // 先查总数（用于分页）
+        const { total } = db.get(
+            `SELECT COUNT(*) AS total FROM value_patterns WHERE ${whereClause}`,
+            ...params
         );
 
-        res.json({ patterns: rows, count: rows.length, total: rows.length });
+        const limitN  = Math.max(1, Math.min(Number(limit)  || 100, 500));
+        const offsetN = Math.max(0, Number(offset) || 0);
+
+        const rows = db.all(
+            `SELECT id, value_hash, count, first_seq, iid, var_name, line, matched_constant, pattern_type, entropy
+             FROM value_patterns
+             WHERE ${whereClause}
+             ORDER BY count DESC
+             LIMIT ? OFFSET ?`,
+            ...params, limitN, offsetN
+        );
+
+        res.json({ patterns: rows, count: rows.length, total, limit: limitN, offset: offsetN });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/value-patterns] error:');
         res.status(500).json({ error: e.message });

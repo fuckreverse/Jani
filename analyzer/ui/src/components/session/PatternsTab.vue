@@ -2,7 +2,7 @@
   <div class="card">
     <div class="section-header">
       <h2 class="section-title">A8 · 值模式 / 魔术常数</h2>
-      <span class="section-badge">{{ filteredPatterns.length }} 条</span>
+      <span class="section-badge">{{ totalCount }} 条</span>
       <span v-if="cryptoCount > 0" class="section-badge badge-crypto">🔐 {{ cryptoCount }} 个密码学常数</span>
     </div>
 
@@ -69,6 +69,17 @@
         />
       </label>
 
+      <!-- 每页条数 -->
+      <label class="filter-label">
+        每页
+        <select v-model="pageSize" class="page-size-select" @change="onPageSizeChange">
+          <option :value="50">50</option>
+          <option :value="100">100</option>
+          <option :value="200">200</option>
+          <option :value="500">500</option>
+        </select>
+      </label>
+
       <button class="btn-secondary" @click="resetFilters">重置</button>
     </div>
 
@@ -106,12 +117,14 @@
             <tr>
               <th>值内容</th>
               <th>类型</th>
+              <th>熵値</th>
               <th>出现次数</th>
               <th>首次 SEQ</th>
               <th>iid</th>
               <th>变量名</th>
               <th>行号</th>
               <th>匹配常数</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -141,6 +154,21 @@
                 <span v-else class="text-muted">—</span>
               </td>
 
+              <!-- Shannon 熵値 -->
+              <td class="td-entropy">
+                <span
+                  v-if="p.entropy != null"
+                  class="entropy-badge"
+                  :class="{
+                    'entropy-high': p.entropy > 4.5,
+                    'entropy-mid':  p.entropy > 3.5 && p.entropy <= 4.5,
+                    'entropy-low':  p.entropy <= 3.5,
+                  }"
+                  :title="`Shannon 熵 = ${p.entropy} bits/char${p.entropy > 4.5 ? '（高熵，暗示加密/压缩）' : p.entropy > 3.5 ? '（中熵）' : '（低熵）'}`"
+                >{{ p.entropy }}</span>
+                <span v-else class="text-muted">—</span>
+              </td>
+
               <!-- 出现次数 -->
               <td class="td-seq td-count">{{ p.count }}</td>
 
@@ -164,14 +192,43 @@
                 <span v-if="p.matched_constant" class="crypto-badge">{{ p.matched_constant }}</span>
                 <span v-else class="text-muted">—</span>
               </td>
+
+              <!-- 跳转到事件流 -->
+              <td class="td-action">
+                <button
+                  class="btn-goto-events"
+                  title="在事件流中精确匹配这个値"
+                  @click.stop="gotoEvents(p)"
+                >📋</button>
+              </td>
             </tr>
           </tbody>
         </table>
       </div>
-      <div class="table-hint">
-        共 {{ filteredPatterns.length }} 条
-        <span v-if="selectedPatternType"> · 类型过滤：{{ PATTERN_TYPE_LABELS[selectedPatternType] ?? selectedPatternType }}</span>
-        · 点击值内容可展开完整值并复制
+      <!-- 分页控件 -->
+      <div class="pagination-bar">
+        <span class="pagination-info">
+          共 <strong>{{ totalCount }}</strong> 条
+          <template v-if="selectedPatternType"> · 类型：{{ PATTERN_TYPE_LABELS[selectedPatternType] ?? selectedPatternType }}</template>
+          · 第 {{ currentPage }} / {{ totalPages }} 页 · 点击值内容可展开完整值
+        </span>
+        <div class="pagination-controls">
+          <button class="page-btn" :disabled="currentPage <= 1" @click="goPage(1)" title="第一页">«</button>
+          <button class="page-btn" :disabled="currentPage <= 1" @click="goPage(currentPage - 1)" title="上一页">‹</button>
+          <template v-for="pg in pageList" :key="pg">
+            <span v-if="pg === '...'" class="page-ellipsis">…</span>
+            <button v-else class="page-btn" :class="{ 'page-btn-active': pg === currentPage }" @click="goPage(pg)">{{ pg }}</button>
+          </template>
+          <button class="page-btn" :disabled="currentPage >= totalPages" @click="goPage(currentPage + 1)" title="下一页">›</button>
+          <button class="page-btn" :disabled="currentPage >= totalPages" @click="goPage(totalPages)" title="最后一页">»</button>
+          <label class="jump-label">
+            跳至
+            <input v-model.number="jumpInput" type="number" min="1" :max="totalPages"
+              class="jump-input" @keyup.enter="doJump" />
+            页
+          </label>
+          <button class="btn-secondary btn-jump" @click="doJump">GO</button>
+        </div>
       </div>
     </div>
   </div>
@@ -186,9 +243,86 @@ const props = defineProps({
     sessionId: { type: String, required: true },
 });
 
+const emit = defineEmits(['goto-event-by-value']);
+
+/**
+ * 点击跳转到事件流。
+ * value_hash 是 JSON 序列化格式：字符串型带双引号（"hello"），数字型不含引号（42）。
+ * value_index.val_str 存的是去掉引号的原始内容，所以需要先解析再传给事件流搜索。
+ */
+function gotoEvents(p) {
+    const raw = p.value_hash ?? '';
+    let mode  = 'str';
+    let value = raw;
+
+    // 尝试 JSON 解析：去掉字符串外层引号 + 反转义
+    if (raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2) {
+        try {
+            const parsed = JSON.parse(raw);
+            if (typeof parsed === 'string') {
+                mode  = 'str';
+                value = parsed;  // 原始字符串，不含双引号
+            }
+        } catch { /* 解析失败，原样传 */ }
+    } else {
+        // 数字型（val_hash 直接是数字字符串）
+        const n = Number(raw);
+        if (!isNaN(n) && isFinite(n) && raw.trim() !== '') {
+            mode  = 'num';
+            value = raw;
+        }
+    }
+
+    emit('goto-event-by-value', { value, mode });
+}
+
 // ── 服务端数据 ────────────────────────────────────────────────────────────────
 const allPatterns     = ref([]);
 const patternsLoading = ref(false);
+const totalCount      = ref(0);   // 服务端真实总数
+
+// ── 分页状态 ──────────────────────────────────────────────────────────────────
+const currentPage = ref(1);
+const pageSize    = ref(100);
+const jumpInput   = ref('');
+
+const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize.value)));
+
+// 页码列表（带省略号，最多显示约 7 个按钮）
+const pageList = computed(() => {
+    const total = totalPages.value;
+    const cur   = currentPage.value;
+    if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+    const pages = [];
+    const delta = 2;
+    const left  = cur - delta;
+    const right = cur + delta;
+    pages.push(1);
+    if (left > 2)     pages.push('...');
+    for (let i = Math.max(2, left); i <= Math.min(total - 1, right); i++) pages.push(i);
+    if (right < total - 1) pages.push('...');
+    pages.push(total);
+    return pages;
+});
+
+function goPage(pg) {
+    const p = Math.max(1, Math.min(Number(pg), totalPages.value));
+    if (p !== currentPage.value) {
+        currentPage.value = p;
+        loadValuePatterns();
+    }
+}
+
+function doJump() {
+    const pg = Number(jumpInput.value);
+    if (pg >= 1 && pg <= totalPages.value) goPage(pg);
+    jumpInput.value = '';
+}
+
+function onPageSizeChange() {
+    currentPage.value = 1;
+    loadValuePatterns();
+}
 
 // ── 点击加载完整值的状态追踪 ──────────────────────────────────────────────────
 const loadingSet = ref(new Set());
@@ -239,6 +373,7 @@ let lenFilterTimer   = null;
 function onValueSearchInput() {
     clearTimeout(valueSearchTimer);
     valueSearchTimer = setTimeout(() => {
+        currentPage.value = 1;
         loadValuePatterns();
     }, 350);
 }
@@ -246,12 +381,14 @@ function onValueSearchInput() {
 function onLenFilterInput() {
     clearTimeout(lenFilterTimer);
     lenFilterTimer = setTimeout(() => {
+        currentPage.value = 1;
         loadValuePatterns();
     }, 400);
 }
 
 function clearValueSearch() {
     valueSearch.value = '';
+    currentPage.value = 1;
     loadValuePatterns();
 }
 
@@ -278,14 +415,16 @@ const cryptoCount = computed(() => allPatterns.value.filter(p => p.matched_const
 // ── 密码学 chip 点击（与 patternType 互斥）─────────────────────────────────────
 function onCryptoChipClick() {
     onlyCrypto.value = !onlyCrypto.value;
-    if (onlyCrypto.value) selectedPatternType.value = ''; // 互斥：取消 patternType 选中
+    if (onlyCrypto.value) selectedPatternType.value = '';
+    currentPage.value = 1;
     loadValuePatterns();
 }
 
 // ── 模式类型 chip 点击（单选切换，与 onlyCrypto 互斥）───────────────────────────
 function onPatternTypeClick(typeVal) {
     selectedPatternType.value = selectedPatternType.value === typeVal ? '' : typeVal;
-    if (selectedPatternType.value) onlyCrypto.value = false; // 互斥：取消密码学选中
+    if (selectedPatternType.value) onlyCrypto.value = false;
+    currentPage.value = 1;
     loadValuePatterns();
 }
 
@@ -298,16 +437,21 @@ function resetFilters() {
     lenMax.value              = '';
     onlyCrypto.value          = false;
     selectedPatternType.value = '';
+    currentPage.value         = 1;
     loadValuePatterns();
 }
 
-// ── 加载数据（服务端过滤：onlyCrypto + valueSearch + patternType）────────────
+// ── 加载数据（服务端过滤 + 分页）─────────────────────────────────────────────
 async function loadValuePatterns() {
     patternsLoading.value = true;
     try {
-        const params = new URLSearchParams({ limit: '2000' });
-        if (onlyCrypto.value) params.set('onlyCrypto', '1');
-        if (valueSearch.value.trim()) params.set('valueSearch', valueSearch.value.trim());
+        const offsetN = (currentPage.value - 1) * pageSize.value;
+        const params  = new URLSearchParams({
+            limit:  String(pageSize.value),
+            offset: String(offsetN),
+        });
+        if (onlyCrypto.value)          params.set('onlyCrypto', '1');
+        if (valueSearch.value.trim())  params.set('valueSearch', valueSearch.value.trim());
         if (selectedPatternType.value) params.set('patternType', selectedPatternType.value);
         if (lenMin.value !== '' && lenMin.value !== null) params.set('lenMin', String(lenMin.value));
         if (lenMax.value !== '' && lenMax.value !== null) params.set('lenMax', String(lenMax.value));
@@ -315,6 +459,10 @@ async function loadValuePatterns() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         allPatterns.value = data.patterns || [];
+        totalCount.value  = data.total ?? data.patterns?.length ?? 0;
+        // 如果当前页超出新的总页数，自动修正
+        const maxPage = Math.max(1, Math.ceil(totalCount.value / pageSize.value));
+        if (currentPage.value > maxPage) currentPage.value = maxPage;
     } catch (e) {
         console.error('loadValuePatterns error:', e);
     } finally {
@@ -360,8 +508,7 @@ async function openValue(p) {
 }
 
 defineExpose({ reload: loadValuePatterns });
-
-onMounted(loadValuePatterns);
+onMounted(loadValuePatterns);  
 </script>
 
 <style scoped>
@@ -538,5 +685,93 @@ onMounted(loadValuePatterns);
 }
 .ptype-byte_array {
     background: rgba(239,68,68,0.12); color: #fca5a5; border-color: rgba(239,68,68,0.3);
+}
+
+/* ── 每页下拉 ── */
+.page-size-select {
+    padding: 3px 6px; font-size: 12px;
+    border: 1px solid var(--border-color); border-radius: 4px;
+    background: var(--bg-secondary); color: var(--text-primary); cursor: pointer;
+}
+.page-size-select:focus { outline: none; border-color: rgba(99,102,241,0.5); }
+
+/* ── 分页控件 ── */
+.pagination-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 12px; flex-wrap: wrap; gap: 8px;
+}
+.pagination-info { font-size: 11px; color: var(--text-muted); }
+.pagination-info strong { color: var(--text-primary); }
+
+.pagination-controls {
+    display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+}
+
+.page-btn {
+    min-width: 28px; height: 26px; padding: 0 7px;
+    border: 1px solid var(--border-color); border-radius: 4px;
+    background: var(--bg-secondary); color: var(--text-muted);
+    font-size: 12px; cursor: pointer;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+    display: inline-flex; align-items: center; justify-content: center;
+}
+.page-btn:hover:not(:disabled) {
+    background: rgba(99,102,241,0.12); border-color: rgba(99,102,241,0.4); color: #a5b4fc;
+}
+.page-btn:disabled { opacity: 0.35; cursor: default; }
+.page-btn-active {
+    background: rgba(99,102,241,0.2) !important;
+    border-color: rgba(99,102,241,0.55) !important;
+    color: #c7d2fe !important; font-weight: 700;
+}
+
+.page-ellipsis {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; font-size: 12px; color: var(--text-muted); user-select: none;
+}
+
+.jump-label {
+    font-size: 12px; color: var(--text-muted);
+    display: flex; align-items: center; gap: 4px; margin-left: 6px;
+}
+.jump-input {
+    width: 46px; height: 26px; padding: 0 5px; font-size: 12px;
+    border: 1px solid var(--border-color); border-radius: 4px;
+    background: var(--bg-secondary); color: var(--text-primary); text-align: center;
+}
+.jump-input:focus { outline: none; border-color: rgba(99,102,241,0.5); }
+.jump-input::-webkit-inner-spin-button,
+.jump-input::-webkit-outer-spin-button { -webkit-appearance: none; }
+.jump-input { -moz-appearance: textfield; }
+
+.btn-jump { padding: 3px 9px; font-size: 12px; height: 26px; }
+
+/* ── 熵値列 ── */
+.td-entropy { text-align: center; min-width: 52px; }
+.entropy-badge {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; font-family: monospace; white-space: nowrap;
+    cursor: default;
+}
+.entropy-high {
+    background: rgba(239,68,68,0.18); color: #fca5a5; border: 1px solid rgba(239,68,68,0.35);
+}
+.entropy-mid {
+    background: rgba(245,158,11,0.15); color: #fde68a; border: 1px solid rgba(245,158,11,0.35);
+}
+.entropy-low {
+    background: rgba(107,114,128,0.12); color: #9ca3af; border: 1px solid rgba(107,114,128,0.25);
+}
+
+/* ── 跳转事件流按钮 ── */
+.td-action { text-align: center; width: 30px; padding: 4px 4px; }
+.btn-goto-events {
+    background: none; border: none; cursor: pointer;
+    font-size: 13px; opacity: 0.45; padding: 1px 3px;
+    border-radius: 3px;
+    transition: opacity 0.12s, background 0.12s;
+}
+.btn-goto-events:hover {
+    opacity: 1; background: rgba(99,102,241,0.12);
 }
 </style>

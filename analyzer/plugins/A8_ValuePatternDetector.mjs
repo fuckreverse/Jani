@@ -352,6 +352,35 @@ function detectValueType(value) {
     return null;
 }
 
+/**
+ * 计算字符串的 Shannon 熵（bits/char）。
+ * 仅对字符串型值有意义；数值/数组等返回 null。
+ * 高熵（> 4.5）暗示加密、压缩或随机数据。
+ * 公式：H = -Σ p_i * log2(p_i)
+ */
+function shannonEntropy(value) {
+    if (value === null || value === undefined) return null;
+    const str = String(value);
+    const len = str.length;
+    if (len === 0) return null;
+    // 纯数字或 JSON 数字 → 不计算熵（无意义）
+    if (!isNaN(Number(str)) && isFinite(Number(str))) return null;
+    // 字节数组形式：以数组整体特征为主，字符串熵意义不大
+    if (str.startsWith('[') && str.endsWith(']')) return null;
+    const freq = new Map();
+    for (let i = 0; i < len; i++) {
+        const c = str[i];
+        freq.set(c, (freq.get(c) ?? 0) + 1);
+    }
+    let h = 0;
+    for (const cnt of freq.values()) {
+        const p = cnt / len;
+        h -= p * Math.log2(p);
+    }
+    // 保留 3 位小数
+    return Math.round(h * 1000) / 1000;
+}
+
 function detectConstant(value) {
     if (value === null || value === undefined) return null;
     const str = String(value).trim().replace(/^"|"$/g, '');
@@ -516,6 +545,7 @@ export default class A8ValuePatternDetector extends BasePlugin {
             // 仍需写入：有常数匹配、有语义类型标签、或出现次数 >= 2
             if (!matched && !patternType && vs.count < 2) continue;
 
+            const entropy = shannonEntropy(vs.value);
             toInsert.push([
                 sessionId,
                 vs.value,        // val_text：完整原始值，直接来自 value_dict
@@ -527,12 +557,13 @@ export default class A8ValuePatternDetector extends BasePlugin {
                 matched ?? null,
                 vs.value_id,     // value_dict_id：直接引用，full-value 一跳搞定
                 patternType,     // 语义类型标签（timestamp_ms / uuid / hex_str 等）
+                entropy,         // Shannon 熵值（bits/char），非字符串型为 null
             ]);
         }
 
         if (toInsert.length > 0) {
             const stmt = rawDb.prepare(
-                'INSERT INTO value_patterns (session_id, value_hash, count, first_seq, iid, var_name, line, matched_constant, value_dict_id, pattern_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                'INSERT INTO value_patterns (session_id, value_hash, count, first_seq, iid, var_name, line, matched_constant, value_dict_id, pattern_type, entropy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
             const insertBatch = rawDb.transaction((batch) => {
                 for (const row of batch) stmt.run(...row);

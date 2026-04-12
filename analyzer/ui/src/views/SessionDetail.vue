@@ -67,7 +67,7 @@
       <EventsTab      v-show="activeTab === 'events'"      ref="eventsTabRef"      :session-id="sessionId" :target-seq="targetSeq" @goto-function="onGotoFunction" />
       <FunctionsTab   v-show="activeTab === 'functions'"   ref="functionsTabRef"   :session-id="sessionId" :plugin-status="pluginStatus" :target-call="targetCall" />
       <LoopsTab       v-show="activeTab === 'loops'"       ref="loopsTabRef"       :session-id="sessionId" />
-      <PatternsTab    v-show="activeTab === 'patterns'"    ref="patternsTabRef"    :session-id="sessionId" />
+      <PatternsTab    v-show="activeTab === 'patterns'"    ref="patternsTabRef"    :session-id="sessionId" @goto-event-by-value="onGotoEventByValue" />
       <CryptoTab      v-show="activeTab === 'crypto'"      ref="cryptoTabRef"      :session-id="sessionId" />
       <SignaturesTab  v-show="activeTab === 'signatures'"  ref="signaturesTabRef"  :session-id="sessionId" />
       <DataflowTab    v-show="activeTab === 'dataflow'"    ref="dataflowTabRef"    :session-id="sessionId" />
@@ -81,7 +81,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 
 import ProgressDrawer  from './ProgressDrawer.vue';
@@ -170,6 +170,14 @@ function onGotoFunction({ fnName, fnIid, callSeq }) {
 function onGotoEvent({ eventId }) {
     targetSeq.value = eventId;
     activeTab.value = 'events';
+}
+
+/** 来自 PatternsTab 的跳转到事件流（精确匹配指定值，str/num 模式由 PatternsTab 决定） */
+async function onGotoEventByValue({ value, mode }) {
+    activeTab.value = 'events';
+    // 切换 Tab 后等 nextTick，确保 EventsTab v-show 已激活
+    await nextTick();
+    eventsTabRef.value?.gotoValueSearch(value, mode);
 }
 
 const tabs = [

@@ -287,8 +287,9 @@ var_name        TEXT,
 line            INTEGER,
 matched_constant TEXT,
 value_dict_id   INTEGER,  -- 引用 value_dict.id，A8 v2 填充，可直接查完整原始值
-pattern_type    TEXT       -- 语义类型标签（A8 v3）：timestamp_ms/timestamp_s/uuid/hex_str/
+pattern_type    TEXT,      -- 语义类型标签（A8 v3）：timestamp_ms/timestamp_s/uuid/hex_str/
                            -- base64_charset/custom_alphabet/base64_encoded/ip_addr/url/json_obj/byte_array
+entropy         REAL       -- Shannon 熵值（A8 v4）：字符串型值计算，高熵（>4.5）暗示加密/压缩；NULL 表示非字符串型
 );
 
 -- ─── 加密检测（I1 CryptoDetector 填充）──────────────────────────────────────

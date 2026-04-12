@@ -521,7 +521,23 @@ watch(() => props.targetSeq, async (seq) => {
     }
 });
 
-defineExpose({ reload: () => loadEvents(true) });
+/**
+ * 从外部跳转：以精确匹配方式搜索指定值。
+ * mode: 'str'（字符串精确）| 'num'（数值精确），默认 'str'
+ */
+function gotoValueSearch(value, mode = 'str') {
+    filters.value = {
+        types: [], line: '', varName: '',
+        valueMode: mode === 'num' ? 'num' : 'str',
+        valueQuery: String(value ?? ''),
+        valueQuery2: '',
+    };
+    currentPage.value = 1;
+    cursorStack.value = [0];
+    loadEvents(true);
+}
+
+defineExpose({ reload: () => loadEvents(true), gotoValueSearch });
 
 onMounted(async () => {
     await loadEvents();
