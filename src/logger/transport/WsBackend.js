@@ -43,6 +43,25 @@ import { createDiagLogger, isDebugEnabled, DOMAIN } from '../diagnostics.js';
 
 const log = createDiagLogger(DOMAIN.BACKEND_WS);
 
+// ── UUID 生成（兼容浏览器与 Node.js）────────────────────────────────────────────
+
+function _generateUUID() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+    }
+    // 降级：手动拼接
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+    });
+}
+
+/** 将 sid 参数追加到 WebSocket URL（已有参数时用 & 拼接） */
+function _urlWithSid(url, sid) {
+    const sep = url.includes('?') ? '&' : '?';
+    return `${url}${sep}sid=${encodeURIComponent(sid)}`;
+}
+
 // ── 公共接口 ────────────────────────────────────────────────────────────────────
 
 export class WsBackend {
@@ -50,6 +69,7 @@ export class WsBackend {
      * @param {object} [options]
      * @param {'main'|'worker'|'sab'} [options.mode='worker']  运行模式
      * @param {string}  [options.url='ws://127.0.0.1:9229/trace']  服务端地址
+     * @param {string}  [options.sessionId]  会话 ID（用于服务端文件复用，默认自动生成 UUID）
      * @param {'binary'} [options.format='binary']    消息格式（仅支持 binary/JTB1）
      * @param {boolean} [options.usePool=false]  启用字典压缩（Value Pool），仅 main 模式支持
      *
@@ -75,6 +95,11 @@ export class WsBackend {
     constructor(options = {}) {
         const mode = options.mode ?? 'worker';
 
+        // 生成（或接受外部传入）会话 ID，拼入 URL，确保重连时服务端能识别同一逻辑会话
+        const sessionId = options.sessionId ?? _generateUUID();
+        const urlWithSid = _urlWithSid(options.url ?? 'ws://127.0.0.1:9229/trace', sessionId);
+        const optionsWithSid = { ...options, url: urlWithSid, sessionId };
+
         // SAB 模式：检查是否支持，不支持则降级为 worker
         if (mode === 'sab' && !WsBackend.isSabSupported()) {
             console.warn(
@@ -85,14 +110,17 @@ export class WsBackend {
                 '    Cross-Origin-Embedder-Policy: require-corp\n' +
                 '  如果使用 webpack-dev-server，在 devServer.headers 中配置。'
             );
-            this._impl = new _WorkerTransport(options);
+            this._impl = new _WorkerTransport(optionsWithSid);
         } else if (mode === 'sab') {
-            this._impl = new _SabTransport(options);
+            this._impl = new _SabTransport(optionsWithSid);
         } else if (mode === 'worker') {
-            this._impl = new _WorkerTransport(options);
+            this._impl = new _WorkerTransport(optionsWithSid);
         } else {
-            this._impl = new _MainTransport(options);
+            this._impl = new _MainTransport(optionsWithSid);
         }
+
+        /** 供外部查询当前会话 ID */
+        this.sessionId = sessionId;
     }
 
     /**

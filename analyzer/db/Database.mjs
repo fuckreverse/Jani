@@ -374,8 +374,8 @@ function _runMigrations(db) {
         }
     }
 
-    // ── call_edges.own_event_count 列迁移 ────────────────────────────────────
-    // 新增列：自身事件数（F3 预计算），旧数据库中不存在，需在线 ALTER
+    // ── call_edges 列迁移 ────────────────────────────────────────────────────
+    // 新增列：own_event_count（F3 预计算自身事件数）、fn_def_iid（函数定义点 iid）
     try {
         const callEdgesCols = new Set(
             db.pragma('table_info(call_edges)').map(r => r.name)
@@ -383,8 +383,11 @@ function _runMigrations(db) {
         if (callEdgesCols.size > 0 && !callEdgesCols.has('own_event_count')) {
             db.exec('ALTER TABLE call_edges ADD COLUMN own_event_count INTEGER');
         }
+        if (callEdgesCols.size > 0 && !callEdgesCols.has('fn_def_iid')) {
+            db.exec('ALTER TABLE call_edges ADD COLUMN fn_def_iid INTEGER');
+        }
     } catch (e) {
-        console.warn('[Database] add call_edges.own_event_count failed (non-fatal):', e.message);
+        console.warn('[Database] add call_edges columns failed (non-fatal):', e.message);
     }
 
     // ── 清理旧的低效索引 ──────────────────────────────────────────────────────

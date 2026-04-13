@@ -111,9 +111,12 @@ CREATE TABLE IF NOT EXISTS call_edges (
     args_json       TEXT,
     return_value    TEXT,
     depth           INTEGER,
-    own_event_count INTEGER  -- 自身事件数：(return_seq - call_seq) 减去所有直接子调用覆盖的 SEQ 跨度
+    own_event_count INTEGER, -- 自身事件数：(return_seq - call_seq) 减去所有直接子调用覆盖的 SEQ 跨度
                              -- 由 F3_CallGraphBuilder 在构建调用图时一次性计算写入，O(N) 预计算
                              -- 迁移：旧数据此列为 NULL，重跑 F3 可填充
+    fn_def_iid      INTEGER  -- 函数定义点 iid（J$.Fe 注入时的 iid，同一函数体每次调用相同）
+                             -- 由 CALL_PRE 事件携带的 fnDefIid 字段填充（runtime 通过 WeakMap 查取）
+                             -- 内建/未插桩函数此列为 NULL
 );
 
 -- ─── 污点路径（A1 TaintTracker 填充）────────────────────────────────────────

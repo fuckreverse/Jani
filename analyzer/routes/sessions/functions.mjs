@@ -71,7 +71,7 @@ router.get('/functions', (req, res) => {
             minCalls    = '1',
             limit       = '100',
             offset      = '0',
-            fnIid,              // 精确 iid 过滤（跨 Tab 跳转时使用）
+            fnDefIid,           // 函数定义点 iid 精确过滤（同一函数体每次调用相同）
             minEvents,          // 函数体最少事件数（近似：MAX(return_seq)-MIN(call_seq)）
             maxEvents,          // 函数体最多事件数
             hideBuiltin = '0',  // '1' 隐藏 JS 内建函数
@@ -89,9 +89,10 @@ router.get('/functions', (req, res) => {
             conditions.push('fn_name LIKE ?');
             params.push(`%${search}%`);
         }
-        if (fnIid !== undefined && fnIid !== '') {
-            conditions.push('fn_iid = ?');
-            params.push(Number(fnIid));
+        // fnDefIid 精确过滤：按函数定义点 iid 唯一定位函数体
+        if (fnDefIid !== undefined && fnDefIid !== '') {
+            conditions.push('fn_def_iid = ?');
+            params.push(Number(fnDefIid));
         }
         // hideBuiltin：fn_name 不在内建名单中（仅 fn_name 不含 '.' 的短名；Math.xxx 等带点的
         // 由于 call_edges.fn_name 通常只存方法短名，这里直接用 NOT IN 过滤）
@@ -135,6 +136,7 @@ router.get('/functions', (req, res) => {
             `SELECT
                 fn_name,
                 fn_iid,
+                fn_def_iid,
                 COUNT(*)         AS call_count,
                 ${ownExpr}       AS event_count,
                 ${avgOwnExpr}    AS avg_own_event_count,
@@ -143,7 +145,7 @@ router.get('/functions', (req, res) => {
                 MAX(depth)       AS max_depth
              FROM call_edges
              WHERE ${conditions.join(' AND ')}
-             GROUP BY fn_name, fn_iid
+             GROUP BY fn_name, fn_def_iid
              HAVING ${havingClauses.join(' AND ')}
              ORDER BY ${orderExpr}
              LIMIT ? OFFSET ?`,
@@ -157,7 +159,7 @@ router.get('/functions', (req, res) => {
                SELECT fn_name
                FROM call_edges
                WHERE ${conditions.join(' AND ')}
-               GROUP BY fn_name, fn_iid
+               GROUP BY fn_name, fn_def_iid
                HAVING ${havingClauses.join(' AND ')}
              )`,
             ...params, ...havingParams
@@ -382,82 +384,141 @@ router.get('/calls/:callId/own-events', (req, res) => {
         const { call_seq: callSeqN, return_seq: returnSeqN, depth: depthN } = call;
         const limitN = Math.min(Number(limit) || 200, 500);
 
-        // ── Step 1: 取所有直接子调用区间，复用共享工具 ───────────────────────────
-        // queryDirectChildren 使用 idx_call_edges_depth 索引，O(子调用数)
+        // ── Step 1: 计算"自身区间"段列表 ─────────────────────────────────────
+        // 取直接子调用列表（已按 call_seq ASC 排序），然后用区间减法得到若干段连续"自身区间"。
+        // 每段区间 [lo, hi] 内的事件全部是本函数自身的（子调用 CALL_PRE/CALL 边界保留）。
+        // 这样后续 SQL 分段走主键范围扫描，完全精确，不需要 fetchMultiplier 猜测。
         const children = queryDirectChildren(id, depthN, callSeqN, returnSeqN);
-        // children 已按 call_seq ASC 排序，可直接传入 makeIsInsideChild
 
-        // ── Step 2: 取区间内事件，JS 侧用 makeIsInsideChild 排除子调用内部 ───────
-        // 策略：保留 CALL_PRE @ call_seq 和 CALL @ return_seq 两个边界事件，
-        //   这样事件流里能看到「调用了 B」及「B 的返回值」。
-        // SQL 只做基础范围+游标过滤；子调用排除全在 JS 侧完成，
-        //   避免 NOT BETWEEN 链过长触发 SQLite "Expression tree is too large"。
-        const baseConditions = [
-            'e.session_id = ?',
-            'e.id >= ?',
-            'e.id <= ?',
-        ];
-        const baseParams = [id, callSeqN, returnSeqN];
-
-        // 游标分页
-        if (cursor !== undefined && cursor !== '') {
-            baseConditions.push('e.id > ?');
-            baseParams.push(Number(cursor));
+        // computeOwnRanges：[frameStart, frameEnd] 减去子调用区间 [child.call_seq+1, child.return_seq-1]
+        // 保留子调用边界本身（CALL_PRE @ call_seq、CALL @ return_seq 均属于本函数）
+        // 等价：把 [callSeqN, returnSeqN] 按子调用切成若干段
+        //   段 1: [callSeqN,           child[0].call_seq]
+        //   段 2: [child[0].return_seq, child[1].call_seq]
+        //   ...
+        //   末段: [child[-1].return_seq, returnSeqN]
+        const ownRanges = [];  // [{lo, hi}]，均为 inclusive
+        {
+            let cur = callSeqN;
+            for (const c of children) {
+                if (c.call_seq >= cur) {
+                    ownRanges.push({ lo: cur, hi: c.call_seq });  // 含子调用的 CALL_PRE
+                }
+                cur = c.return_seq;  // 下一段从子调用的 CALL 开始（含 CALL）
+            }
+            ownRanges.push({ lo: cur, hi: returnSeqN });
         }
 
-        // 多取倍数应对过滤损耗
-        const fetchMultiplier = children.length > 50 ? 5 : children.length > 10 ? 3 : 1;
-        const rawEvents = db.all(
-            `SELECT e.id AS seq, e.type, e.iid,
-                    s.sl AS line, s.sc AS col, s.src_text
-             FROM events e
-             LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
-             WHERE ${baseConditions.join(' AND ')}
-             ORDER BY e.id ASC
-             LIMIT ?`,
-            ...baseParams, limitN * fetchMultiplier
+        // ── Step 2: 游标定位到起始段 ─────────────────────────────────────────
+        // cursor 为上次返回的最后 event SEQ，下次从 > cursor 开始扫描
+        const cursorN = (cursor !== undefined && cursor !== '') ? Number(cursor) : callSeqN - 1;
+
+        // 找第一个包含 cursorN+1 的段（lo <= cursor+1 的最后一段，取 hi > cursorN 的第一段）
+        let startRangeIdx = 0;
+        for (let i = 0; i < ownRanges.length; i++) {
+            if (ownRanges[i].hi > cursorN) { startRangeIdx = i; break; }
+            startRangeIdx = i + 1;
+        }
+
+        // ── Step 3: 分段扫描，凑满 limitN 条事件 ────────────────────────────
+        // 每段用主键范围查询 WHERE e.id >= lo AND e.id <= hi，精确走 PK B-tree
+        // 完全不需要 fetchMultiplier，也不会漏事件
+        const rawStmt = db.raw().prepare(
+            `SELECT id AS seq, type, iid FROM events
+             WHERE session_id = ? AND id >= ? AND id <= ?
+             ORDER BY id ASC LIMIT ?`
         );
 
-        // JS 侧排除子调用内部区间，复用 makeIsInsideChild
-        const isInChild = makeIsInsideChild(children);
-        let events;
-        if (children.length === 0) {
-            events = rawEvents.slice(0, limitN);
-        } else {
-            const filtered = [];
-            for (const e of rawEvents) {
-                if (!isInChild(e.seq)) filtered.push(e);
-                if (filtered.length >= limitN) break;
+        const eventRows = [];
+        for (let i = startRangeIdx; i < ownRanges.length && eventRows.length < limitN; i++) {
+            const { lo, hi } = ownRanges[i];
+            const loEff = i === startRangeIdx ? Math.max(lo, cursorN + 1) : lo;
+            if (loEff > hi) continue;
+            const remaining = limitN - eventRows.length;
+            const rows = rawStmt.all(id, loEff, hi, remaining);
+            for (const r of rows) eventRows.push(r);
+        }
+
+        // ── Step 4: 批量查 smap（按 iid 点查主键，不 JOIN 主查询）─────────────
+        // 先收集唯一 iid 集合，再逐个走 smap(session_id, iid) PK 点查
+        const iidSmapCache = new Map();
+        const smapPointStmt = db.raw().prepare(
+            'SELECT sl, sc, src_text FROM smap WHERE session_id = ? AND iid = ?'
+        );
+        for (const e of eventRows) {
+            if (e.iid != null && !iidSmapCache.has(e.iid)) {
+                const s = smapPointStmt.get(id, e.iid);
+                iidSmapCache.set(e.iid, s ?? null);
             }
-            events = filtered;
         }
 
-        // ── Step 3: 批量查 writes/reads/fields ────────────────────────────────
-        const eventIds = events.map(e => e.seq);
-        let writes = [], reads = [], fields = [];
+        // ── Step 5: 批量查 writes/reads/fields ───────────────────────────────
+        // eventRows 数量 <= limitN（最多 500）；用 event.id 主键范围 + JOIN 方式
+        // 复用与 annotated-source 相同的"以 events PK 范围驱动"策略：
+        // 对每段 ownRange 分别查，再合并（段数通常 = 子调用数 + 1，通常个位数）
+        const writesMap = new Map();  // event_id → [{name, value, omitted}]
+        const readsMap  = new Map();
+        const fieldsMap = new Map();
 
-        if (eventIds.length > 0) {
-            const ph = eventIds.map(() => '?').join(',');
-            writes = db.all(`SELECT w.event_id, w.name, vd.val_text AS value, w.omitted FROM writes w LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id WHERE w.session_id = ? AND w.event_id IN (${ph})`, id, ...eventIds);
-            reads  = db.all(`SELECT r.event_id, r.name, vd.val_text AS value, r.omitted FROM reads r LEFT JOIN value_dict vd ON vd.session_id = r.session_id AND vd.id = r.value_id WHERE r.session_id = ? AND r.event_id IN (${ph})`, id, ...eventIds);
-            fields = db.all(`SELECT f.event_id, f.offset, f.is_write, vd.val_text AS value, f.omitted, f.base_oid FROM fields f LEFT JOIN value_dict vd ON vd.session_id = f.session_id AND vd.id = f.value_id WHERE f.session_id = ? AND f.event_id IN (${ph})`, id, ...eventIds);
+        const wStmt = db.raw().prepare(
+            `SELECT w.event_id, w.name, vd.val_text AS value, w.omitted
+             FROM events e
+             JOIN writes w ON w.session_id = e.session_id AND w.event_id = e.id
+             LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
+             WHERE e.session_id = ? AND e.id >= ? AND e.id <= ?`
+        );
+        const rStmt = db.raw().prepare(
+            `SELECT r.event_id, r.name, vd.val_text AS value, r.omitted
+             FROM events e
+             JOIN reads r ON r.session_id = e.session_id AND r.event_id = e.id
+             LEFT JOIN value_dict vd ON vd.session_id = r.session_id AND vd.id = r.value_id
+             WHERE e.session_id = ? AND e.id >= ? AND e.id <= ?`
+        );
+        const fStmt = db.raw().prepare(
+            `SELECT f.event_id, f.offset, f.is_write, vd.val_text AS value, f.omitted, f.base_oid
+             FROM events e
+             JOIN fields f ON f.session_id = e.session_id AND f.event_id = e.id
+             LEFT JOIN value_dict vd ON vd.session_id = f.session_id AND vd.id = f.value_id
+             WHERE e.session_id = ? AND e.id >= ? AND e.id <= ?`
+        );
+
+        // 只扫描实际有事件的段（起始段到最后一条事件所在段）
+        const lastSeq = eventRows.length > 0 ? eventRows[eventRows.length - 1].seq : cursorN;
+        for (let i = startRangeIdx; i < ownRanges.length; i++) {
+            const { lo, hi } = ownRanges[i];
+            const loEff = i === startRangeIdx ? Math.max(lo, cursorN + 1) : lo;
+            const hiEff = Math.min(hi, lastSeq);
+            if (loEff > hiEff) continue;
+
+            for (const w of wStmt.all(id, loEff, hiEff)) {
+                if (!writesMap.has(w.event_id)) writesMap.set(w.event_id, []);
+                writesMap.get(w.event_id).push(w);
+            }
+            for (const r of rStmt.all(id, loEff, hiEff)) {
+                if (!readsMap.has(r.event_id)) readsMap.set(r.event_id, []);
+                readsMap.get(r.event_id).push(r);
+            }
+            for (const f of fStmt.all(id, loEff, hiEff)) {
+                if (!fieldsMap.has(f.event_id)) fieldsMap.set(f.event_id, []);
+                fieldsMap.get(f.event_id).push(f);
+            }
+            if (hiEff >= lastSeq) break;  // 已覆盖所有事件，提前退出
         }
 
-        const writesMap = groupBy(writes, 'event_id');
-        const readsMap  = groupBy(reads,  'event_id');
-        const fieldsMap = groupBy(fields, 'event_id');
-
-        const result = events.map(e => ({
-            seq:     e.seq,
-            type:    decodeType(e.type),
-            iid:     e.iid,
-            line:    e.line ?? null,
-            col:     e.col  ?? null,
-            srcText: e.src_text ?? null,
-            writes:  (writesMap[e.seq] || []).map(w => ({ name: w.name, value: safeParseJson(w.value), omitted: !!w.omitted })),
-            reads:   (readsMap[e.seq]  || []).map(r => ({ name: r.name, value: safeParseJson(r.value), omitted: !!r.omitted })),
-            fields:  (fieldsMap[e.seq] || []).map(f => ({ offset: f.offset, isWrite: !!f.is_write, value: safeParseJson(f.value), omitted: !!f.omitted, baseOid: f.base_oid ?? null })),
-        }));
+        const result = eventRows.map(e => {
+            const s = e.iid != null ? iidSmapCache.get(e.iid) : null;
+            return {
+                seq:     e.seq,
+                type:    decodeType(e.type),
+                iid:     e.iid,
+                line:    s?.sl  ?? null,
+                col:     s?.sc  ?? null,
+                srcText: s?.src_text ?? null,
+                writes:  (writesMap.get(e.seq) || []).map(w => ({ name: w.name, value: safeParseJson(w.value), omitted: !!w.omitted })),
+                reads:   (readsMap.get(e.seq)  || []).map(r => ({ name: r.name, value: safeParseJson(r.value), omitted: !!r.omitted })),
+                fields:  (fieldsMap.get(e.seq) || []).map(f => ({ offset: f.offset, isWrite: !!f.is_write, value: safeParseJson(f.value), omitted: !!f.omitted, baseOid: f.base_oid ?? null })),
+            };
+        });
 
         const nextCursor = result.length === limitN ? result[result.length - 1].seq : null;
 
@@ -841,17 +902,18 @@ router.get('/calls/:callId/annotated-source', (req, res) => {
             if (!isInsideChild(r.seq)) ownIidSet.add(r.iid);
         }
 
-        // 用 iid 集合查 smap（iid 数量 = 去重后的 AST 节点数，通常很小）
-        // 逐个查比展开 IN 更安全；也可以一次全量 smap + JS 过滤，这里用逐个查
-        // 实际上 smap 条目数 = 程序 AST 节点总数，是固定的，可以全量扫描后 JS 过滤
-        const allSmapForSession = db.all(
-            `SELECT iid, sl, sc, src_text FROM smap
-             WHERE session_id = ?
-               AND sl IS NOT NULL
-             ORDER BY sl ASC, sc ASC`,
-            id
+        // 用 ownIidSet 逐个点查 smap 主键（session_id, iid）
+        // smap 主键是 (session_id, iid)，单点查询 O(log N)
+        // ownIidSet 大小 = 本函数自身层去重 iid 数，通常几十到几百个，远比全表扫描快
+        const smapRows = [];
+        const smapStmt = db.raw().prepare(
+            'SELECT iid, sl, sc, src_text FROM smap WHERE session_id = ? AND iid = ? AND sl IS NOT NULL'
         );
-        const smapRows = allSmapForSession.filter(r => ownIidSet.has(r.iid));
+        for (const iid of ownIidSet) {
+            const row = smapStmt.get(id, iid);
+            if (row) smapRows.push(row);
+        }
+        smapRows.sort((a, b) => a.sl - b.sl || a.sc - b.sc);
 
         if (smapRows.length === 0) {
             // 区分两种情况：
@@ -925,13 +987,15 @@ router.get('/calls/:callId/annotated-source', (req, res) => {
         }
 
         {
-            // 用关联子查询直接按区间过滤，不展开 event_id 列表
+            // 以 events 主键范围为驱动（走 PK 范围扫描），再 JOIN writes/reads
+            // idx_writes_event(session_id, event_id) / idx_reads_event(session_id, event_id)
+            // 在 JS 层用 iidToSmap 过滤掉子调用的事件（iidToSmap 只含本函数自身 iid）
             const writes = db.all(
-                `SELECT w.event_id, e.iid, w.name, vd.val_text AS value, w.omitted
-                 FROM writes w
-                 JOIN events e ON e.session_id = w.session_id AND e.id = w.event_id
+                `SELECT e.iid, w.name, vd.val_text AS value, w.omitted
+                 FROM events e
+                 JOIN writes w ON w.session_id = e.session_id AND w.event_id = e.id
                  LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
-                 WHERE w.session_id = ?
+                 WHERE e.session_id = ?
                    AND e.id > ?
                    AND e.id < ?`,
                 id, callSeq, returnSeq
@@ -944,11 +1008,11 @@ router.get('/calls/:callId/annotated-source', (req, res) => {
             }
 
             const reads = db.all(
-                `SELECT r.event_id, e.iid, r.name, vd.val_text AS value, r.omitted
-                 FROM reads r
-                 JOIN events e ON e.session_id = r.session_id AND e.id = r.event_id
+                `SELECT e.iid, r.name, vd.val_text AS value, r.omitted
+                 FROM events e
+                 JOIN reads r ON r.session_id = e.session_id AND r.event_id = e.id
                  LEFT JOIN value_dict vd ON vd.session_id = r.session_id AND vd.id = r.value_id
-                 WHERE r.session_id = ?
+                 WHERE e.session_id = ?
                    AND e.id > ?
                    AND e.id < ?`,
                 id, callSeq, returnSeq

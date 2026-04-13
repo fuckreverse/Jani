@@ -55,19 +55,26 @@ export default class F3CallGraphBuilder extends BasePlugin {
             8
         );
 
-        // ── Step 2: 单次扫描 reads 取 callee 名，JOIN value_dict 取完整函数名 ──
-        // 利用 idx_reads_name(session_id, name) 索引，只扫 name='callee' 的行
+        // ── Step 2: 单次扫描 reads 取 callee 名 + callee_def_iid ──────────────
+        // 利用 idx_reads_name(session_id, name) 索引，合并扫描 name IN ('callee','callee_def_iid') 的行
         // 单次全量扫描 + JOIN，避免分批 IN 导致的 N 次 prepare + 随机 B-Tree 跳转
-        const calleeMap = new Map(); // event_id → callee name string
+        const calleeMap       = new Map(); // event_id → callee name string
+        const calleeDefIidMap = new Map(); // event_id → fn_def_iid (number)
         {
             const rows = rawDb.prepare(
-                `SELECT r.event_id, vd.val_text AS value
+                `SELECT r.event_id, r.name, vd.val_text AS value
                  FROM reads r
                  LEFT JOIN value_dict vd ON vd.session_id = r.session_id AND vd.id = r.value_id
-                 WHERE r.session_id = ? AND r.name = 'callee'`
+                 WHERE r.session_id = ? AND r.name IN ('callee', 'callee_def_iid')`
             ).all(sessionId);
             for (const r of rows) {
-                calleeMap.set(r.event_id, r.value?.replace(/^"|"$/g, '') ?? null);
+                if (r.name === 'callee') {
+                    calleeMap.set(r.event_id, r.value?.replace(/^"|"$/g, '') ?? null);
+                } else {
+                    // callee_def_iid 存的是整数字符串，转回 number
+                    const n = r.value !== null ? Number(r.value) : null;
+                    if (n !== null && !isNaN(n)) calleeDefIidMap.set(r.event_id, n);
+                }
             }
         }
 
@@ -124,7 +131,7 @@ export default class F3CallGraphBuilder extends BasePlugin {
         const edges   = [];
 
         const stmt = rawDb.prepare(
-            'INSERT INTO call_edges (session_id, call_seq, return_seq, caller_line, fn_name, fn_iid, args_json, return_value, depth, own_event_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO call_edges (session_id, call_seq, return_seq, caller_line, fn_name, fn_iid, args_json, return_value, depth, own_event_count, fn_def_iid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
         const insertBatch = rawDb.transaction((batch) => {
             for (const e of batch) stmt.run(e);
@@ -148,6 +155,7 @@ export default class F3CallGraphBuilder extends BasePlugin {
                     caller_line:      smapLineMap.get(evt.iid) ?? null,
                     fn_iid:           evt.iid,
                     fn_name:          calleeMap.get(evt.id) ?? `fn@${evt.iid || 'unknown'}`,
+                    fn_def_iid:       calleeDefIidMap.get(evt.id) ?? null,
                     args_json:        argsMap.get(evt.id) ?? '[]',
                     depth:            depth++,
                     child_event_span: 0,  // 直接子调用消耗的 SEQ 跨度之和
@@ -174,6 +182,7 @@ export default class F3CallGraphBuilder extends BasePlugin {
                     retMap.get(evt.id) ?? null,
                     frame.depth,
                     ownCount,
+                    frame.fn_def_iid ?? null,
                 ]);
                 edgeCount++;
 

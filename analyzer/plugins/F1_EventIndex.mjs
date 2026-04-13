@@ -348,6 +348,13 @@ export default class F1EventIndex extends BasePlugin {
                     const vid = internValue(sv, vdBatch);
                     readBatch.push([eventId, sessionId, 'callee', vid, 0]);
                 }
+                // fnDefIid：函数定义点 iid（同一函数体每次调用相同），存入 reads 表（name='callee_def_iid'）
+                // F3_CallGraphBuilder 依赖此字段填充 call_edges.fn_def_iid，用于唯一标识函数体
+                if (event.fnDefIid !== undefined && event.fnDefIid !== null) {
+                    const sv = String(event.fnDefIid);
+                    const vid = internValue(sv, vdBatch);
+                    readBatch.push([eventId, sessionId, 'callee_def_iid', vid, 0]);
+                }
                 // 把参数列表写入 writes 表（name='arg0','arg1',...），F3 读取 args 时依赖此数据
                 if (event.args?.length > 0) {
                     const argc = Math.min(event.args.length, 8);

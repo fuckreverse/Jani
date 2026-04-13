@@ -143,7 +143,7 @@ export class ExecutionTraceAnalysis {
 
     // ── 函数调用边界 ──────────────────────────────────────────────────────────
 
-    callPre(iid, f, base, args, isConstructor, isMethod) {
+    callPre(iid, f, base, args, isConstructor, isMethod, fnDefIid) {
         const name = f?.name || '(anonymous)';
 
         // 保存当前语句的 pending 上下文，防止被调函数内部钩子污染
@@ -161,6 +161,8 @@ export class ExecutionTraceAnalysis {
         this._pendingFields = [];
 
         // 立即输出 CALL_PRE 事件
+        // fnDefIid：被调函数定义点的 iid（同一函数在不同位置调用时此值相同）
+        // 仅对被插桩的 JS 函数有值；内建/未插桩函数为 undefined，不写入
         this._emit({
             type: 'CALL_PRE',
             iid,
@@ -169,6 +171,7 @@ export class ExecutionTraceAnalysis {
             isMethod:      !!isMethod,
             args:          args ? Array.from(args) : [],
             ...(isMethod && base !== undefined && { base }),
+            ...(fnDefIid !== undefined && { fnDefIid }),
         });
 
         return { f, base, args, skip: false };

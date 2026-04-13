@@ -52,6 +52,7 @@
  *   CALL_PRE        = 0x03   payload: [fnName_str][argc u8][arg0_val]...[argN_val]
  *                                     flags.isConstructor / flags.isMethod
  *                                     flags.hasThis → [this_val]
+ *                                     flags.HAS_FN_DEF_IID → [fnDefIid u32]
  *   CALL            = 0x04   payload: [fnName_str][result_val]
  *   FUNCTION_ENTER  = 0x05   无 payload
  *   FUNCTION_EXIT   = 0x06   payload: [flags.hasException → exception_val]
@@ -155,7 +156,7 @@ export const FLAGS = Object.freeze({
     VALUE_OMITTED:    0x10,  // 通用：值已省略（可通过 smap.defIid 追溯）
     IS_WRITE:         0x20,  // field 条目：属性写入
     DIRECT_FE:        0x40,  // FUNCTION_ENTER：无 callPre 覆盖（直接调用）
-    // 0x80 保留（曾用于 FIELDS_HAVE_OID，已废弃，field 固定携带 base_oid）
+    HAS_FN_DEF_IID:   0x80,  // CALL_PRE：payload 末尾附有函数定义点 iid（u32，4B）
 });
 
 // ─── 值类型常量 ────────────────────────────────────────────────────────────────
@@ -863,8 +864,11 @@ function measureEvent(event, pool = null) {
                 thisMv = measureValue(event.base, false, pool);
                 thisSize = 1 + thisMv.extraBytes;
             }
-            const payloadSize = strFieldBytes(fnm) + 1 + argsSize + thisSize;
-            return { payloadSize, _m: { fnm, argc, argMeasures, args, hasThis, thisMv, base: event.base } };
+            // fnDefIid：被调函数定义点 iid（仅插桩 JS 函数有值）
+            const hasFnDefIid = event.fnDefIid !== undefined && event.fnDefIid !== null;
+            const fnDefIidSize = hasFnDefIid ? 4 : 0;  // u32 = 4B
+            const payloadSize = strFieldBytes(fnm) + 1 + argsSize + thisSize + fnDefIidSize;
+            return { payloadSize, _m: { fnm, argc, argMeasures, args, hasThis, thisMv, base: event.base, hasFnDefIid, fnDefIid: event.fnDefIid } };
         }
 
         case 'CALL': {
@@ -967,6 +971,10 @@ function writePayload(view, offset, type, _m) {
             if (_m.hasThis) {
                 offset = writeValue(view, offset, _m.thisMv, _m.base);
             }
+            if (_m.hasFnDefIid) {
+                view.setUint32(offset, _m.fnDefIid >>> 0, true);  // 小端 u32
+                offset += 4;
+            }
             break;
         }
 
@@ -1041,11 +1049,12 @@ function computeTypeAndFlags(event) {
             flagsByte |= FLAGS.HAS_EXCEPTION;
         }
     }
-    if (event.type === 'CALL_PRE') {
-        if (event.isConstructor) flagsByte |= FLAGS.IS_CONSTRUCTOR;
-        if (event.isMethod)      flagsByte |= FLAGS.IS_METHOD;
-        if (event.isMethod && event.base !== undefined) flagsByte |= FLAGS.HAS_THIS;
-    }
+if (event.type === 'CALL_PRE') {
+                if (event.isConstructor)                         flagsByte |= FLAGS.IS_CONSTRUCTOR;
+                if (event.isMethod)                              flagsByte |= FLAGS.IS_METHOD;
+                if (event.isMethod && event.base !== undefined)  flagsByte |= FLAGS.HAS_THIS;
+                if (event.fnDefIid !== undefined && event.fnDefIid !== null) flagsByte |= FLAGS.HAS_FN_DEF_IID;
+            }
     if (event.type === 'FUNCTION_ENTER' && event.directFe) {
         flagsByte |= FLAGS.DIRECT_FE;
     }
@@ -1367,6 +1376,10 @@ export function deserializeEvent(view, offset, dict = null, version = FORMAT_VER
                 const r = readValue(view, pos, dict);
                 event.base = r.value;
                 pos = r.end;
+            }
+            if (flagsByte & FLAGS.HAS_FN_DEF_IID) {
+                event.fnDefIid = view.getUint32(pos, true);  // 小端 u32
+                pos += 4;
             }
             break;
         }
