@@ -64,13 +64,13 @@ CREATE TABLE events (
 );
 
 -- 变量写入
+-- 注意：value 列已移除（原冗余存储），统一通过 value_id JOIN value_dict 获取完整值
 CREATE TABLE writes (
     id          INTEGER PRIMARY KEY,
     event_id    INTEGER NOT NULL,
     session_id  TEXT NOT NULL,
     name        TEXT,
-    value       TEXT,     -- JSON 序列化
-    value_id    INTEGER,  -- 引用 value_dict.id（F1 v2+ 填充，NULL 表示旧数据）
+    value_id    INTEGER,  -- 引用 value_dict.(session_id, id)，通过 JOIN 获取完整值
     omitted     INTEGER DEFAULT 0
 );
 
@@ -80,21 +80,20 @@ CREATE TABLE reads (
     event_id    INTEGER NOT NULL,
     session_id  TEXT NOT NULL,
     name        TEXT,
-    value       TEXT,
-    value_id    INTEGER,  -- 引用 value_dict.id（F1 v2+ 填充，NULL 表示旧数据）
+    value_id    INTEGER,  -- 引用 value_dict.(session_id, id)，通过 JOIN 获取完整值
     omitted     INTEGER DEFAULT 0
 );
 
 -- 属性读写（fields）
 -- 注意：base 字段已移除，改用 base_oid（运行时对象唯一 ID，0 或 NULL 表示非对象）
+-- 注意：value 列已移除，统一通过 value_id JOIN value_dict 获取完整值
 CREATE TABLE fields (
     id          INTEGER PRIMARY KEY,
     event_id    INTEGER NOT NULL,
     session_id  TEXT NOT NULL,
     offset      TEXT,
     is_write    INTEGER,
-    value       TEXT,
-    value_id    INTEGER,  -- 引用 value_dict.id（F1 v2+ 填充，NULL 表示旧数据）
+    value_id    INTEGER,  -- 引用 value_dict.(session_id, id)，通过 JOIN 获取完整值
     omitted     INTEGER DEFAULT 0,
     base_oid    INTEGER   -- 运行时对象唯一 ID（OID），NULL/0 表示非对象或 OID 未知
 );
@@ -104,12 +103,14 @@ CREATE TABLE fields (
 -- val_type: 'num' / 'bool' / 'str' / 'null' / 'obj' / 'ta'
 --   'ta' = TypedArray / ArrayBuffer，val_text 为 "[TypeName(N):MB:hexpreview]" 格式字符串
 -- 典型压缩比：循环中同一数值 100k 次写入 → 字典只存 1 行
+-- 注意：id 为 session 内局部 id（非全局自增），PRIMARY KEY 为 (session_id, id)
 CREATE TABLE value_dict (
-    id          INTEGER PRIMARY KEY,  -- 内存计数器分配，非 AUTOINCREMENT
+    id          INTEGER NOT NULL,     -- session 内局部 id，从 1 开始，跨 session 可重复
     session_id  TEXT NOT NULL,
     val_text    TEXT NOT NULL,        -- 原始序列化字符串（同 writes/reads/fields.value）
     val_type    TEXT NOT NULL,        -- 'num' / 'bool' / 'str' / 'null' / 'obj' / 'ta'
     val_num     REAL,                 -- val_type='num' 时有效，用于数值范围查询
+    PRIMARY KEY (session_id, id),
     UNIQUE (session_id, val_text)
 );
 
@@ -136,8 +137,11 @@ CREATE TABLE call_edges (
     args_json       TEXT,
     return_value    TEXT,
     depth           INTEGER,    -- 调用深度
-    own_event_count INTEGER     -- 自身事件数：(return_seq - call_seq) 减去子调用覆盖的 SEQ 跨度
+    own_event_count INTEGER,    -- 自身事件数：(return_seq - call_seq) 减去子调用覆盖的 SEQ 跨度
                                 -- 由 F3_CallGraphBuilder 预计算写入（O(N)）；旧数据此列为 NULL
+    fn_def_iid      INTEGER     -- 函数定义点 iid（J$.Fe 注入时的 iid，同一函数体每次调用相同）
+                                -- 由 CALL_PRE 事件携带的 fnDefIid 字段填充（runtime 通过 WeakMap 查取）
+                                -- 内建/未插桩函数此列为 NULL
 );
 
 -- 污点路径（由 TaintTracker 插件填充）
@@ -209,6 +213,63 @@ CREATE TABLE run_tasks (
     session_id  TEXT,               -- 成功时自动创建的 Session ID（关联 sessions 表）
     error_msg   TEXT                -- 失败原因（超时/异常等）
 );
+
+-- 循环（A3 HotPathAnalyzer v3 填充）
+-- v2 新增字段：src_text（循环首行源码）、median_gap（中位间距）、loop_depth（嵌套深度）、parent_loop_id
+-- v3 新增字段：call_edge_id（所属函数帧）、fn_name（函数名冗余副本）
+CREATE TABLE IF NOT EXISTS loops (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    iid             INTEGER,
+    start_seq       INTEGER,
+    end_seq         INTEGER,
+    iteration_count INTEGER,
+    line            INTEGER,
+    src_text        TEXT,           -- 循环首行源码片段（v2 新增）
+    median_gap      INTEGER,        -- iid 命中间距中位数（v2 新增，单位：events）
+    loop_depth      INTEGER DEFAULT 0,  -- 嵌套深度（v2 新增）
+    parent_loop_id  INTEGER,        -- 直接父循环 id（v2 新增，NULL=顶层）
+    call_edge_id    INTEGER,        -- 所属函数调用帧（v3 新增，NULL=顶层脚本）
+    fn_name         TEXT            -- 所属函数名（v3 新增，冗余副本供 UI 直接展示）
+);
+
+-- 值模式（A8 ValuePatternDetector v3/v4 填充）
+-- v2 新增字段：value_dict_id（引用 value_dict.id，可直接查完整原始值）
+-- v3 新增字段：pattern_type（语义类型标签）
+-- v4 新增字段：entropy（Shannon 熵值）
+CREATE TABLE IF NOT EXISTS value_patterns (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    value_hash      TEXT,           -- 值的文本（A8 v2 起为完整值，不再截断）
+    count           INTEGER DEFAULT 0,
+    first_seq       INTEGER,
+    iid             INTEGER,
+    var_name        TEXT,
+    line            INTEGER,
+    matched_constant TEXT,
+    value_dict_id   INTEGER,        -- 引用 value_dict.id，A8 v2 填充，可直接查完整原始值
+    pattern_type    TEXT,           -- 语义类型标签（A8 v3）：
+                                    --   timestamp_ms / timestamp_s / uuid / hex_str /
+                                    --   base64_charset / custom_alphabet / base64_encoded /
+                                    --   ip_addr / url / json_obj / byte_array
+    entropy         REAL            -- Shannon 熵值（A8 v4）：字符串型值计算，
+                                    --   高熵（>4.5）暗示加密/压缩；NULL 表示非字符串型
+);
+
+-- 插件检查点（断点恢复 / 进度持久化）
+-- is_stale=1：上游数据已更新，本插件结果可能过期（需重跑）
+-- summary_json：emitDone() 的统计摘要（JSON），用于概览页快速展示
+CREATE TABLE IF NOT EXISTS plugin_checkpoints (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL,
+    plugin_id    TEXT NOT NULL,
+    phase        TEXT,
+    completed_at INTEGER NOT NULL,
+    duration_ms  INTEGER,
+    is_stale     INTEGER DEFAULT 0,  -- 1 = 上游数据已更新，本插件结果可能过期
+    summary_json TEXT,               -- emitDone() 的统计摘要（JSON）
+    UNIQUE (session_id, plugin_id)
+);
 ```
 
 ---
@@ -224,6 +285,27 @@ CREATE INDEX idx_fields_offset       ON fields(session_id, offset);
 CREATE INDEX idx_call_edges_session  ON call_edges(session_id);
 CREATE INDEX idx_taint_session       ON taint_paths(session_id);
 CREATE INDEX idx_var_lifetime_name   ON var_lifetime(session_id, name);
+
+-- web_api_calls 索引（I5 WebApiDetector 使用）
+CREATE INDEX IF NOT EXISTS idx_web_api_session     ON web_api_calls(session_id);
+CREATE INDEX IF NOT EXISTS idx_web_api_category    ON web_api_calls(session_id, category);
+CREATE INDEX IF NOT EXISTS idx_web_api_host        ON web_api_calls(session_id, host_obj);
+CREATE INDEX IF NOT EXISTS idx_web_api_property    ON web_api_calls(session_id, property_name);
+CREATE INDEX IF NOT EXISTS idx_web_api_access_type ON web_api_calls(session_id, access_type);
+
+-- dataflow_edges 新增索引（子图 BFS 查询）
+CREATE INDEX IF NOT EXISTS idx_df_from_event ON dataflow_edges(session_id, from_event_id);
+CREATE INDEX IF NOT EXISTS idx_df_to_event   ON dataflow_edges(session_id, to_event_id);
+CREATE INDEX IF NOT EXISTS idx_df_from_var   ON dataflow_edges(session_id, from_var);
+CREATE INDEX IF NOT EXISTS idx_df_to_var     ON dataflow_edges(session_id, to_var);
+CREATE INDEX IF NOT EXISTS idx_df_edge_type  ON dataflow_edges(session_id, edge_type);
+
+-- value_patterns 语义类型标签索引（A8 v3）
+CREATE INDEX IF NOT EXISTS idx_vp_pattern_type ON value_patterns(session_id, pattern_type);
+
+-- loop_iterations 新增索引（covering ORDER BY + seqFrom/seqTo 过滤）
+CREATE INDEX IF NOT EXISTS idx_loop_iter_session   ON loop_iterations(session_id, loop_id, iteration_idx);
+CREATE INDEX IF NOT EXISTS idx_loop_iter_start_seq ON loop_iterations(session_id, start_seq);
 
 -- value_dict 索引（由 _runMigrations 创建，不在 schema.sql 中定义，
 -- 避免旧数据库升级时因列不存在而报错；value_id 列通过 ALTER TABLE ADD COLUMN 添加后才创建）
@@ -293,6 +375,7 @@ API 兼容层（与原 sql.js 版本完全兼容）
   - writes/reads/fields 表：去除 AUTOINCREMENT + FOREIGN KEY（重建表，提升批量 INSERT 性能）
   - events 表迁移：将旧 TEXT 类型的 type 列转为 INTEGER（重建表）
   - call_edges 表：添加 own_event_count 列
+  - call_edges 表：添加 fn_def_iid 列（函数定义点 iid，内建函数为 NULL）
   - obfuscation_hints 表：添加 fn_name 列
   - object_timelines 表：添加 src_text 列
   - value_dict 表：CREATE TABLE IF NOT EXISTS（新表，幂等）
@@ -304,6 +387,15 @@ API 兼容层（与原 sql.js 版本完全兼容）
   - 索引 idx_call_edges_depth：CREATE INDEX IF NOT EXISTS（depth 前置覆盖索引，优化 own-events 子调用排除查询）
   - 索引 idx_obj_timeline_seq：CREATE INDEX IF NOT EXISTS（object_timelines 时间窗口过滤）
   - 索引 idx_vi_ta：CREATE INDEX IF NOT EXISTS（value_index 中 TypedArray 部分索引）
+  - plugin_checkpoints 表：添加 is_stale 列（过期标记，重跑上游插件后自动标记）
+  - plugin_checkpoints 表：添加 summary_json 列（插件产出统计摘要 JSON，概览页展示用）
+  - value_patterns 表：添加 pattern_type 列（A8 v3 语义类型标签）
+  - value_patterns 表：添加 entropy 列（A8 v4 Shannon 熵值）
+  - loops 表 v2/v3 列迁移：添加 src_text / median_gap / loop_depth / parent_loop_id / call_edge_id / fn_name
+  - 索引 idx_vp_pattern_type：CREATE INDEX IF NOT EXISTS（value_patterns 语义类型过滤）
+  - 索引 idx_loop_iter_session：升级为 (session_id, loop_id, iteration_idx) covering 索引
+  - 索引 idx_loop_iter_start_seq：CREATE INDEX IF NOT EXISTS（loop_iterations 时间窗口过滤）
+  - dataflow_edges 索引：idx_df_from_event / idx_df_to_event / idx_df_from_var / idx_df_to_var / idx_df_edge_type
 ```
 
 ### 3.3 文件位置
@@ -364,8 +456,14 @@ analyzer/db/EventTypeCode.mjs   # events.type 整数编码双向映射（与 Eve
 | `events` 去冗余列 | 有 `line/col/src_text` | 移除，改由 smap 动态 JOIN | 节省 2-3GB |
 | `writes/reads/fields` 去 AUTOINCREMENT | 有 AUTOINCREMENT | 移除，普通 INTEGER PK | 批量 INSERT 性能提升 |
 | `call_edges.own_event_count` | 无 | 预计算列 | 函数复杂度排序 O(1) 查询 |
-| `value_dict` 去重表 | 无 | 内存 Map + `INSERT OR IGNORE` | 循环重复值只存 1 行 |
+| `value_dict` 去重表 | 无 | 内存 Map + `INSERT OR IGNORE`；主键改为 `(session_id, id)` | 循环重复值只存 1 行；多 session 无冲突 |
 | `base` → `base_oid` | 序列化字符串 | 运行时对象唯一 ID（整数） | 精确追踪对象属性，支持 OID 别名合并 |
+| `writes/reads/fields.value` 列 | 存在（冗余存储） | 已移除，统一通过 `value_id JOIN value_dict` 获取 | 节省存储，消除数据冗余 |
+| `call_edges.fn_def_iid` | 无 | 函数定义点 iid（CALL_PRE 携带，WeakMap 查取） | 精确识别同名不同位置的函数 |
+| `plugin_checkpoints.is_stale` | 无 | 过期标记（上游数据更新后置 1） | 支持精确的增量重跑提示 |
+| `plugin_checkpoints.summary_json` | 无 | 插件产出统计摘要（JSON） | 概览页直接展示，无需再次查询插件输出表 |
+| `value_patterns` 增强 | 单一密码学常数匹配 | v2 加 `value_dict_id`；v3 加 `pattern_type`；v4 加 `entropy` | 语义类型识别 + 熵分析，支持更多值模式检测 |
+| `loops` 表增强 | 仅行号 + 迭代数 | v2 加深度/父循环；v3 加所属函数帧 | 嵌套循环识别 + 函数边界感知 |
 
 ### 5.3 索引优化策略
 

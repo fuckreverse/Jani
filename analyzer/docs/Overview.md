@@ -1,7 +1,7 @@
 # Jani Trace Analyzer — 概览与路线图
 
-**版本：** v1.6（已实现）  
-**日期：** 2026-04-11  
+**版本：** v1.7（已实现）  
+**日期：** 2026-04-13  
 **目标：** 为 JS 动态 trace 提供一站式逆向分析平台，支持算法识别、污点追踪、签名还原等场景。
 
 ---
@@ -54,9 +54,10 @@ Jani 的插桩引擎已能产出高质量 trace（`.bin` + `.smap.json`），包
 │  ┌────▼───────────────▼─────────────────▼────────────▼────┐  │
 │  │              SQLite（better-sqlite3，WAL 模式写磁盘）   │  │
 │  │  sessions | events | writes | reads | fields | smap   │  │
-│  │  call_edges | taint_paths | var_lifetime | scopes      │  │
+│  │  call_edges | taint_paths | var_lifetime               │  │
 │  │  value_dict | value_patterns | bookmarks | value_index  │  │
 │  │  iid_counts | loops | object_timelines | oid_aliases   │  │
+│  │  web_api_calls（BOM/DOM 宿主访问检测）                  │  │
 │  │  plugin_checkpoints（断点恢复 / 进度持久化）            │  │
 │  └────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
@@ -105,27 +106,27 @@ Jani/
 │   │   ├── BasePlugin.mjs     # 插件基类
 │   │   ├── F1_EventIndex.mjs  # 基础：事件索引 + 值索引（BATCH_SIZE=5000，yield 让出事件循环）
 │   │   ├── F2_SmapLoader.mjs
-│   │   ├── F3_CallGraphBuilder.mjs  # 调用图 + own_event_count 预计算
+│   │   ├── F3_CallGraphBuilder.mjs  # 调用图 + own_event_count + fn_def_iid 预计算
 │   │   ├── F4_VariableLifetime.mjs
 │   │   ├── A1_TaintTracker.mjs
-│   │   ├── A2_DataFlowGraph.mjs
-│   │   ├── A3_HotPathAnalyzer.mjs
-│   │   ├── A4_StringTracker.mjs
-│   │   ├── A5_LoopDetector.mjs
+│   │   ├── A2_DataFlowGraph.mjs     # 数据流图 v2：子图 BFS 查询
+│   │   ├── A3_HotPathAnalyzer.mjs   # v3：函数边界感知 + 嵌套循环识别
+│   │   ├── A5_LoopDetector.mjs      # v2：读写双快照
 │   │   ├── A7_ObjectMutationTracker.mjs
-│   │   ├── A8_ValuePatternDetector.mjs
+│   │   ├── A8_ValuePatternDetector.mjs  # v4：语义标签 + Shannon 熵
 │   │   ├── I1_CryptoDetector.mjs
 │   │   ├── I2_SignatureAnalyzer.mjs
-│   │   ├── I3_ObfuscationDetector.mjs
-│   │   └── I4_AlgorithmSummarizer.mjs
+│   │   ├── I3_ObfuscationDetector.mjs   # v2：8 类检测维度
+│   │   ├── I4_AlgorithmSummarizer.mjs
+│   │   └── I5_WebApiDetector.mjs        # BOM/DOM 宿主对象访问检测，三级置信度
 │   ├── routes/
 │   │   ├── sessions.mjs       # 会话路由入口（组合子模块 + 导出 createSession）
 │   │   ├── sessions/          # 会话 API 子模块
 │   │   │   ├── core.mjs       # 会话 CRUD + 插件分阶段调度（re-run / delete / checkpoints）
 │   │   │   ├── events.mjs     # 事件查询 API（event-types / events / value-search）
-│   │   │   ├── functions.mjs  # 函数调用 API（functions / calls / call-graph / call-stack）
-│   │   │   ├── analysis.mjs   # 分析结果 API（hot-iids / taint / dataflow / summary 等）
-│   │   │   └── utils.mjs      # 共享工具（safeParseJson / groupBy / BUILTIN_FN_NAMES）
+│   │   │   ├── functions.mjs  # 函数调用 API（functions / calls / call-graph / call-stack / annotated-source）
+│   │   │   ├── analysis.mjs   # 分析结果 API（hot-iids / taint / dataflow / web-api / plugin-stats 等）
+│   │   │   └── utils.mjs      # 共享工具（safeParseJson / groupBy / BUILTIN_FN_NAMES / queryDirectChildren）
 │   │   ├── instrument.mjs     # 插桩 API（显式 --output，支持 wsUrl/wsSab，支持预处理）
 │   │   ├── projects.mjs       # 工作空间 API（上传/插桩/fork/下载/关联会话，支持预处理）
 │   │   ├── storage.mjs        # 空间分析 API（stats 统计 + delete 批量清理）
@@ -138,23 +139,24 @@ Jani/
 │       │   ├── components/
 │       │   │   └── session/   # 会话详情标签页组件
 │       │   │       ├── CryptoTab.vue       # 加密检测标签页
-│       │   │       ├── DataflowTab.vue     # 数据流图标签页
+│       │   │       ├── DataflowTab.vue     # 数据流图标签页（含子图 BFS 多视图展示）
 │       │   │       ├── EventsTab.vue       # 事件列表标签页（含值搜索、跨Tab跳转）
 │       │   │       #   普通模式：游标分页（cursorStack，O(log N) B-tree 定位，深页恒速）
 │       │   │       #   值搜索模式：offset 分页（结果集有限，随机翻页需求高）
 │       │   │       #   跨Tab跳转：seqFrom 精确定位（无需估算页码）
 │       │   │       ├── FileInfoBar.vue     # 文件信息栏
-│       │   │       ├── FunctionsTab.vue    # 函数列表标签页（事件数过滤、内建函数隐藏、调用定位、被谁调用子面板、内嵌火焰图）
-│       │   │       ├── CallDetail.vue      # 函数调用详情面板（调用栈 / 事件流，由 FunctionsTab 使用）
-│       │   │       ├── LoopsTab.vue        # 循环分析标签页
-│       │   │       ├── ObfuscationTab.vue  # 混淆检测标签页
-│       │   │       ├── ObjMutTab.vue       # 对象变异标签页
-│       │   │       ├── PatternsTab.vue     # 值模式标签页
+│       │   │       ├── FunctionsTab.vue    # 函数列表标签页（事件数过滤、内建函数隐藏、调用定位、被谁调用子面板、内嵌火焰图、fn_def_iid 过滤）
+│       │   │       ├── CallDetail.vue      # 函数调用详情面板（调用栈 / 事件流 / 源码注解，由 FunctionsTab 使用）
+│       │   │       ├── LoopsTab.vue        # 循环分析标签页（循环函数名、嵌套深度、读写快照切换）
+│       │   │       ├── ObfuscationTab.vue  # 混淆检测标签页（8 类混淆维度图标和跳转）
+│       │   │       ├── ObjMutTab.vue       # 对象变异标签页（搜索框 + 读写过滤）
+│       │   │       ├── OverviewTab.vue     # 会话概览标签页（插件产出统计、算法报告摘要、关联工作空间）
+│       │   │       ├── PatternsTab.vue     # 值模式标签页（语义标签、Shannon 熵、value_dict 降级搜索）
 │       │   │       ├── SessionCard.vue     # 会话卡片组件
 │       │   │       ├── SessionHeader.vue   # 会话头部信息
 │       │   │       ├── SignaturesTab.vue   # 签名分析标签页
-│       │   │       ├── StringsTab.vue      # 字符串追踪标签页
-│       │   │       ├── SummaryTab.vue      # 算法摘要标签页
+│       │   │       ├── SummaryTab.vue      # 算法摘要标签页（含算法报告展示）
+│       │   │       ├── WebApiTab.vue       # Web API 检测标签页（BOM/DOM 宿主访问，按类别分组，置信度过滤）
 │       │   │       ├── CfgTab.vue          # 控制流图标签页（Dynamic CFG + fn-cfg，Cytoscape 渲染）
 │       │   │       ├── UploadDialog.vue    # 上传 trace 对话框
 │       │   │       ├── ImportFromTraceDialog.vue   # 从 trace 目录导入对话框
@@ -305,6 +307,24 @@ Jani/
 - [x] **Trace 对比页面**（`TraceDiff.vue`，路由 `/diff`）：多会话执行行为差异可视化，导航栏新增入口
 - [x] **`routes/compare.mjs`（新文件）**：多对比 API 全部实现，内建函数黑名单预拼 SQL 供 LRU 缓存
 
+### Phase 11：分析深化与体验优化 ✅ 已完成
+- [x] **`writes/reads/fields` 去冗余**：移除三张表冗余 `value` 列，统一通过 `value_id` JOIN `value_dict` 获取完整值；Schema 迁移自动处理旧数据库
+- [x] **`value_dict` 复合主键修复**：`(session_id, id)` 双列主键，修复多 session 共用 `id=1` 的主键冲突
+- [x] **A3 循环检测 v3**（函数边界感知）：每次循环检测在单次调用的 own-event 窗口内进行，消除子函数 iid 误判；嵌套循环局部推导；`loops` 表新增 `call_edge_id`、`fn_name`、`loop_depth`、`body_size` 字段
+- [x] **A5 迭代快照 v2**：reads + writes 双快照；循环列表展示函数名、嵌套深度；迭代间变量变化高亮
+- [x] **A4 StringTracker 移除**：功能由 `value_dict` + `PatternsTab` 降级搜索替代；`StringsTab.vue` 同步删除
+- [x] **A8 值模式检测 v4**：新增语义类型标签（`pattern_type`）和 Shannon 熵（`entropy`）字段；合并 timestamp 类型，新增普通字符串类型标签
+- [x] **A2 数据流图 v2**：支持子图 BFS 查询（`GET /dataflow?subgraph=1&startNode=X&hops=N`）；前端多视图展示（完整图 / 子图聚焦）
+- [x] **I3 混淆检测 v2**：新增 5 类维度（深调用栈/字符串池/动态 eval/变量重用/高熵命名）→ 共 8 类；字符串解密函数检测加入参数全整数索引验证；依赖精简为 F1 + A3
+- [x] **I5 WebApiDetector（新插件）**：检测运行时对 BOM/DOM 宿主对象的属性访问与方法调用；三级置信度（confirmed / propagated / inferred）；写入 `web_api_calls` 表；前端新增 `WebApiTab.vue`
+- [x] **`fn_def_iid` 函数定义点 IID**：`call_edges` 表新增 `fn_def_iid` 列，F3 从 `CALL_PRE.fnDefIid` 读取；API 支持按 `fnDefIid` 精确过滤函数调用，区分同名但定义位置不同的函数
+- [x] **函数调用源码注解**（`GET /calls/:callId/annotated-source`）：返回函数调用中每条指令的源码行、事件类型、值，标注子调用范围；前端 `CallDetail.vue` 新增源码注解面板
+- [x] **会话复用**（trace-server `?sid=` 参数）：断线重连后按 `sid` 复用同一文件追加写入，idle 超时自动关闭文件，防止资源泄漏
+- [x] **插件检查点统计摘要**（`plugin_checkpoints.summary_json`）：插件完成时持久化统计摘要，供 `OverviewTab.vue` 展示插件产出统计
+- [x] **插件检查点过期标记**（`plugin_checkpoints.is_stale`）：上游插件重跑后，下游依赖插件检查点自动标记为 stale；`ProgressDrawer.vue` 展示过期状态
+- [x] **概览页/帮助抽屉**：新增 `OverviewTab.vue`（插件产出统计 + 算法报告摘要 + 关联工作空间展示）和 `HelpDrawer.vue`（操作指引）
+- [x] **对象变异与函数列表搜索**：`ObjMutTab.vue` 新增对象名/属性名模糊搜索和读/写过滤；`FunctionsTab.vue` 按自身事件均值过滤，搜索防抖优化
+
 ---
 
 ## 5. 关键设计决策
@@ -350,6 +370,13 @@ Jani/
 | 单函数 CFG 基本块划分 | 按行号聚类（相邻行号差 ≤ LINE_GAP=3），采样多次调用取 union iid 集合 | 无需静态分析，纯动态数据；采样 union 确保覆盖不同执行路径；行号差阈值过滤无关 iid |
 | 多会话对比查询优化 | 所有维度用 `IN(${ph})` 一次查询 + `GROUP BY session_id` 聚合，最多 6 次 SQL（原来 6N 次） | N=8 会话时性能提升 8×；预拼 BUILTIN_NOT_IN_SQL 常量供 LRU 缓存 |
 | 对比页 `/diff` 分歧计算 | delta/pct 纯 JS 层计算（以 sessions[0] 为基准），不下推 SQL | 计算量 O(N × |types|)，远小于 DB 往返时延；保持 SQL 结构简单，LRU 友好 |
+| `writes/reads/fields` 去冗余 `value` 列 | 统一通过 `value_id` JOIN `value_dict` | 去除三张表冗余存储，节省磁盘空间；值只需在 `value_dict` 维护一份，更新即全生效 |
+| `fn_def_iid` 函数定义点 IID | `call_edges` 新增列，`CALL_PRE` 事件携带 | 函数名相同但定义位置不同（如多次 `function foo()`）的情况，仅靠 `fn_name` 无法区分；`fn_def_iid` 精确唯一定位函数定义点 |
+| I5 WebApiDetector 三级置信度 | confirmed（oid_aliases 精确匹配）> propagated（OID 传播）> inferred（属性名启发） | OID 路径精确但覆盖率低；属性名路径覆盖率高但误报高；三级结合兼顾精确度与召回率 |
+| A3 函数边界感知循环检测 | own-event 窗口 = 帧 `[call_seq, return_seq]` - 所有子调用帧范围 | 子函数内循环 iid 在父函数 own-event 视角下只出现一次，不会触发"重复"判定；消除跨帧误判 |
+| `value_dict` 复合主键 `(session_id, id)` | 两列联合主键，id 在单 session 内自增 | 多 session 同时导入时各自从 1 开始计数，单列主键 `id` 导致不同 session 相互冲突 |
+| trace-server 会话复用 (`?sid=`) | URL `sid` 参数标识会话，断线重连追加写入同一文件；idle 超时关闭 | 移动端/弱网场景下连接断开不应丢弃已收集数据；idle 超时（默认 60 s）防止文件句柄泄漏 |
+| `plugin_checkpoints.is_stale` 过期标记 | 上游插件重跑后，`DOWNSTREAM_STALE_MAP` 标记所有依赖其的下游检查点为 stale | 避免分析结果不一致（上游数据变更而下游不知情）；stale 状态在 UI 中明确提示用户需重跑 |
 
 ---
 

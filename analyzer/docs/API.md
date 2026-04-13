@@ -124,7 +124,8 @@ DELETE /api/sessions/:id
 
 GET  /api/sessions/:id/checkpoints
     查询插件断点恢复状态
-    返回：{ checkpoints: [{ plugin_id, phase, completed_at, duration_ms }] }
+    返回：{ checkpoints: [{ plugin_id, phase, completed_at, duration_ms, is_stale }] }
+    is_stale=true：上游数据已更新，该插件的分析结果可能过期，需重跑
 
 GET  /api/sessions/:id/event-types
     返回该会话所有事件类型及其数量
@@ -152,18 +153,21 @@ GET  /api/sessions/:id/events?line=42&type=END_EXPR&types=CALL_PRE,CALL&limit=10
     events.type 为整数编码（Phase D），API 响应已自动解码为字符串
     事件对象 fields 数组项：base 字段已改为 baseOid（运行时对象 ID，null 表示未知）
 
-GET  /api/sessions/:id/functions?search=&minCalls=1&minEvents=&maxEvents=&hideBuiltin=0&sortBy=call_count&limit=100&offset=0
-    查询函数调用统计（聚合 call_edges 按 fn_name + fn_iid 分组）
-    返回：{ functions: [{ fn_name, fn_iid, call_count, event_count, avg_own_event_count, min_line, ... }], total }
+GET  /api/sessions/:id/functions?search=&minCalls=1&minEvents=&maxEvents=&hideBuiltin=0&sortBy=call_count&limit=100&offset=0&fnDefIid=&line=
+    查询函数调用统计（聚合 call_edges 按 fn_name + fn_def_iid 分组）
+    返回：{ functions: [{ fn_name, fn_iid, fn_def_iid, call_count, event_count, avg_own_event_count, min_line, ... }], total }
     hideBuiltin=1：过滤 JS 内建函数名
     sortBy=event_count：按平均自身事件数排序（衡量函数复杂度）
     minEvents/maxEvents：按 own_event_count 范围过滤（对旧数据降级为 return_seq-call_seq 近似）
+    fnDefIid：按函数定义点 iid 精确过滤（同一函数体每次调用相同，可唯一定位函数体）
+    line：按调用点行号精确过滤（caller_line = N）
+    search：函数名模糊搜索（LIKE %keyword%）
 
-GET  /api/sessions/:id/functions/:fnName/calls?limit=200&offset=0&fnIid=&callSeq=
+GET  /api/sessions/:id/functions/:fnName/calls?limit=200&offset=0&fnDefIid=&callSeq=
     查询某函数所有调用记录（含参数、返回值、SEQ 范围）
-    fnIid：按 fn_iid 精确过滤，区分同名不同位置的函数
+    fnDefIid：按函数定义点 iid 精确过滤，唯一定位函数体（替代旧的 fnIid 参数）
     callSeq：自动定位到包含该调用的分页（前端无需手动翻页）
-    返回：{ calls: [{ id, call_seq, return_seq, depth, args, return_value, ... }], total, offset }
+    返回：{ calls: [{ id, call_seq, return_seq, depth, args, return_value, fn_def_iid, ... }], total, offset }
 
 GET  /api/sessions/:id/calls/:callId/own-events?limit=50&offset=0
     查询单次调用自身事件流（排除子调用事件），支持分页
@@ -222,6 +226,16 @@ GET  /api/sessions/:id/fn-cfg?fnName=&maxCalls=20
       stats:  { blockCount, edgeCount, iidCount }
     }
 
+GET  /api/sessions/:id/calls/:callId/annotated-source
+    返回某次调用的函数源码，并附加本次调用内的动态执行数据
+    包含：每行执行次数（本次调用 SEQ 区间内 GROUP BY iid）、每行读写变量值（去重，最多 6 个/行）
+    实现：排除子调用内部事件（复用 queryDirectChildren + makeIsInsideChild），准确统计函数体内事件
+    返回：{
+      fnName, startLine, lines: [{ line, srcText, execCount,
+        writes: [{ name, val_text }], reads: [{ name, val_text }] }],
+      signature: null
+    }
+
 GET  /api/sessions/:id/value-search?num=0.5&str=foo&strLike=*secret*&varName=key&source=write&limit=200
     按值搜索 value_index 表，返回匹配的 event_id 列表
     支持：num（精确数值）/ numMin+numMax（数值范围）/ str（精确字符串）/ strLike（通配符，* 匹配任意）/ varName（按变量名过滤）
@@ -253,30 +267,95 @@ GET  /api/sessions/:id/hot-iids
 GET  /api/sessions/:id/call-graph
     调用图数据
 
-GET  /api/sessions/:id/loop-iterations?seqFrom=&seqTo=&limit=200&offset=0
+GET  /api/sessions/:id/loop-iterations?seqFrom=&seqTo=&loopId=&loopsOnly=0&limit=100&offset=0
     循环迭代快照数据（A5 LoopDetector 输出）
-    seqFrom/seqTo：时间窗口过滤，只返回循环起始 seq 在该范围内的记录（可选）
-    返回：{ iterations: [{ loopIid, round, seq, vars }], total }
+    seqFrom/seqTo：时间窗口过滤，只返回循环起始 start_seq 在该范围内的记录（可选）
+    loopId：按循环 id 精确过滤（只返回指定循环的迭代记录）
+    loopsOnly=1：只返回循环列表（跳过迭代查询，初始加载时节省耗时）
+    返回：{
+      loops: [{ id, iid, start_seq, end_seq, iteration_count, line, src_text, median_gap,
+               loop_depth, parent_loop_id, call_edge_id, fn_name }],
+      iterations: [{ id, loop_id, iteration_idx, start_seq, end_seq, vars_snapshot }],
+      count, total, offset
+    }
+    vars_snapshot 格式（v2）：{ v: 2, w: { name: val }, r: { name: lastReadVal } }
+      v = 版本号；w = 每次迭代的写操作最终值；r = 读操作最后一次读取值
 
-GET  /api/sessions/:id/value-patterns?seqFrom=&seqTo=&limit=200&offset=0
-    值模式检测结果（A8 ValuePatternDetector 输出，35+ 魔术常数）
-    seqFrom/seqTo：时间窗口过滤，只返回 event_id 在该范围内的记录（可选）
-    返回：{ patterns: [{ event_id, name, value, matched_constant, category }], total }
+GET  /api/sessions/:id/value-patterns?seqFrom=&seqTo=&limit=100&offset=0&patternType=&valueSearch=&varName=&onlyCrypto=&minCount=&lenMin=&lenMax=
+    值模式检测结果（A8 ValuePatternDetector 输出，35+ 魔术常数 + 语义类型标签）
+    seqFrom/seqTo：时间窗口过滤，只返回 first_seq 在该范围内的记录（可选）
+    patternType：按语义类型标签精确过滤：
+        timestamp_ms / timestamp_s / uuid / hex_str / base64_charset /
+        custom_alphabet / base64_encoded / ip_addr / url / json_obj / byte_array
+    valueSearch：按值内容（value_hash 字段）模糊搜索
+    varName：按变量名过滤
+    onlyCrypto：'1' 时只返回匹配密码学常数的记录
+    minCount：最小出现次数过滤
+    lenMin/lenMax：值文本长度范围过滤
+    返回：{ patterns: [{ id, value_hash, count, first_seq, iid, var_name, line, matched_constant, pattern_type, entropy }], total }
 
-GET  /api/sessions/:id/strings?seqFrom=&seqTo=&limit=500&offset=0
-    字符串追踪结果（A4 StringTracker 输出）
-    seqFrom/seqTo：时间窗口过滤（可选）
-    返回：{ strings: [{ event_id, name, value, length }], total }
+GET  /api/sessions/:id/value-patterns/:patternId/full-value
+    获取值模式的完整原始值（通过 value_dict_id 直接查询，A8 v2 起支持）
+    返回：{ fullValue: '...', patternId: N }
+
+GET  /api/sessions/:id/value-index-search?q=keyword
+    在 value_dict 表里搜索字符串型值（降级兜底搜索），至少 2 字符
+    按出现次数降序排列，最多返回 50 条唯一值
+    返回：{ results: [{ value_dict_id, val_text, occurrence_count }] }
+
+GET  /api/sessions/:id/plugin-stats
+    返回每个分析插件的产出统计摘要，用于概览页展示
+    直接读取 plugin_checkpoints.summary_json（分析阶段已保存）
+    返回：{
+      stats: { [pluginId]: { ...统计数据 } },
+      perf:  { [pluginId]: { durationMs, completedAt, isStale, phase } }
+    }
+
+GET  /api/sessions/:id/web-api?category=&host_obj=&access_type=&confidence_level=&search=&limit=500&offset=0
+    Web API 调用检测结果（I5 WebApiDetector 输出）
+    category：宿主对象分类过滤（window/document/navigator/location/storage/xhr/fetch/timing/observer/event/canvas/other）
+    host_obj：推断的宿主对象名过滤
+    access_type：访问类型过滤（call/read/write）
+    confidence_level：置信度过滤（confirmed/propagated/inferred）
+    search：属性名关键字搜索（LIKE %search%）
+    返回：{
+      items: [{ id, event_id, category, host_obj, property_name, access_type,
+                confidence_level, receiver_var, args_json, return_value, line, src_text }],
+      total, hasMore,
+      summary: [{ category, host_obj, access_type, confidence_level, cnt }]
+    }
 
 GET  /api/sessions/:id/object-timelines?seqFrom=&seqTo=&limit=200&offset=0
     对象属性变化时间线（A7 ObjectMutationTracker 输出）
     seqFrom/seqTo：时间窗口过滤，只返回 seq 在该范围内的记录（可选）
     返回：{ timelines: [{ base_var, seq, mutation_type, offset, value, src_text }], total }
 
-GET  /api/sessions/:id/dataflow?seqFrom=&seqTo=&limit=200&offset=0
-    数据流边（A2 DataFlowGraph 输出）
-    seqFrom/seqTo：时间窗口过滤，只返回 from_seq 在该范围内的记录（可选）
-    返回：{ edges: [{ from_seq, to_seq, var_name, from_line, to_line }], total }
+GET  /api/sessions/:id/dataflow?seqFrom=&seqTo=&edgeType=&varName=&varExact=&limit=200&offset=0
+    数据流边（A2 DataFlowGraph v2 输出）
+    seqFrom/seqTo：时间窗口过滤，只返回 from_event_id 在该范围内的记录（可选）
+    edgeType：边类型过滤（assign/call_arg/call_ret/field_write/field_read）
+    varName：变量名模糊搜索（LIKE %keyword%）
+    varExact：精确变量名过滤
+    返回：{ edges: [{ from_event_id, to_event_id, from_var, to_var, edge_type, from_line, to_line }], total }
+
+GET  /api/sessions/:id/dataflow/vars?prefix=&limit=100
+    返回所有出现在数据流边中的唯一变量名（前缀搜索）
+    prefix：变量名前缀过滤（可选，利用 idx_df_from_var/idx_df_to_var 索引）
+    排除 '#' 开头的匿名/内部变量
+    返回：{ vars: ['varA', 'varB', ...] }
+
+GET  /api/sessions/:id/dataflow/subgraph?varName=&eventId=&direction=both&hops=3&maxNodes=80
+    N-hop 数据流子图（以指定变量名或 event_id 为中心，BFS 展开）
+    varName：起始变量名（从该变量的所有边出发）
+    eventId：起始事件 ID（从该事件的边出发）
+    direction：展开方向（forward=下游 / backward=上游 / both，默认 both）
+    hops：最大跳数（默认 3，最大 6）
+    maxNodes：最大节点数上限（默认 80，最大 200）
+    返回：{
+      nodes: [{ id, type: 'var'|'event', label, varName?, eventId? }],
+      edges: [{ source, target, edgeType, ...原始 dataflow_edges 字段 }],
+      stats: { nodeCount, edgeCount, truncated }
+    }
 
 GET  /api/sessions/:id/crypto-hints
     加密检测结果
@@ -471,8 +550,11 @@ WS /ws/instrument/run/:runId  （也支持 /ws/run/:runId，两条路径均可�
 
 WS /ws/trace
     浏览器端 Trace 收集（原 trace-server 功能，已集成进 JTA Server）
-    可携带查询参数 ?projectId=xxx 自动关联工作空间
+    可携带查询参数 ?projectId=xxx&sid=<uuid> 自动关联工作空间和复用会话文件
     协议：二进制帧 [u32 batchId LE][事件流 bytes]
     响应：ACK 帧 [u32 batchId LE]（4 字节）
     说明：文件保存到 TRACES_DIR，收集完成后可通过 /api/trace/import 导入
+    会话文件复用：WsBackend 构造时自动生成 UUID 作为 sessionId，通过 ?sid= 拼入 URL
+      同一 sid 的多次连接（断线重连）共享同一 .bin 文件，追加写入
+      会话无活跃连接且超过空闲超时（默认 30s）后自动关闭文件
 ```
