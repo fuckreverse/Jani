@@ -6,104 +6,112 @@
     </div>
 
     <!-- 筛选栏 -->
-    <div class="filter-bar" style="margin-bottom:14px; flex-wrap:wrap; gap:8px">
-      <div class="search-box">
-        <span class="search-icon">🔍</span>
-        <input
-          v-model="fnExecSearch"
-          placeholder="按函数名搜索..."
-          class="search-input"
-          @keyup.enter="loadFnExec(true)"
-          @input="onSearchInput"
-        />
-        <button v-if="fnExecSearch" class="search-clear" @click="clearSearch" title="清空搜索">✕</button>
-      </div>
+    <div class="filter-bar-wrap">
+      <div class="filter-bar-row">
+        <!-- 左侧：搜索框 + 所有筛选条件 + 查询/重置（可换行） -->
+        <div class="filter-bar-controls">
+          <div class="search-box">
+            <span class="search-icon">🔍</span>
+            <input
+              v-model="fnExecSearch"
+              placeholder="按函数名搜索..."
+              class="search-input"
+              @keyup.enter="loadFnExec(true)"
+              @input="onSearchInput"
+            />
+            <button v-if="fnExecSearch" class="search-clear" @click="clearSearch" title="清空搜索">✕</button>
+          </div>
 
-      <!-- 调用次数 -->
-      <label class="filter-label">
-        调用次数 ≥
-        <input
-          v-model="fnExecMinCalls"
-          type="number"
-          min="1"
-          style="width:62px"
-          @keyup.enter="loadFnExec(true)"
-        />
-      </label>
+          <!-- 调用次数 -->
+          <label class="filter-label">
+            调用≥
+            <input
+              v-model="fnExecMinCalls"
+              type="number"
+              min="1"
+              style="width:52px"
+              @keyup.enter="loadFnExec(true)"
+              @input="debouncedSearch"
+            />
+          </label>
 
-      <!-- 事件数范围 -->
-      <label class="filter-label">
-        事件数
-        <input
-          v-model="fnMinEvents"
-          type="number"
-          min="0"
-          placeholder="最少"
-          style="width:62px"
-          title="函数体内事件总量下限（近似值）"
-          @keyup.enter="loadFnExec(true)"
-        />
-        <span style="color:var(--text-muted);font-size:11px">~</span>
-        <input
-          v-model="fnMaxEvents"
-          type="number"
-          min="0"
-          placeholder="最多"
-          style="width:62px"
-          title="函数体内事件总量上限（近似值）"
-          @keyup.enter="loadFnExec(true)"
-        />
-      </label>
+          <!-- 事件数范围 -->
+          <label class="filter-label">
+            事件数
+            <input
+              v-model="fnMinEvents"
+              type="number"
+              min="0"
+              placeholder="最少"
+              style="width:60px"
+              title="每次调用自身事件数均值下限（不含子调用，近似值）"
+              @keyup.enter="loadFnExec(true)"
+              @input="debouncedSearch"
+            />
+            <span style="color:var(--text-muted);font-size:11px">~</span>
+            <input
+              v-model="fnMaxEvents"
+              type="number"
+              min="0"
+              placeholder="最多"
+              style="width:60px"
+              title="每次调用自身事件数均值上限（不含子调用，近似值）"
+              @keyup.enter="loadFnExec(true)"
+              @input="debouncedSearch"
+            />
+          </label>
 
-      <!-- 行号过滤 -->
-      <label class="filter-label">
-        行号
-        <input
-          v-model="fnLineFilter"
-          type="number"
-          min="1"
-          placeholder="调用点行"
-          style="width:72px"
-          title="按调用点行号过滤（caller_line = N），可用于定位 (anonymous) 等函数"
-          @keyup.enter="loadFnExec(true)"
-          @change="loadFnExec(true)"
-        />
-      </label>
+          <!-- 行号过滤 -->
+          <label class="filter-label">
+            行号
+            <input
+              v-model="fnLineFilter"
+              type="number"
+              min="1"
+              placeholder="调用点行"
+              style="width:66px"
+              title="按调用点行号过滤（caller_line = N），可用于定位 (anonymous) 等函数"
+              @keyup.enter="loadFnExec(true)"
+              @input="debouncedSearch"
+            />
+          </label>
 
-      <!-- 隐藏内建函数 toggle -->
-      <label class="filter-label filter-toggle" :class="{ 'toggle-active': fnHideBuiltin }" @click="fnHideBuiltin = !fnHideBuiltin; loadFnExec(true)">
-        <span class="toggle-dot"></span>
-        隐藏内建函数
-      </label>
+          <!-- 隐藏内建函数 toggle -->
+          <label class="filter-label filter-toggle" :class="{ 'toggle-active': fnHideBuiltin }" @click="fnHideBuiltin = !fnHideBuiltin; loadFnExec(true)">
+            <span class="toggle-dot"></span>
+            隐藏内建
+          </label>
 
-      <!-- 排序 -->
-      <select v-model="fnSortBy" class="filter-select" @change="loadFnExec(true)" title="排序方式">
-        <option value="call_count">调用次数↓</option>
-        <option value="event_count">自身事件↓（均值）</option>
-      </select>
+          <button class="btn-primary" @click="loadFnExec(true)">查询</button>
+          <button class="btn-secondary" @click="clearFnExecFilters">重置</button>
 
-      <button class="btn-primary" @click="loadFnExec(true)">查询</button>
-      <button class="btn-secondary" @click="clearFnExecFilters">重置</button>
+          <!-- 排序 -->
+          <select v-model="fnSortBy" class="filter-select" @change="loadFnExec(true)" title="排序方式">
+            <option value="call_count">调用次数↓</option>
+            <option value="event_count">事件数↓</option>
+          </select>
+        </div>
 
-      <!-- 火焰图按钮组 -->
-      <div class="flame-btn-group">
-        <button
-          class="btn-flame"
-          :class="{ 'btn-flame-active': showFlameGraph }"
-          :disabled="flameLoading"
-          @click="toggleFlameGraph"
-          title="内嵌火焰图（Canvas 渲染，可下钻缩放）"
-        >
-          <span v-if="flameLoading" class="spinner-tiny"></span>
-          <span v-else>🔥</span>
-          {{ showFlameGraph ? '隐藏火焰图' : '火焰图' }}
-        </button>
-        <button
-          class="btn-flame-export"
-          :disabled="flameLoading"
-          @click="exportFlamegraph"
-          title="导出 Speedscope JSON，拖入 speedscope.app 查看"
-        >↗ 导出</button>
+        <!-- 右侧：火焰图按钮组（不参与换行，始终靠右） -->
+        <div class="flame-btn-group" style="flex-shrink:0">
+          <button
+            class="btn-flame"
+            :class="{ 'btn-flame-active': showFlameGraph }"
+            :disabled="flameLoading"
+            @click="toggleFlameGraph"
+            title="内嵌火焰图（Canvas 渲染，可下钻缩放）"
+          >
+            <span v-if="flameLoading" class="spinner-tiny"></span>
+            <span v-else>🔥</span>
+            {{ showFlameGraph ? '隐藏火焰图' : '火焰图' }}
+          </button>
+          <button
+            class="btn-flame-export"
+            :disabled="flameLoading"
+            @click="exportFlamegraph"
+            title="导出 Speedscope JSON，拖入 speedscope.app 查看"
+          >↗ 导出</button>
+        </div>
       </div>
     </div>
 
@@ -443,11 +451,16 @@ function formatEventCount(n) {
     return String(n);
 }
 
-// 搜索防抖（400ms）
-let searchTimer = null;
+// 统一防抖（400ms）：所有筛选输入框变化时调用
+let _debounceTimer = null;
+function debouncedSearch() {
+    clearTimeout(_debounceTimer);
+    _debounceTimer = setTimeout(() => loadFnExec(true), 400);
+}
+
+// 搜索框专用（同一防抖，保持向后兼容）
 function onSearchInput() {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => loadFnExec(true), 400);
+    debouncedSearch();
 }
 
 function clearSearch() {
@@ -1110,6 +1123,23 @@ onMounted(() => loadFnExec(true));
     display: inline-block; padding: 2px 8px; border-radius: 10px;
     background: rgba(99,102,241,0.15); color: #a5b4fc; font-size: 11px; font-weight: 600;
 }
+.filter-bar-wrap { margin-bottom: 14px; }
+.filter-bar-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: nowrap;   /* 外层不换行，左右两个区块各自处理 */
+}
+.filter-bar-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;     /* 内层筛选条件可以换行 */
+    flex: 1;
+    min-width: 0;
+}
+/* 兼容旧引用 */
 .filter-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .filter-label { font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
 .text-muted { color: var(--text-muted); }
@@ -1273,8 +1303,11 @@ onMounted(() => loadFnExec(true));
 
 /* 隐藏 number input 的上下调整箭头（spinner） */
 .filter-bar input[type=number]::-webkit-inner-spin-button,
-.filter-bar input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-.filter-bar input[type=number] { -moz-appearance: textfield; }
+.filter-bar input[type=number]::-webkit-outer-spin-button,
+.filter-bar-controls input[type=number]::-webkit-inner-spin-button,
+.filter-bar-controls input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.filter-bar input[type=number],
+.filter-bar-controls input[type=number] { -moz-appearance: textfield; }
 
 /* 内建函数 toggle 按钮 */
 .filter-toggle {

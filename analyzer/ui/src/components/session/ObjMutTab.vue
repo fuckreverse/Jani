@@ -6,21 +6,48 @@
     </div>
 
     <div v-if="objLoading" class="loading"><div class="spinner"></div><span>加载中...</span></div>
-    <div v-else-if="total === 0 && !objBaseFilter" class="empty-state"><p>暂无对象变异数据（请先运行 Phase 4）</p></div>
+    <div v-else-if="total === 0 && !objBaseFilter && !objSearch" class="empty-state"><p>暂无对象变异数据（请先运行 Phase 4）</p></div>
     <div v-else>
       <!-- 过滤栏 -->
       <div class="filter-bar">
-        <label class="filter-label">过滤对象：</label>
+        <!-- 搜索框 -->
+        <div class="search-box">
+          <span class="search-icon">🔍</span>
+          <input
+            v-model="objSearch"
+            placeholder="搜索对象名/属性名..."
+            class="search-input"
+            @input="onSearchInput"
+            @keyup.enter="onFilterChange"
+          />
+          <button v-if="objSearch" class="search-clear" @click="clearSearch" title="清空搜索">✕</button>
+        </div>
+
+        <!-- 过滤对象下拉 -->
+        <label class="filter-label">对象：</label>
         <select v-model="objBaseFilter" @change="onFilterChange" class="select-input obj-select">
           <option value="">— 全部 —</option>
           <option v-for="s in objBaseStats" :key="s.base_var" :value="s.base_var">
             {{ s.base_var }}（写 {{ s.write_count }}·读 {{ s.read_count }}）
           </option>
         </select>
-        <label class="filter-label">
-          <input type="checkbox" v-model="onlyObjWrites" @change="onFilterChange" />
-          仅显示写入
-        </label>
+
+        <!-- 读写过滤 radio -->
+        <div class="rw-filter">
+          <label class="rw-option" :class="{ active: rwFilter === 'all' }">
+            <input type="radio" v-model="rwFilter" value="all" @change="onFilterChange" />
+            全部
+          </label>
+          <label class="rw-option" :class="{ active: rwFilter === 'write' }">
+            <input type="radio" v-model="rwFilter" value="write" @change="onFilterChange" />
+            仅写入
+          </label>
+          <label class="rw-option" :class="{ active: rwFilter === 'read' }">
+            <input type="radio" v-model="rwFilter" value="read" @change="onFilterChange" />
+            仅读取
+          </label>
+        </div>
+
         <label class="filter-label">
           每页
           <select v-model.number="pageSize" @change="onFilterChange" class="select-input" style="width:70px">
@@ -115,7 +142,8 @@ const objTimelines  = ref([]);
 const objBaseStats  = ref([]);
 const objLoading    = ref(false);
 const objBaseFilter = ref('');
-const onlyObjWrites = ref(false);
+const objSearch     = ref('');      // 搜索关键词（模糊匹配 base_var / offset_key）
+const rwFilter      = ref('all');   // 'all' | 'write' | 'read'
 
 // 分页状态
 const currentPage = ref(1);
@@ -131,8 +159,10 @@ async function loadObjTimelines(page = currentPage.value) {
             page:     String(page),
             pageSize: String(pageSize.value),
         });
-        if (objBaseFilter.value)  params.set('baseVar',    objBaseFilter.value);
-        if (onlyObjWrites.value)  params.set('onlyWrites', '1');
+        if (objBaseFilter.value)           params.set('baseVar',    objBaseFilter.value);
+        if (objSearch.value.trim())        params.set('search',     objSearch.value.trim());
+        if (rwFilter.value === 'write')    params.set('onlyWrites', '1');
+        if (rwFilter.value === 'read')     params.set('onlyReads',  '1');
 
         const res = await fetch(`/api/sessions/${props.sessionId}/object-timelines?${params}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -153,6 +183,18 @@ async function loadObjTimelines(page = currentPage.value) {
 
 function onFilterChange() {
     // 过滤条件变化时重置到第 1 页
+    loadObjTimelines(1);
+}
+
+// 搜索框防抖（400ms）
+let _searchTimer = null;
+function onSearchInput() {
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(() => loadObjTimelines(1), 400);
+}
+
+function clearSearch() {
+    objSearch.value = '';
     loadObjTimelines(1);
 }
 
@@ -179,8 +221,78 @@ onMounted(() => loadObjTimelines(1));
     display: inline-block; padding: 2px 8px; border-radius: 10px;
     background: rgba(99,102,241,0.15); color: #a5b4fc; font-size: 11px; font-weight: 600;
 }
-.filter-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.filter-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .filter-label { font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
+
+/* 搜索框 */
+.search-box {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+.search-icon {
+    position: absolute;
+    left: 8px;
+    font-size: 13px;
+    pointer-events: none;
+    opacity: 0.6;
+}
+.search-input {
+    width: 200px;
+    padding: 4px 26px 4px 28px !important;
+    height: 30px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 12px;
+}
+.search-input:focus { outline: none; border-color: rgba(99,102,241,0.5); }
+.search-clear {
+    position: absolute;
+    right: 6px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 0 2px;
+    line-height: 1;
+    opacity: 0.7;
+    transition: opacity 0.12s;
+}
+.search-clear:hover { opacity: 1; color: var(--danger, #f87171); }
+
+/* 读写过滤 radio 按钮组 */
+.rw-filter {
+    display: flex;
+    align-items: center;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+}
+.rw-option {
+    display: flex;
+    align-items: center;
+    padding: 4px 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+    border-right: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    transition: background 0.12s, color 0.12s;
+    white-space: nowrap;
+    gap: 5px;
+}
+.rw-option:last-child { border-right: none; }
+.rw-option:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.rw-option.active {
+    background: rgba(99,102,241,0.12);
+    color: #a5b4fc;
+    font-weight: 600;
+}
+.rw-option input[type=radio] { display: none; }
 .select-input {
     padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color);
     background: var(--bg-secondary); color: var(--text-primary); font-size: 12px;

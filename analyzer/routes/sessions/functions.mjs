@@ -59,7 +59,7 @@ function makeIsInsideChild(sortedChildren) {
 // 按 fn_name 聚合 call_edges，返回函数列表（调用次数、行号等）
 //
 // 新增过滤参数：
-//   minEvents   / maxEvents  — 按函数体事件数（≈ MAX(return_seq)-MIN(call_seq) 近似）过滤
+//   minEvents   / maxEvents  — 按函数体自身事件数均值（avg_own_event_count，即每次调用自身事件数均值）过滤
 //   hideBuiltin              — '1' 时隐藏 JS 内建函数（charAt/indexOf/push/… 等）
 //   sortBy                   — 'call_count'（默认）| 'event_count'（按事件数倒序）
 
@@ -113,25 +113,25 @@ router.get('/functions', (req, res) => {
         const minEventsN = minEvents !== undefined && minEvents !== '' ? Number(minEvents) : null;
         const maxEventsN = maxEvents !== undefined && maxEvents !== '' ? Number(maxEvents) : null;
 
-        // HAVING 子句：call_count + 可选的 own_event_count 范围
-        const ownExpr = `SUM(COALESCE(own_event_count, COALESCE(return_seq,call_seq) - call_seq))`;
+        // HAVING 子句：call_count + 可选的 own_event_count 范围（按均值过滤，与前端"事件/次"语义一致）
+        const ownExpr    = `SUM(COALESCE(own_event_count, COALESCE(return_seq,call_seq) - call_seq))`;
+        const avgOwnExpr = `CAST(ROUND(1.0 * ${ownExpr} / COUNT(*)) AS INTEGER)`;
         const havingClauses = [`COUNT(*) >= ?`];
         const havingParams  = [minCallsN];
         if (minEventsN !== null) {
-            havingClauses.push(`${ownExpr} >= ?`);
+            // 过滤条件：每次调用均值 >= minEvents
+            havingClauses.push(`${avgOwnExpr} >= ?`);
             havingParams.push(minEventsN);
         }
         if (maxEventsN !== null) {
-            havingClauses.push(`${ownExpr} <= ?`);
+            // 过滤条件：每次调用均值 <= maxEvents
+            havingClauses.push(`${avgOwnExpr} <= ?`);
             havingParams.push(maxEventsN);
         }
 
-        const avgOwnOrderExpr = `CAST(ROUND(1.0 * ${ownExpr} / COUNT(*)) AS INTEGER)`;
         const orderExpr = sortBy === 'event_count'
-            ? `${avgOwnOrderExpr} DESC`
+            ? `${avgOwnExpr} DESC`
             : `call_count DESC`;
-
-        const avgOwnExpr = `CAST(ROUND(1.0 * ${ownExpr} / COUNT(*)) AS INTEGER)`;
         const rows = db.all(
             `SELECT
                 fn_name,

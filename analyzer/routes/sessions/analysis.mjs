@@ -783,6 +783,8 @@ router.get('/object-timelines', (req, res) => {
         const {
             baseVar,
             onlyWrites,
+            onlyReads,
+            search,          // 模糊搜索：匹配 base_var 或 offset_key（属性名）
             page     = '1',
             pageSize = '100',
             seqFrom,
@@ -799,8 +801,16 @@ router.get('/object-timelines', (req, res) => {
             conditions.push('base_var = ?');
             params.push(baseVar);
         }
+        // 模糊搜索：base_var 或 offset_key 包含关键词
+        if (search && search.trim()) {
+            conditions.push('(base_var LIKE ? OR offset_key LIKE ?)');
+            params.push(`%${search.trim()}%`, `%${search.trim()}%`);
+        }
         if (onlyWrites === '1' || onlyWrites === 'true') {
             conditions.push('is_write = 1');
+        }
+        if (onlyReads === '1' || onlyReads === 'true') {
+            conditions.push('is_write = 0');
         }
         // 时间窗口过滤：change_seq 在 [seqFrom, seqTo] 内
         if (seqFrom !== undefined && seqFrom !== '') {

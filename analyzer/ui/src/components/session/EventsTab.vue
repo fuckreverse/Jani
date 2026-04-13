@@ -46,7 +46,10 @@
           <input
             v-model="filters.line"
             placeholder="行号"
-            type="number"
+            type="text"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            class="line-input"
             style="width:90px"
             @keyup.enter="loadEvents(true)"
           />
@@ -280,7 +283,7 @@ const selectedSeq   = ref(null);
 // 获得响应后：cursorStack[N] = nextCursor（供下一页使用）
 const cursorStack   = ref([0]);   // 初始：第 1 页从 cursor=0 开始
 
-const filters = ref({ types: [], line: '', varName: '', valueMode: '', valueQuery: '', valueQuery2: '' });
+const filters = ref({ types: [], line: '', varName: '', valueMode: 'strLike', valueQuery: '', valueQuery2: '' });
 
 const selectedEvent = computed(() =>
     events.value.find(e => e.seq === selectedSeq.value) ?? null
@@ -454,7 +457,7 @@ function nextPage() {
 }
 
 function clearFilters() {
-    filters.value = { types: [], line: '', varName: '', valueMode: '', valueQuery: '', valueQuery2: '' };
+    filters.value = { types: [], line: '', varName: '', valueMode: 'strLike', valueQuery: '', valueQuery2: '' };
     valueSearchTotal.value = 0;
     valueSearchError.value = '';
     typeDropdownOpen.value = false;
@@ -498,7 +501,7 @@ async function gotoOwnerFn(event) {
 watch(() => props.targetSeq, async (seq) => {
     if (seq == null) return;
     // 清空过滤 + 游标栈，用 seqFrom 直接定位（O(log N)，无需估算页码）
-    filters.value = { types: [], line: '', varName: '', valueMode: '', valueQuery: '', valueQuery2: '' };
+    filters.value = { types: [], line: '', varName: '', valueMode: 'strLike', valueQuery: '', valueQuery2: '' };
     valueSearchTotal.value = 0;
     valueSearchError.value = '';
     currentPage.value = 1;
@@ -698,6 +701,11 @@ onUnmounted(() => {
     background: rgba(248,113,113,0.08); border-radius: 4px;
     border: 1px solid rgba(248,113,113,0.2);
 }
+
+/* ─── 行号输入框：隐藏 number spinner ──────────────────────────────────── */
+.line-input::-webkit-outer-spin-button,
+.line-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.line-input[type=number] { -moz-appearance: textfield; }
 
 /* ─── 值搜索 ─────────────────────────────────────────────────────────────── */
 .value-search-group {
