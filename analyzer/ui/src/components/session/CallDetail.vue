@@ -25,6 +25,13 @@
         @click.stop="openDataflow"
         title="在数据流图中追踪该函数相关的变量流向"
       >🔗 数据流</button>
+      <button
+        v-if="call.fnIid != null"
+        class="call-panel-tab"
+        :class="{ 'call-panel-tab-active': activeView === 'source' }"
+        @click.stop="toggleView('source')"
+        title="查看函数源码，并叠加本次调用的执行次数与读写值"
+      >{ } 源码注解</button>
       <!-- 自身/全部切换：仅在事件流面板时显示 -->
       <template v-if="activeView === 'events'">
         <span class="call-panel-sep">|</span>
@@ -137,6 +144,103 @@
       </div>
     </div>
 
+    <!-- 源码注解面板 -->
+    <div v-if="activeView === 'source'" class="fn-call-source">
+      <div v-if="sourceLoading" class="loading" style="padding:16px">
+        <div class="spinner"></div><span>加载源码注解...</span>
+      </div>
+      <div v-else-if="sourceError" class="empty-state" style="padding:16px;color:#f87171">
+        ⚠ {{ sourceError }}
+      </div>
+      <div v-else-if="sourceData?.error === 'not_instrumented'" class="empty-state" style="padding:16px">
+        <p style="color:var(--text-muted)">🔒 该函数未被插桩，无执行数据</p>
+        <p v-if="sourceData.callSite" style="font-size:11px;color:var(--text-muted);margin-top:6px">
+          调用点：第 {{ sourceData.callSite.line }} 行
+          <code v-if="sourceData.callSite.srcText" style="margin-left:6px;opacity:.8">{{ sourceData.callSite.srcText }}</code>
+        </p>
+        <p v-else style="font-size:11px;color:var(--text-muted)">（原生函数 / 未加载的第三方库）</p>
+      </div>
+      <div v-else-if="!sourceData || sourceData.lines.length === 0" class="empty-state" style="padding:16px">
+        <p>📭 无源码数据</p>
+        <p style="font-size:11px;color:var(--text-muted)">需要 F2-SmapLoader 插件加载源码映射</p>
+      </div>
+      <div v-else class="source-panel-body">
+        <!-- 函数签名信息栏 -->
+        <div v-if="sourceData.signature" class="source-sig-bar">
+          <span class="source-sig-label">签名推断</span>
+          <span class="source-sig-fn">{{ sourceData.fnName }}</span>
+          <span class="source-sig-sep">·</span>
+          <span class="source-sig-meta">共调用 {{ sourceData.signature.callCount }} 次</span>
+          <span v-if="sourceData.signature.isPure" class="source-sig-badge pure">纯函数</span>
+          <template v-if="sourceData.signature.returnTypes?.length">
+            <span class="source-sig-sep">→</span>
+            <span class="source-sig-types">
+              <span
+                v-for="rt in sourceData.signature.returnTypes"
+                :key="rt.type"
+                class="sig-type-chip"
+              >{{ rt.type }}<em v-if="rt.pct != null"> {{ rt.pct }}%</em></span>
+            </span>
+          </template>
+        </div>
+        <!-- 源码表格 -->
+        <div class="source-code-wrapper">
+          <table class="source-table">
+            <tbody>
+              <tr
+                v-for="lineInfo in sourceData.lines"
+                :key="lineInfo.line"
+                class="source-row"
+                :class="{
+                  'source-row-hot':  lineInfo.execCount >= 100,
+                  'source-row-exec': lineInfo.execCount > 0 && lineInfo.execCount < 100,
+                  'source-row-dead': lineInfo.execCount === 0,
+                }"
+              >
+                <!-- 行号 -->
+                <td class="source-lineno">{{ lineInfo.line }}</td>
+                <!-- 执行次数气泡 -->
+                <td class="source-exec">
+                  <span v-if="lineInfo.execCount > 0" class="exec-badge" :class="lineInfo.execCount >= 100 ? 'exec-hot' : 'exec-warm'">
+                    ×{{ fmtNum(lineInfo.execCount) }}
+                  </span>
+                  <span v-else class="exec-dead">—</span>
+                </td>
+                <!-- 源码文本 -->
+                <td class="source-text">
+                  <code>{{ lineInfo.srcText }}</code>
+                </td>
+                <!-- 写入值 -->
+                <td class="source-vars">
+                  <template v-if="lineInfo.writes?.length">
+                    <span
+                      v-for="w in lineInfo.writes"
+                      :key="w.name"
+                      class="var-chip var-write"
+                    >
+                      {{ w.name }}=<em class="source-val">{{ fmtVals(w.values) }}</em>
+                    </span>
+                  </template>
+                </td>
+                <!-- 读取值 -->
+                <td class="source-vars">
+                  <template v-if="lineInfo.reads?.length">
+                    <span
+                      v-for="r in lineInfo.reads"
+                      :key="r.name"
+                      class="var-chip var-read"
+                    >
+                      {{ r.name }}→<em class="source-val">{{ fmtVals(r.values) }}</em>
+                    </span>
+                  </template>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- CFG 面板 -->
     <div v-if="activeView === 'cfg'" class="fn-call-cfg">
       <div v-if="cfgLoading" class="loading" style="padding:16px">
@@ -223,6 +327,11 @@ const eventsPage    = ref(1);
 const eventsCursorStack = ref([null]); // [null, cursor1, cursor2, ...]，null 表示从头
 const eventsTotal   = ref(0); // 全部模式下的总数（own 模式不知道总数）
 
+// 源码注解状态
+const sourceLoading = ref(false);
+const sourceError   = ref('');
+const sourceData    = ref(null);
+
 // CFG 状态
 const cfgCyRef    = ref(null);
 const cfgLoading  = ref(false);
@@ -247,12 +356,16 @@ watch(() => props.call?.id, (id) => {
   eventsTotal.value   = 0;
   cfgData.value    = null;
   cfgError.value   = '';
+  sourceData.value = null;
+  sourceError.value = '';
   destroyCfgCy();
   // 加载初始面板数据
   if (props.initialView === 'stack') {
     loadStack();
   } else if (props.initialView === 'cfg') {
     loadCfg();
+  } else if (props.initialView === 'source') {
+    loadSource();
   } else {
     loadEvents();
   }
@@ -273,6 +386,7 @@ async function toggleView(view) {
   if (view === 'stack'  && stack.value.length  === 0) await loadStack();
   if (view === 'events' && events.value.length === 0) await loadEvents();
   if (view === 'cfg'    && cfgData.value === null && !cfgLoading.value) await loadCfg();
+  if (view === 'source' && sourceData.value === null && !sourceLoading.value) await loadSource();
 }
 
 // ── 数据流联动 ────────────────────────────────────────────────────────────────
@@ -379,6 +493,49 @@ function nextEventsPage() {
   if (!eventsHasMore.value) return;
   eventsPage.value++;
   loadEvents();
+}
+
+// ── 源码注解加载 ──────────────────────────────────────────────
+
+async function loadSource() {
+  if (!props.call.id) return;
+  sourceLoading.value = true;
+  sourceError.value   = '';
+  sourceData.value    = null;
+  try {
+    const res = await fetch(`/api/sessions/${props.sessionId}/calls/${props.call.id}/annotated-source`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+if (data.error === 'not_instrumented') {
+                // 未插桩函数单独处理，存入 sourceData 供模板展示友好提示
+                sourceData.value = data;
+            } else if (data.error === 'no_smap' || data.error === 'no_iid') {
+                sourceError.value = '源码映射数据不存在，请确认 F2-SmapLoader 插件已运行';
+            } else {
+                sourceData.value = data;
+            }
+  } catch (e) {
+    console.error('[CallDetail] loadSource error:', e);
+    sourceError.value = e.message;
+  } finally {
+    sourceLoading.value = false;
+  }
+}
+
+/** 将一行的多个值格式化为简短展示字符串 */
+function fmtVals(values) {
+  if (!values || values.length === 0) return '';
+  const strs = values.map(v => {
+    if (v === null || v === undefined) return 'null';
+    if (typeof v === 'string') return v.length > 18 ? v.slice(0, 18) + '…' : v;
+    if (typeof v === 'object') return '{...}';
+    return String(v).length > 18 ? String(v).slice(0, 18) + '…' : String(v);
+  });
+  // 去重展示
+  const unique = [...new Set(strs)];
+  if (unique.length === 1) return unique[0];
+  if (unique.length <= 3) return unique.join(' / ');
+  return `${unique.slice(0, 2).join(' / ')} ...+${unique.length - 2}`;
 }
 
 // ── CFG 加载与渲染 ────────────────────────────────────────────────────────────
@@ -753,6 +910,176 @@ function initCfgCy(data) {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .empty-state { text-align: center; color: var(--text-muted); font-size: 12px; }
+
+/* ── 源码注解面板 ─────────────────────────────────────────────────────── */
+.fn-call-source {
+  display: flex;
+  flex-direction: column;
+}
+
+.source-panel-body {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 签名信息栏 */
+.source-sig-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: rgba(10,10,20,0.4);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.source-sig-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.source-sig-fn {
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  color: #a5b4fc;
+  font-weight: 600;
+}
+.source-sig-sep {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.source-sig-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.source-sig-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid;
+}
+.source-sig-badge.pure {
+  background: rgba(34,197,94,0.1);
+  color: #86efac;
+  border-color: rgba(34,197,94,0.3);
+}
+.source-sig-types {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.sig-type-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  background: rgba(99,102,241,0.12);
+  color: #a5b4fc;
+  border: 1px solid rgba(99,102,241,0.25);
+  font-family: 'JetBrains Mono', monospace;
+}
+.sig-type-chip em {
+  font-style: normal;
+  opacity: 0.65;
+}
+
+/* 源码表格 */
+.source-code-wrapper {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 480px;
+}
+.source-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+}
+.source-row { transition: background 0.1s; }
+.source-row:hover td { background: rgba(99,102,241,0.06); }
+
+/* 已执行行（有动态数据） */
+.source-row-exec td { background: rgba(15,20,40,0.5); }
+.source-row-exec:hover td { background: rgba(99,102,241,0.08) !important; }
+
+/* 热点行（执行次数 >= 100） */
+.source-row-hot td { background: rgba(245,158,11,0.06); }
+.source-row-hot:hover td { background: rgba(245,158,11,0.1) !important; }
+
+/* 死代码（未执行） */
+.source-row-dead td { opacity: 0.4; }
+
+.source-lineno {
+  padding: 3px 10px 3px 12px;
+  text-align: right;
+  color: var(--text-muted);
+  font-size: 11px;
+  user-select: none;
+  white-space: nowrap;
+  min-width: 36px;
+  border-right: 1px solid rgba(45,49,72,0.4);
+  vertical-align: top;
+  padding-top: 5px;
+}
+
+.source-exec {
+  padding: 3px 8px;
+  text-align: right;
+  white-space: nowrap;
+  min-width: 44px;
+  vertical-align: top;
+  padding-top: 5px;
+}
+.exec-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: monospace;
+}
+.exec-warm {
+  background: rgba(99,102,241,0.15);
+  color: #a5b4fc;
+}
+.exec-hot {
+  background: rgba(245,158,11,0.18);
+  color: #fcd34d;
+}
+.exec-dead {
+  font-size: 11px;
+  color: rgba(99,99,120,0.4);
+}
+
+.source-text {
+  padding: 3px 12px 3px 8px;
+  white-space: pre;
+  color: var(--text-primary);
+  vertical-align: top;
+  padding-top: 5px;
+}
+.source-text code {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.source-vars {
+  padding: 3px 8px;
+  vertical-align: top;
+  padding-top: 4px;
+  max-width: 200px;
+}
+.source-val {
+  font-style: normal;
+  color: #fcd34d;
+  font-size: 10px;
+  margin-left: 2px;
+  opacity: 0.9;
+}
 
 /* ── CFG 面板 ────────────────────────────────────────────────────────── */
 .fn-call-cfg {

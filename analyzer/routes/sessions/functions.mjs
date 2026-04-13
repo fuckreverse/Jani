@@ -20,6 +20,41 @@ import { safeParseJson, groupBy, BUILTIN_FN_NAMES } from './utils.mjs';
 
 const router = Router({ mergeParams: true });
 
+// ── 共享工具：直接子调用列表 + 区间判断 ──────────────────────────────────────
+//
+// 多个接口（own-events / annotated-source / fn-cfg 等）都需要"排除子调用内部事件"，
+// 统一封装在此，避免重复实现。
+//
+// queryDirectChildren(sessionId, depth, callSeq, returnSeq) → [{call_seq, return_seq}]（按 call_seq 升序）
+//   利用 idx_call_edges_depth 索引：depth 等值 + call_seq 范围，O(子调用数)
+//
+// makeIsInsideChild(sortedChildren) → (seq: number) => boolean
+//   子调用已按 call_seq 升序排列，扫描时可提前 break，O(children)
+//   子调用的 CALL_PRE(=call_seq) 和 CALL(=return_seq) 边界本身不在"内部"，保留
+
+function queryDirectChildren(sessionId, depth, callSeq, returnSeq) {
+    return db.all(
+        `SELECT call_seq, return_seq FROM call_edges
+         WHERE session_id = ?
+           AND depth = ?
+           AND call_seq >= ?
+           AND call_seq <= ?
+         ORDER BY call_seq ASC`,
+        sessionId, depth + 1, callSeq, returnSeq
+    );
+}
+
+function makeIsInsideChild(sortedChildren) {
+    if (sortedChildren.length === 0) return () => false;
+    return function isInsideChild(seq) {
+        for (const c of sortedChildren) {
+            if (c.call_seq >= seq) break;   // 剩余子调用起点 >= seq，不可能包含 seq
+            if (seq < c.return_seq) return true;  // c.call_seq < seq < c.return_seq → 内部
+        }
+        return false;
+    };
+}
+
 // ── GET /api/sessions/:id/functions ──────────────────────────────────────
 // 按 fn_name 聚合 call_edges，返回函数列表（调用次数、行号等）
 //
@@ -347,26 +382,16 @@ router.get('/calls/:callId/own-events', (req, res) => {
         const { call_seq: callSeqN, return_seq: returnSeqN, depth: depthN } = call;
         const limitN = Math.min(Number(limit) || 200, 500);
 
-        // ── Step 1: 取所有直接子调用区间（depth+1，在本调用区间内）──────────────
-        // 使用 idx_call_edges_depth(session_id, depth, call_seq, return_seq)：
-        //   depth 等值过滤（=）+ call_seq 范围（>=）命中索引前缀，比旧的 idx_call_edges_stack 快
-        const children = db.all(
-            `SELECT call_seq, return_seq FROM call_edges
-             WHERE session_id = ?
-               AND depth = ?
-               AND call_seq  >= ?
-               AND call_seq  <= ?
-             ORDER BY call_seq ASC`,
-            id, depthN + 1, callSeqN, returnSeqN
-        );
-        // 注：把 return_seq <= returnSeqN 改为 call_seq <= returnSeqN 以充分利用索引，
-        // 子调用的 call_seq 必然在父区间内，return_seq 超出的情况不存在（正确 trace）。
-        // 若 trace 有损坏数据，下方过滤逻辑会在 JS 侧自然排除 return_seq > returnSeqN 的边。
+        // ── Step 1: 取所有直接子调用区间，复用共享工具 ───────────────────────────
+        // queryDirectChildren 使用 idx_call_edges_depth 索引，O(子调用数)
+        const children = queryDirectChildren(id, depthN, callSeqN, returnSeqN);
+        // children 已按 call_seq ASC 排序，可直接传入 makeIsInsideChild
 
-        // ── Step 2: 构建 SQL 排除条件 ─────────────────────────────────────────
-        // 策略：排除每个子调用的「内部」事件（call_seq+1 到 return_seq-1），
-        // 但保留头（CALL_PRE @ call_seq）和尾（CALL @ return_seq），
-        // 这样 A 的事件流里仍能看到「调用了 B」及「B 的返回值」。
+        // ── Step 2: 取区间内事件，JS 侧用 makeIsInsideChild 排除子调用内部 ───────
+        // 策略：保留 CALL_PRE @ call_seq 和 CALL @ return_seq 两个边界事件，
+        //   这样事件流里能看到「调用了 B」及「B 的返回值」。
+        // SQL 只做基础范围+游标过滤；子调用排除全在 JS 侧完成，
+        //   避免 NOT BETWEEN 链过长触发 SQLite "Expression tree is too large"。
         const baseConditions = [
             'e.session_id = ?',
             'e.id >= ?',
@@ -380,9 +405,7 @@ router.get('/calls/:callId/own-events', (req, res) => {
             baseParams.push(Number(cursor));
         }
 
-        // 统一策略：SQL 只做基础范围+游标过滤，子调用排除全部在 JS 侧完成。
-        // 避免 NOT BETWEEN 链过长触发 SQLite "Expression tree is too large" 错误。
-        // 多取倍数是为了应对过滤损耗（子调用越多，损耗越大）；子调用少时损耗接近 0。
+        // 多取倍数应对过滤损耗
         const fetchMultiplier = children.length > 50 ? 5 : children.length > 10 ? 3 : 1;
         const rawEvents = db.all(
             `SELECT e.id AS seq, e.type, e.iid,
@@ -395,24 +418,15 @@ router.get('/calls/:callId/own-events', (req, res) => {
             ...baseParams, limitN * fetchMultiplier
         );
 
-        // JS 侧排除子调用内部区间（保留 call_seq 和 return_seq 两个边界事件）
+        // JS 侧排除子调用内部区间，复用 makeIsInsideChild
+        const isInChild = makeIsInsideChild(children);
         let events;
         if (children.length === 0) {
             events = rawEvents.slice(0, limitN);
         } else {
-            // 对子调用区间排序，方便提前 break
-            const sortedChildren = children.slice().sort((a, b) => a.call_seq - b.call_seq);
             const filtered = [];
             for (const e of rawEvents) {
-                let inInner = false;
-                for (const c of sortedChildren) {
-                    if (c.call_seq > e.seq) break;          // 后续子调用不可能匹配
-                    if (e.seq > c.call_seq && e.seq < c.return_seq) {
-                        inInner = true;
-                        break;
-                    }
-                }
-                if (!inInner) filtered.push(e);
+                if (!isInChild(e.seq)) filtered.push(e);
                 if (filtered.length >= limitN) break;
             }
             events = filtered;
@@ -755,6 +769,286 @@ router.get('/flamegraph', (req, res) => {
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/flamegraph] error:');
         res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/calls/:callId/annotated-source ──────────────────
+// 返回某次调用的函数源码，并附加本次调用内的动态执行数据：
+//   - 每行的执行次数（本次调用 SEQ 区间内 GROUP BY iid）
+//   - 每行读写的变量值（去重后最多 MAX_VALS_PER_LINE 个）
+//   - 函数签名推断（来自 fn_signatures，若有）
+//
+// 实现步骤：
+//   1. 从 call_edges 取 call_seq / return_seq
+//   2. 扫描 (call_seq, return_seq) 开区间内所有事件，用实际出现的 iid 集合确定函数体
+//      （CALL_PRE/CALL 边界事件本身不属于函数体，用开区间排除）
+//   3. 用这些 iid JOIN smap 取每行的 sl / src_text
+//   4. 统计各 iid 在该区间的执行次数（GROUP BY iid）
+//   5. 按行号聚合 reads/writes，每行最多取 MAX_VALS_PER_LINE 个不重复值
+//   6. 按行号组装 lines[] 返回
+
+const MAX_VALS_PER_LINE = 6;
+
+router.get('/calls/:callId/annotated-source', (req, res) => {
+    try {
+        const { id, callId } = req.params;
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: `Session ${id} not found` });
+
+        const call = db.get(
+            'SELECT fn_name, fn_iid, call_seq, return_seq, depth FROM call_edges WHERE id = ? AND session_id = ?',
+            Number(callId), id
+        );
+        if (!call) return res.status(404).json({ error: `Call ${callId} not found` });
+
+        const { fn_name: fnName, fn_iid: fnEntryIid, call_seq: callSeq, return_seq: returnSeq, depth: callDepth } = call;
+
+        if (returnSeq == null) {
+            return res.json({ fnName, startLine: null, lines: [], signature: null, error: 'no_return_seq' });
+        }
+
+        // ── Step 1: 取函数"自身"事件的 iid 集合（排除子调用内部） ──────────
+        //
+        // 事件序列示意：
+        //   [call_seq=CALL_PRE] ... [子CALL_PRE] [子内部...] [子CALL] ... [return_seq=CALL]
+        //   call_seq  = CALL_PRE 事件 id；return_seq = CALL 事件 id
+        //   本函数自身事件 = 开区间 (call_seq, return_seq) 中，
+        //     不属于任何直接子调用内部 (child.call_seq, child.return_seq) 的事件
+        //   子调用的 CALL_PRE/CALL 边界本身（本函数发出的调用动作）保留。
+        //
+        // 策略：复用 queryDirectChildren + makeIsInsideChild，
+        //   先取区间内所有 iid+seq，JS 侧过滤，再 JOIN smap 取行号信息。
+        //   与 own-events 接口保持一致，避免 NOT EXISTS 逐行子查询。
+
+        const childCalls = queryDirectChildren(id, callDepth, callSeq, returnSeq);
+        const isInsideChild = makeIsInsideChild(childCalls);
+
+        // 取区间内所有 (seq, iid)，JS 侧过滤掉子调用内部的 seq
+        const rawSeqRows = db.all(
+            `SELECT id AS seq, iid FROM events
+             WHERE session_id = ?
+               AND id > ?
+               AND id < ?
+               AND iid IS NOT NULL
+             ORDER BY id ASC`,
+            id, callSeq, returnSeq
+        );
+
+        // 过滤后收集"自身层"出现过的 iid 集合
+        const ownIidSet = new Set();
+        for (const r of rawSeqRows) {
+            if (!isInsideChild(r.seq)) ownIidSet.add(r.iid);
+        }
+
+        // 用 iid 集合查 smap（iid 数量 = 去重后的 AST 节点数，通常很小）
+        // 逐个查比展开 IN 更安全；也可以一次全量 smap + JS 过滤，这里用逐个查
+        // 实际上 smap 条目数 = 程序 AST 节点总数，是固定的，可以全量扫描后 JS 过滤
+        const allSmapForSession = db.all(
+            `SELECT iid, sl, sc, src_text FROM smap
+             WHERE session_id = ?
+               AND sl IS NOT NULL
+             ORDER BY sl ASC, sc ASC`,
+            id
+        );
+        const smapRows = allSmapForSession.filter(r => ownIidSet.has(r.iid));
+
+        if (smapRows.length === 0) {
+            // 区分两种情况：
+            // 1. 未插桩函数：开区间 (call_seq, return_seq) 内根本没有事件
+            //    → return_seq - call_seq <= 1，开区间为空
+            // 2. 有事件但 iid 没有对应 smap 条目（smap 未加载）
+            const hasEventsInBody = db.get(
+                `SELECT 1 FROM events WHERE session_id = ? AND id > ? AND id < ? LIMIT 1`,
+                id, callSeq, returnSeq
+            );
+
+            if (!hasEventsInBody) {
+                // 未插桩：尝试用调用点 iid 给出调用位置信息
+                const callSiteSmap = fnEntryIid
+                    ? db.get('SELECT sl, sc, src_text FROM smap WHERE session_id = ? AND iid = ?', id, fnEntryIid)
+                    : null;
+                return res.json({
+                    fnName,
+                    startLine: null,
+                    lines: [],
+                    signature: null,
+                    error: 'not_instrumented',
+                    callSite: callSiteSmap
+                        ? { line: callSiteSmap.sl, col: callSiteSmap.sc, srcText: callSiteSmap.src_text }
+                        : null,
+                });
+            }
+
+            // 有事件但 smap 缺失
+            return res.json({ fnName, startLine: null, lines: [], signature: null, error: 'no_smap' });
+        }
+
+        // iid → smap 快速查找
+        const iidToSmap = new Map();
+        for (const r of smapRows) iidToSmap.set(r.iid, r);
+
+        // ── Step 2: 本次调用内各 iid 执行次数 ────────────────────────────
+        // 直接按 SEQ 区间扫描，无需 IN 列表；在 JS 层用 iidToSmap 过滤
+        const execCountMap = new Map(); // iid → count
+        {
+            const rows = db.all(
+                `SELECT iid, COUNT(*) AS cnt
+                 FROM events
+                 WHERE session_id = ?
+                   AND id > ?
+                   AND id < ?
+                 GROUP BY iid`,
+                id, callSeq, returnSeq
+            );
+            for (const r of rows) {
+                if (iidToSmap.has(r.iid)) execCountMap.set(r.iid, r.cnt);
+            }
+        }
+
+        // ── Step 3: 本次调用内的 writes / reads（按行号聚合，限值数量） ──
+        // 用 SEQ 区间子查询关联 writes/reads，完全避免 IN 列表
+        // line → { reads: Map<name, Set<val>>, writes: Map<name, Set<val>> }
+        const lineDataMap = new Map();
+
+        function getLineData(line) {
+            if (!lineDataMap.has(line)) {
+                lineDataMap.set(line, { reads: new Map(), writes: new Map() });
+            }
+            return lineDataMap.get(line);
+        }
+
+        function addVal(mapOfSets, name, val) {
+            if (!mapOfSets.has(name)) mapOfSets.set(name, new Set());
+            const s = mapOfSets.get(name);
+            if (s.size < MAX_VALS_PER_LINE) s.add(val);
+        }
+
+        {
+            // 用关联子查询直接按区间过滤，不展开 event_id 列表
+            const writes = db.all(
+                `SELECT w.event_id, e.iid, w.name, vd.val_text AS value, w.omitted
+                 FROM writes w
+                 JOIN events e ON e.session_id = w.session_id AND e.id = w.event_id
+                 LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
+                 WHERE w.session_id = ?
+                   AND e.id > ?
+                   AND e.id < ?`,
+                id, callSeq, returnSeq
+            );
+            for (const w of writes) {
+                const smap = iidToSmap.get(w.iid);
+                const line = smap?.sl ?? null;
+                if (line == null || w.omitted) continue;
+                addVal(getLineData(line).writes, w.name, w.value);
+            }
+
+            const reads = db.all(
+                `SELECT r.event_id, e.iid, r.name, vd.val_text AS value, r.omitted
+                 FROM reads r
+                 JOIN events e ON e.session_id = r.session_id AND e.id = r.event_id
+                 LEFT JOIN value_dict vd ON vd.session_id = r.session_id AND vd.id = r.value_id
+                 WHERE r.session_id = ?
+                   AND e.id > ?
+                   AND e.id < ?`,
+                id, callSeq, returnSeq
+            );
+            for (const r of reads) {
+                const smap = iidToSmap.get(r.iid);
+                const line = smap?.sl ?? null;
+                if (line == null || r.omitted) continue;
+                addVal(getLineData(line).reads, r.name, r.value);
+            }
+        }
+
+        // ── Step 4: 按行号组装 lines[] ────────────────────────────────────
+        // 同一行可能有多个 iid（表达式粒度），取执行次数最大的那个（代表该行被执行了几次）
+        // 先建 line → maxExecCount 映射
+        const lineExecCountMap = new Map(); // line → maxExecCount
+        for (const [iid, smapRow] of iidToSmap) {
+            const line = smapRow.sl;
+            if (line == null) continue;
+            const cnt = execCountMap.get(iid) ?? 0;
+            if (!lineExecCountMap.has(line) || cnt > lineExecCountMap.get(line)) {
+                lineExecCountMap.set(line, cnt);
+            }
+        }
+
+        // 收集所有唯一的行，取每行「行首 iid」的 src_text（sc 最小的那个 iid）
+        const lineSmapMap = new Map(); // line → smap row（行首 iid）
+        for (const [, smapRow] of iidToSmap) {
+            const line = smapRow.sl;
+            if (line == null) continue;
+            if (!lineSmapMap.has(line) || smapRow.sc < lineSmapMap.get(line).sc) {
+                lineSmapMap.set(line, smapRow);
+            }
+        }
+
+        const sortedLines = [...lineSmapMap.keys()].sort((a, b) => a - b);
+        const startLine   = sortedLines[0] ?? null;
+
+        const lines = sortedLines.map(line => {
+            const smapRow   = lineSmapMap.get(line);
+            const execCount = lineExecCountMap.get(line) ?? 0;
+            const ld        = lineDataMap.get(line);
+
+            const reads = ld
+                ? [...ld.reads.entries()].map(([name, vals]) => ({
+                    name,
+                    values: [...vals].map(v => { try { return JSON.parse(v); } catch { return v; } }),
+                }))
+                : [];
+            const writes = ld
+                ? [...ld.writes.entries()].map(([name, vals]) => ({
+                    name,
+                    values: [...vals].map(v => { try { return JSON.parse(v); } catch { return v; } }),
+                }))
+                : [];
+
+            return {
+                line,
+                srcText:   smapRow?.src_text ?? null,
+                execCount,
+                reads,
+                writes,
+            };
+        });
+
+        // ── Step 5: 函数签名（可选，来自 fn_signatures） ─────────────────
+        let signature = null;
+        if (fnName) {
+            const sigRow = db.get(
+                `SELECT arg_types, return_types, call_count, is_pure, sample_args, sample_return
+                 FROM fn_signatures
+                 WHERE session_id = ? AND fn_name = ?
+                 LIMIT 1`,
+                id, fnName
+            );
+            if (sigRow) {
+                signature = {
+                    callCount:    sigRow.call_count,
+                    isPure:       !!sigRow.is_pure,
+                    argTypes:     safeParseJson(sigRow.arg_types, []),
+                    returnTypes:  safeParseJson(sigRow.return_types, []),
+                    sampleArgs:   safeParseJson(sigRow.sample_args, []),
+                    sampleReturn: safeParseJson(sigRow.sample_return, null),
+                };
+            }
+        }
+
+        return res.json({
+            fnName,
+            fnIid: fnEntryIid,
+            startLine,
+            callSeq,
+            returnSeq,
+            lines,
+            signature,
+        });
+
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/calls/:callId/annotated-source] error:');
+        return res.status(500).json({ error: e.message });
     }
 });
 
