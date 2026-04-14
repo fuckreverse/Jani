@@ -13,6 +13,7 @@
             <input v-model="localName" placeholder="新工作空间名称" style="width:100%" />
           </div>
           <InstrumentOptions ref="optsRef" :embedded="true" />
+          <PreprocessOptions ref="preprocessRef" :embedded="true" />
         </div>
         <div class="modal-footer">
           <div v-if="error" class="fork-error">❌ {{ error }}</div>
@@ -32,6 +33,7 @@
 <script setup>
 import { ref, watch, nextTick } from 'vue';
 import InstrumentOptions from './InstrumentOptions.vue';
+import PreprocessOptions from './PreprocessOptions.vue';
 
 const props = defineProps({
   /** 是否显示 */
@@ -62,10 +64,11 @@ const emit = defineEmits([
   'success',
 ]);
 
-const localName = ref('');
-const loading   = ref(false);
-const error     = ref('');
-const optsRef   = ref(null);
+const localName    = ref('');
+const loading      = ref(false);
+const error        = ref('');
+const optsRef      = ref(null);
+const preprocessRef = ref(null);
 
 // 每次弹窗打开时，回填名称和选项
 watch(() => props.visible, async (val) => {
@@ -74,10 +77,11 @@ watch(() => props.visible, async (val) => {
   error.value     = '';
   loading.value   = false;
   await nextTick();
-  if (optsRef.value && props.initialOptions) {
+  if (props.initialOptions) {
     try {
       const savedOpts = JSON.parse(props.initialOptions);
-      optsRef.value.loadOptions(savedOpts);
+      if (optsRef.value) optsRef.value.loadOptions(savedOpts?.options ?? savedOpts);
+      if (preprocessRef.value) preprocessRef.value.loadPreprocess(savedOpts?.preprocess ?? null);
     } catch { /* 忽略解析失败 */ }
   }
 });
@@ -92,11 +96,12 @@ async function handleSubmit() {
   loading.value = true;
   error.value   = '';
   try {
-    const options = optsRef.value?.buildOptions() ?? {};
+    const options    = optsRef.value?.buildOptions() ?? {};
+    const preprocess = preprocessRef.value?.buildPreprocess() ?? null;
     const res = await fetch(`/api/projects/${props.projectId}/fork`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ name: localName.value.trim(), options }),
+      body:    JSON.stringify({ name: localName.value.trim(), options, preprocess }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);

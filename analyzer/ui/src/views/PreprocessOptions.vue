@@ -194,8 +194,8 @@ const TRANSPILE_TARGETS = [
 const expanded = ref(true);
 
 const opts = reactive({
-  enabled:   false,
-  preset:    'deobfuscate',
+  enabled:   true,
+  preset:    'full',
   sourceType: 'script',
   deobfuscate: {
     replaceVoid:       true,    // void 0 → undefined，语义等价，最安全
