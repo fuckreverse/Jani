@@ -100,6 +100,7 @@
             <div v-if="selectedNode.srcText" class="nd-row"><span class="nd-key">源码</span><code class="src-text">{{ selectedNode.srcText }}</code></div>
             <div class="nd-actions">
               <button v-if="selectedNode.varName" class="btn-secondary btn-sm" @click="loadSubgraphFrom(selectedNode.varName, 'backward')">← 回溯上游</button>
+              <button v-if="selectedNode.line != null" class="btn-secondary btn-sm" @click="gotoEventLine(selectedNode.line)" title="跳转到事件流对应行号">📋 查看事件</button>
             </div>
           </template>
         </div>
@@ -275,76 +276,60 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick, watch, defineAsyncComponent } from 'vue';
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 
-// SliceTree 是一个轻量的嵌套列表组件，内联定义避免额外文件
-const SliceTree = defineAsyncComponent(() =>
-    // 使用内联组件方式，直接在本文件 script 末尾定义
-    Promise.resolve({
-        props: {
-            nodes: Array,
-            edges: Array,
-            rootVar: String,
-            direction: String,
-        },
-        emits: ['jump-subgraph'],
-        setup(props, { emit }) {
-            // 构建邻接表
-            const adjacency = computed(() => {
-                const adj = new Map(); // nodeKey → [childNodeKey]
-                for (const e of (props.edges || [])) {
-                    const src = props.direction === 'backward'
-                        ? `var:${e.from_var}`   // backward: from → root
-                        : `var:${e.to_var}`;    // forward: root → to
-                    const dst = props.direction === 'backward'
-                        ? `var:${e.to_var}`
-                        : `var:${e.from_var}`;
-                    if (!adj.has(dst)) adj.set(dst, new Set());
-                    adj.get(dst).add(src);
-                }
-                return adj;
-            });
+// SliceTree：切片层级展示组件（内联 Options API，无需独立文件）
+const SliceTree = {
+    props: {
+        nodes:     { type: Array,  default: () => [] },
+        edges:     { type: Array,  default: () => [] },
+        rootVar:   { type: String, default: '' },
+        direction: { type: String, default: 'backward' },
+    },
+    emits: ['jump-subgraph'],
+    computed: {
+        // BFS 按层展开依赖链
+        // backward: dst = to_var（target），src = from_var（上游）
+        // forward:  dst = from_var（source），src = to_var（下游）
+        computedLayers() {
+            if (!this.rootVar) return [];
+            const rootKey = `var:${this.rootVar}`;
 
-            // BFS 层级构建
-            const layers = computed(() => {
-                if (!props.rootVar) return [];
-                const rootKey = `var:${props.rootVar}`;
-                const visited = new Set([rootKey]);
-                const result = [[rootKey]];
-                let frontier = [rootKey];
-                while (frontier.length > 0) {
-                    const nextFrontier = [];
-                    for (const key of frontier) {
-                        const children = adjacency.value.get(key) || new Set();
-                        for (const c of children) {
-                            if (!visited.has(c)) {
-                                visited.add(c);
-                                nextFrontier.push(c);
-                            }
-                        }
+            // 构建邻接表：dst → Set<src>（"dst 的依赖来自 src"）
+            const adj = new Map();
+            for (const e of this.edges) {
+                if (!e.from_var || !e.to_var) continue;
+                const src = this.direction === 'backward' ? `var:${e.from_var}` : `var:${e.to_var}`;
+                const dst = this.direction === 'backward' ? `var:${e.to_var}`   : `var:${e.from_var}`;
+                if (!adj.has(dst)) adj.set(dst, new Set());
+                adj.get(dst).add(src);
+            }
+
+            // BFS 层级构建（带安全计数防止意外死循环）
+            const visited  = new Set([rootKey]);
+            const result   = [[rootKey]];
+            let frontier   = [rootKey];
+            let safety     = 0;
+            while (frontier.length > 0 && safety++ < 20) {
+                const next = [];
+                for (const key of frontier) {
+                    for (const c of (adj.get(key) || [])) {
+                        if (!visited.has(c)) { visited.add(c); next.push(c); }
                     }
-                    if (nextFrontier.length > 0) result.push(nextFrontier);
-                    frontier = nextFrontier;
                 }
-                return result;
-            });
-
-            const nodeMap = computed(() => {
-                const m = new Map();
-                for (const n of (props.nodes || [])) m.set(n.id, n);
-                return m;
-            });
-
-            const varLabel = (key) => key.replace(/^var:/, '');
-
-            return () => {
-                const { h } = window.Vue || {};
-                if (!h) return null; // 回退
-                // 使用 Vue render 函数渲染层级列表
-                return null; // fallback：由 template 渲染
-            };
+                if (next.length > 0) result.push(next);
+                frontier = next;
+            }
+            return result;
         },
-        template: `
+        // id → 节点对象映射（用于取 edgeTypes）
+        nodeMap() {
+            const m = new Map();
+            for (const n of this.nodes) m.set(n.id, n);
+            return m;
+        },
+    },
+    template: `
 <div class="slice-tree-wrap">
   <div v-for="(layer, li) in computedLayers" :key="li" class="slice-layer">
     <div class="slice-layer-label">{{ li === 0 ? '目标' : (direction === 'backward' ? '来源 L'+li : '影响 L'+li) }}</div>
@@ -362,50 +347,11 @@ const SliceTree = defineAsyncComponent(() =>
         </span>
       </div>
     </div>
-    <div v-if="li < computedLayers.length-1" class="slice-layer-arrow">{{ direction === 'backward' ? '←' : '→' }}</div>
+    <div v-if="li < computedLayers.length - 1" class="slice-layer-arrow">{{ direction === 'backward' ? '←' : '→' }}</div>
   </div>
 </div>
-        `,
-        computed: {
-            computedLayers() {
-                if (!this.rootVar) return [];
-                const rootKey = `var:${this.rootVar}`;
-                const adj = new Map();
-                for (const e of (this.edges || [])) {
-                    if (!e.from_var || !e.to_var) continue;
-                    const src = this.direction === 'backward' ? `var:${e.from_var}` : `var:${e.to_var}`;
-                    const dst = this.direction === 'backward' ? `var:${e.to_var}` : `var:${e.from_var}`;
-                    if (!adj.has(dst)) adj.set(dst, new Set());
-                    adj.get(dst).add(src);
-                }
-                const visited = new Set([rootKey]);
-                const result = [[rootKey]];
-                let frontier = [rootKey];
-                let safety = 0;
-                while (frontier.length > 0 && safety++ < 20) {
-                    const nextFrontier = [];
-                    for (const key of frontier) {
-                        const children = adj.get(key) || new Set();
-                        for (const c of children) {
-                            if (!visited.has(c)) {
-                                visited.add(c);
-                                nextFrontier.push(c);
-                            }
-                        }
-                    }
-                    if (nextFrontier.length > 0) result.push(nextFrontier);
-                    frontier = nextFrontier;
-                }
-                return result;
-            },
-            nodeMap() {
-                const m = new Map();
-                for (const n of (this.nodes || [])) m.set(n.id, n);
-                return m;
-            },
-        },
-    })
-);
+    `,
+};
 
 const props = defineProps({
     sessionId: { type: String, required: true },
@@ -414,7 +360,7 @@ const props = defineProps({
     initialMode: { type: String, default: '' }, // 'graph'|'slice'|'table'
 });
 
-const emit = defineEmits(['goto-dataflow']);
+const emit = defineEmits(['goto-dataflow', 'goto-line']);
 
 // ─── 视图模式 ─────────────────────────────────────────────────────────────────
 const viewMode = ref('graph');
@@ -531,6 +477,7 @@ async function loadCytoscape() {
 // 边类型颜色映射
 const EDGE_COLORS = {
     assign:      '#6366f1',
+    copy:        '#06b6d4',
     field_write: '#22c55e',
     field_read:  '#f59e0b',
     call_arg:    '#a855f7',
@@ -853,6 +800,12 @@ function onTableRowClick(edge) {
     }
 }
 
+// ─── 跳转到事件流 ─────────────────────────────────────────────────────────────
+function gotoEventLine(line) {
+    if (line == null) return;
+    emit('goto-line', { minLine: line, maxLine: line });
+}
+
 // ─── 外部联动接口 ─────────────────────────────────────────────────────────────
 // 从 CallDetail 等外部组件调用：展开指定变量的数据流子图
 function openDataflowFor(varN, mode = 'graph', direction = 'both') {
@@ -1039,6 +992,7 @@ defineExpose({
 
 .type-badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; white-space: nowrap; }
 .df-assign      { background: rgba(99,102,241,0.15); color: #a5b4fc; }
+.df-copy        { background: rgba(6,182,212,0.15);  color: #67e8f9; }
 .df-field_write { background: rgba(34,197,94,0.15);  color: #86efac; }
 .df-field_read  { background: rgba(245,158,11,0.15); color: #fcd34d; }
 .df-call_arg    { background: rgba(168,85,247,0.15); color: #d8b4fe; }

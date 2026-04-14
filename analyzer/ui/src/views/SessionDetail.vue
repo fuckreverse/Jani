@@ -82,7 +82,7 @@
       <PatternsTab    v-show="activeTab === 'patterns'"    ref="patternsTabRef"    :session-id="sessionId" @goto-event-by-value="onGotoEventByValue" />
       <CryptoTab      v-show="activeTab === 'crypto'"      ref="cryptoTabRef"      :session-id="sessionId" />
       <SignaturesTab  v-show="activeTab === 'signatures'"  ref="signaturesTabRef"  :session-id="sessionId" />
-      <DataflowTab    v-show="activeTab === 'dataflow'"    ref="dataflowTabRef"    :session-id="sessionId" />
+      <DataflowTab    v-show="activeTab === 'dataflow'"    ref="dataflowTabRef"    :session-id="sessionId" @goto-line="onCfgGotoLine" />
       <ObjMutTab      v-show="activeTab === 'objmut'"      ref="objmutTabRef"      :session-id="sessionId" />
       <ObfuscationTab v-show="activeTab === 'obfuscation'" ref="obfuscationTabRef" :session-id="sessionId" @goto-function="onGotoFunction" />
       <CfgTab        v-show="activeTab === 'cfg'"         ref="cfgTabRef"         :session-id="sessionId" @goto-line="onCfgGotoLine" />

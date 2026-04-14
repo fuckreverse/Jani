@@ -398,7 +398,7 @@ CREATE TABLE IF NOT EXISTS dataflow_edges (
     to_event_id     INTEGER,
     from_var        TEXT,
     to_var          TEXT,
-    edge_type       TEXT,   -- assign / call_arg / call_ret / field_read / field_write
+    edge_type       TEXT,   -- assign / copy / call_arg / call_ret / field_read / field_write
     iid             INTEGER,
     line            INTEGER
 );

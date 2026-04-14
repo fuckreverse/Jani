@@ -304,7 +304,7 @@ export function registerTools(server, client) {
         'Query dataflow edges (A2 DataFlowGraph) with edge type and variable name filtering.',
         {
             sessionId: z.string().describe('session ID'),
-            edgeType:  z.enum(['assign','call_arg','call_ret','field_write','field_read']).optional().describe('edge type filter (optional)'),
+            edgeType:  z.enum(['assign','copy','call_arg','call_ret','field_write','field_read']).optional().describe('edge type filter (optional)'),
             varName:   z.string().optional().describe('variable name fuzzy search (optional)'),
             varExact:  z.string().optional().describe('exact variable name (optional)'),
             seqFrom:   z.number().int().optional().describe('start seq filter (optional)'),

@@ -2,23 +2,27 @@
  * A2_DataFlowGraph.mjs — 构建变量级 def-use 数据流图
  * 写入 dataflow_edges 表
  *
- * v2 重构：
- *  - assign 边：from_var = 定义变量名, to_var = 使用变量名（≠ 当 SSA 别名时相同，普通 def-use 时相同）
- *              真正的语义：哪个 write 事件 → 哪个 read 事件，变量名作辅助标签
- *  - call_arg 边：函数调用时，实参变量 → 形参变量（基于 call_edges + writes/reads 匹配）
- *  - call_ret 边：函数返回值 → 接收返回值的变量
- *  - field_write / field_read：属性读写，与 v1 相同
+ * 边类型说明：
+ *  - assign   边：write(X) → read(X)，同一变量的定义-使用链（def-use）
+ *  - copy     边：同一事件内的 read(A) × write(B)，代表跨变量赋值传播（如 b = a）
+ *  - call_arg 边：CALL_PRE 事件(call_seq) → 函数体内第 i 个 read，代表实参→形参传递
+ *  - call_ret 边：CALL 事件(return_seq) → return_seq 后第一个 read，代表返回值→接收方
+ *  - field_write / field_read：属性读写，基于 OID 标识对象
  *
  * 性能优化：
  *  - 一次性加载全部 events/writes/reads/fields，消除分批 IN 查询
  *  - 使用 prepared statement + 大 batch 事务写入
  *  - def-use 匹配：用二分查找取最近 write，O(log N)
- *  - call_arg/call_ret：先构建 call_seq → [write event] 的倒排索引，O(1) 查找
+ *  - call_arg/call_ret：基于有序 reads 数组 + lowerBound 二分，O(log N) 区间查找
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
 
 const BATCH_SIZE = 5000;
+// copy 边每个事件的上界：防止解构赋值/大表达式产生组合爆炸
+// 例：const {a,b,c,d,e} = obj 有 5 reads × 5 writes = 25 条，正常
+// 但 eval 类场景可能产生数百个 read/write，需限制
+const MAX_COPY_PER_EVENT = 20;
 
 // 二分：在有序 arr 中找最后一个 key(item) < target 的位置
 function upperBoundLt(arr, target, key) {
@@ -82,12 +86,30 @@ export default class A2DataFlowGraph extends BasePlugin {
             'SELECT event_id, name FROM reads WHERE session_id = ? AND name IS NOT NULL ORDER BY event_id ASC'
         ).all(sessionId);
 
-        // ── 建 write 索引：varName → [{event_id}]（已按 event_id ASC 有序）──
+        // ── 建 write 索引：varName → [event_id, ...]（已按 event_id ASC 有序）──
         this.emitProgress(ctx, '构建 write 索引...', 22);
         const writeIndex = new Map(); // name → [event_id, ...]（扁平数组，减少对象开销）
         for (const w of writes) {
             if (!writeIndex.has(w.name)) writeIndex.set(w.name, []);
             writeIndex.get(w.name).push(w.event_id);
+        }
+
+        // ── 建 event_id → writes[] / reads[] 分组索引（供 copy 边使用）────────
+        // copy 边需要找到同一事件内同时有 reads 和 writes 的情况（如 b = a 赋值）
+        this.emitProgress(ctx, '构建事件内 read-write 分组...', 26);
+        // 跳过占位符变量名（Jalangi 内部使用，不是程序变量）
+        const SKIP_NAMES = new Set(['callee', 'callee_def_iid', 'return', 'arg0', 'arg1', 'arg2', 'arg3', 'arg4', 'arg5', 'arg6', 'arg7']);
+        const evWritesMap = new Map(); // event_id → [varName, ...]
+        for (const w of writes) {
+            if (!w.name || SKIP_NAMES.has(w.name)) continue;
+            if (!evWritesMap.has(w.event_id)) evWritesMap.set(w.event_id, []);
+            evWritesMap.get(w.event_id).push(w.name);
+        }
+        const evReadsMap = new Map();  // event_id → [varName, ...]
+        for (const r of reads) {
+            if (!r.name || SKIP_NAMES.has(r.name)) continue;
+            if (!evReadsMap.has(r.event_id)) evReadsMap.set(r.event_id, []);
+            evReadsMap.get(r.event_id).push(r.name);
         }
 
         // ── prepare 批量写入 ───────────────────────────────────────────────
@@ -113,6 +135,7 @@ export default class A2DataFlowGraph extends BasePlugin {
         // from_event_id = write 事件 SEQ, to_event_id = read 事件 SEQ
         this.emitProgress(ctx, '构建 assign 边...', 30);
         for (const r of reads) {
+            if (SKIP_NAMES.has(r.name)) continue;
             const defs = writeIndex.get(r.name);
             if (!defs) continue;
 
@@ -139,18 +162,84 @@ export default class A2DataFlowGraph extends BasePlugin {
             }
         }
         flush();
-        this.emitProgress(ctx, `assign 边完成(${totalWritten})，构建 call 边...`, 55);
+        this.emitProgress(ctx, `assign 边完成(${totalWritten})，构建 copy 边...`, 50);
+
+        // ── copy 边：同一事件内的 read × write 配对（跨变量赋值传播）────────────
+        // 语义：当一个事件（如 WRITE 事件 `b = a`）同时有 reads 和 writes 时，
+        //       表示 reads 中的变量值被传播到 writes 中的变量。
+        //       建立 copy 边：from_var = read 变量, to_var = write 变量，
+        //
+        //       from_event_id = rName（被读取变量）的最近一次 write 事件（def 点）
+        //       to_event_id   = 当前赋值事件本身（use/write 点）
+        //
+        //       这样图中的边方向为：源变量定义点 → 赋值写入点，
+        //       准确表达 `b = a` 中"a 的上一次写入"到"b 的本次写入"的数据流方向，
+        //       避免 from_event_id = to_event_id 产生的自环问题。
+        //
+        // 排除：CALL_PRE/CALL 类型的占位符（arg0/return），已在 SKIP_NAMES 中处理
+        // 限制：每个事件最多 MAX_COPY_PER_EVENT 条 copy 边（防止组合爆炸）
+        this.emitProgress(ctx, '构建 copy 边...', 52);
+        let copyCount = 0;
+        for (const [eventId, writeNames] of evWritesMap) {
+            const readNames = evReadsMap.get(eventId);
+            if (!readNames || readNames.length === 0) continue;
+
+            const meta = eventMeta.get(eventId);
+            let perEvent = 0;
+            outer: for (const rName of readNames) {
+                // 找 rName 最近一次在 eventId 之前的 write 事件（def 点）
+                // 如不存在则用 eventId 自身（退化为原始行为）
+                const rDefs = writeIndex.get(rName);
+                const rDefIdx = rDefs ? upperBoundLt(rDefs, eventId, x => x) : -1;
+                const fromEventId = rDefIdx >= 0 ? rDefs[rDefIdx] : eventId;
+
+                for (const wName of writeNames) {
+                    if (rName === wName) continue; // 跳过自赋值（已由 assign 边覆盖）
+                    edges.push([
+                        sessionId,
+                        fromEventId,  // from_event_id: 源变量(rName)最近的 def 事件
+                        eventId,      // to_event_id:   当前赋值写入事件
+                        rName,        // from_var（读取源变量）
+                        wName,        // to_var（写入目标变量）
+                        'copy',
+                        meta?.iid ?? null,
+                        meta?.line ?? null,
+                    ]);
+                    copyCount++;
+                    perEvent++;
+                    if (perEvent >= MAX_COPY_PER_EVENT) break outer; // 防止组合爆炸
+                    if (edges.length >= BATCH_SIZE) {
+                        flush();
+                        this.emitProgress(ctx, `copy 边已写 ${copyCount}...`, 54);
+                    }
+                }
+            }
+        }
+        flush();
+        this.emitProgress(ctx, `copy 边完成(${copyCount})，构建 call 边...`, 55);
 
         // ── call_arg / call_ret 边 ─────────────────────────────────────────
-        // call_arg：调用点的实参 write（call_seq 之前的最近 write） → 被调函数体内的 read
-        // call_ret：被调函数内的最后一次 write（return 表达式变量）→ call_seq 之后的 read
         //
-        // 数据来源：call_edges 表提供 (call_seq, return_seq, fn_name, args_json)
-        // 算法：
-        //   1. 对每个 call_edge，从 args_json 解出实参变量名列表
-        //   2. 在 writes 表中找调用前最近一次写该变量 → from_event_id
-        //   3. 在 call_seq ~ return_seq 内找第一次读该变量（形参绑定）→ to_event_id
-        //   4. 对 return_value（return_seq 处的写），找 return_seq 之后的第一次读 → to_event_id
+        // 核心设计（v3 修复）：
+        //   F1_EventIndex 将参数以 name='arg0','arg1',... 写入 writes 表，
+        //   CALL 事件将返回值以 name='return' 写入 writes 表。
+        //   这些特殊名称是占位符，不是程序中的真实变量名。
+        //
+        //   call_arg 边：
+        //     from_event_id = CALL_PRE 事件本身（call_seq），作为"实参传入"节点
+        //                     其在 writes 表中有 arg0/arg1... 记录，代表实参值
+        //     to_event_id   = 函数体 [call_seq+1, return_seq] 内按顺序第 i 个 read 事件
+        //                     代表形参在函数体内首次被使用的位置
+        //     from_var      = "arg{i}"（实参位置标签）
+        //     to_var        = 形参读取的变量名（函数体内读的第 i 个变量名）
+        //
+        //   call_ret 边：
+        //     from_event_id = CALL 事件本身（return_seq），其在 writes 表中有 name='return'
+        //                     代表返回值产出点
+        //     to_event_id   = return_seq 之后调用者上下文中第一个 read 事件
+        //                     代表返回值被接收/使用的位置
+        //     from_var      = "(return)"
+        //     to_var        = 接收方读取的变量名
 
         this.emitProgress(ctx, '加载 call_edges...', 58);
         const callEdges = rawDb.prepare(
@@ -159,115 +248,94 @@ export default class A2DataFlowGraph extends BasePlugin {
         ).all(sessionId);
 
         if (callEdges.length > 0) {
-            // 构建 event_id → write.name 倒排（供 return 值识别）
-            // 构建 reads 按 varName 的有序数组（复用 writeIndex 模式）
-            const readIndex = new Map(); // name → [event_id, ...]（有序）
-            for (const r of reads) {
-                if (!readIndex.has(r.name)) readIndex.set(r.name, []);
-                readIndex.get(r.name).push(r.event_id);
+            // ── 构建全局 reads 有序数组（按 event_id ASC，已满足）──────────────
+            // reads 数组本身已按 event_id 有序（加载时 ORDER BY event_id ASC）
+
+            // ── 预加载 CALL_PRE 的 arg0/arg1 写事件 ─────────────────────────
+            // 只需找 call_seq（= CALL_PRE event_id）在 writes 表中有哪几条 arg* 记录
+            // 因为 arg0/arg1 的 event_id 就是 call_seq 本身，直接以 call_seq 为 key
+            const callPreArgCount = new Map(); // call_seq → argCount（args_json 解出的个数）
+            for (const ce of callEdges) {
+                if (!ce.args_json) continue;
+                let args;
+                try { args = JSON.parse(ce.args_json); } catch { args = null; }
+                if (Array.isArray(args) && args.length > 0) {
+                    callPreArgCount.set(ce.call_seq, args.length);
+                }
             }
 
-            // 构建 event_id → write varName（用于 return_value 识别）
-            const writeEventToName = new Map();
-            for (const w of writes) writeEventToName.set(w.event_id, w.name);
+            // ── 按 call_edge 区间对 reads 建倒排（event_id → 区间 index）──────
+            // 用二分直接定位 [call_seq+1, return_seq] 内的第一个 read
+            // reads 已按 event_id 有序，lowerBound 直接用
 
             let callEdgeCount = 0;
+            const prevWritten = totalWritten;
+
             for (const ce of callEdges) {
+                if (!ce.return_seq || ce.return_seq <= ce.call_seq) continue;
+
                 // ── call_arg 边 ────────────────────────────────────────────
-                if (ce.args_json) {
-                    let args;
-                    try { args = JSON.parse(ce.args_json); } catch { args = null; }
-                    if (Array.isArray(args)) {
-                        for (let i = 0; i < args.length; i++) {
-                            const arg = args[i];
-                            // arg 可能是 {name, value} 或直接是值字符串
-                            const argName = typeof arg === 'object' && arg !== null ? arg.name : null;
-                            if (!argName) continue;
+                // from: CALL_PRE 事件本身（call_seq），代表第 i 个实参传入
+                // to:   函数体内按出现顺序的第 i 个 read（形参首次使用）
+                const argc = callPreArgCount.get(ce.call_seq) ?? 0;
+                if (argc > 0) {
+                    // 找函数体内 [call_seq+1, return_seq] 的所有 reads（按 event_id 有序）
+                    const rStart = lowerBound(reads, ce.call_seq + 1, r => r.event_id);
+                    if (rStart >= 0) {
+                        // 取前 argc 个在区间内的 read 事件作为形参使用点
+                        let found = 0;
+                        for (let ri = rStart; ri < reads.length && found < argc; ri++) {
+                            const r = reads[ri];
+                            if (r.event_id > ce.return_seq) break;
+                            // 跳过特殊占位符名称（callee、return 等）
+                            if (!r.name || r.name === 'callee' || r.name === 'return') continue;
 
-                            const argWrites = writeIndex.get(argName);
-                            if (!argWrites) continue;
-
-                            // 调用点之前最近一次写实参变量
-                            const wIdx = upperBoundLt(argWrites, ce.call_seq, x => x);
-                            if (wIdx < 0) continue;
-                            const fromEid = argWrites[wIdx];
-
-                            // 函数体内第一次读该变量（形参绑定点）
-                            const argReads = readIndex.get(argName);
-                            if (!argReads) continue;
-                            const rIdx = lowerBound(argReads, ce.call_seq, x => x);
-                            if (rIdx < 0 || argReads[rIdx] > ce.return_seq) continue;
-                            const toEid = argReads[rIdx];
-
-                            const meta = eventMeta.get(toEid);
+                            const meta = eventMeta.get(r.event_id);
                             edges.push([
                                 sessionId,
-                                fromEid,
-                                toEid,
-                                argName,           // from_var: 调用方实参名
-                                argName,           // to_var: 形参名（暂用实参名，因 smap 不含形参名）
+                                ce.call_seq,        // from: CALL_PRE 事件（实参传入点）
+                                r.event_id,         // to: 函数体内形参首次使用
+                                `arg${found}`,      // from_var: 实参位置标签
+                                r.name,             // to_var: 形参变量名
                                 'call_arg',
                                 meta?.iid ?? null,
                                 meta?.line ?? null,
                             ]);
+                            found++;
                         }
                     }
                 }
 
                 // ── call_ret 边 ────────────────────────────────────────────
-                // return_value 是字符串化的值（不是变量名），需要找 return_seq 处的写事件
-                // 策略：找 return_seq 前后最近一次写，再找 return_seq 之后第一次读任意变量
-                // 简化实现：找 return_seq 前的最后一次写（任意变量）→ return_seq 后第一次读
-                if (ce.return_seq && ce.return_seq > ce.call_seq) {
-                    // 找 [call_seq, return_seq] 内的最后一次 write
-                    // 用 writes 数组（已按 event_id 有序），找 return_seq 前最近
-                    // 但 writes 是全量数组，按 event_id 二分即可
-                    const lastWriteIdx = upperBoundLt(writes, ce.return_seq + 1, w => w.event_id);
-                    if (lastWriteIdx >= 0) {
-                        // 向前找在 [call_seq, return_seq] 内的写
-                        let foundWriteIdx = -1;
-                        for (let wi = lastWriteIdx; wi >= 0; wi--) {
-                            if (writes[wi].event_id >= ce.call_seq) {
-                                foundWriteIdx = wi;
-                                break;
-                            }
-                            if (writes[wi].event_id < ce.call_seq) break;
-                        }
-                        if (foundWriteIdx >= 0) {
-                            const retWrite = writes[foundWriteIdx];
-                            const retName = retWrite.name;
-                            if (retName) {
-                                // 找 return_seq 之后第一次读该变量
-                                const retReads = readIndex.get(retName);
-                                if (retReads) {
-                                    const rIdx = lowerBound(retReads, ce.return_seq, x => x);
-                                    if (rIdx >= 0) {
-                                        const toEid = retReads[rIdx];
-                                        const meta = eventMeta.get(toEid);
-                                        edges.push([
-                                            sessionId,
-                                            retWrite.event_id,
-                                            toEid,
-                                            retName,    // from_var: 返回值来源变量
-                                            retName,    // to_var: 接收返回值的变量（近似）
-                                            'call_ret',
-                                            meta?.iid ?? null,
-                                            meta?.line ?? null,
-                                        ]);
-                                    }
-                                }
-                            }
-                        }
+                // from: CALL 事件本身（return_seq），代表返回值产出
+                // to:   return_seq 之后第一个 read（调用者接收返回值）
+                // 注意：要跳过属于子调用的 reads，找调用者上下文的第一个 read
+                const afterRet = lowerBound(reads, ce.return_seq + 1, r => r.event_id);
+                if (afterRet >= 0) {
+                    const toRead = reads[afterRet];
+                    if (toRead && toRead.name && toRead.name !== 'callee' && toRead.name !== 'return') {
+                        const meta = eventMeta.get(toRead.event_id);
+                        edges.push([
+                            sessionId,
+                            ce.return_seq,          // from: CALL 事件（返回值产出点）
+                            toRead.event_id,        // to: 调用者接收返回值的第一个 read
+                            '(return)',             // from_var: 返回值标签
+                            toRead.name,            // to_var: 调用者接收方变量名
+                            'call_ret',
+                            meta?.iid ?? null,
+                            meta?.line ?? null,
+                        ]);
                     }
                 }
 
                 if (edges.length >= BATCH_SIZE) {
                     flush();
-                    callEdgeCount = totalWritten;
+                    callEdgeCount = totalWritten - prevWritten;
                 }
             }
             flush();
-            this.emitProgress(ctx, `call 边完成(${totalWritten - callEdgeCount})，构建 field 边...`, 75);
+            callEdgeCount = totalWritten - prevWritten;
+            this.emitProgress(ctx, `call 边完成(${callEdgeCount})，构建 field 边...`, 75);
         }
 
         // ── field 边 ─────────────────────────────────────────────────────────
