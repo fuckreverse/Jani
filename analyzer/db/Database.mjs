@@ -664,6 +664,39 @@ function _runMigrations(db) {
         console.warn('[Database] add loops v2/v3 columns failed (non-fatal):', e.message);
     }
 
+    // ── 导出专用覆盖索引（消除 writes/reads/fields 按 event_id 范围扫描的回表）──
+    // 原 idx_writes_event(session_id, event_id) 只含两列，回表取 name/value_id/omitted 开销大。
+    // 新索引包含所有查询列，SQLite 可直接从索引页返回结果，无需触碰主表。
+    const exportCoverIndexes = [
+        [
+            'idx_writes_eid_cover',
+            'writes',
+            'session_id, event_id, name, value_id, omitted',
+        ],
+        [
+            'idx_reads_eid_cover',
+            'reads',
+            'session_id, event_id, name, value_id, omitted',
+        ],
+        [
+            'idx_fields_eid_cover',
+            'fields',
+            'session_id, event_id, offset, is_write, value_id, omitted, base_oid',
+        ],
+    ];
+    for (const [idxName, tbl, cols] of exportCoverIndexes) {
+        try {
+            const exists = db.prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name=?"
+            ).get(idxName);
+            if (!exists) {
+                db.exec(`CREATE INDEX IF NOT EXISTS ${idxName} ON ${tbl}(${cols})`);
+            }
+        } catch (e) {
+            console.warn(`[Database] create export cover index ${idxName} failed (non-fatal):`, e.message);
+        }
+    }
+
     // ── dataflow_edges 性能索引（v2 新增，用于子图 BFS / 变量搜索）──────────
     const dfIndexes = [
         ['idx_df_from_event', 'dataflow_edges', 'session_id, from_event_id'],

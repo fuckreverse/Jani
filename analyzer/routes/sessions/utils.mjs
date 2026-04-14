@@ -22,6 +22,22 @@ export function groupBy(arr, key) {
     return map;
 }
 
+// ── 子调用区间过滤（own-events / export 共用）────────────────────────────────
+//
+// makeIsInsideChild(sortedChildren) → (seq: number) => boolean
+//   sortedChildren 按 call_seq ASC 排列；返回的函数判断 seq 是否在某个子调用"内部"
+//   （call_seq < seq < return_seq，即不含边界事件 CALL_PRE/CALL 本身）
+export function makeIsInsideChild(sortedChildren) {
+    if (!sortedChildren || sortedChildren.length === 0) return () => false;
+    return function isInsideChild(seq) {
+        for (const c of sortedChildren) {
+            if (c.call_seq >= seq) break;   // 剩余子调用起点 >= seq，不可能包含 seq
+            if (seq < c.return_seq) return true;  // c.call_seq < seq < c.return_seq → 内部
+        }
+        return false;
+    };
+}
+
 // ── 常见 JS 内建 / 原生方法名列表（用于 hideBuiltin 过滤）─────────────────────
 
 export const BUILTIN_FN_NAMES = new Set([

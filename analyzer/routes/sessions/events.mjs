@@ -15,7 +15,7 @@ import { createLogger } from '../../logger.mjs';
 const log = createLogger('sessions');
 import * as db from '../../db/Database.mjs';
 import { decodeType, TYPE } from '../../db/EventTypeCode.mjs';
-import { safeParseJson, groupBy } from './utils.mjs';
+import { safeParseJson, groupBy, makeIsInsideChild } from './utils.mjs';
 
 const router = Router({ mergeParams: true });
 
@@ -670,13 +670,14 @@ router.post('/events/export', async (req, res) => {
             return res.status(400).json({ error: 'format must be ndjson | tsv | text' });
         }
 
-        // ── Step 1: 将所有 ranges 解析为 [{lo, hi, excludeRanges[]}] ───────────
-        // excludeRanges 仅 callId+ownOnly=true 时填入（子调用内部区间）
-        const resolvedRanges = [];  // [{ lo, hi, excludes: [{lo,hi}] }]
+        // ── Step 1: 将所有 ranges 解析为 [{lo, hi, children[]}] ─────────────
+        // 不再把 ownOnly 展开成 N 个小段（可能有 1000+ 段），
+        // 而是保留一个大范围 [call_seq, return_seq]，附带子调用列表 children，
+        // Step 2 扫描时在 Node.js 侧用 makeIsInsideChild 过滤。
+        const resolvedRanges = [];  // [{ lo, hi, children: [{call_seq,return_seq}] }]
 
         for (const r of ranges) {
             if (r.callId != null) {
-                // 函数调用范围
                 const call = db.get(
                     'SELECT call_seq, return_seq, depth FROM call_edges WHERE id = ? AND session_id = ?',
                     Number(r.callId), id
@@ -686,10 +687,9 @@ router.post('/events/export', async (req, res) => {
                 const ownOnly = r.ownOnly !== false;  // 默认 true
 
                 if (!ownOnly) {
-                    // 全量区间，不排除子调用
-                    resolvedRanges.push({ lo: call_seq, hi: return_seq, excludes: [] });
+                    resolvedRanges.push({ lo: call_seq, hi: return_seq, children: [] });
                 } else {
-                    // 自身事件：用与 own-events 相同的区间减法，得到若干段连续范围
+                    // 查子调用，Node.js 侧过滤（不展开成多段）
                     const children = db.all(
                         `SELECT call_seq, return_seq FROM call_edges
                          WHERE session_id = ? AND depth = ?
@@ -697,21 +697,13 @@ router.post('/events/export', async (req, res) => {
                          ORDER BY call_seq ASC`,
                         id, depth + 1, call_seq, return_seq
                     );
-                    // 把 [call_seq, return_seq] 按子调用切段，保留子调用边界
-                    let cur = call_seq;
-                    for (const c of children) {
-                        if (c.call_seq >= cur) {
-                            resolvedRanges.push({ lo: cur, hi: c.call_seq, excludes: [] });
-                        }
-                        cur = c.return_seq;
-                    }
-                    resolvedRanges.push({ lo: cur, hi: return_seq, excludes: [] });
+                    resolvedRanges.push({ lo: call_seq, hi: return_seq, children });
                 }
             } else if (r.seqFrom != null && r.seqTo != null) {
                 resolvedRanges.push({
                     lo: Number(r.seqFrom),
                     hi: Number(r.seqTo),
-                    excludes: [],
+                    children: [],
                 });
             }
         }
@@ -740,139 +732,167 @@ router.post('/events/export', async (req, res) => {
 
         // 预备 SQL（按段走主键范围扫描）
         const rawDb = db.raw();
+
+        // events：按 PK 范围扫描（不再 JOIN smap，smap 单独点查，避免大范围 JOIN 放大）
         const evStmt = rawDb.prepare(
-            `SELECT e.id AS seq, e.type, e.iid,
-                    s.sl AS line, s.sc AS col, s.src_text
-             FROM events e
-             LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
-             WHERE e.session_id = ? AND e.id >= ? AND e.id <= ?
-             ORDER BY e.id ASC`
+            `SELECT id AS seq, type, iid
+             FROM events
+             WHERE session_id = ? AND id >= ? AND id <= ?
+             ORDER BY id ASC LIMIT ?`
         );
-        const wStmt = rawDb.prepare(
-            `SELECT w.event_id, w.name, vd.val_text AS value, w.omitted
-             FROM writes w
-             LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
-             WHERE w.session_id = ? AND w.event_id >= ? AND w.event_id <= ?`
-        );
-        const rStmt = rawDb.prepare(
-            `SELECT r.event_id, r.name, vd.val_text AS value, r.omitted
-             FROM reads r
-             LEFT JOIN value_dict vd ON vd.session_id = r.session_id AND vd.id = r.value_id
-             WHERE r.session_id = ? AND r.event_id >= ? AND r.event_id <= ?`
-        );
-        const fStmt = rawDb.prepare(
-            `SELECT f.event_id, f.offset, f.is_write, vd.val_text AS value, f.omitted, f.base_oid
-             FROM fields f
-             LEFT JOIN value_dict vd ON vd.session_id = f.session_id AND vd.id = f.value_id
-             WHERE f.session_id = ? AND f.event_id >= ? AND f.event_id <= ?`
+        const smapStmt = rawDb.prepare(
+            'SELECT sl AS line, sc AS col, src_text FROM smap WHERE session_id = ? AND iid = ?'
         );
 
-        // 逐段流式输出（每段最多 BATCH 条，避免单次锁定时间过长）
-        const BATCH = 2000;
+        // writes/reads/fields：按实际 event id 列表 IN 查询，每批最多 500 个 id
+        // （不再用 BETWEEN firstSeq AND lastSeq，避免拉进子调用内部的行）
+
+        // 每批 events 行数（按实际输出行数，非 SEQ 步长）
+        const BATCH = 500;
+
+        // ── 诊断计数器 ──────────────────────────────────────────────────────────
+        const _t0export = performance.now();
+        let _diagBatches = 0, _diagEvRows = 0, _diagWRows = 0, _diagRRows = 0, _diagFRows = 0;
+        let _diagEvMs = 0, _diagSmapMs = 0, _diagWrfMs = 0, _diagSerMs = 0;
 
         for (const seg of resolvedRanges) {
-            let cursor = seg.lo;
-            while (cursor <= seg.hi) {
-                const hiPage = Math.min(cursor + BATCH - 1, seg.hi);
-                const evRows = evStmt.all(id, cursor, hiPage);
-                if (evRows.length === 0) break;
+            // 构建子调用过滤函数（ownOnly 模式下排除子调用内部事件）
+            const isInsideSeg = seg.children.length > 0
+                ? makeIsInsideChild(seg.children)
+                : () => false;
 
-                // 批量取 writes/reads/fields
-                const firstSeq = evRows[0].seq;
-                const lastSeq  = evRows[evRows.length - 1].seq;
-                const wRows = wStmt.all(id, firstSeq, lastSeq);
-                const rRows = rStmt.all(id, firstSeq, lastSeq);
-                const fRows = fStmt.all(id, firstSeq, lastSeq);
+            // 用密度估算每批要取多少行才能凑够 BATCH 条 own events
+            // ownSeq = 总区间 - 子调用内部区间（子调用边界保留，所以 -1/-1 只算内部）
+            const segSpan = seg.hi - seg.lo + 1;
+            const childInternalSeq = seg.children.reduce((s, c) => s + Math.max(0, c.return_seq - c.call_seq - 1), 0);
+            const ownSeq = Math.max(1, segSpan - childInternalSeq);
+            const density = ownSeq / segSpan;
+            const fetchSize = Math.min(50000, Math.max(BATCH * 2, Math.ceil(BATCH / density)));
+
+            // ── PK 范围扫描 + Node.js 侧过滤，凑满 BATCH 后输出一批 ──────────
+            // 核心：一次 SQL 取 fetchSize 行，在内存过滤掉子调用内部行，
+            //       积攒到 BATCH 条再做 smap/writes/reads/fields 查询并写出。
+            // 这样整个段只需 ceil(ownRows/BATCH) 次 smap+wrf 查询，而不是每个小段一次。
+
+            const flushBatch = (evRows) => {
+                if (evRows.length === 0) return;
+                _diagBatches++;
+                _diagEvRows += evRows.length;
+
+                // smap 点查（去重 iid）
+                const _ts0 = performance.now();
+                const smapCache = new Map();
+                for (const e of evRows) {
+                    if (e.iid != null && !smapCache.has(e.iid)) {
+                        smapCache.set(e.iid, smapStmt.get(id, e.iid) ?? null);
+                    }
+                }
+                _diagSmapMs += performance.now() - _ts0;
+
+                // writes/reads/fields：精确 IN 查询
+                const _tw0 = performance.now();
+                const seqList = evRows.map(e => e.seq);
+                const ph = seqList.map(() => '?').join(',');
+                const wRows = rawDb.prepare(
+                    `SELECT w.event_id, w.name, vd.val_text AS value, w.omitted
+                     FROM writes w
+                     LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
+                     WHERE w.session_id = ? AND w.event_id IN (${ph})`
+                ).all([id, ...seqList]);
+                const rRows = rawDb.prepare(
+                    `SELECT r.event_id, r.name, vd.val_text AS value, r.omitted
+                     FROM reads r
+                     LEFT JOIN value_dict vd ON vd.session_id = r.session_id AND vd.id = r.value_id
+                     WHERE r.session_id = ? AND r.event_id IN (${ph})`
+                ).all([id, ...seqList]);
+                const fRows = rawDb.prepare(
+                    `SELECT f.event_id, f.offset, f.is_write, vd.val_text AS value, f.omitted, f.base_oid
+                     FROM fields f
+                     LEFT JOIN value_dict vd ON vd.session_id = f.session_id AND vd.id = f.value_id
+                     WHERE f.session_id = ? AND f.event_id IN (${ph})`
+                ).all([id, ...seqList]);
+                _diagWrfMs += performance.now() - _tw0;
+                _diagWRows += wRows.length; _diagRRows += rRows.length; _diagFRows += fRows.length;
 
                 // 分组
                 const wMap = new Map(), rMap = new Map(), fMap = new Map();
-                for (const w of wRows) {
-                    if (!wMap.has(w.event_id)) wMap.set(w.event_id, []);
-                    wMap.get(w.event_id).push(w);
-                }
-                for (const r of rRows) {
-                    if (!rMap.has(r.event_id)) rMap.set(r.event_id, []);
-                    rMap.get(r.event_id).push(r);
-                }
-                for (const f of fRows) {
-                    if (!fMap.has(f.event_id)) fMap.set(f.event_id, []);
-                    fMap.get(f.event_id).push(f);
-                }
+                for (const w of wRows) { if (!wMap.has(w.event_id)) wMap.set(w.event_id, []); wMap.get(w.event_id).push(w); }
+                for (const r of rRows) { if (!rMap.has(r.event_id)) rMap.set(r.event_id, []); rMap.get(r.event_id).push(r); }
+                for (const f of fRows) { if (!fMap.has(f.event_id)) fMap.set(f.event_id, []); fMap.get(f.event_id).push(f); }
 
+                const _tser0 = performance.now();
                 let chunk = '';
                 for (const e of evRows) {
-                    const writes = (wMap.get(e.seq) || []).map(w => ({
-                        name: w.name,
-                        value: safeParseJson(w.value),
-                        omitted: !!w.omitted,
-                    }));
-                    const reads = (rMap.get(e.seq) || []).map(r => ({
-                        name: r.name,
-                        value: safeParseJson(r.value),
-                        omitted: !!r.omitted,
-                    }));
-                    const fields = (fMap.get(e.seq) || []).map(f => ({
-                        offset: f.offset,
-                        isWrite: !!f.is_write,
-                        value: safeParseJson(f.value),
-                        omitted: !!f.omitted,
-                        baseOid: f.base_oid ?? null,
-                    }));
-
+                    const sm = e.iid != null ? (smapCache.get(e.iid) ?? null) : null;
+                    const writes = (wMap.get(e.seq) || []).map(w => ({ name: w.name, value: safeParseJson(w.value), omitted: !!w.omitted }));
+                    const reads  = (rMap.get(e.seq) || []).map(r => ({ name: r.name, value: safeParseJson(r.value), omitted: !!r.omitted }));
+                    const fields = (fMap.get(e.seq) || []).map(f => ({ offset: f.offset, isWrite: !!f.is_write, value: safeParseJson(f.value), omitted: !!f.omitted, baseOid: f.base_oid ?? null }));
                     const typeStr = decodeType(e.type);
 
                     if (format === 'ndjson') {
-                        chunk += JSON.stringify({
-                            seq:     e.seq,
-                            type:    typeStr,
-                            iid:     e.iid,
-                            line:    e.line ?? null,
-                            col:     e.col  ?? null,
-                            srcText: e.src_text ?? null,
-                            writes,
-                            reads,
-                            fields,
-                        }) + '\n';
-
+                        chunk += JSON.stringify({ seq: e.seq, type: typeStr, iid: e.iid, line: sm?.line ?? null, col: sm?.col ?? null, srcText: sm?.src_text ?? null, writes, reads, fields }) + '\n';
                     } else if (format === 'tsv') {
-                        // writes/reads/fields 序列化为紧凑字符串
                         const wStr = writes.map(w => w.omitted ? `${w.name}=…` : `${w.name}=${JSON.stringify(w.value)}`).join(';');
                         const rStr = reads.map(r  => r.omitted ? `${r.name}=…` : `${r.name}=${JSON.stringify(r.value)}`).join(';');
-                        const fStr = fields.map(f => {
-                            const arrow = f.isWrite ? '=' : '->';
-                            return `#${f.baseOid ?? '?'}.${f.offset}${arrow}${JSON.stringify(f.value)}`;
-                        }).join(';');
-                        const loc  = e.line != null ? `${e.line}:${e.col ?? 0}` : '';
-                        const src  = (e.src_text ?? '').replace(/\t/g, ' ');
+                        const fStr = fields.map(f => `#${f.baseOid ?? '?'}.${f.offset}${f.isWrite ? '=' : '->'}${JSON.stringify(f.value)}`).join(';');
+                        const loc  = sm?.line != null ? `${sm.line}:${sm.col ?? 0}` : '';
+                        const src  = (sm?.src_text ?? '').replace(/\t/g, ' ');
                         chunk += `${e.seq}\t${typeStr}\t${loc}\t${src}\t${wStr}\t${rStr}\t${fStr}\n`;
-
                     } else {
-                        // text — 人类可读
-                        const loc    = e.line != null ? `@${e.line}:${e.col ?? 0}` : '';
-                        const srcPad = e.src_text ? `  │ ${e.src_text}` : '';
+                        const loc    = sm?.line != null ? `@${sm.line}:${sm.col ?? 0}` : '';
+                        const srcPad = sm?.src_text ? `  │ ${sm.src_text}` : '';
                         let line = `[${String(e.seq).padStart(8)}] ${typeStr.padEnd(14)} ${loc}${srcPad}`;
-                        if (writes.length) {
-                            line += '\n' + writes.map(w =>
-                                `            W  ${w.name} = ${w.omitted ? '…' : JSON.stringify(w.value)}`
-                            ).join('\n');
-                        }
-                        if (reads.length) {
-                            line += '\n' + reads.map(r =>
-                                `            R  ${r.name} → ${r.omitted ? '…' : JSON.stringify(r.value)}`
-                            ).join('\n');
-                        }
-                        if (fields.length) {
-                            line += '\n' + fields.map(f =>
-                                `            F  #${f.baseOid ?? '?'}.${f.offset} ${f.isWrite ? '=' : '->'} ${JSON.stringify(f.value)}`
-                            ).join('\n');
-                        }
+                        if (writes.length) line += '\n' + writes.map(w => `            W  ${w.name} = ${w.omitted ? '…' : JSON.stringify(w.value)}`).join('\n');
+                        if (reads.length)  line += '\n' + reads.map(r  => `            R  ${r.name} → ${r.omitted ? '…' : JSON.stringify(r.value)}`).join('\n');
+                        if (fields.length) line += '\n' + fields.map(f => `            F  #${f.baseOid ?? '?'}.${f.offset} ${f.isWrite ? '=' : '->'} ${JSON.stringify(f.value)}`).join('\n');
                         chunk += line + '\n';
                     }
                 }
-
+                _diagSerMs += performance.now() - _tser0;
                 res.write(chunk);
-                cursor = hiPage + 1;
+            };
+
+            let cursor = seg.lo;
+            let ownBuf = [];
+            while (cursor <= seg.hi) {
+                const _tb0 = performance.now();
+                const batch = evStmt.all(id, cursor, seg.hi, fetchSize);
+                _diagEvMs += performance.now() - _tb0;
+                if (batch.length === 0) break;
+
+                for (const r of batch) {
+                    if (!isInsideSeg(r.seq)) {
+                        ownBuf.push(r);
+                        if (ownBuf.length >= BATCH) {
+                            flushBatch(ownBuf);
+                            ownBuf = [];
+                        }
+                    }
+                }
+                cursor = batch[batch.length - 1].seq + 1;
             }
+            // 刷出剩余不足 BATCH 的部分
+            flushBatch(ownBuf);
+            ownBuf = [];
+        }
+
+        // ── 导出性能诊断日志 ──────────────────────────────────────────────────
+        const _totalExport = performance.now() - _t0export;
+        if (_totalExport > 200) {
+            log.warn({
+                sessionId: id, format,
+                resolvedRangeCount: resolvedRanges.length,
+                batches: _diagBatches,
+                evRows: _diagEvRows,
+                wRows: _diagWRows, rRows: _diagRRows, fRows: _diagFRows,
+                ms: {
+                    events:    +_diagEvMs.toFixed(1),
+                    smap:      +_diagSmapMs.toFixed(1),
+                    wrFields:  +_diagWrfMs.toFixed(1),
+                    serialize: +_diagSerMs.toFixed(1),
+                    total:     +_totalExport.toFixed(1),
+                },
+            }, '[export] slow export');
         }
 
         res.end();

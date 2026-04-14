@@ -16,7 +16,7 @@ import { createLogger } from '../../logger.mjs';
 const log = createLogger('sessions');
 import * as db from '../../db/Database.mjs';
 import { decodeType } from '../../db/EventTypeCode.mjs';
-import { safeParseJson, groupBy, BUILTIN_FN_NAMES } from './utils.mjs';
+import { safeParseJson, groupBy, BUILTIN_FN_NAMES, makeIsInsideChild as makeIsInsideChildUtil } from './utils.mjs';
 
 const router = Router({ mergeParams: true });
 
@@ -44,16 +44,8 @@ function queryDirectChildren(sessionId, depth, callSeq, returnSeq) {
     );
 }
 
-function makeIsInsideChild(sortedChildren) {
-    if (sortedChildren.length === 0) return () => false;
-    return function isInsideChild(seq) {
-        for (const c of sortedChildren) {
-            if (c.call_seq >= seq) break;   // 剩余子调用起点 >= seq，不可能包含 seq
-            if (seq < c.return_seq) return true;  // c.call_seq < seq < c.return_seq → 内部
-        }
-        return false;
-    };
-}
+// makeIsInsideChild 已迁移到 utils.mjs 共享，此处用别名向后兼容
+const makeIsInsideChild = makeIsInsideChildUtil;
 
 // ── GET /api/sessions/:id/functions ──────────────────────────────────────
 // 按 fn_name 聚合 call_edges，返回函数列表（调用次数、行号等）
@@ -370,6 +362,7 @@ router.get('/calls/:callId/own-events', (req, res) => {
     try {
         const { id, callId } = req.params;
         const { limit = '200', cursor } = req.query;
+        const _t0 = performance.now();
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: `Session ${id} not found` });
@@ -383,6 +376,7 @@ router.get('/calls/:callId/own-events', (req, res) => {
 
         const { call_seq: callSeqN, return_seq: returnSeqN, depth: depthN } = call;
         const limitN = Math.min(Number(limit) || 200, 500);
+        const _t1 = performance.now();
 
         // ── Step 1: 计算"自身区间"段列表 ─────────────────────────────────────
         // 取直接子调用列表（已按 call_seq ASC 排序），然后用区间减法得到若干段连续"自身区间"。
@@ -408,6 +402,7 @@ router.get('/calls/:callId/own-events', (req, res) => {
             }
             ownRanges.push({ lo: cur, hi: returnSeqN });
         }
+        const _t2 = performance.now();
 
         // ── Step 2: 游标定位到起始段 ─────────────────────────────────────────
         // cursor 为上次返回的最后 event SEQ，下次从 > cursor 开始扫描
@@ -420,24 +415,41 @@ router.get('/calls/:callId/own-events', (req, res) => {
             startRangeIdx = i + 1;
         }
 
-        // ── Step 3: 分段扫描，凑满 limitN 条事件 ────────────────────────────
-        // 每段用主键范围查询 WHERE e.id >= lo AND e.id <= hi，精确走 PK B-tree
-        // 完全不需要 fetchMultiplier，也不会漏事件
-        const rawStmt = db.raw().prepare(
+        // ── Step 3: 一次 PK 范围扫描 + Node.js 侧过滤 ───────────────────────
+        // 核心思路：
+        //   - 一条 SQL 按 PK 顺序取 [cursorN+1, returnSeqN] 区间内的行（超量取 fetchSize）
+        //   - 在 Node.js 侧用 makeIsInsideChild 过滤掉子调用内部的行，凑满 limitN 条
+        //   - 多轮取直到凑满或到达帧尾
+        // 优势：只用 1~N 次简单 PK 范围查询（无 OR/BETWEEN 复杂子句），SQLite 全程走 PK B-tree
+        // fetchSize = limitN * (1 + childCount/avgOwnDensity)，保守估 3x，最少 500
+        const isInsideChild = makeIsInsideChild(children);
+        // 估算需要扫描多少行才能凑出 limitN 个 own event：
+        //   ownDensity = ownRanges 数 / frameSpan（越小说明子调用越密集，own event 越稀疏）
+        //   fetchSize = limitN / ownDensity，最小 limitN*2，最大 50000 防止一次拉太多
+        const frameSpan = returnSeqN - callSeqN + 1;
+        const ownSeqEstimate = ownRanges.reduce((s, r) => s + (r.hi - r.lo + 1), 0);
+        const density = Math.max(0.001, ownSeqEstimate / frameSpan);  // own events 占比
+        const fetchSize = Math.min(50000, Math.max(limitN * 2, Math.ceil(limitN / density)));
+        const scanStmt = db.raw().prepare(
             `SELECT id AS seq, type, iid FROM events
-             WHERE session_id = ? AND id >= ? AND id <= ?
+             WHERE session_id = ? AND id > ? AND id <= ?
              ORDER BY id ASC LIMIT ?`
         );
 
         const eventRows = [];
-        for (let i = startRangeIdx; i < ownRanges.length && eventRows.length < limitN; i++) {
-            const { lo, hi } = ownRanges[i];
-            const loEff = i === startRangeIdx ? Math.max(lo, cursorN + 1) : lo;
-            if (loEff > hi) continue;
-            const remaining = limitN - eventRows.length;
-            const rows = rawStmt.all(id, loEff, hi, remaining);
-            for (const r of rows) eventRows.push(r);
+        let scanCursor = cursorN;
+        while (eventRows.length < limitN && scanCursor < returnSeqN) {
+            const batch = scanStmt.all(id, scanCursor, returnSeqN, fetchSize);
+            if (batch.length === 0) break;
+            for (const r of batch) {
+                if (!isInsideChild(r.seq)) {
+                    eventRows.push(r);
+                    if (eventRows.length >= limitN) break;
+                }
+            }
+            scanCursor = batch[batch.length - 1].seq;
         }
+        const _t3 = performance.now();
 
         // ── Step 4: 批量查 smap（按 iid 点查主键，不 JOIN 主查询）─────────────
         // 先收集唯一 iid 集合，再逐个走 smap(session_id, iid) PK 点查
@@ -451,59 +463,62 @@ router.get('/calls/:callId/own-events', (req, res) => {
                 iidSmapCache.set(e.iid, s ?? null);
             }
         }
+        const _t4 = performance.now();
 
         // ── Step 5: 批量查 writes/reads/fields ───────────────────────────────
-        // eventRows 数量 <= limitN（最多 500）；用 event.id 主键范围 + JOIN 方式
-        // 复用与 annotated-source 相同的"以 events PK 范围驱动"策略：
-        // 对每段 ownRange 分别查，再合并（段数通常 = 子调用数 + 1，通常个位数）
+        // 直接以 writes/reads/fields 为驱动表，按 event_id 范围走
+        // idx_writes_eid_cover(session_id, event_id, name, value_id, omitted) 覆盖索引，
+        // 完全不扫 events 表，消除"先扫 events 再 JOIN"的 N 倍放大。
         const writesMap = new Map();  // event_id → [{name, value, omitted}]
         const readsMap  = new Map();
         const fieldsMap = new Map();
 
-        const wStmt = db.raw().prepare(
-            `SELECT w.event_id, w.name, vd.val_text AS value, w.omitted
-             FROM events e
-             JOIN writes w ON w.session_id = e.session_id AND w.event_id = e.id
-             LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
-             WHERE e.session_id = ? AND e.id >= ? AND e.id <= ?`
-        );
-        const rStmt = db.raw().prepare(
-            `SELECT r.event_id, r.name, vd.val_text AS value, r.omitted
-             FROM events e
-             JOIN reads r ON r.session_id = e.session_id AND r.event_id = e.id
-             LEFT JOIN value_dict vd ON vd.session_id = r.session_id AND vd.id = r.value_id
-             WHERE e.session_id = ? AND e.id >= ? AND e.id <= ?`
-        );
-        const fStmt = db.raw().prepare(
-            `SELECT f.event_id, f.offset, f.is_write, vd.val_text AS value, f.omitted, f.base_oid
-             FROM events e
-             JOIN fields f ON f.session_id = e.session_id AND f.event_id = e.id
-             LEFT JOIN value_dict vd ON vd.session_id = f.session_id AND vd.id = f.value_id
-             WHERE e.session_id = ? AND e.id >= ? AND e.id <= ?`
-        );
+        // ── Step 5: 按 eventRows 实际覆盖的 SEQ 范围一次批量查 ────────────────
+        // 不再按 ownRanges 逐段循环，而是直接用 eventRows 的实际 seq 集合（最多 limitN 条）
+        // 用 event_id IN (seq1, seq2, ...) 一次查出对应的 writes/reads/fields
+        let _wRows = 0, _rRows = 0, _fRows = 0, _segCount = eventRows.length;
+        if (eventRows.length > 0) {
+            const seqList = eventRows.map(e => e.seq);
+            // 分批（每批最多 990 个，留 9 个给其他参数）
+            const WRF_BATCH = 990;
+            const rawDb = db.raw();
+            for (let b = 0; b < seqList.length; b += WRF_BATCH) {
+                const batch = seqList.slice(b, b + WRF_BATCH);
+                const ph = batch.map(() => '?').join(',');
 
-        // 只扫描实际有事件的段（起始段到最后一条事件所在段）
-        const lastSeq = eventRows.length > 0 ? eventRows[eventRows.length - 1].seq : cursorN;
-        for (let i = startRangeIdx; i < ownRanges.length; i++) {
-            const { lo, hi } = ownRanges[i];
-            const loEff = i === startRangeIdx ? Math.max(lo, cursorN + 1) : lo;
-            const hiEff = Math.min(hi, lastSeq);
-            if (loEff > hiEff) continue;
-
-            for (const w of wStmt.all(id, loEff, hiEff)) {
-                if (!writesMap.has(w.event_id)) writesMap.set(w.event_id, []);
-                writesMap.get(w.event_id).push(w);
+                for (const w of rawDb.prepare(
+                    `SELECT w.event_id, w.name, vd.val_text AS value, w.omitted
+                     FROM writes w
+                     LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
+                     WHERE w.session_id = ? AND w.event_id IN (${ph})`
+                ).all([id, ...batch])) {
+                    if (!writesMap.has(w.event_id)) writesMap.set(w.event_id, []);
+                    writesMap.get(w.event_id).push(w);
+                    _wRows++;
+                }
+                for (const r of rawDb.prepare(
+                    `SELECT r.event_id, r.name, vd.val_text AS value, r.omitted
+                     FROM reads r
+                     LEFT JOIN value_dict vd ON vd.session_id = r.session_id AND vd.id = r.value_id
+                     WHERE r.session_id = ? AND r.event_id IN (${ph})`
+                ).all([id, ...batch])) {
+                    if (!readsMap.has(r.event_id)) readsMap.set(r.event_id, []);
+                    readsMap.get(r.event_id).push(r);
+                    _rRows++;
+                }
+                for (const f of rawDb.prepare(
+                    `SELECT f.event_id, f.offset, f.is_write, vd.val_text AS value, f.omitted, f.base_oid
+                     FROM fields f
+                     LEFT JOIN value_dict vd ON vd.session_id = f.session_id AND vd.id = f.value_id
+                     WHERE f.session_id = ? AND f.event_id IN (${ph})`
+                ).all([id, ...batch])) {
+                    if (!fieldsMap.has(f.event_id)) fieldsMap.set(f.event_id, []);
+                    fieldsMap.get(f.event_id).push(f);
+                    _fRows++;
+                }
             }
-            for (const r of rStmt.all(id, loEff, hiEff)) {
-                if (!readsMap.has(r.event_id)) readsMap.set(r.event_id, []);
-                readsMap.get(r.event_id).push(r);
-            }
-            for (const f of fStmt.all(id, loEff, hiEff)) {
-                if (!fieldsMap.has(f.event_id)) fieldsMap.set(f.event_id, []);
-                fieldsMap.get(f.event_id).push(f);
-            }
-            if (hiEff >= lastSeq) break;  // 已覆盖所有事件，提前退出
         }
+        const _t5 = performance.now();
 
         const result = eventRows.map(e => {
             const s = e.iid != null ? iidSmapCache.get(e.iid) : null;
@@ -519,8 +534,33 @@ router.get('/calls/:callId/own-events', (req, res) => {
                 fields:  (fieldsMap.get(e.seq) || []).map(f => ({ offset: f.offset, isWrite: !!f.is_write, value: safeParseJson(f.value), omitted: !!f.omitted, baseOid: f.base_oid ?? null })),
             };
         });
+        const _t6 = performance.now();
 
         const nextCursor = result.length === limitN ? result[result.length - 1].seq : null;
+
+        // ── 性能诊断日志（每次请求打印，便于排查慢查询）──────────────────────
+        const _total = _t6 - _t0;
+        if (_total > 50) {  // 超过 50ms 才打印，避免刷屏
+            log.warn({
+                callId, cursor: cursor ?? 'first',
+                frameSpan: returnSeqN - callSeqN,
+                childCount: children.length,
+                ownRangeCount: ownRanges.length,
+                ownSeqEstimate, density: +density.toFixed(4), fetchSize,
+                segScanned: _segCount,
+                eventRows: eventRows.length,
+                wRows: _wRows, rRows: _rRows, fRows: _fRows,
+                ms: {
+                    lookup:    +(_t1 - _t0).toFixed(1),
+                    children:  +(_t2 - _t1).toFixed(1),
+                    events:    +(_t3 - _t2).toFixed(1),
+                    smap:      +(_t4 - _t3).toFixed(1),
+                    wrFields:  +(_t5 - _t4).toFixed(1),
+                    serialize: +(_t6 - _t5).toFixed(1),
+                    total:     +_total.toFixed(1),
+                },
+            }, '[own-events] slow request');
+        }
 
         return res.json({
             sessionId: id,
