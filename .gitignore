@@ -8,3 +8,4 @@ data
 *.db
 jalangi-trace.bin
 analyzer/traces/_project_map.json
+analyzer/traces/_aliases.json
