@@ -58,6 +58,9 @@
           <input ref="sourceInput" type="file" accept=".js" style="display:none" @change="handleFileInput('source', $event)" />
         </div>
 
+        <!-- 分析插件选择 -->
+        <PluginSelector v-model="form.selectedPlugins" ref="pluginSelectorRef" />
+
         <div v-if="uploadError" class="upload-error">❌ {{ uploadError }}</div>
 
         <div class="dialog-actions">
@@ -78,13 +81,15 @@
 
 <script setup>
 import { ref, reactive } from 'vue';
+import PluginSelector from './PluginSelector.vue';
 
 const emit = defineEmits(['close', 'created']);
 
-const form     = ref({ name: '', bin: null, smap: null, source: null });
+const form     = ref({ name: '', bin: null, smap: null, source: null, selectedPlugins: [] });
 const dragging = reactive({ bin: false, smap: false, source: false });
-const uploading  = ref(false);
+const uploading   = ref(false);
 const uploadError = ref('');
+const pluginSelectorRef = ref(null);
 
 function formatSize(bytes) {
     if (bytes < 1024) return `${bytes} B`;
@@ -115,6 +120,12 @@ async function submit() {
         if (form.value.source) formData.append('source', form.value.source);
         if (form.value.name)   formData.append('name',   form.value.name);
 
+        // 传递 selectedPlugins：null = 全选（不传，后端用默认），否则传过滤列表
+        const payload = pluginSelectorRef.value?.getPayload();
+        if (payload !== null && payload !== undefined) {
+            formData.append('selectedPlugins', JSON.stringify(payload));
+        }
+
         const res = await fetch('/api/sessions', { method: 'POST', body: formData });
 
         const contentType = res.headers.get('content-type') || '';
@@ -127,7 +138,7 @@ async function submit() {
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
 
         const savedName = form.value.name || (form.value.bin?.name?.replace(/\.bin$/, '')) || '';
-        form.value = { name: '', bin: null, smap: null, source: null };
+        form.value = { name: '', bin: null, smap: null, source: null, selectedPlugins: [] };
 
         emit('created', { sessionId: data.sessionId, name: savedName });
     } catch (e) {
@@ -143,7 +154,7 @@ async function submit() {
     position: fixed; inset: 0; background: rgba(0,0,0,0.6);
     display: flex; align-items: center; justify-content: center; z-index: 1000;
 }
-.dialog { width: 520px; max-height: 90vh; overflow-y: auto; }
+.dialog { width: 600px; max-height: 90vh; overflow-y: auto; }
 .dialog-title { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
 .dialog-hint { font-size: 13px; color: var(--text-muted); margin-bottom: 20px; }
 .upload-form { display: flex; flex-direction: column; gap: 16px; }

@@ -29,7 +29,7 @@ import {
 } from '../src/encoding/EventSerializer.js';
 
 import * as db from './db/Database.mjs';
-import { autoDiscover } from './PluginEngine.mjs';
+import { autoDiscover, listPlugins } from './PluginEngine.mjs';
 import { registerWsClient } from './InstrumentRunner.mjs';
 import sessionsRouter from './routes/sessions.mjs';
 import instrumentRouter from './routes/instrument.mjs';
@@ -202,6 +202,34 @@ function validateTraceFilename(name) {
         && !name.includes('..')
         && name.endsWith('.bin');
 }
+
+// 获取可选择的分析插件列表（Phase 2/3/4，Phase 1 为必须项不可选）
+app.get('/api/plugins', async (req, res) => {
+    try {
+        await autoDiscover();
+        const { PHASE2_PLUGINS, PHASE3_PLUGINS, PHASE4_PLUGINS } = await import('./routes/sessions/core.mjs');
+        const all = listPlugins();
+        const byId = Object.fromEntries(all.map(p => [p.id, p]));
+
+        // 构造带分组、描述、依赖信息的插件列表
+        const makeGroup = (ids, phase) =>
+            ids.map(id => ({
+                id,
+                phase,
+                displayName: byId[id]?.displayName || id,
+                description: byId[id]?.description || '',
+                deps: byId[id]?.deps || [],
+            }));
+
+        res.json({
+            phase2: makeGroup(PHASE2_PLUGINS, 'phase2'),
+            phase3: makeGroup(PHASE3_PLUGINS, 'phase3'),
+            phase4: makeGroup(PHASE4_PLUGINS, 'phase4'),
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
 
 // Trace 文件列表（支持搜索 ?q= 和分页 ?offset=&limit=）
 app.get('/api/trace/files', (req, res) => {
@@ -423,10 +451,10 @@ app.get('/api/trace/files/:name/download', (req, res) => {
     }
 });
 
-// Trace 文件导入为会话（支持 projectId 关联工作空间 smap）
+// Trace 文件导入为会话（支持 projectId 关联工作空间 smap，selectedPlugins 自定义分析插件）
 app.post('/api/trace/import', async (req, res) => {
     try {
-        const { filename, name: sessionName, projectId } = req.body;
+        const { filename, name: sessionName, projectId, selectedPlugins } = req.body;
         if (!filename || typeof filename !== 'string' || filename.includes('/') || filename.includes('..')) {
             return res.status(400).json({ error: 'Invalid filename' });
         }
@@ -465,6 +493,7 @@ app.post('/api/trace/import', async (req, res) => {
             projectId: projectId || null,
             name: sessionName || filename.replace(/\.bin$/, ''),
             wsProgressBroadcast: req.app.get('wsProgressBroadcast'),
+            selectedPlugins: Array.isArray(selectedPlugins) ? selectedPlugins : null,
         });
         res.json({ sessionId: sid });
     } catch (e) {

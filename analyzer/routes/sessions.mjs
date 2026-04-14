@@ -50,7 +50,7 @@ const log = createLogger('sessions');
 
 /**
  * 从已有的 bin/smap 文件路径创建会话（供内部调用，如 trace-import API）。
- * @param {{ binPath: string, smapPath?: string|null, sourcePath?: string|null, projectId?: string|null, name?: string, wsProgressBroadcast?: Function }} opts
+ * @param {{ binPath: string, smapPath?: string|null, sourcePath?: string|null, projectId?: string|null, name?: string, wsProgressBroadcast?: Function, selectedPlugins?: string[]|null }} opts
  * @returns {Promise<string>} sessionId
  */
 export async function createSession({
@@ -60,7 +60,10 @@ export async function createSession({
     projectId   = null,
     name        = null,
     wsProgressBroadcast = null,
+    selectedPlugins = null,   // null 表示运行所有 Phase 2 插件（默认）
 }) {
+    const { PHASE2_PLUGINS, PHASE3_PLUGINS, PHASE4_PLUGINS } = await import('./sessions/core.mjs');
+
     const sessionId  = uuid();
     const sessionDir = resolve(DATA_DIR, sessionId);
     mkdirSync(sessionDir, { recursive: true });
@@ -93,6 +96,14 @@ export async function createSession({
     const phase1Plugins = [...PHASE1_PLUGINS];
     if (smapDest) phase1Plugins.push('F2-SmapLoader');
 
+    // 过滤 selectedPlugins：null 表示运行所有；否则只运行在 selectedPlugins 中指定的插件
+    const filterBySelection = (plugins) =>
+        selectedPlugins === null ? plugins : plugins.filter(id => selectedPlugins.includes(id));
+
+    const phase2Selected = filterBySelection(PHASE2_PLUGINS);
+    const phase3Selected = filterBySelection(PHASE3_PLUGINS);
+    const phase4Selected = filterBySelection(PHASE4_PLUGINS);
+
     autoDiscover().then(() =>
         schedule(sessionId, {
             plugins: phase1Plugins,
@@ -102,7 +113,8 @@ export async function createSession({
             onProgress: (evt) => {
                 wsProgressBroadcast?.(sessionId, evt);
                 if (evt.type === 'all_done' && evt.phase === 'phase1') {
-                    _schedulePhase2(sessionId, sessionDir, wsProgressBroadcast, !!smapDest);
+                    _schedulePhase2(sessionId, sessionDir, wsProgressBroadcast, !!smapDest,
+                        phase2Selected, phase3Selected, phase4Selected);
                 }
             },
         })

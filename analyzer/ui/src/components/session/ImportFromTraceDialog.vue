@@ -1,6 +1,6 @@
 <template>
   <div class="dialog-overlay" @click.self="$emit('close')">
-    <div class="dialog card" style="width: min(600px, 96vw)">
+    <div class="dialog card" style="width: min(660px, 96vw)">
       <h2 class="dialog-title">从已有 Trace 文件导入</h2>
       <p class="dialog-hint">选择一个已收集的 trace 文件创建分析会话</p>
 
@@ -47,6 +47,9 @@
             <span class="trace-mtime">{{ formatDate(t.mtime) }}</span>
           </div>
         </div>
+
+        <!-- 分析插件选择 -->
+        <PluginSelector v-model="form.selectedPlugins" ref="pluginSelectorRef" />
       </div>
 
       <div v-if="importError" class="upload-error">❌ {{ importError }}</div>
@@ -68,16 +71,18 @@
 <script setup>
 import { ref, onMounted } from 'vue';
 import { formatDate } from '../../composables/useSessionUtils.js';
+import PluginSelector from './PluginSelector.vue';
 
 const emit = defineEmits(['close', 'imported']);
 
-const form = ref({ name: '', projectId: null, selectedTrace: null });
+const form = ref({ name: '', projectId: null, selectedTrace: null, selectedPlugins: [] });
 const importing         = ref(false);
 const importError       = ref('');
 const existingTraces    = ref([]);
 const loadingTraces     = ref(false);
 const traceSearchQuery  = ref('');
 const availableProjects = ref([]);
+const pluginSelectorRef = ref(null);
 let traceSearchTimer = null;
 
 function formatSize(bytes) {
@@ -123,6 +128,9 @@ async function doImport() {
     importError.value = '';
 
     try {
+        // null = 全选（后端使用默认），否则传过滤后列表
+        const selectedPlugins = pluginSelectorRef.value?.getPayload();
+
         const res = await fetch('/api/trace/import', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -130,13 +138,14 @@ async function doImport() {
                 filename:  form.value.selectedTrace.name,
                 name:      form.value.name.trim() || undefined,
                 projectId: form.value.projectId || undefined,
+                selectedPlugins,
             }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
 
         const savedName = form.value.name || form.value.selectedTrace.name.replace(/\.bin$/, '');
-        form.value = { name: '', projectId: null, selectedTrace: null };
+        form.value = { name: '', projectId: null, selectedTrace: null, selectedPlugins: [] };
 
         emit('imported', { sessionId: data.sessionId, name: savedName });
     } catch (e) {
@@ -168,7 +177,7 @@ onMounted(() => {
 }
 .trace-search:focus { outline: none; border-color: var(--accent); }
 .trace-loading, .trace-empty { padding: 24px; text-align: center; color: var(--text-muted); font-size: 13px; }
-.trace-list { max-height: 240px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 8px; }
+.trace-list { max-height: 180px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 8px; }
 .trace-item {
     display: flex; align-items: center; gap: 10px; padding: 10px 12px;
     border-bottom: 1px solid var(--border-color); cursor: pointer; transition: background 0.1s;

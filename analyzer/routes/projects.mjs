@@ -38,6 +38,8 @@ mkdirSync(SESSIONS_DIR, { recursive: true });
 // 分阶段插件定义（与 sessions.mjs 保持一致）
 const PHASE1_PLUGINS = ['F1-EventIndex'];
 const PHASE2_PLUGINS = ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer'];
+const PHASE3_PLUGINS = ['A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer'];
+const PHASE4_PLUGINS = ['A2-DataFlowGraph', 'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer', 'I5-WebApiDetector'];
 
 // ── POST /api/projects ──────────────────────────────────────────────────────
 // 上传原始 JS 源码，创建工作空间，异步触发（预处理+）插桩
@@ -331,6 +333,23 @@ router.post('/:id/sessions', async (req, res) => {
         const phase1Plugins = [...PHASE1_PLUGINS];
         if (smapDest) phase1Plugins.push('F2-SmapLoader');
 
+        // 解析 selectedPlugins（FormData 中作为 JSON 字符串传入）
+        let selectedPlugins = null;
+        const rawSelected = req.body?.selectedPlugins;
+        if (rawSelected) {
+            try {
+                selectedPlugins = typeof rawSelected === 'string' ? JSON.parse(rawSelected) : rawSelected;
+                if (!Array.isArray(selectedPlugins)) selectedPlugins = null;
+            } catch { selectedPlugins = null; }
+        }
+
+        const filterBySelection = (plugins) =>
+            selectedPlugins === null ? plugins : plugins.filter(id => selectedPlugins.includes(id));
+
+        const phase2Selected = filterBySelection(PHASE2_PLUGINS);
+        const phase3Selected = filterBySelection(PHASE3_PLUGINS);
+        const phase4Selected = filterBySelection(PHASE4_PLUGINS);
+
         autoDiscover().then(() =>
             schedule(sessionId, {
                 plugins: phase1Plugins,
@@ -340,7 +359,8 @@ router.post('/:id/sessions', async (req, res) => {
                 onProgress: (evt) => {
                     wsProgressBroadcast?.(sessionId, evt);
                     if (evt.type === 'all_done' && evt.phase === 'phase1') {
-                        _schedulePhase2(sessionId, sessionDir, wsProgressBroadcast, !!smapDest);
+                        _schedulePhase2(sessionId, sessionDir, wsProgressBroadcast, !!smapDest,
+                            phase2Selected, phase3Selected, phase4Selected);
                     }
                 },
             })
@@ -642,30 +662,54 @@ async function _runInstrumentation(projectId, projectDir, sourcePath, originalNa
     });
 }
 
-// ── 内部：后台调度 Phase 2 ──────────────────────────────────────────────────
+// ── 内部：后台调度 Phase 2（及可选的 Phase 3/4）────────────────────────────
 
-async function _schedulePhase2(sessionId, sessionDir, wsProgressBroadcast, _hasSmap) {
+async function _schedulePhase2(
+    sessionId, sessionDir, wsProgressBroadcast, _hasSmap,
+    phase2Plugins = PHASE2_PLUGINS,
+    phase3Plugins = [],
+    phase4Plugins = [],
+) {
     try {
         db.run("UPDATE sessions SET status='indexing' WHERE id=?", sessionId);
-        wsProgressBroadcast?.(sessionId, {
-            type: 'phase_start',
-            sessionId,
-            phase: 'phase2',
-            plugins: PHASE2_PLUGINS,
-        });
 
-        await autoDiscover();
-        await schedule(sessionId, {
-            plugins: PHASE2_PLUGINS,
-            dataDir: sessionDir,
-            phase: 'phase2',
-            skipCompleted: true,
-            onProgress: (evt) => {
-                wsProgressBroadcast?.(sessionId, evt);
-            },
-        });
+        if (phase2Plugins.length > 0) {
+            wsProgressBroadcast?.(sessionId, {
+                type: 'phase_start', sessionId, phase: 'phase2', plugins: phase2Plugins,
+            });
+            await autoDiscover();
+            await schedule(sessionId, {
+                plugins: phase2Plugins, dataDir: sessionDir,
+                phase: 'phase2', skipCompleted: true,
+                onProgress: (evt) => wsProgressBroadcast?.(sessionId, evt),
+            });
+        } else {
+            await autoDiscover();
+        }
+
+        if (phase3Plugins.length > 0) {
+            wsProgressBroadcast?.(sessionId, {
+                type: 'phase_start', sessionId, phase: 'phase3', plugins: phase3Plugins,
+            });
+            await schedule(sessionId, {
+                plugins: phase3Plugins, dataDir: sessionDir,
+                phase: 'phase3', skipCompleted: true,
+                onProgress: (evt) => wsProgressBroadcast?.(sessionId, evt),
+            });
+        }
+
+        if (phase4Plugins.length > 0) {
+            wsProgressBroadcast?.(sessionId, {
+                type: 'phase_start', sessionId, phase: 'phase4', plugins: phase4Plugins,
+            });
+            await schedule(sessionId, {
+                plugins: phase4Plugins, dataDir: sessionDir,
+                phase: 'phase4', skipCompleted: true,
+                onProgress: (evt) => wsProgressBroadcast?.(sessionId, evt),
+            });
+        }
     } catch (e) {
-        log.error({ err: e }, '[projects] phase2 schedule error:');
+        log.error({ err: e }, '[projects] phase2+ schedule error:');
         wsProgressBroadcast?.(sessionId, { type: 'error', sessionId, phase: 'phase2', message: e.message });
     }
 }

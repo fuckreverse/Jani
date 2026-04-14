@@ -195,6 +195,9 @@
             </div>
           </div>
 
+          <!-- 分析插件选择（两个 Tab 共用） -->
+          <PluginSelector v-model="selectedPlugins" ref="pluginSelectorRef" />
+
           <!-- 会话名称（两个 Tab 共用） -->
           <div class="trace-opts">
             <div class="opt-field">
@@ -325,6 +328,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import ProgressDrawer from './ProgressDrawer.vue';
 import ForkModal from './ForkModal.vue';
+import PluginSelector from '../components/session/PluginSelector.vue';
 
 const route  = useRoute();
 const router = useRouter();
@@ -340,6 +344,8 @@ const sessionName = ref('');
 const uploading  = ref(false);
 const uploadError = ref('');
 const uploadSuccess = ref('');
+const selectedPlugins = ref([]);
+const pluginSelectorRef = ref(null);
 
 // Tab 切换：上传 / 选已有 trace
 const uploadTab = ref('upload');  // 'upload' | 'existing'
@@ -463,6 +469,10 @@ async function uploadTrace() {
         const fd = new FormData();
         fd.append('bin', traceFile.value, traceFile.value.name);
         if (sessionName.value.trim()) fd.append('name', sessionName.value.trim());
+        const pluginPayload = pluginSelectorRef.value?.getPayload();
+        if (pluginPayload !== null && pluginPayload !== undefined) {
+            fd.append('selectedPlugins', JSON.stringify(pluginPayload));
+        }
 
         const res  = await fetch(`/api/projects/${projectId}/sessions`, { method: 'POST', body: fd });
         const data = await res.json();
@@ -496,6 +506,8 @@ async function importExistingTrace() {
     uploadSuccess.value = '';
 
     try {
+        const selectedPluginsPayload = pluginSelectorRef.value?.getPayload();
+
         const res = await fetch('/api/trace/import', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -503,6 +515,7 @@ async function importExistingTrace() {
                 filename: selectedTrace.value.name,
                 name: sessionName.value.trim() || undefined,
                 projectId: projectId,
+                selectedPlugins: selectedPluginsPayload,
             }),
         });
         const data = await res.json();

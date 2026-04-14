@@ -214,7 +214,7 @@
 
     <!-- 导入会话对话框 -->
     <div v-if="showImportDialog" class="dialog-overlay" @click.self="showImportDialog = false">
-      <div class="dialog card">
+      <div class="dialog card" style="width: min(660px, 96vw)">
         <h2 class="dialog-title">导入为分析会话</h2>
         <p class="dialog-hint">文件：<code>{{ importTarget?.name }}</code></p>
 
@@ -236,6 +236,9 @@
               将使用该工作空间的 smap.json 进行源码映射
             </p>
           </div>
+
+          <!-- 分析插件选择 -->
+          <PluginSelector v-model="importForm.selectedPlugins" ref="pluginSelectorRef" />
         </div>
 
         <div v-if="importError" class="upload-error">❌ {{ importError }}</div>
@@ -270,6 +273,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
 import ProgressDrawer from './ProgressDrawer.vue';
+import PluginSelector from '../components/session/PluginSelector.vue';
 
 const router = useRouter();
 
@@ -301,11 +305,12 @@ const editingAlias = ref('');
 const aliasInputRef = ref(null);
 
 // 导入会话
-const showImportDialog = ref(false);
-const importTarget     = ref(null);
-const importForm       = ref({ sessionName: '', projectId: null });
-const importing        = ref(false);
-const importError      = ref('');
+const showImportDialog    = ref(false);
+const importTarget        = ref(null);
+const importForm          = ref({ sessionName: '', projectId: null, selectedPlugins: [] });
+const importing           = ref(false);
+const importError         = ref('');
+const pluginSelectorRef   = ref(null);
 const availableProjects = ref([]);
 
 // 进度抽屉
@@ -567,6 +572,8 @@ async function doImport() {
     importError.value = '';
 
     try {
+        const selectedPlugins = pluginSelectorRef.value?.getPayload();
+
         const res = await fetch('/api/trace/import', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -574,6 +581,7 @@ async function doImport() {
                 filename: importTarget.value.name,
                 name: importForm.value.sessionName.trim() || undefined,
                 projectId: importForm.value.projectId || undefined,
+                selectedPlugins,
             }),
         });
         const data = await res.json();
