@@ -645,4 +645,247 @@ router.get('/value-dict', (req, res) => {
     }
 });
 
+// ── POST /api/sessions/:id/events/export ──────────────────────────────────
+// 导出指定范围内的事件，支持多范围、流式输出。
+//
+// 请求体（JSON）：
+//   ranges  — 范围列表，每项为以下之一：
+//     { seqFrom: N, seqTo: N }             — 直接 SEQ 区间（含两端）
+//     { callId: N, ownOnly: true|false }   — 函数单次调用；ownOnly=true 仅自身事件（默认 true）
+//   format  — 'ndjson'（默认）| 'tsv' | 'text'
+//
+// 响应：流式（Transfer-Encoding: chunked），大文件安全。
+
+router.post('/events/export', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const { ranges = [], format = 'ndjson' } = req.body || {};
+        if (!Array.isArray(ranges) || ranges.length === 0) {
+            return res.status(400).json({ error: 'ranges must be a non-empty array' });
+        }
+        if (!['ndjson', 'tsv', 'text'].includes(format)) {
+            return res.status(400).json({ error: 'format must be ndjson | tsv | text' });
+        }
+
+        // ── Step 1: 将所有 ranges 解析为 [{lo, hi, excludeRanges[]}] ───────────
+        // excludeRanges 仅 callId+ownOnly=true 时填入（子调用内部区间）
+        const resolvedRanges = [];  // [{ lo, hi, excludes: [{lo,hi}] }]
+
+        for (const r of ranges) {
+            if (r.callId != null) {
+                // 函数调用范围
+                const call = db.get(
+                    'SELECT call_seq, return_seq, depth FROM call_edges WHERE id = ? AND session_id = ?',
+                    Number(r.callId), id
+                );
+                if (!call) continue;
+                const { call_seq, return_seq, depth } = call;
+                const ownOnly = r.ownOnly !== false;  // 默认 true
+
+                if (!ownOnly) {
+                    // 全量区间，不排除子调用
+                    resolvedRanges.push({ lo: call_seq, hi: return_seq, excludes: [] });
+                } else {
+                    // 自身事件：用与 own-events 相同的区间减法，得到若干段连续范围
+                    const children = db.all(
+                        `SELECT call_seq, return_seq FROM call_edges
+                         WHERE session_id = ? AND depth = ?
+                           AND call_seq >= ? AND call_seq <= ?
+                         ORDER BY call_seq ASC`,
+                        id, depth + 1, call_seq, return_seq
+                    );
+                    // 把 [call_seq, return_seq] 按子调用切段，保留子调用边界
+                    let cur = call_seq;
+                    for (const c of children) {
+                        if (c.call_seq >= cur) {
+                            resolvedRanges.push({ lo: cur, hi: c.call_seq, excludes: [] });
+                        }
+                        cur = c.return_seq;
+                    }
+                    resolvedRanges.push({ lo: cur, hi: return_seq, excludes: [] });
+                }
+            } else if (r.seqFrom != null && r.seqTo != null) {
+                resolvedRanges.push({
+                    lo: Number(r.seqFrom),
+                    hi: Number(r.seqTo),
+                    excludes: [],
+                });
+            }
+        }
+
+        if (resolvedRanges.length === 0) {
+            return res.status(400).json({ error: 'No valid ranges resolved' });
+        }
+
+        // 按 lo 升序排序（便于流式顺序输出）
+        resolvedRanges.sort((a, b) => a.lo - b.lo);
+
+        // ── Step 2: 流式扫描并输出 ─────────────────────────────────────────────
+        // 按格式设置响应头
+        const ext      = format === 'tsv' ? 'tsv' : format === 'text' ? 'txt' : 'ndjson';
+        const mime     = format === 'tsv'  ? 'text/tab-separated-values'
+                       : format === 'text' ? 'text/plain'
+                       : 'application/x-ndjson';
+        res.setHeader('Content-Type', `${mime}; charset=utf-8`);
+        res.setHeader('Content-Disposition', `attachment; filename="events-export.${ext}"`);
+        res.setHeader('Transfer-Encoding', 'chunked');
+
+        // TSV header
+        if (format === 'tsv') {
+            res.write('seq\ttype\tline\tcol\tsrcText\twrites\treads\tfields\n');
+        }
+
+        // 预备 SQL（按段走主键范围扫描）
+        const rawDb = db.raw();
+        const evStmt = rawDb.prepare(
+            `SELECT e.id AS seq, e.type, e.iid,
+                    s.sl AS line, s.sc AS col, s.src_text
+             FROM events e
+             LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
+             WHERE e.session_id = ? AND e.id >= ? AND e.id <= ?
+             ORDER BY e.id ASC`
+        );
+        const wStmt = rawDb.prepare(
+            `SELECT w.event_id, w.name, vd.val_text AS value, w.omitted
+             FROM writes w
+             LEFT JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
+             WHERE w.session_id = ? AND w.event_id >= ? AND w.event_id <= ?`
+        );
+        const rStmt = rawDb.prepare(
+            `SELECT r.event_id, r.name, vd.val_text AS value, r.omitted
+             FROM reads r
+             LEFT JOIN value_dict vd ON vd.session_id = r.session_id AND vd.id = r.value_id
+             WHERE r.session_id = ? AND r.event_id >= ? AND r.event_id <= ?`
+        );
+        const fStmt = rawDb.prepare(
+            `SELECT f.event_id, f.offset, f.is_write, vd.val_text AS value, f.omitted, f.base_oid
+             FROM fields f
+             LEFT JOIN value_dict vd ON vd.session_id = f.session_id AND vd.id = f.value_id
+             WHERE f.session_id = ? AND f.event_id >= ? AND f.event_id <= ?`
+        );
+
+        // 逐段流式输出（每段最多 BATCH 条，避免单次锁定时间过长）
+        const BATCH = 2000;
+
+        for (const seg of resolvedRanges) {
+            let cursor = seg.lo;
+            while (cursor <= seg.hi) {
+                const hiPage = Math.min(cursor + BATCH - 1, seg.hi);
+                const evRows = evStmt.all(id, cursor, hiPage);
+                if (evRows.length === 0) break;
+
+                // 批量取 writes/reads/fields
+                const firstSeq = evRows[0].seq;
+                const lastSeq  = evRows[evRows.length - 1].seq;
+                const wRows = wStmt.all(id, firstSeq, lastSeq);
+                const rRows = rStmt.all(id, firstSeq, lastSeq);
+                const fRows = fStmt.all(id, firstSeq, lastSeq);
+
+                // 分组
+                const wMap = new Map(), rMap = new Map(), fMap = new Map();
+                for (const w of wRows) {
+                    if (!wMap.has(w.event_id)) wMap.set(w.event_id, []);
+                    wMap.get(w.event_id).push(w);
+                }
+                for (const r of rRows) {
+                    if (!rMap.has(r.event_id)) rMap.set(r.event_id, []);
+                    rMap.get(r.event_id).push(r);
+                }
+                for (const f of fRows) {
+                    if (!fMap.has(f.event_id)) fMap.set(f.event_id, []);
+                    fMap.get(f.event_id).push(f);
+                }
+
+                let chunk = '';
+                for (const e of evRows) {
+                    const writes = (wMap.get(e.seq) || []).map(w => ({
+                        name: w.name,
+                        value: safeParseJson(w.value),
+                        omitted: !!w.omitted,
+                    }));
+                    const reads = (rMap.get(e.seq) || []).map(r => ({
+                        name: r.name,
+                        value: safeParseJson(r.value),
+                        omitted: !!r.omitted,
+                    }));
+                    const fields = (fMap.get(e.seq) || []).map(f => ({
+                        offset: f.offset,
+                        isWrite: !!f.is_write,
+                        value: safeParseJson(f.value),
+                        omitted: !!f.omitted,
+                        baseOid: f.base_oid ?? null,
+                    }));
+
+                    const typeStr = decodeType(e.type);
+
+                    if (format === 'ndjson') {
+                        chunk += JSON.stringify({
+                            seq:     e.seq,
+                            type:    typeStr,
+                            iid:     e.iid,
+                            line:    e.line ?? null,
+                            col:     e.col  ?? null,
+                            srcText: e.src_text ?? null,
+                            writes,
+                            reads,
+                            fields,
+                        }) + '\n';
+
+                    } else if (format === 'tsv') {
+                        // writes/reads/fields 序列化为紧凑字符串
+                        const wStr = writes.map(w => w.omitted ? `${w.name}=…` : `${w.name}=${JSON.stringify(w.value)}`).join(';');
+                        const rStr = reads.map(r  => r.omitted ? `${r.name}=…` : `${r.name}=${JSON.stringify(r.value)}`).join(';');
+                        const fStr = fields.map(f => {
+                            const arrow = f.isWrite ? '=' : '->';
+                            return `#${f.baseOid ?? '?'}.${f.offset}${arrow}${JSON.stringify(f.value)}`;
+                        }).join(';');
+                        const loc  = e.line != null ? `${e.line}:${e.col ?? 0}` : '';
+                        const src  = (e.src_text ?? '').replace(/\t/g, ' ');
+                        chunk += `${e.seq}\t${typeStr}\t${loc}\t${src}\t${wStr}\t${rStr}\t${fStr}\n`;
+
+                    } else {
+                        // text — 人类可读
+                        const loc    = e.line != null ? `@${e.line}:${e.col ?? 0}` : '';
+                        const srcPad = e.src_text ? `  │ ${e.src_text}` : '';
+                        let line = `[${String(e.seq).padStart(8)}] ${typeStr.padEnd(14)} ${loc}${srcPad}`;
+                        if (writes.length) {
+                            line += '\n' + writes.map(w =>
+                                `            W  ${w.name} = ${w.omitted ? '…' : JSON.stringify(w.value)}`
+                            ).join('\n');
+                        }
+                        if (reads.length) {
+                            line += '\n' + reads.map(r =>
+                                `            R  ${r.name} → ${r.omitted ? '…' : JSON.stringify(r.value)}`
+                            ).join('\n');
+                        }
+                        if (fields.length) {
+                            line += '\n' + fields.map(f =>
+                                `            F  #${f.baseOid ?? '?'}.${f.offset} ${f.isWrite ? '=' : '->'} ${JSON.stringify(f.value)}`
+                            ).join('\n');
+                        }
+                        chunk += line + '\n';
+                    }
+                }
+
+                res.write(chunk);
+                cursor = hiPage + 1;
+            }
+        }
+
+        res.end();
+    } catch (e) {
+        log.error({ err: e }, '[POST /api/sessions/:id/events/export] error:');
+        // 如果响应头已发送则只能 end，否则可返回 JSON error
+        if (res.headersSent) {
+            res.end();
+        } else {
+            res.status(500).json({ error: e.message });
+        }
+    }
+});
+
 export default router;
+

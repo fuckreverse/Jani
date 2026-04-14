@@ -50,6 +50,30 @@
         <span v-if="childCount > 0" class="call-child-hint">
           已折叠 {{ childCount }} 个子调用
         </span>
+
+        <!-- 导出按钮 -->
+        <div class="cd-export-wrap" ref="cdExportBtnRef">
+          <button
+            class="cd-export-btn"
+            :disabled="cdExporting"
+            @click.stop="toggleCdExport"
+            title="导出当前事件流"
+          >{{ cdExporting ? '…' : '⬇' }}</button>
+          <div v-if="cdExportOpen" class="cd-export-popover" @click.stop>
+            <div class="cd-ep-row" v-for="f in cdExportFormats" :key="f.value">
+              <button
+                class="cd-ep-fmt-btn"
+                :class="{ 'cd-ep-fmt-active': cdExportFormat === f.value }"
+                @click.stop="cdExportFormat = f.value"
+              >{{ f.label }}</button>
+              <span class="cd-ep-hint">{{ f.hint }}</span>
+            </div>
+            <div class="cd-ep-actions">
+              <span v-if="cdExportError" class="cd-ep-error">{{ cdExportError }}</span>
+              <button class="cd-ep-go btn-primary" @click.stop="doCdExport">下载</button>
+            </div>
+          </div>
+        </div>
       </template>
     </div>
 
@@ -373,7 +397,77 @@ watch(() => props.call?.id, (id) => {
 
 onUnmounted(() => {
   destroyCfgCy();
+  document.removeEventListener('click', handleCdExportOutside);
 });
+
+// ── 导出事件流 ────────────────────────────────────────────────────────────────
+
+const cdExportBtnRef  = ref(null);
+const cdExportOpen    = ref(false);
+const cdExporting     = ref(false);
+const cdExportError   = ref('');
+const cdExportFormat  = ref('ndjson');
+
+const cdExportFormats = [
+  { value: 'ndjson', label: 'NDJSON', hint: 'jq 可处理' },
+  { value: 'tsv',    label: 'TSV',    hint: 'Excel/awk' },
+  { value: 'text',   label: '纯文本', hint: '人类可读' },
+];
+
+function toggleCdExport() {
+  cdExportOpen.value = !cdExportOpen.value;
+  cdExportError.value = '';
+  if (cdExportOpen.value) {
+    // 打开时注册一次性外部点击监听
+    setTimeout(() => document.addEventListener('click', handleCdExportOutside), 0);
+  } else {
+    document.removeEventListener('click', handleCdExportOutside);
+  }
+}
+
+function handleCdExportOutside(e) {
+  if (cdExportBtnRef.value && !cdExportBtnRef.value.contains(e.target)) {
+    cdExportOpen.value = false;
+    document.removeEventListener('click', handleCdExportOutside);
+  }
+}
+
+async function doCdExport() {
+  cdExportError.value = '';
+  cdExporting.value   = true;
+  cdExportOpen.value  = false;
+  document.removeEventListener('click', handleCdExportOutside);
+  try {
+    const range = { callId: props.call.id, ownOnly: ownOnly.value };
+    const res = await fetch(`/api/sessions/${props.sessionId}/events/export`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ ranges: [range], format: cdExportFormat.value }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || `HTTP ${res.status}`);
+    }
+    const ext  = cdExportFormat.value === 'tsv' ? 'tsv'
+               : cdExportFormat.value === 'text' ? 'txt'
+               : 'ndjson';
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    const fnLabel = props.call.fnName ? props.call.fnName.slice(0, 20) : `call${props.call.id}`;
+    a.download = `${fnLabel}-events.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    cdExportError.value = `失败: ${e.message}`;
+    cdExportOpen.value  = true;
+  } finally {
+    cdExporting.value = false;
+  }
+}
 
 // ── 面板切换 ──────────────────────────────────────────────────────────────────
 
@@ -845,8 +939,42 @@ function initCfgCy(data) {
 .call-panel-tab-own { padding: 5px 10px; }
 .call-child-hint {
   padding: 5px 10px; font-size: 10px; color: var(--text-muted);
-  font-style: italic; flex: 1; text-align: right;
+  font-style: italic;
 }
+
+/* 导出按钮 */
+.cd-export-wrap { position: relative; margin-left: auto; display: flex; align-items: center; padding-right: 6px; }
+.cd-export-btn {
+  padding: 2px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;
+  border: 1px solid rgba(99,102,241,0.4); background: rgba(99,102,241,0.1);
+  color: #a5b4fc; transition: background 0.1s;
+}
+.cd-export-btn:hover:not(:disabled) { background: rgba(99,102,241,0.22); }
+.cd-export-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* 格式选择弹层 */
+.cd-export-popover {
+  position: absolute; top: calc(100% + 5px); right: 0; z-index: 300;
+  width: 180px; padding: 10px 12px;
+  background: var(--bg-secondary, #1e2138);
+  border: 1px solid var(--border-color, rgba(99,102,241,0.25));
+  border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+}
+.cd-ep-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+}
+.cd-ep-fmt-btn {
+  padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border-color);
+  background: var(--bg-tertiary, #161929); color: var(--text-secondary);
+  font-size: 11px; cursor: pointer; min-width: 54px;
+  transition: background 0.1s, color 0.1s;
+}
+.cd-ep-fmt-btn:hover { background: rgba(99,102,241,0.15); color: #a5b4fc; }
+.cd-ep-fmt-active { background: rgba(99,102,241,0.2) !important; color: #a5b4fc !important; border-color: rgba(99,102,241,0.5) !important; }
+.cd-ep-hint { font-size: 10px; color: var(--text-muted); }
+.cd-ep-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 8px; border-top: 1px solid var(--border-color); padding-top: 8px; }
+.cd-ep-error { flex: 1; font-size: 10px; color: #fca5a5; }
+.cd-ep-go { font-size: 11px; padding: 3px 12px; }
 
 /* 调用栈面板 */
 .call-stack-panel { padding: 8px 12px; }

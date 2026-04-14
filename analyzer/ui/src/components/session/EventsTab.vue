@@ -87,6 +87,80 @@
             <span v-else>查询</span>
           </button>
           <button class="btn-secondary" @click="clearFilters">清空</button>
+
+          <!-- 导出按钮 -->
+          <div class="export-wrap" ref="exportBtnRef">
+            <button class="btn-export" @click.stop="toggleExportPanel">
+              ⬇ 导出
+            </button>
+
+            <!-- 导出面板 -->
+            <div v-if="exportPanelOpen" class="export-panel" @click.stop>
+              <div class="ep-title">导出事件</div>
+
+              <!-- 范围条目列表 -->
+              <div class="ep-ranges">
+                <div
+                  v-for="(rng, idx) in exportRanges"
+                  :key="idx"
+                  class="ep-range-row"
+                >
+                  <!-- 范围类型选择 -->
+                  <select v-model="rng.type" class="ep-type-sel" @change="onRangeTypeChange(rng)">
+                    <option value="seq">SEQ 区间</option>
+                    <option value="call">函数调用 callId</option>
+                  </select>
+
+                  <!-- SEQ 区间输入 -->
+                  <template v-if="rng.type === 'seq'">
+                    <input v-model="rng.seqFrom" placeholder="起始 SEQ" type="number" class="ep-seq-input" />
+                    <span class="ep-tilde">~</span>
+                    <input v-model="rng.seqTo" placeholder="结束 SEQ" type="number" class="ep-seq-input" />
+                  </template>
+
+                  <!-- callId 输入 -->
+                  <template v-else>
+                    <input v-model="rng.callId" placeholder="callId" type="number" class="ep-call-input" />
+                    <label class="ep-own-label">
+                      <input type="checkbox" v-model="rng.ownOnly" />
+                      <span>仅自身</span>
+                    </label>
+                  </template>
+
+                  <!-- 删除按钮（超过一条时显示） -->
+                  <button
+                    v-if="exportRanges.length > 1"
+                    class="ep-del-btn"
+                    @click="exportRanges.splice(idx, 1)"
+                    title="删除此范围"
+                  >✕</button>
+                </div>
+
+                <!-- 添加范围 -->
+                <button class="ep-add-btn" @click="addExportRange">＋ 添加范围</button>
+              </div>
+
+              <!-- 格式选择 -->
+              <div class="ep-fmt">
+                <span class="ep-fmt-label">格式</span>
+                <label v-for="f in exportFormats" :key="f.value" class="ep-fmt-radio">
+                  <input type="radio" v-model="exportFormat" :value="f.value" />
+                  <span>{{ f.label }}</span>
+                  <span class="ep-fmt-hint">{{ f.hint }}</span>
+                </label>
+              </div>
+
+              <!-- 操作 -->
+              <div class="ep-actions">
+                <span v-if="exportError" class="ep-error">{{ exportError }}</span>
+                <button
+                  class="btn-primary ep-submit"
+                  :disabled="exporting"
+                  @click="doExport"
+                >{{ exporting ? '导出中…' : '下载' }}</button>
+              </div>
+            </div>
+          </div>
         </div>
         <div v-if="valueSearchError" class="value-search-error">{{ valueSearchError }}</div>
       </div>
@@ -540,16 +614,122 @@ function gotoValueSearch(value, mode = 'str') {
     loadEvents(true);
 }
 
+// ─── 导出面板 ─────────────────────────────────────────────────────────────────
+
+const exportBtnRef    = ref(null);
+const exportPanelOpen = ref(false);
+const exporting       = ref(false);
+const exportError     = ref('');
+const exportFormat    = ref('ndjson');
+
+const exportFormats = [
+    { value: 'ndjson', label: 'NDJSON',  hint: 'jq 可直接处理' },
+    { value: 'tsv',    label: 'TSV',     hint: 'Excel/awk 友好' },
+    { value: 'text',   label: '纯文本',  hint: '人类可读' },
+];
+
+function makeEmptyRange() {
+    return { type: 'seq', seqFrom: '', seqTo: '', callId: '', ownOnly: true };
+}
+const exportRanges = ref([makeEmptyRange()]);
+
+function toggleExportPanel() {
+    exportPanelOpen.value = !exportPanelOpen.value;
+    if (exportPanelOpen.value) exportError.value = '';
+}
+
+function addExportRange() {
+    exportRanges.value.push(makeEmptyRange());
+}
+
+function onRangeTypeChange(rng) {
+    // 切换类型时清空输入，避免残留脏数据
+    rng.seqFrom = '';
+    rng.seqTo   = '';
+    rng.callId  = '';
+    rng.ownOnly = true;
+}
+
+function handleExportOutsideClick(e) {
+    if (exportBtnRef.value && !exportBtnRef.value.contains(e.target)) {
+        exportPanelOpen.value = false;
+    }
+}
+
+async function doExport() {
+    exportError.value = '';
+
+    // 校验并构建 ranges 数组
+    const ranges = [];
+    for (const rng of exportRanges.value) {
+        if (rng.type === 'seq') {
+            const lo = Number(rng.seqFrom);
+            const hi = Number(rng.seqTo);
+            if (!rng.seqFrom || !rng.seqTo || isNaN(lo) || isNaN(hi)) {
+                exportError.value = '请填写完整的 SEQ 范围';
+                return;
+            }
+            if (lo > hi) {
+                exportError.value = `SEQ 范围无效：${lo} > ${hi}`;
+                return;
+            }
+            ranges.push({ seqFrom: lo, seqTo: hi });
+        } else {
+            const cid = Number(rng.callId);
+            if (!rng.callId || isNaN(cid)) {
+                exportError.value = '请填写有效的 callId';
+                return;
+            }
+            ranges.push({ callId: cid, ownOnly: !!rng.ownOnly });
+        }
+    }
+
+    exporting.value = true;
+    try {
+        const res = await fetch(`/api/sessions/${props.sessionId}/events/export`, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ ranges, format: exportFormat.value }),
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || `HTTP ${res.status}`);
+        }
+
+        // 流式下载 → Blob → 触发浏览器下载
+        const ext  = exportFormat.value === 'tsv' ? 'tsv'
+                   : exportFormat.value === 'text' ? 'txt'
+                   : 'ndjson';
+        const blob = await res.blob();
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = `events-${props.sessionId.slice(0, 8)}.${ext}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        exportPanelOpen.value = false;
+    } catch (e) {
+        exportError.value = `导出失败: ${e.message}`;
+    } finally {
+        exporting.value = false;
+    }
+}
+
 defineExpose({ reload: () => loadEvents(true), gotoValueSearch });
 
 onMounted(async () => {
     await loadEvents();
     await loadEventTypes();
     document.addEventListener('click', handleOutsideClick);
+    document.addEventListener('click', handleExportOutsideClick);
 });
 
 onUnmounted(() => {
     document.removeEventListener('click', handleOutsideClick);
+    document.removeEventListener('click', handleExportOutsideClick);
 });
 </script>
 
@@ -743,4 +923,89 @@ onUnmounted(() => {
 .match-var { color: #c4b5fd; font-style: normal; }
 .match-eq  { color: var(--text-muted); margin: 0 1px; }
 .match-val { color: #fcd34d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ─── 导出面板 ─────────────────────────────────────────────────────────────── */
+.export-wrap { position: relative; }
+
+.btn-export {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 5px 12px; border-radius: 6px; border: 1px solid rgba(99,102,241,0.4);
+    background: rgba(99,102,241,0.1); color: #a5b4fc;
+    font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s;
+}
+.btn-export:hover { background: rgba(99,102,241,0.2); border-color: rgba(99,102,241,0.7); }
+
+.export-panel {
+    position: absolute; top: calc(100% + 6px); right: 0; z-index: 200;
+    width: 380px; padding: 14px 16px;
+    background: var(--bg-secondary, #1e2138);
+    border: 1px solid var(--border-color, rgba(99,102,241,0.25));
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+}
+
+.ep-title {
+    font-size: 13px; font-weight: 700; color: var(--text-primary);
+    margin-bottom: 12px; letter-spacing: 0.02em;
+}
+
+/* 范围列表 */
+.ep-ranges { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+
+.ep-range-row {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+
+.ep-type-sel {
+    padding: 3px 6px; border-radius: 5px; font-size: 11px;
+    background: var(--bg-tertiary, #161929); color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+
+.ep-seq-input, .ep-call-input {
+    width: 90px; padding: 3px 6px; border-radius: 5px; font-size: 11px;
+    background: var(--bg-tertiary, #161929); color: var(--text-primary);
+    border: 1px solid var(--border-color); font-family: monospace;
+}
+.ep-call-input { width: 80px; }
+
+.ep-tilde { color: var(--text-muted); font-size: 12px; }
+
+.ep-own-label {
+    display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-secondary);
+    cursor: pointer; white-space: nowrap;
+}
+
+.ep-del-btn {
+    padding: 2px 6px; border-radius: 4px; border: none; font-size: 11px;
+    background: rgba(239,68,68,0.15); color: #fca5a5; cursor: pointer;
+    transition: background 0.1s;
+}
+.ep-del-btn:hover { background: rgba(239,68,68,0.3); }
+
+.ep-add-btn {
+    align-self: flex-start; padding: 3px 10px; border-radius: 5px;
+    border: 1px dashed rgba(99,102,241,0.4); background: transparent;
+    color: #a5b4fc; font-size: 11px; cursor: pointer;
+    transition: background 0.1s;
+}
+.ep-add-btn:hover { background: rgba(99,102,241,0.1); }
+
+/* 格式选择 */
+.ep-fmt {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 0; border-top: 1px solid var(--border-color); margin-bottom: 10px;
+}
+.ep-fmt-label { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.ep-fmt-radio {
+    display: flex; align-items: center; gap: 4px; font-size: 11px;
+    color: var(--text-secondary); cursor: pointer;
+}
+.ep-fmt-hint { color: var(--text-muted); font-size: 10px; margin-left: 2px; }
+
+/* 操作区 */
+.ep-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.ep-error { flex: 1; font-size: 11px; color: #fca5a5; }
+.ep-submit { font-size: 12px; padding: 5px 14px; }
 </style>
