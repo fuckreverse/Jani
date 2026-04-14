@@ -77,7 +77,7 @@
       <!-- Tab 内容区域（使用 v-show 保留已加载组件状态） -->
       <OverviewTab    v-show="activeTab === 'overview'"   :session="session" :plugin-status="pluginStatus" :plugin-duration="wsPluginDuration" :is-analyzing="isAnalyzing" :inline-progress-pct="inlineProgressPct" :running-plugin="runningPlugin" @open-progress="showProgressDrawer = true" />
       <EventsTab      v-show="activeTab === 'events'"      ref="eventsTabRef"      :session-id="sessionId" :target-seq="targetSeq" @goto-function="onGotoFunction" />
-      <FunctionsTab   v-show="activeTab === 'functions'"   ref="functionsTabRef"   :session-id="sessionId" :plugin-status="pluginStatus" :target-call="targetCall" @open-dataflow="onOpenDataflow" />
+      <FunctionsTab   v-show="activeTab === 'functions'"   ref="functionsTabRef"   :session-id="sessionId" :plugin-status="pluginStatus" :target-call="targetCall" @open-dataflow="onOpenDataflow" @goto-line="onCfgGotoLine" />
       <LoopsTab       v-show="activeTab === 'loops'"       ref="loopsTabRef"       :session-id="sessionId" @goto-seq="onGotoSeq" />
       <PatternsTab    v-show="activeTab === 'patterns'"    ref="patternsTabRef"    :session-id="sessionId" @goto-event-by-value="onGotoEventByValue" />
       <CryptoTab      v-show="activeTab === 'crypto'"      ref="cryptoTabRef"      :session-id="sessionId" />
@@ -85,7 +85,7 @@
       <DataflowTab    v-show="activeTab === 'dataflow'"    ref="dataflowTabRef"    :session-id="sessionId" />
       <ObjMutTab      v-show="activeTab === 'objmut'"      ref="objmutTabRef"      :session-id="sessionId" />
       <ObfuscationTab v-show="activeTab === 'obfuscation'" ref="obfuscationTabRef" :session-id="sessionId" @goto-function="onGotoFunction" />
-      <CfgTab        v-show="activeTab === 'cfg'"         ref="cfgTabRef"         :session-id="sessionId" />
+      <CfgTab        v-show="activeTab === 'cfg'"         ref="cfgTabRef"         :session-id="sessionId" @goto-line="onCfgGotoLine" />
       <WebApiTab     v-show="activeTab === 'webapi'"      ref="webapiTabRef"      :session-id="sessionId" />
     </div>
   </div>
@@ -220,6 +220,13 @@ async function onOpenDataflow({ varName, direction = 'both', mode = 'graph' }) {
     activeTab.value = 'dataflow';
     await nextTick();
     dataflowTabRef.value?.openDataflowFor(varName, mode, direction);
+}
+
+/** 来自 CfgTab：fn-cfg 块节点双击 → 跳转到事件流对应行号范围 */
+async function onCfgGotoLine({ minLine, maxLine }) {
+    activeTab.value = 'events';
+    await nextTick();
+    eventsTabRef.value?.gotoLine(minLine, maxLine);
 }
 
 const tabs = [

@@ -160,7 +160,7 @@
           <span class="tooltip-key">{{ k }}</span>
           <span class="tooltip-val">{{ v }}</span>
         </div>
-        <div v-if="tooltip.isLoop" class="tooltip-hint">🖱 双击查看迭代详情</div>
+        <div v-if="tooltip.hint" class="tooltip-hint">{{ tooltip.hint }}</div>
       </div>
     </div>
 
@@ -227,11 +227,14 @@
 import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import cytoscape from 'cytoscape';
 
-// ── Props ─────────────────────────────────────────────────────────────────
+// ── Props / Emits ─────────────────────────────────────────────────────────
 
 const props = defineProps({
     sessionId: { type: String, required: true },
 });
+
+// goto-line: { minLine, maxLine } → 跳转到事件流对应行号范围
+const emit = defineEmits(['goto-line']);
 
 // ── 全局状态 ──────────────────────────────────────────────────────────────
 
@@ -587,6 +590,16 @@ function initCytoscape(elements, cfgMode) {
             props_obj['源码']     = truncate(data.srcText, 40);
         }
 
+        // 提示可双击的操作
+        let dblclickHint = '';
+        if (cfgMode === 'funcfg' && data.minLine != null) {
+            dblclickHint = '🖱 双击跳转到事件流';
+        } else if (cfgMode === 'callgraph' && data.type === 'function') {
+            dblclickHint = '🖱 双击下钻函数 CFG';
+        } else if (cfgMode === 'callgraph' && data.type === 'loop') {
+            dblclickHint = '🖱 双击查看迭代详情';
+        }
+
         tooltip.value = {
             x:     pos.x + 12,
             y:     pos.y + 12,
@@ -595,13 +608,32 @@ function initCytoscape(elements, cfgMode) {
                 : (data.label || data.id),
             props: props_obj,
             isLoop,
+            hint: dblclickHint,
         };
     });
 
-    // 循环节点双击 → 迭代详情
+    // 双击事件处理
     if (cfgMode === 'callgraph') {
+        // 调用图：循环节点双击 → 迭代详情
         cy.on('dblclick', 'node[type="loop"]', (evt) => {
             openLoopDrawer(evt.target.data());
+        });
+        // 调用图：函数节点双击 → 下钻到 fn-cfg 模式
+        cy.on('dblclick', 'node[type="function"]', (evt) => {
+            const d = evt.target.data();
+            if (d.fnName) {
+                tooltip.value = null;
+                gotoFnCfg(d.fnName, d.fnIid ?? null);
+            }
+        });
+    } else if (cfgMode === 'funcfg') {
+        // 函数CFG：块节点双击 → 跳转到事件流对应行号范围
+        cy.on('dblclick', 'node[type="block"]', (evt) => {
+            const d = evt.target.data();
+            if (d.minLine != null) {
+                tooltip.value = null;
+                emit('goto-line', { minLine: d.minLine, maxLine: d.maxLine ?? d.minLine });
+            }
         });
     }
 
@@ -1036,6 +1068,34 @@ watch(() => props.sessionId, () => {
         loadFnList();
     }
 });
+
+// ── 公开方法（供父组件 / SessionDetail 调用） ─────────────────────────────
+
+/**
+ * 从外部切换到函数 CFG 模式并分析指定函数。
+ * 用于调用图节点双击后联动。
+ */
+async function gotoFnCfg(fnName, fnIid) {
+    // 切换到 funcfg 模式（若已在该模式则什么也不做，只销毁旧图）
+    if (mode.value !== 'funcfg') {
+        mode.value = 'funcfg';
+        error.value = '';
+        tooltip.value = null;
+        destroyCy();
+    }
+    // 确保函数列表已加载（有缓存时直接返回）
+    await loadFnList();
+    selectedFn.value = { fnName, fnIid: fnIid ?? null };
+    fnSearchText.value = fnName;
+    showFnDropdown.value = false;
+    fnCfgData.value = null;
+    destroyCy();
+    await loadFnCfg();
+}
+
+defineExpose({ reload: () => {
+    if (mode.value === 'callgraph') loadCfg();
+}, gotoFnCfg });
 </script>
 
 <style scoped>

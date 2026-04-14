@@ -305,6 +305,7 @@
             <span class="cfg-tooltip-key">{{ k }}</span>
             <span class="cfg-tooltip-val">{{ v }}</span>
           </div>
+          <div v-if="cfgTooltip.hint" class="cfg-tooltip-hint">{{ cfgTooltip.hint }}</div>
         </div>
       </div>
     </div>
@@ -332,7 +333,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(['update:childCount', 'open-dataflow']);
+const emit = defineEmits(['update:childCount', 'open-dataflow', 'goto-line']);
 
 // ── 状态 ─────────────────────────────────────────────────────────────────────
 
@@ -904,7 +905,17 @@ function initCfgCy(data) {
       y:     pos.y + 12,
       title: d.minLine != null ? `Block L${d.minLine}` : d.id,
       props: props_obj,
+      hint:  d.minLine != null ? '🖱 双击跳转到事件流' : '',
     };
+  });
+
+  // 双击块节点 → 通知父组件跳转到对应行号范围的事件流
+  cfgCy.on('dblclick', 'node', (evt) => {
+    const d = evt.target.data();
+    if (d.minLine != null) {
+      cfgTooltip.value = null;
+      emit('goto-line', { minLine: d.minLine, maxLine: d.maxLine ?? d.minLine });
+    }
   });
 
   cfgCy.on('tap', (evt) => {
@@ -1330,4 +1341,13 @@ function initCfgCy(data) {
 
 .cfg-tooltip-key { color: var(--text-muted); }
 .cfg-tooltip-val { color: var(--text-primary); font-family: 'JetBrains Mono', monospace; }
+
+.cfg-tooltip-hint {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border-color);
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: center;
+}
 </style>

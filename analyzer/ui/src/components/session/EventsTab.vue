@@ -614,6 +614,24 @@ function gotoValueSearch(value, mode = 'str') {
     loadEvents(true);
 }
 
+/**
+ * 从外部跳转：按行号范围过滤事件流。
+ * minLine / maxLine 均为源码行号（包含端点）。
+ * 若 maxLine 省略则只按 minLine 精确过滤。
+ */
+function gotoLine(minLine, maxLine) {
+    const lineStr = (maxLine != null && maxLine !== minLine)
+        ? `${minLine}-${maxLine}`
+        : String(minLine);
+    filters.value = {
+        types: [], line: lineStr, varName: '',
+        valueMode: 'strLike', valueQuery: '', valueQuery2: '',
+    };
+    currentPage.value = 1;
+    cursorStack.value = [0];
+    loadEvents(true);
+}
+
 // ─── 导出面板 ─────────────────────────────────────────────────────────────────
 
 const exportBtnRef    = ref(null);
@@ -718,7 +736,7 @@ async function doExport() {
     }
 }
 
-defineExpose({ reload: () => loadEvents(true), gotoValueSearch });
+defineExpose({ reload: () => loadEvents(true), gotoValueSearch, gotoLine });
 
 onMounted(async () => {
     await loadEvents();

@@ -68,9 +68,20 @@ router.get('/events', (req, res) => {
         const params = [id];
 
         // line 已从 events 移除（Phase D），通过 smap 过滤
+        // 支持两种格式：
+        //   单行号：line=45        → s.sl = 45
+        //   行号范围：line=45-52   → s.sl BETWEEN 45 AND 52
         if (line !== undefined) {
-            conditions.push(`EXISTS (SELECT 1 FROM smap s WHERE s.session_id = e.session_id AND s.iid = e.iid AND s.sl = ?)`);
-            params.push(Number(line));
+            const dashIdx = String(line).indexOf('-');
+            if (dashIdx > 0) {
+                const lo = Number(line.slice(0, dashIdx));
+                const hi = Number(line.slice(dashIdx + 1));
+                conditions.push(`EXISTS (SELECT 1 FROM smap s WHERE s.session_id = e.session_id AND s.iid = e.iid AND s.sl BETWEEN ? AND ?)`);
+                params.push(lo, hi);
+            } else {
+                conditions.push(`EXISTS (SELECT 1 FROM smap s WHERE s.session_id = e.session_id AND s.iid = e.iid AND s.sl = ?)`);
+                params.push(Number(line));
+            }
         }
         // types 多选（优先），type 单选（向后兼容）
         // type 列为整数编码（Phase D），过滤时将字符串转为整数
