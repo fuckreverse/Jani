@@ -27,7 +27,7 @@
         <label class="filter-label">对象：</label>
         <select v-model="objBaseFilter" @change="onFilterChange" class="select-input obj-select">
           <option value="">— 全部 —</option>
-          <option v-for="s in objBaseStats" :key="s.base_var" :value="s.base_var">
+          <option v-for="s in filteredObjBaseStats" :key="s.base_var" :value="s.base_var">
             {{ s.base_var }}（写 {{ s.write_count }}·读 {{ s.read_count }}）
           </option>
         </select>
@@ -130,7 +130,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { truncate } from '../../composables/useSessionUtils.js';
 import { openValueViewer } from '../../composables/useValueViewer.js';
 
@@ -144,6 +144,13 @@ const objLoading    = ref(false);
 const objBaseFilter = ref('');
 const objSearch     = ref('');      // 搜索关键词（模糊匹配 base_var / offset_key）
 const rwFilter      = ref('all');   // 'all' | 'write' | 'read'
+
+// 根据搜索词过滤对象列表（只对 base_var 名称做匹配）
+const filteredObjBaseStats = computed(() => {
+    const kw = objSearch.value.trim().toLowerCase();
+    if (!kw) return objBaseStats.value;
+    return objBaseStats.value.filter(s => s.base_var.toLowerCase().includes(kw));
+});
 
 // 分页状态
 const currentPage = ref(1);
