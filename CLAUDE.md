@@ -121,3 +121,24 @@ npm run test:unit / test:integration / test:logging  # 分组
 | DOC-19 | [`analyzer/docs/WebUI.md`](analyzer/docs/WebUI.md) | `analyzer/` JTA Web UI 设计、MCP Server 设计与 Tool 列表 |
 
 **文档同步原则**：代码变更时同步更新对应文档；只更新受影响的文档，不整体重写；以代码为准。
+
+### MCP / Skill 同步规则
+
+`analyzer/mcp/` 目录提供 MCP Server，将 JTA 的 52 个能力暴露给 LLM 客户端（Claude / Cursor / CatPaw 等）。
+`analyzer/skills/jta-mcp/` 目录包含配套的 CatPaw Skill（上下文工程文档）。
+
+**以下情况必须同步修改 MCP 层与 Skill：**
+
+| 变更类型 | 需同步的文件 |
+|---|---|
+| 新增 REST API 端点 | `mcp/client.mjs`（新增方法）、`mcp/tools.mjs`（新增 Tool）、`skills/jta-mcp/references/tools.md`（更新索引） |
+| 删除或重命名 API 端点 | 同上，删除对应方法/工具/索引条目 |
+| API 参数或返回值语义变更 | `mcp/tools.mjs`（更新 Zod schema 和描述）、对应 `skills/jta-mcp/references/` 文件 |
+| 新增分析插件 | `skills/jta-mcp/references/concepts.md`（插件执行顺序表）、`references/tools.md`（若有对应工具） |
+| SOP 流程变更 | `skills/jta-mcp/references/sop.md` |
+| 核心概念变更（ID 体系、分页、事件类型等） | `skills/jta-mcp/references/concepts.md` |
+
+修改 Skill 内容后，重新打包：
+```bash
+python3 ~/.catpaw/skills/skill-creator/scripts/package_skill.py analyzer/skills/jta-mcp analyzer/skills
+```

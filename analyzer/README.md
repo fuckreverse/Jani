@@ -142,6 +142,63 @@ curl "http://localhost:33000/api/sessions/<id>/events?line=42"
 curl "http://localhost:33000/api/sessions/<id>/events?varName=key"
 ```
 
+## MCP Server
+
+JTA 提供 MCP (Model Context Protocol) Server，将 52 个分析能力暴露给 LLM 客户端（Claude Desktop / Cursor / CatPaw 等）。
+
+### 启动方式
+
+```bash
+npm run mcp:stdio        # stdio 传输（适用于 Claude Desktop / CatPaw，进程间通信）
+npm run mcp:sse          # SSE 传输（端口 4000）
+npm run mcp:streamable   # Streamable HTTP（端口 4001）
+```
+
+> MCP Server 需与 JTA Server 同时运行（`node server.mjs` 或 `npm run dev`）。
+
+### 配置示例（Claude Desktop）
+
+```json
+{
+  "mcpServers": {
+    "jta": {
+      "command": "node",
+      "args": ["/path/to/analyzer/mcp/jta-mcp-stdio.mjs"]
+    }
+  }
+}
+```
+
+### 源码结构
+
+```
+mcp/
+├── client.mjs          # JTA REST API HTTP 封装（所有工具的底层调用）
+├── tools.mjs           # 52 个 MCP Tool 定义（Zod schema + handler）
+├── jta-mcp-stdio.mjs   # stdio 传输入口
+├── jta-mcp-sse.mjs     # SSE 传输入口（端口 4000）
+└── jta-mcp-streamable.mjs  # Streamable HTTP 入口（端口 4001）
+```
+
+### Skill（上下文工程）
+
+`skills/jta-mcp/` 包含配套的 CatPaw Skill，帮助 LLM 掌握工具使用的最佳实践：
+
+```
+skills/
+├── jta-mcp.skill           # 打包文件（可直接安装到 CatPaw）
+└── jta-mcp/
+    ├── SKILL.md            # 触发条件 + 启动命令 + sessionId 获取流程
+    └── references/
+        ├── sop.md          # 5 大分析场景完整 SOP
+        ├── tools.md        # 52 个工具全量索引
+        └── concepts.md     # ID 体系 / 事件类型 / 插件顺序 / 分页机制
+```
+
+安装 Skill（CatPaw 用户）：在 CatPaw 中打开 `analyzer/skills/jta-mcp.skill` 文件即可安装。
+
+---
+
 ## 目录结构
 
 ```
@@ -194,6 +251,15 @@ analyzer/
 │   │       ├── ProgressDrawer.vue    # 分析进度侧边抽屉
 │   │       └── TraceMonitor.vue      # Trace 收集监控（/trace）
 │   └── vite.config.js       # Vite 代理 → 33000
+├── mcp/                     # MCP Server（LLM 客户端集成）
+│   ├── client.mjs           # JTA REST API HTTP 封装
+│   ├── tools.mjs            # 52 个 MCP Tool 定义（Zod schema）
+│   ├── jta-mcp-stdio.mjs    # stdio 传输入口
+│   ├── jta-mcp-sse.mjs      # SSE 传输入口（端口 4000）
+│   └── jta-mcp-streamable.mjs  # Streamable HTTP 入口（端口 4001）
+├── skills/                  # CatPaw Skill（上下文工程）
+│   ├── jta-mcp.skill        # 打包文件（可安装到 CatPaw）
+│   └── jta-mcp/             # Skill 源码（SKILL.md + references/）
 ├── InstrumentRunner.mjs     # 服务端沙箱运行（WS 推流输出，30s 超时，3 并发）
 ├── PluginEngine.mjs         # 插件调度器（拓扑排序 + 并发执行 + 断点恢复 + 分阶段调度）
 ├── logger.mjs               # 日志封装
