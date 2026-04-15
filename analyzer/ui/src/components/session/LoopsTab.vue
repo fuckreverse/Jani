@@ -77,6 +77,22 @@
         <template v-else>
 
           <!-- ── 循环信息横幅（src_text + 函数归属）─────────────────────────── -->
+          <!-- ── 变量角色摘要行（A6 数据，仅在有数据时显示）──────────────────── -->
+          <div v-if="varRoles.length > 0" class="var-roles-bar">
+            <span class="var-roles-label">变量角色</span>
+            <div class="var-roles-chips">
+              <span
+                v-for="r in varRoles"
+                :key="r.var_name"
+                class="var-role-chip"
+                :class="roleClass(r.role)"
+                :title="roleTooltip(r)"
+              >
+                <span class="role-icon">{{ roleIcon(r.role) }}</span>{{ r.var_name }}
+                <em v-if="r.min_val !== null && r.max_val !== null"> [{{ fmtNum(r.min_val) }}→{{ fmtNum(r.max_val) }}]</em>
+              </span>
+            </div>
+          </div>
           <div class="loop-src-banner">
             <span class="loop-src-label">源码</span>
             <code class="loop-src-code">{{ selectedLoop.src_text || '（无源码映射）' }}</code>
@@ -167,10 +183,12 @@
                               v-for="(val, key) in filteredWrites(iter)"
                               :key="'w:' + key"
                               class="var-chip var-write var-chip-expandable"
-                              :class="chipDiffClass('w', key, val, rowIdx)"
-                              title="写入值 — 点击查看完整值"
+                              :class="[chipDiffClass('w', key, val, rowIdx), chipRoleClass(key)]"
+                              :title="'写入值 — 点击查看完整值' + (chipRoleIcon(key) ? '\n角色：' + roleTooltip({ role: varRoleMap.get(key), min_val: null, max_val: null }) : '')"
                               @click.stop="openValueViewer(val, key + ' [write]')"
-                            >{{ key }}=<em>{{ truncateVal(val) }}</em></span>
+                            >
+                              <span v-if="chipRoleIcon(key)" class="chip-role-icon">{{ chipRoleIcon(key) }}</span>{{ key }}=<em>{{ truncateVal(val) }}</em>
+                            </span>
                           </template>
                           <!-- 读快照（蓝色） -->
                           <template v-if="snapshotMode !== 'write'">
@@ -178,10 +196,12 @@
                               v-for="(val, key) in filteredReads(iter)"
                               :key="'r:' + key"
                               class="var-chip var-read var-chip-expandable"
-                              :class="chipDiffClass('r', key, val, rowIdx)"
+                              :class="[chipDiffClass('r', key, val, rowIdx), chipRoleClass(key)]"
                               title="读取值 — 点击查看完整值"
                               @click.stop="openValueViewer(val, key + ' [read]')"
-                            >{{ key }}<span class="read-mark">r</span>=<em>{{ truncateVal(val) }}</em></span>
+                            >
+                              <span v-if="chipRoleIcon(key)" class="chip-role-icon">{{ chipRoleIcon(key) }}</span>{{ key }}<span class="read-mark">r</span>=<em>{{ truncateVal(val) }}</em>
+                            </span>
                           </template>
                           <span
                             v-if="noVisibleVars(iter)"
@@ -291,6 +311,71 @@ const snapshotMode = ref('both');
 const varFilter    = ref('');
 /** 跨迭代 diff 高亮开关（默认开启） */
 const diffMode     = ref(true);
+
+// ── 变量角色（A6 LoopVarClassifier）──────────────────────────────────────
+/** 当前选中循环的变量角色列表 [{loop_id, var_name, role, min_val, max_val, ...}] */
+const varRoles    = ref([]);
+/** 变量名 → role 的快速查找 Map（用于 chip 角标） */
+const varRoleMap  = ref(new Map());
+
+/** 角色 → 显示图标 */
+function roleIcon(role) {
+    switch (role) {
+        case 'counter_inc':  return '↑';
+        case 'counter_dec':  return '↓';
+        case 'accumulator':  return '+';
+        case 'oscillator':   return '~';
+        case 'state':        return 'S';
+        case 'constant':     return '=';
+        case 'sparse':       return '?';
+        default:             return '';
+    }
+}
+
+/** 角色 → CSS 类名 */
+function roleClass(role) {
+    return `role-${role.replace('_', '-')}`;
+}
+
+/** 角色 tooltip 文本 */
+function roleTooltip(r) {
+    const descs = {
+        counter_inc:  '计数器（严格递增）',
+        counter_dec:  '计数器（严格递减）',
+        accumulator:  '累加器（方向性变化）',
+        oscillator:   '振荡变量（交替/周期变化）',
+        state:        '状态变量（非数值，每次变化）',
+        constant:     '循环不变量（每次迭代相同）',
+        sparse:       '稀疏变量（不足50%迭代出现）',
+    };
+    const desc = descs[r.role] ?? r.role;
+    const parts = [desc];
+    if (r.min_val !== null && r.max_val !== null)
+        parts.push(`范围：${fmtNum(r.min_val)} → ${fmtNum(r.max_val)}`);
+    if (r.present_count != null)
+        parts.push(`出现 ${r.present_count}/${r.total_iters} 次迭代`);
+    if (r.distinct_count != null)
+        parts.push(`${r.distinct_count} 个不同值`);
+    return parts.join('\n');
+}
+
+/** 格式化数值（整数/浮点自适应） */
+function fmtNum(n) {
+    if (n == null) return '';
+    if (Number.isInteger(n)) return String(n);
+    return n.toFixed(4).replace(/\.?0+$/, '');
+}
+
+/** 根据变量名从角色 Map 取角色（用于 chip 角标） */
+function chipRoleIcon(varName) {
+    const role = varRoleMap.value.get(varName);
+    return role ? roleIcon(role) : '';
+}
+
+function chipRoleClass(varName) {
+    const role = varRoleMap.value.get(varName);
+    return role ? `chip-role-${role.replace('_', '-')}` : '';
+}
 
 const iterTotalPages = computed(() => Math.max(1, Math.ceil(iterTotal.value / ITER_PAGE_SIZE)));
 
@@ -415,7 +500,30 @@ async function selectLoop(loop) {
     iterJump.value = 1;
     iterations.value = [];
     iterTotal.value = 0;
-    await loadIterations();
+    varRoles.value = [];
+    varRoleMap.value = new Map();
+    await Promise.all([
+        loadIterations(),
+        loadVarRoles(loop.id),
+    ]);
+}
+
+async function loadVarRoles(loopId) {
+    try {
+        const params = new URLSearchParams({ loopId, limit: 200 });
+        const res = await fetch(`/api/sessions/${props.sessionId}/loop-var-roles?${params}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const roles = data.roles ?? [];
+        // 过滤掉常量和稀疏变量（UI 中不做 chip 角标，避免噪音），但在摘要行保留
+        varRoles.value = roles.filter(r => r.role !== 'sparse' && r.role !== 'constant');
+        // 构建 Map（所有角色，含常量，供迭代 chip hover 用）
+        const m = new Map();
+        for (const r of roles) m.set(r.var_name, r.role);
+        varRoleMap.value = m;
+    } catch {
+        // 非致命：A6 插件未运行时静默忽略
+    }
 }
 
 async function loadIterations() {
@@ -723,6 +831,46 @@ onMounted(loadLoops);
     background: rgba(99,102,241,0.2); color: #c7d2fe;
     border-color: rgba(99,102,241,0.5);
 }
+
+/* ── 变量角色摘要行（A6）────────────────────────────────────────── */
+.var-roles-bar {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 6px 12px; margin-bottom: 8px;
+    background: rgba(15,20,40,0.4);
+    border: 1px solid rgba(99,102,241,0.15);
+    border-radius: 6px; flex-wrap: wrap;
+}
+.var-roles-label {
+    font-size: 10px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    flex-shrink: 0; white-space: nowrap; padding-top: 3px;
+}
+.var-roles-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.var-role-chip {
+    display: inline-flex; align-items: center; gap: 2px;
+    padding: 2px 6px; border-radius: 4px; font-size: 11px;
+    font-family: monospace; cursor: default; white-space: nowrap;
+}
+.var-role-chip em { font-style: normal; font-size: 10px; opacity: 0.75; margin-left: 2px; }
+.role-icon { font-size: 10px; margin-right: 2px; opacity: 0.9; }
+/* 角色颜色 */
+.role-counter-inc { background: rgba(34,197,94,0.12);  color: #86efac; border: 1px solid rgba(34,197,94,0.25); }
+.role-counter-dec { background: rgba(248,113,113,0.12); color: #fca5a5; border: 1px solid rgba(248,113,113,0.25); }
+.role-accumulator { background: rgba(251,191,36,0.12);  color: #fcd34d; border: 1px solid rgba(251,191,36,0.25); }
+.role-oscillator  { background: rgba(167,139,250,0.12); color: #c4b5fd; border: 1px solid rgba(167,139,250,0.25); }
+.role-state       { background: rgba(56,189,248,0.12);  color: #7dd3fc; border: 1px solid rgba(56,189,248,0.25); }
+
+/* chip 上的角色角标 */
+.chip-role-icon {
+    font-size: 9px; font-weight: 700; margin-right: 1px;
+    opacity: 0.85;
+}
+/* chip 角色边框微提示（不覆盖 diff 高亮，优先级低） */
+.chip-role-counter-inc em { color: #86efac !important; }
+.chip-role-counter-dec em { color: #fca5a5 !important; }
+.chip-role-accumulator em { color: #fcd34d !important; }
+.chip-role-oscillator  em { color: #c4b5fd !important; }
+.chip-role-state       em { color: #7dd3fc !important; }
 
 /* ── diff 高亮 chips（不足4）────────────────────────────────────── */
 /* 变化的变量：橙色边框高亮，加粗 */

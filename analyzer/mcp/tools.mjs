@@ -287,6 +287,24 @@ export function registerTools(server, client) {
             }))
     );
 
+    server.tool('get_loop_var_roles',
+        'Get per-variable role classification for loops (A6 LoopVarClassifier). ' +
+        'Roles: counter_inc (↑ strict monotone), counter_dec (↓ strict monotone), ' +
+        'accumulator (directional numeric), oscillator (numeric oscillation), ' +
+        'state (non-numeric changing), constant (loop-invariant), sparse (<50% present). ' +
+        'Use this to quickly identify loop counters and accumulators without reading all iteration snapshots.',
+        {
+            sessionId: z.string().describe('session ID'),
+            loopId:    z.number().int().optional().describe('loop ID (optional, returns all loops if omitted)'),
+            role:      z.enum(['counter_inc','counter_dec','accumulator','oscillator','state','constant','sparse'])
+                         .optional().describe('filter by role (optional)'),
+            varName:   z.string().optional().describe('filter by variable name keyword (optional)'),
+            limit:     z.number().int().optional().describe('max results (default 200)'),
+        },
+        async ({ sessionId, loopId, role, varName, limit = 200 }) =>
+            safe(() => client.getLoopVarRoles(sessionId, { loopId, role, varName, limit }))
+    );
+
     // ── Dataflow / Taint ──────────────────────────────────────────────────────
     server.tool('trace_taint',
         'Taint tracking: forward=trace pollution path, backward=trace data source. Returns DAG.',

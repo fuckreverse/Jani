@@ -331,6 +331,11 @@ function watchProject(projectId) {
         } else if (msg.type === 'init') {
             p.status    = msg.status;
             p.iid_count = msg.iid_count;
+            // 若连接时插桩已完成（status 为终态），关闭 WS 并清理
+            if (msg.status === 'ready' || msg.status === 'failed') {
+                ws.close();
+                wsMap.delete(projectId);
+            }
         }
     };
 

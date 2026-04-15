@@ -5,6 +5,7 @@
  * GET  /api/sessions/:id/var-lifetime       变量生命周期
  * POST /api/sessions/:id/taint             污点追踪
  * GET  /api/sessions/:id/loop-iterations   循环迭代数据
+ * GET  /api/sessions/:id/loop-var-roles    循环变量角色（A6）
  * GET  /api/sessions/:id/value-patterns    值模式
  * GET  /api/sessions/:id/crypto-hints      加密算法提示
  * GET  /api/sessions/:id/signature-paths   签名路径
@@ -184,6 +185,65 @@ router.get('/loop-iterations', (req, res) => {
         res.json({ loops, iterations: result, count: result.length, total: totalRow?.total ?? 0, offset: offsetN });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/loop-iterations] error:');
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── GET /api/sessions/:id/loop-var-roles ──────────────────────────────────
+// 返回 A6_LoopVarClassifier 推断的变量角色结果。
+// 查询参数：
+//   loopId   — 指定循环 ID（省略则返回所有循环的角色）
+//   role     — 按角色过滤（counter_inc / counter_dec / accumulator /
+//               oscillator / state / constant / sparse）
+//   varName  — 变量名关键字（模糊匹配）
+//   limit    — 每页条数（默认 200，最大 1000）
+//   offset   — 偏移量
+
+router.get('/loop-var-roles', (req, res) => {
+    try {
+        const { id } = req.params;
+        const { loopId, role, varName, limit = '200', offset = '0' } = req.query;
+
+        const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const conditions = ['session_id = ?'];
+        const params     = [id];
+
+        if (loopId !== undefined && loopId !== '') {
+            conditions.push('loop_id = ?');
+            params.push(Number(loopId));
+        }
+        if (role) {
+            conditions.push('role = ?');
+            params.push(role);
+        }
+        if (varName) {
+            conditions.push('var_name LIKE ?');
+            params.push(`%${varName}%`);
+        }
+
+        const limitN  = Math.min(Number(limit)  || 200, 1000);
+        const offsetN = Number(offset) || 0;
+
+        const rows = db.all(
+            `SELECT id, loop_id, var_name, role, first_val, last_val,
+                    min_val, max_val, distinct_count, present_count, total_iters
+             FROM loop_var_roles
+             WHERE ${conditions.join(' AND ')}
+             ORDER BY loop_id ASC, role ASC, var_name ASC
+             LIMIT ? OFFSET ?`,
+            ...params, limitN, offsetN
+        );
+
+        const totalRow = db.get(
+            `SELECT COUNT(*) AS total FROM loop_var_roles WHERE ${conditions.join(' AND ')}`,
+            ...params
+        );
+
+        res.json({ roles: rows, total: totalRow?.total ?? 0, offset: offsetN });
+    } catch (e) {
+        log.error({ err: e }, '[GET /api/sessions/:id/loop-var-roles] error:');
         res.status(500).json({ error: e.message });
     }
 });

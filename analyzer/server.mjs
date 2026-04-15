@@ -590,10 +590,12 @@ if (existsSync(UI_DIST)) {
 
 const server = createServer(app);
 
-// 为 /ws/trace 单独创建一个 WebSocketServer，启用 permessage-deflate
+// 为 /ws/trace 单独创建一个 WebSocketServer（noServer 模式），启用 permessage-deflate
+// 使用 noServer 模式避免多个 WSS 共享同一 HTTP server 时产生的 upgrade 事件竞争问题：
+// 若两个 WSS 都监听同一 server 的 upgrade 事件，其中一个的 shouldHandle() 返回 false 时
+// 会调用 abortHandshake(socket, 400) 将 socket 销毁，导致另一个 WSS 无法建立连接。
 const wssTrace = new WebSocketServer({
-    server,
-    path: '/ws/trace',
+    noServer: true,
     perMessageDeflate: {
         zlibDeflateOptions: { level: GZIP_LEVEL },
         // 保留上下文窗口（提升压缩率），服务端和客户端各自维护
@@ -602,8 +604,24 @@ const wssTrace = new WebSocketServer({
     },
 });
 
-// 通用 WebSocket 服务器（进度 / 运行输出等）
-const wss = new WebSocketServer({ server });
+// 通用 WebSocket 服务器（进度 / 运行输出等，noServer 模式）
+const wss = new WebSocketServer({ noServer: true });
+
+// 统一处理 HTTP Upgrade 请求，按路径路由到对应的 WSS
+server.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url, `http://localhost:${PORT}`);
+    const pathname = url.pathname;
+
+    if (pathname === '/ws/trace') {
+        wssTrace.handleUpgrade(req, socket, head, (ws) => {
+            wssTrace.emit('connection', ws, req);
+        });
+    } else {
+        wss.handleUpgrade(req, socket, head, (ws) => {
+            wss.emit('connection', ws, req);
+        });
+    }
+});
 
 // ── /ws/trace 连接处理（委托给 TraceCollector）────────────────────────────
 wssTrace.on('connection', (ws, req) => traceCollector.handleConnection(ws, req));

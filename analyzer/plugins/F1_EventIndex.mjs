@@ -26,6 +26,7 @@ import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
 import { encodeType, TYPE } from '../db/EventTypeCode.mjs';
 import { createLogger } from '../logger.mjs';
+import { cfg } from '../Config.mjs';
 
 const log = createLogger('F1-EventIndex');
 

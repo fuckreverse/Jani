@@ -193,11 +193,15 @@ export class JtaClient {
         return this._get(`/api/sessions/${encodeURIComponent(sessionId)}/flamegraph`, params);
     }
 
-    getLoopIterations(sessionId, params = {}) {
-        return this._get(`/api/sessions/${encodeURIComponent(sessionId)}/loop-iterations`, params);
-    }
+getLoopIterations(sessionId, params = {}) {
+return this._get(`/api/sessions/${encodeURIComponent(sessionId)}/loop-iterations`, params);
+}
 
-    // ── 数据流 / 污点 ─────────────────────────────────────────────────────────
+getLoopVarRoles(sessionId, params = {}) {
+return this._get(`/api/sessions/${encodeURIComponent(sessionId)}/loop-var-roles`, params);
+}
+
+// ── 数据流 / 污点 ─────────────────────────────────────────────────────────
 
     traceTaint(sessionId, varName, direction = 'forward', startSeq = null) {
         const q = { var: varName, direction };

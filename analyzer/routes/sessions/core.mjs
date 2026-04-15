@@ -389,23 +389,39 @@ router.delete('/:id', (req, res) => {
         }
 
         // 删除所有关联的数据库记录（单事务，原子操作）
+        // 注意：先关闭外键约束，避免逐行外键校验拖慢大表删除；事务结束后恢复
         const TABLES_WITH_SESSION = [
-            'events', 'writes', 'reads', 'fields', 'smap',
-            'call_edges', 'taint_paths', 'var_lifetime', 'scopes',
-            'bookmarks', 'iid_counts', 'loops', 'loop_iterations',
-            'string_events', 'fn_signatures', 'object_timelines', 'value_patterns',
-            'crypto_hints', 'signature_paths', 'obfuscation_hints', 'analysis_summary',
-            'dataflow_edges', 'value_index', 'plugin_checkpoints',
+            // F1 核心事件表（数据量最大，放前面让事务尽快释放空间）
+            'value_index', 'value_dict', 'oid_aliases',
+            'writes', 'reads', 'fields', 'events',
+            // F2/F3/F4
+            'smap', 'call_edges', 'var_lifetime', 'iid_counts',
+            // A 系列分析结果
+            'taint_paths', 'dataflow_edges', 'loops', 'loop_iterations', 'loop_var_roles',
+            'object_timelines', 'value_patterns',
+            // I 系列分析结果
+            'string_events', 'fn_signatures', 'crypto_hints', 'signature_paths',
+            'obfuscation_hints', 'web_api_calls',
+            // 其他
+            'scopes', 'bookmarks', 'analysis_summary', 'plugin_checkpoints',
         ];
-        db.transaction(() => {
-            for (const table of TABLES_WITH_SESSION) {
-                try {
-                    db.run(`DELETE FROM ${table} WHERE session_id = ?`, id);
-                } catch { /* 表不存在时忽略 */ }
-            }
-            // 删除 sessions 主记录
-            db.run('DELETE FROM sessions WHERE id = ?', id);
-        });
+        const rawDb = db.raw();
+        rawDb.pragma('foreign_keys = OFF');
+        try {
+            db.transaction(() => {
+                for (const table of TABLES_WITH_SESSION) {
+                    try {
+                        db.run(`DELETE FROM ${table} WHERE session_id = ?`, id);
+                    } catch (e) {
+                        if (!e.message?.includes('no such table')) throw e;
+                    }
+                }
+                // 删除 sessions 主记录
+                db.run('DELETE FROM sessions WHERE id = ?', id);
+            });
+        } finally {
+            rawDb.pragma('foreign_keys = ON');
+        }
 
         return res.json({ deleted: true });
     } catch (e) {

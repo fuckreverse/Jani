@@ -132,6 +132,12 @@
       "loopBatchSize": 50,
       "maxReadVarsPerIter": 30
     },
+    "A6_LoopVarClassifier": {
+      "maxLoops": 5000,
+      "loopBatchSize": 100,
+      "minIters": 3,
+      "insertBatchSize": 2000
+    },
     "A7_ObjectMutationTracker": {
       "batchSize": 5000
     },

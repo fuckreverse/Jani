@@ -225,6 +225,34 @@ CREATE TABLE IF NOT EXISTS loop_iterations (
     vars_snapshot   TEXT
 );
 
+-- ─── 循环变量角色（A6 LoopVarClassifier 填充）───────────────────────────────
+-- 记录每个循环中各变量跨迭代的角色推断结果。
+-- role 枚举：
+--   counter_inc  — 严格单调递增数值（典型 i++）
+--   counter_dec  — 严格单调递减数值（i--）
+--   accumulator  — 非严格单调但方向性明显的数值变化（sum += x）
+--   oscillator   — 数值振荡（交替/周期变化，如 flag 翻转）
+--   state        — 字符串/布尔类型每次迭代都有变化（状态机变量）
+--   constant     — 每次迭代值完全相同（循环不变量）
+--   sparse       — 仅在 < 50% 迭代中出现（稀疏赋值变量）
+
+CREATE TABLE IF NOT EXISTS loop_var_roles (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    loop_id         INTEGER NOT NULL,
+    var_name        TEXT NOT NULL,
+    role            TEXT NOT NULL,
+    first_val       TEXT,           -- 首次迭代的值
+    last_val        TEXT,           -- 末次迭代的值
+    min_val         REAL,           -- 最小数值（仅数值型有效）
+    max_val         REAL,           -- 最大数值（仅数值型有效）
+    distinct_count  INTEGER NOT NULL DEFAULT 0,  -- 不同值的数量
+    present_count   INTEGER NOT NULL DEFAULT 0,  -- 出现该变量的迭代次数
+    total_iters     INTEGER NOT NULL DEFAULT 0   -- 循环总迭代次数
+);
+CREATE INDEX IF NOT EXISTS idx_lvr_session_loop ON loop_var_roles(session_id, loop_id);
+CREATE INDEX IF NOT EXISTS idx_lvr_session_role ON loop_var_roles(session_id, role);
+
 -- ─── 字符串事件（A4 StringTracker 填充）─────────────────────────────────────
 -- Phase 4 重构：增加 var_name / line / iid / encoding_hint 列
 
