@@ -13,7 +13,6 @@
  *   0x06 = FUNCTION_EXIT
  *   0x07 = END_EXPR
  *   0x08 = KEY_EVENT
- *   0x09 = DICT_ENTRY
  *   0x0B = WRITE_VAR
  *   0x0C = READ_VAR_FULL
  *
@@ -34,7 +33,6 @@ export const TYPE = Object.freeze({
     FUNCTION_EXIT:  0x06,
     END_EXPR:       0x07,
     KEY_EVENT:      0x08,
-    DICT_ENTRY:     0x09,
     WRITE_VAR:      0x0B,
     READ_VAR_FULL:  0x0C,
 });

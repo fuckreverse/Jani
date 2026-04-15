@@ -390,17 +390,16 @@ function injectSmapInfo(event, smapMap) {
  * 只保留 write 数据（内存占用远小于全量事件），其他事件类型直接跳过。
  *
  * @param {DataView} view
- * @param {Map}      dict      字典压缩 Map（与第二遍共享同一份即可，第一遍解码会重建）
  * @returns {Map<number, Array<{name: string, value: *}>>}  iid → writes
  */
-function collectWriteValues(view, dict) {
+function collectWriteValues(view) {
     const writeValues = new Map();
     let offset = FILE_HEADER_SIZE;
 
     while (offset + EVENT_HEADER_SIZE <= view.byteLength) {
         let result;
         try {
-            result = deserializeEvent(view, offset, dict);
+            result = deserializeEvent(view, offset);
         } catch {
             break;
         }
@@ -408,7 +407,6 @@ function collectWriteValues(view, dict) {
         if (nextOffset <= offset) break;
         offset = nextOffset;
 
-        if (event.type === 'DICT_ENTRY') continue;
         if (event.type !== 'END_EXPR' || !event.writes) continue;
 
         for (const w of event.writes) {
@@ -466,19 +464,16 @@ function decodeBinaryBuffer(buf, opts, emit) {
     // ── 第一遍（仅在 resolveValues 时）：提取所有 write 值 ──────────────────
     let writeValues = null;
     if (resolveValues) {
-        // 第一遍用独立 dict，避免状态污染第二遍
-        writeValues = collectWriteValues(view, new Map());
+        writeValues = collectWriteValues(view);
     }
 
     // ── 第二遍（或唯一一遍）：流式解码并输出 ───────────────────────────────
-    // 字典解压：DICT_ENTRY 事件写入此 Map，后续 STRING_REF / 0xFFFF 哨兵引用它
-    const dict = new Map();
     let offset = FILE_HEADER_SIZE;
 
     while (offset + EVENT_HEADER_SIZE <= ab.byteLength) {
         let result;
         try {
-            result = deserializeEvent(view, offset, dict);
+            result = deserializeEvent(view, offset);
         } catch (err) {
             process.stderr.write(`[trace-parse] decode error at offset ${offset}: ${err.message}\n`);
             break;
@@ -486,9 +481,6 @@ function decodeBinaryBuffer(buf, opts, emit) {
         const { event, nextOffset } = result;
         if (nextOffset <= offset) break;
         offset = nextOffset;
-
-        // DICT_ENTRY 是字典控制事件，deserializeEvent 已自动更新 dict，跳过输出
-        if (event.type === 'DICT_ENTRY') continue;
 
         stats.total++;
 

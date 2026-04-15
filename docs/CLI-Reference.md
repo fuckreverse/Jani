@@ -264,8 +264,6 @@ node tools/trace-decode.mjs [选项] [trace.bin]
 | `--pretty` | 格式化 JSON 输出（带缩进，调试用；输出量大时不建议使用）|
 | `--help / -h` | 显示帮助信息 |
 
-**字典压缩透明解码**：当 trace 文件由 `NodeStreamBackend({ usePool: true })` 或 `WsBackend({ usePool: true })` 写入时，包含 `DICT_ENTRY` 条目和 `STRING_REF` 引用，`trace-decode` 在解码过程中**自动维护字典状态**，对下游工具完全透明。
-
 **输出事件类型及字段**：
 
 | 事件类型 | 主要字段 |

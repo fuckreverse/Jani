@@ -237,8 +237,6 @@ export default class F1EventIndex extends BasePlugin {
         let vdBatch    = [];  // value_dict INSERT 缓冲（当 flush 时写入）
         let totalEvents = 0;
         let batchCount  = 0;
-        const dict = new Map();
-
         // 速率统计
         const startTime = Date.now();
         let lastReportTime = startTime;
@@ -320,7 +318,7 @@ export default class F1EventIndex extends BasePlugin {
 
             let result;
             try {
-                result = deserializeEvent(view, relOffset, dict, fileVersion);
+                result = deserializeEvent(view, relOffset, fileVersion);
             } catch (e) {
                 log.warn({ err: e, fileOffset: windowStart + relOffset, sessionId },
                     `Decode error at file offset ${windowStart + relOffset}: ${e.message}`);
@@ -332,8 +330,6 @@ export default class F1EventIndex extends BasePlugin {
             relOffset = result.nextOffset;
 
             const { event } = result;
-            if (event.type === 'DICT_ENTRY') continue;  // 不写入 events 表
-
             totalEvents++;
             const eventId = event.seq;
 
