@@ -17,10 +17,11 @@
  *   - value_dict：内存 Map 分配局部 ID，避免 N+1 查询；INSERT OR IGNORE 保证幂等
  */
 
-import { openSync, readSync, fstatSync, closeSync } from 'fs';
+import { openSync, readSync, fstatSync, closeSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { setImmediate as setImmediateAsync } from 'timers/promises';
 import { resolve } from 'path';
 import { createRequire } from 'module';
+import { gunzipSync } from 'zlib';
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
 import { encodeType, TYPE } from '../db/EventTypeCode.mjs';
@@ -76,13 +77,30 @@ export default class F1EventIndex extends BasePlugin {
 
         this.emitProgress(ctx, '检查 .bin 文件...', 0);
 
+        // ── 支持 .bin.gz：自动解压为临时文件，解析完后删除 ──────────────────
+        let binPath = session.bin_path;
+        let tmpBinPath = null;
+        if (binPath.endsWith('.bin.gz')) {
+            this.emitProgress(ctx, '解压 .bin.gz 文件...', 1);
+            log.info({ binPath, sessionId }, 'Decompressing .bin.gz trace file...');
+            const compressed = readFileSync(binPath);
+            const decompressed = gunzipSync(compressed);
+            // 写入临时文件（复用目录，文件名加 _tmp_f1 后缀）
+            tmpBinPath = binPath.replace(/\.bin\.gz$/, `._tmp_f1_${sessionId}.bin`);
+            writeFileSync(tmpBinPath, decompressed);
+            binPath = tmpBinPath;
+            log.info({ tmpBinPath, size: decompressed.byteLength }, 'Decompressed to temp file');
+        }
+
         // 用小 buffer 验证文件头，避免大文件整体读入
-        const fd = openSync(session.bin_path, 'r');
+        const fd = openSync(binPath, 'r');
         const fileSize = fstatSync(fd).size;
         const headerBuf = Buffer.alloc(8);
         readSync(fd, headerBuf, 0, 8, 0);
         if (!isBinaryTrace(headerBuf)) {
             closeSync(fd);
+            // 清理临时解压文件（如有）
+            if (tmpBinPath) { try { unlinkSync(tmpBinPath); } catch { /* ignore */ } }
             throw new Error(`文件 "${session.bin_path}" 不是有效的 JTB1 trace 文件`);
         }
 
@@ -431,6 +449,13 @@ export default class F1EventIndex extends BasePlugin {
 
         flush();
         closeSync(fd);
+
+        // 清理临时解压文件（如有）
+        if (tmpBinPath) {
+            try { unlinkSync(tmpBinPath); } catch (e) {
+                log.warn({ tmpBinPath, err: e }, 'Failed to delete temp decompressed file');
+            }
+        }
 
         // 恢复外键约束
         rawDb.pragma('foreign_keys = ON');

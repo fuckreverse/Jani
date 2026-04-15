@@ -1500,30 +1500,180 @@ export function deserializeEvent(view, offset, dict = null, version = FORMAT_VER
  *
  * @param {ArrayBuffer|Buffer} buf
  * @param {function(event: object, index: number): void} callback
+ * @param {object} [options]
+ * @param {boolean} [options.dedupe=false]  按 seq 去重（过滤重连重发的重复事件）
  */
-export function iterateBinary(buf, callback) {
+export function iterateBinary(buf, callback, options = {}) {
+    const { dedupe = false } = options;
     const ab   = buf instanceof ArrayBuffer ? buf : buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
     const view = new DataView(ab);
+    const version = ab.byteLength >= FILE_HEADER_SIZE ? readFileVersion(view) : FORMAT_VERSION;
     let offset = FILE_HEADER_SIZE;
     let index  = 0;
-    const dict = new Map();  // 字符串字典，在 DICT_ENTRY 事件中自动填充
+    const dict      = new Map();  // 字符串字典，在 DICT_ENTRY 事件中自动填充
+    const seenSeqs  = dedupe ? new Set() : null;  // seq 去重集合
 
     while (offset + EVENT_HEADER_SIZE <= ab.byteLength) {
-        const { event, nextOffset } = deserializeEvent(view, offset, dict);
-        callback(event, index++);
+        const { event, nextOffset } = deserializeEvent(view, offset, dict, version);
+        // 防止解析错误导致死循环：nextOffset 必须严格大于当前 offset
+        if (nextOffset <= offset) break;
         offset = nextOffset;
-        // 防止解析错误导致死循环
-        if (nextOffset <= offset && nextOffset !== offset) break;
+
+        // seq 去重：跳过已见过的事件（重连重发场景）。
+        // DICT_ENTRY 本身没有业务 seq，不参与去重，但照常传递给回调（保持向后兼容）。
+        if (seenSeqs !== null && event.type !== 'DICT_ENTRY') {
+            if (seenSeqs.has(event.seq)) continue;
+            seenSeqs.add(event.seq);
+        }
+
+        callback(event, index++);
     }
 }
 
 /**
  * 将整个二进制 trace Buffer 反序列化为事件数组。
  * @param {ArrayBuffer|Buffer} buf
+ * @param {object} [options]
+ * @param {boolean} [options.dedupe=false]  按 seq 去重（过滤重连重发的重复事件）
  * @returns {Array<object>}
  */
-export function deserializeAll(buf) {
+export function deserializeAll(buf, options = {}) {
     const events = [];
-    iterateBinary(buf, ev => events.push(ev));
+    iterateBinary(buf, ev => events.push(ev), options);
     return events;
+}
+
+// ─── .bin.gz 支持（Node.js 环境）────────────────────────────────────────────
+
+/**
+ * 检测 Buffer/ArrayBuffer/Uint8Array 是否为 gzip 格式（魔数 1f 8b）。
+ * @param {ArrayBuffer|Buffer|Uint8Array} buf
+ * @returns {boolean}
+ */
+export function isGzipTrace(buf) {
+    const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf instanceof ArrayBuffer ? buf : buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+    return bytes.length >= 2 && bytes[0] === 0x1F && bytes[1] === 0x8B;
+}
+
+/**
+ * 将 gzip 压缩的 trace Buffer 同步解压（Node.js 环境）。
+ * 若当前环境无 zlib（浏览器）则抛出错误。
+ *
+ * @param {Buffer} buf  gzip 压缩的 Buffer
+ * @returns {Buffer}    解压后的 Buffer
+ */
+export function gunzipTraceSync(buf) {
+    // Node.js 环境：通过全局缓存使用 zlib.gunzipSync
+    // 该缓存由 _initNodeZlib() 在模块加载后填充（见模块末尾）
+    if (globalThis.__jalangiGunzipSync) {
+        return globalThis.__jalangiGunzipSync(buf);
+    }
+    throw new Error('gunzipTraceSync: zlib not available. Call initNodeZlib() first or use gunzipTraceAsync().');
+}
+
+/**
+ * 将 gzip 压缩的 trace Buffer 异步解压（Node.js 环境）。
+ * 返回 Promise<Buffer>，在浏览器中可使用 DecompressionStream。
+ *
+ * @param {Buffer|ArrayBuffer|Uint8Array} buf
+ * @returns {Promise<Buffer>}
+ */
+export async function gunzipTraceAsync(buf) {
+    // Node.js 环境：使用 zlib
+    if (typeof process !== 'undefined' && process.versions?.node) {
+        const { gunzip } = await import('node:zlib');
+        const { promisify } = await import('node:util');
+        const gunzipP = promisify(gunzip);
+        const nodeBuf = Buffer.isBuffer(buf) ? buf : Buffer.from(buf instanceof ArrayBuffer ? buf : buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+        return gunzipP(nodeBuf);
+    }
+
+    // 浏览器环境：使用 DecompressionStream（Chrome 80+, Firefox 113+）
+    if (typeof DecompressionStream !== 'undefined') {
+        const ds  = new DecompressionStream('gzip');
+        const writer = ds.writable.getWriter();
+        const reader = ds.readable.getReader();
+        const inputBuf = buf instanceof ArrayBuffer ? buf : (buf instanceof Uint8Array ? buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) : buf);
+        writer.write(inputBuf);
+        writer.close();
+        const chunks = [];
+        let totalLen = 0;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            totalLen += value.byteLength;
+        }
+        const out = new Uint8Array(totalLen);
+        let off = 0;
+        for (const c of chunks) { out.set(c, off); off += c.byteLength; }
+        return out;
+    }
+
+    throw new Error('gunzipTraceAsync: no decompression API available');
+}
+
+/**
+ * 遍历 trace Buffer（支持自动解压 .bin.gz）。
+ * Node.js 环境同步完成；浏览器需先用 gunzipTraceAsync 解压再调用 iterateBinary。
+ *
+ * @param {ArrayBuffer|Buffer} buf         原始 buffer（可以是 .bin 或 .bin.gz）
+ * @param {function}           callback    (event, index) => void
+ * @param {object}             [options]
+ * @param {boolean}            [options.dedupe=false]  按 seq 去重
+ */
+export function iterateBinaryAuto(buf, callback, options = {}) {
+    if (isGzipTrace(buf)) {
+        if (!globalThis.__jalangiGunzipSync) {
+            throw new Error('iterateBinaryAuto: gzip detected but sync decompression unavailable. Use iterateBinaryAutoAsync() instead.');
+        }
+        const nodeBuf = Buffer.isBuffer(buf) ? buf
+            : Buffer.from(buf instanceof ArrayBuffer ? buf : buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+        const decompressed = globalThis.__jalangiGunzipSync(nodeBuf);
+        iterateBinary(decompressed, callback, options);
+        return;
+    }
+    iterateBinary(buf, callback, options);
+}
+
+/**
+ * 异步版本的 iterateBinaryAuto，同时支持 Node.js 和浏览器环境。
+ *
+ * @param {ArrayBuffer|Buffer} buf
+ * @param {function}           callback    (event, index) => void
+ * @param {object}             [options]
+ * @param {boolean}            [options.dedupe=false]  按 seq 去重
+ * @returns {Promise<void>}
+ */
+export async function iterateBinaryAutoAsync(buf, callback, options = {}) {
+    let resolved = buf;
+    if (isGzipTrace(buf)) {
+        resolved = await gunzipTraceAsync(buf);
+    }
+    iterateBinary(resolved, callback, options);
+}
+
+/**
+ * 异步版本的 deserializeAll，同时支持 .bin 和 .bin.gz。
+ *
+ * @param {ArrayBuffer|Buffer} buf
+ * @param {object}             [options]
+ * @param {boolean}            [options.dedupe=false]  按 seq 去重
+ * @returns {Promise<Array<object>>}
+ */
+export async function deserializeAllAsync(buf, options = {}) {
+    const events = [];
+    await iterateBinaryAutoAsync(buf, ev => events.push(ev), options);
+    return events;
+}
+
+// ─── Node.js 环境初始化（ESM 顶层 await 注入 gunzipSync）──────────────────────
+
+// 在 Node.js 环境中，模块加载时异步初始化 gunzipSync 到 globalThis。
+// 这样 gunzipTraceSync / iterateBinaryAuto 无需 createRequire 即可同步使用。
+if (typeof process !== 'undefined' && process.versions?.node) {
+    // 不阻塞模块加载；首次读取 .bin.gz 文件前 await 完成即可
+    import('node:zlib').then(({ gunzipSync }) => {
+        globalThis.__jalangiGunzipSync = gunzipSync;
+    }).catch(() => { /* 极端情况下 zlib 不可用，忽略 */ });
 }

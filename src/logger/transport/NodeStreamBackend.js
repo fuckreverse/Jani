@@ -4,9 +4,7 @@
  * NodeStreamBackend — Node.js 文件流日志后端（二进制格式）。
  *
  * 将事件批次序列化为紧凑二进制格式（JTB1，见 EventSerializer.js），
- * 通过 Node.js fs.WriteStream 写入 .bin 文件。
- * WriteStream 内置了操作系统级别的写缓冲和背压机制（drain 事件），
- * 非常适合高吞吐写文件场景。
+ * 通过 Node.js fs.WriteStream 写入 .bin 或 .bin.gz 文件。
  *
  * 支持两种输出目标：
  *  1. 文件路径（默认：'jalangi-trace.bin'）
@@ -16,25 +14,27 @@
  *
  *   import { NodeStreamBackend } from '.../logger/transport/NodeStreamBackend.js';
  *   const backend = new NodeStreamBackend({ path: 'my-trace.bin' });
+ *   // 开启 gzip 压缩（输出 .bin.gz）：
+ *   const backend = new NodeStreamBackend({ path: 'my-trace.bin.gz', compress: true });
  *   // 与 LogManager 配合：
  *   const mgr = new LogManager({ backends: [backend] });
  *
  * 启用字典压缩（Value Pool）：
  *
  *   const backend = new NodeStreamBackend({ path: 'my-trace.bin', usePool: true });
- *   // 高频字符串（变量名、文件名、属性名）自动被字典压缩，通常可减少 30-50% trace 体积。
+ *   // 高频字符串（变量名、文件名、属性名）自动被字典压缩。
  *
  * 输出格式（二进制 JTB1）：
  *   文件 = [魔数 8B 文件头][事件1: 12B头 + payload][事件2: 12B头 + payload]...
  *   可用 trace-parse.mjs 解码：
- *     node tools/trace-parse.mjs trace.bin --smap trace.smap.json
+ *     node tools/trace-parse.mjs trace.bin[.gz] --smap trace.smap.json
  *
  * smap.json 写出：
- *   若构造时提供了 smap（通过 setSmap(smapObj) 或 options.smap），
- *   在 close() 时自动写出与 .bin 配对的 .smap.json 文件。
+ *   若构造时提供了 smap，在 close() 时自动写出与 .bin[.gz] 配对的 .smap.json 文件。
  */
 
 import { createWriteStream, writeFileSync } from 'node:fs';
+import { createGzip } from 'node:zlib';
 import {
     serializeBatch,
     createFileHeader,
@@ -47,13 +47,15 @@ const log = createDiagLogger(DOMAIN.BACKEND_NODE);
 export class NodeStreamBackend {
     /**
      * @param {object} [options]
-     * @param {string}  [options.path='jalangi-trace.bin']  输出文件路径（.bin）
+     * @param {string}  [options.path='jalangi-trace.bin']  输出文件路径（.bin 或 .bin.gz）
      * @param {import('node:stream').Writable} [options.stream]  直接传入 Writable（优先于 path）
      * @param {boolean} [options.append=false]   是否追加模式（二进制 trace 不支持追加，默认覆盖）
      * @param {number}  [options.highWaterMark=65536]  WriteStream 缓冲上限（字节）
      * @param {boolean} [options.autoFlush=false]  每批后调用 flush（降低延迟但增加 syscall）
      * @param {object|null} [options.smap=null]  初始 smap 对象（可在 close 时自动写出 .smap.json）
      * @param {boolean} [options.usePool=false]  启用字典压缩（Value Pool），减少重复字符串开销
+     * @param {boolean} [options.compress=false]  写盘时对 JTB1 流进行 gzip 压缩（输出 .bin.gz）
+     * @param {number}  [options.gzipLevel=6]    gzip 压缩级别 1（最快）~ 9（最小）
      */
     constructor(options = {}) {
         const {
@@ -64,12 +66,18 @@ export class NodeStreamBackend {
             autoFlush     = false,
             smap          = null,
             usePool       = false,
+            compress      = false,
+            gzipLevel     = 6,
         } = options;
+
+        // 如果 path 以 .bin.gz 结尾，自动开启压缩
+        const autoCompress = compress || (!stream && path.endsWith('.bin.gz'));
 
         this._path      = path;
         this._autoFlush = autoFlush;
         this._closed    = false;
         this._smap      = smap;
+        this._compress  = autoCompress;
 
         // 字典压缩
         this._usePool   = usePool;
@@ -79,13 +87,37 @@ export class NodeStreamBackend {
         this.stats = { batchCount: 0, totalEvents: 0, bytesWritten: 0, errors: 0 };
 
         if (stream) {
-            this._stream  = stream;
-            this._managed = false;   // 外部流，不由我们关闭
+            // 外部流：不由我们管理生命周期
+            this._stream     = stream;
+            this._managed    = false;
+            this._gzip       = null;
+            this._fileStream = null;
         } else {
-            this._stream  = createWriteStream(path, {
+            const fileStream = createWriteStream(path, {
                 flags:        append ? 'a' : 'w',
                 highWaterMark,
             });
+            fileStream.on('error', (err) => {
+                this.stats.errors++;
+                log.error('fileStream error:', err.message);
+            });
+
+            if (autoCompress) {
+                // gzip 压缩模式：JTB1 字节流 → Gzip → 文件
+                const gz = createGzip({ level: gzipLevel });
+                gz.pipe(fileStream);
+                gz.on('error', (err) => {
+                    this.stats.errors++;
+                    log.error('gzip error:', err.message);
+                });
+                this._stream     = gz;          // 对外写入目标是 gzip 流
+                this._gzip       = gz;          // 保存引用，close 时 end gz
+                this._fileStream = fileStream;  // 底层文件流
+            } else {
+                this._stream     = fileStream;
+                this._gzip       = null;
+                this._fileStream = null;
+            }
             this._managed = true;
         }
 
@@ -224,6 +256,7 @@ export class NodeStreamBackend {
 
     /**
      * 关闭文件流（flush 后关闭），并写出 .smap.json（如有）。
+     * 压缩模式下：需先 end gzip，底层文件流 finish 后再写 smap。
      * @returns {Promise<void>}
      */
     close() {
@@ -239,9 +272,16 @@ export class NodeStreamBackend {
                 this.flush().then(done, reject);
                 return;
             }
-            this._stream.end((err) => {
-                if (err) { reject(err); } else { done(); }
-            });
+            if (this._compress && this._gzip && this._fileStream) {
+                // 压缩模式：等底层文件流完全写入后再写 smap
+                this._fileStream.once('finish', () => done());
+                this._fileStream.once('error', (err) => reject(err));
+                this._gzip.end();  // end gzip → flush 压缩数据 → end fileStream
+            } else {
+                this._stream.end((err) => {
+                    if (err) { reject(err); } else { done(); }
+                });
+            }
         });
     }
 
@@ -267,8 +307,8 @@ export class NodeStreamBackend {
     }
 
     /**
-     * 在 close 时写出 .smap.json 文件（与 .bin 配对）。
-     * 文件名：将 .bin 后缀替换为 .smap.json，或追加 .smap.json。
+     * 在 close 时写出 .smap.json 文件（与 .bin[.gz] 配对）。
+     * 文件名：将 .bin 或 .bin.gz 后缀替换为 .smap.json。
      * @private
      */
     _writeSmapJson() {
@@ -276,7 +316,9 @@ export class NodeStreamBackend {
         if (!this._managed || !this._path) return;
 
         let smapPath = this._path;
-        if (smapPath.endsWith('.bin')) {
+        if (smapPath.endsWith('.bin.gz')) {
+            smapPath = smapPath.slice(0, -7) + '.smap.json';
+        } else if (smapPath.endsWith('.bin')) {
             smapPath = smapPath.slice(0, -4) + '.smap.json';
         } else {
             smapPath = smapPath + '.smap.json';

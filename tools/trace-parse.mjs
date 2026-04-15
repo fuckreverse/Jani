@@ -59,6 +59,8 @@ import {
     MAGIC,
     deserializeEvent,
     isBinaryTrace,
+    isGzipTrace,
+    gunzipTraceAsync,
 } from '../src/encoding/EventSerializer.js';
 
 // ── 快速手动解析器（热路径，不使用正则）──────────────────────────────────────
@@ -524,6 +526,7 @@ function emitBinaryEvent(event, pretty, emit) {
 
 /**
  * 二进制模式主流程：读取整个 buffer，解码并输出 NDJSON。
+ * 自动识别 .bin.gz（gzip 压缩格式），解压后再解码。
  * @param {string|null} inputPath
  * @param {object}      opts
  */
@@ -558,6 +561,17 @@ async function runBinaryMode(inputPath, opts) {
         const chunks = [];
         for await (const chunk of input) chunks.push(chunk);
         buf = Buffer.concat(chunks);
+    }
+
+    // 自动解压 .bin.gz
+    if (isGzipTrace(buf)) {
+        try {
+            process.stderr.write('[trace-parse] detected gzip trace, decompressing...\n');
+            buf = await gunzipTraceAsync(buf);
+        } catch (err) {
+            process.stderr.write(`[trace-parse] failed to decompress: ${err.message}\n`);
+            process.exit(1);
+        }
     }
 
     const emit = (line) => process.stdout.write(line + '\n');
@@ -632,13 +646,15 @@ async function main() {
     let isBinary = false;
 
     if (inputPath) {
-        // 文件路径已知：直接读取前 4 字节
+        // 文件路径已知：读取前 4 字节检测魔数（JTB1 或 gzip 1f8b）
         try {
             const fd = await (await import('fs')).promises.open(inputPath, 'r');
             const hdr = Buffer.alloc(4);
             await fd.read(hdr, 0, 4, 0);
             await fd.close();
-            isBinary = isBinaryTrace(hdr);
+            // .bin（JTB1 魔数）或 .bin.gz（gzip 魔数）均视为二进制模式
+            isBinary = isBinaryTrace(hdr) || isGzipTrace(hdr)
+                || inputPath.endsWith('.bin.gz');
         } catch { /* 若读取失败，fallback 到文本模式 */ }
     } else {
         // stdin：无法提前知道格式，暂不自动检测（用户可通过 --smap 等选项暗示使用二进制模式，或显式检测）

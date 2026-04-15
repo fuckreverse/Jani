@@ -193,7 +193,9 @@
 
   "traceServer": {
     "port": 9229,
-    "sessionIdleMs": 30000
+    "sessionIdleMs": 30000,
+    "compress": true,
+    "gzipLevel": 6
   },
 
   "mcp": {

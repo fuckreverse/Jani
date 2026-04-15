@@ -13,20 +13,21 @@
 
 | 工具 | 功能 |
 |------|------|
-| `trace-parse.mjs` | 将 JTB1 二进制 `.bin` 文件解码为结构化 NDJSON（核心入口） |
-| `trace-parse.mjs` | 兼容层：解析旧文本 trace 或 `.bin` 文件，统一输出结构化 NDJSON |
+| `trace-parse.mjs` | 将 JTB1 二进制 `.bin` / `.bin.gz` 文件解码为结构化 NDJSON（核心入口）|
+| `trace-parse.mjs` | 兼容层：解析旧文本 trace 或 `.bin`/`.bin.gz` 文件，统一输出结构化 NDJSON |
 | `trace-render.mjs` | 将结构化 NDJSON 渲染为 flat / tree / block / pipe / io 展示格式 |
 | `trace-filter.mjs` | 按类型、seq 范围、行号、函数名、变量等条件过滤 |
 | `trace-hot-lines.mjs` | 统计代码行执行热点（Top-N 排行）|
 | `trace-call-tree.mjs` | 重建函数调用树，支持深度限制与汇总统计 |
 | `trace-var-timeline.mjs` | 追踪变量值的时序变化 |
 | `trace-range-extract.mjs` | 按 seq 区间快速提取片段（含 context 窗口）|
+| `trace-server/TraceCollector.mjs` | 核心收集逻辑共享模块（会话管理 / 去重 / gzip 压缩写盘），被独立服务与 JTA 两处复用 |
 
 ### 数据流
 
 ```
 ExecutionTrace 插件 / WsBackend / NodeStreamBackend
-    ↓ trace.bin（JTB1 二进制格式）+ trace.smap.json（IID 源码位置映射）
+    ↓ trace.bin / trace.bin.gz（JTB1 二进制格式）+ trace.smap.json（IID 源码位置映射）
 trace-parse.mjs  [--smap] [--resolve-values]
     ↓ parsed.ndjson（结构化 NDJSON，JTB1 事件类型）
 trace-filter.mjs  ─→  trace-render.mjs      ← 展示格式转换（flat/tree/block/pipe/io）
@@ -37,6 +38,7 @@ trace-filter.mjs  ─→  trace-render.mjs      ← 展示格式转换（flat/tr
 ```
 
 **设计原则**：运行时只写入最紧凑的 JTB1 二进制格式（无缓冲、不丢失数据）；
+服务端落盘时可选 gzip 压缩（输出 `.bin.gz`，`trace-parse.mjs` 自动识别并解压）；
 树形/缩进等展示风格完全在离线侧（`trace-render.mjs`）按需生成，可重复渲染、任意过滤后再渲染。
 
 所有工具从 **stdin** 或文件读取，结果写到 **stdout**，统计摘要写到 **stderr**，可任意串联：
@@ -51,7 +53,10 @@ node tools/trace-parse.mjs trace.bin \
 
 ## 2. trace-parse.mjs — 二进制解码（核心入口）
 
-将 JTB1 二进制 `.bin` 文件解码为结构化 NDJSON，是处理链的起点。
+将 JTB1 二进制 `.bin` / `.bin.gz` 文件解码为结构化 NDJSON，是处理链的起点。
+
+> **`.bin.gz` 自动检测**：输入文件若以 `.bin.gz` 结尾，`trace-parse.mjs` 会自动使用 `node:zlib` 解压，
+> 对后续处理完全透明，管道用法无需任何额外参数。
 
 ### 选项
 
@@ -91,17 +96,18 @@ node tools/trace-parse.mjs trace.bin \
 ### 用法
 
 ```bash
-# 基本解码
+# 基本解码（.bin 或 .bin.gz 均可直接使用）
 node tools/trace-parse.mjs trace.bin
+node tools/trace-parse.mjs trace.bin.gz
 
 # 注入 smap，还原源码位置（line/col/srcText）
-node tools/trace-parse.mjs trace.bin --smap trace.smap.json
+node tools/trace-parse.mjs trace.bin.gz --smap trace.smap.json
 
 # 追溯省略值 + 统计输出
-node tools/trace-parse.mjs trace.bin --smap trace.smap.json --resolve-values --stats
+node tools/trace-parse.mjs trace.bin.gz --smap trace.smap.json --resolve-values --stats
 
 # 管道到 render
-node tools/trace-parse.mjs trace.bin --smap trace.smap.json | node tools/trace-render.mjs --format tree
+node tools/trace-parse.mjs trace.bin.gz --smap trace.smap.json | node tools/trace-render.mjs --format tree
 ```
 
 ---
@@ -547,7 +553,9 @@ node tools/trace-parse.mjs trace.bin --smap trace.smap.json \
 
 `ExecutionTraceAnalysis` 运行时通过 `NodeStreamBackend` 将事件序列化为 **JTB1 二进制格式**写入 `.bin` 文件，配套输出 `.smap.json`（IID → 源码位置映射）。
 
-在浏览器端通过 `WsBackend` 将事件流实时推送给 `trace-server`，服务端落地为相同格式的 `.bin` 文件。
+在浏览器端通过 `WsBackend` 将事件流实时推送给 `trace-server` 或 JTA 内置 `/ws/trace` 端点，
+服务端落地为 `.bin` 或 `.bin.gz`（gzip 压缩，默认开启，可通过 `--no-compress` 或配置项关闭）。
+`trace-parse.mjs` 自动识别两种格式，无需额外参数。
 
 `trace-parse.mjs` 将二进制事件解码为统一结构化 NDJSON，事件类型为 JTB1 枚举（`CALL_PRE`/`CALL`/`END_EXPR` 等），供下游工具统一消费：
 

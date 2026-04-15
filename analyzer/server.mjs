@@ -15,19 +15,17 @@ import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import multer from 'multer';
-import { resolve, dirname, join, extname, basename } from 'path';
-import { mkdirSync, existsSync, createWriteStream, readdirSync, rmSync, statSync, renameSync, createReadStream, readFileSync, writeFileSync } from 'fs';
+import { resolve, dirname, join, basename } from 'path';
+import { mkdirSync, existsSync, readdirSync, rmSync, statSync, createReadStream, readFileSync, writeFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
 import { createLogger } from './logger.mjs';
 import { cfg, configPaths } from './Config.mjs';
+import { TraceCollector } from '../tools/trace-server/TraceCollector.mjs';
 
 const log = createLogger('server');
 
-import {
-    createFileHeader,
-    EVENT_HEADER_SIZE,
-} from '../src/encoding/EventSerializer.js';
+// EventSerializer 已由 TraceCollector 内部 import，此处无需重复引入
 
 import * as db from './db/Database.mjs';
 import { autoDiscover, listPlugins } from './PluginEngine.mjs';
@@ -61,36 +59,75 @@ mkdirSync(UPLOAD_DIR,   { recursive: true });
 mkdirSync(SESSIONS_DIR, { recursive: true });
 mkdirSync(TRACES_DIR,   { recursive: true });
 
+// 压缩设置（来自 traceServer 配置）
+const TRACE_COMPRESS = cfg('traceServer.compress') !== false;  // 默认 true
+const GZIP_LEVEL     = Math.max(1, Math.min(9, Number(cfg('traceServer.gzipLevel') ?? 6)));
+const SESSION_IDLE_MS = Number(cfg('traceServer.sessionIdleMs') ?? 30000);
+
 // 启动时清空旧 trace 文件（仅当显式传 --clear-traces 时才清空，默认保留）
 const doClearTraces = args.includes('--clear-traces');
 if (doClearTraces && existsSync(TRACES_DIR)) {
-    const oldFiles = readdirSync(TRACES_DIR).filter(f => f.endsWith('.bin') || f.endsWith('.smap.json'));
+    const oldFiles = readdirSync(TRACES_DIR).filter(f => f.endsWith('.bin') || f.endsWith('.bin.gz') || f.endsWith('.smap.json'));
     for (const f of oldFiles) rmSync(join(TRACES_DIR, f));
     if (oldFiles.length > 0) log.info({ count: oldFiles.length, dir: TRACES_DIR }, `Cleared ${oldFiles.length} old trace file(s)`);
 }
 
-// ── Trace 收集（原 trace-server）统计 ───────────────────────────────────────
+// ── Trace 收集（TraceCollector 实例）────────────────────────────────────────
 
-const traceStats = {
-    connections:     0,
-    batchesReceived: 0,
-    eventsReceived:  0,
-    bytesReceived:   0,
-    errors:          0,
-    startTime:       Date.now(),
-};
+// 无 sid 时用递增序号（analyzer 风格，方便与其他日志对照）
+let _traceConnSeq = 0;
 
-let traceConnSeq = 0;
+/**
+ * TraceCollector 实例：封装会话管理、消息处理、去重写入等核心逻辑。
+ * analyzer 版本通过以下参数定制行为：
+ *   - onInfo/onError/onDebug/onWarn → 使用 pino log
+ *   - parseSid → 同时从 URL 取 sid 和 projectId
+ *   - onSessionClosed → 写 _project_map.json
+ *   - makeSuffix → 无 sid 时用递增序号
+ */
+const traceCollector = new TraceCollector({
+    outDir:        TRACES_DIR,
+    compress:      TRACE_COMPRESS,
+    gzipLevel:     GZIP_LEVEL,
+    sessionIdleMs: SESSION_IDLE_MS,
+    urlBase:       `http://localhost:${PORT}`,
 
-function makeTraceFilePath() {
-    const now = new Date();
-    const pad = (n, w = 2) => String(n).padStart(w, '0');
-    const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
-    const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-    const ms   = pad(now.getMilliseconds(), 3);
-    const seq  = pad(++traceConnSeq, 3);
-    return join(TRACES_DIR, `trace_${date}_${time}_${ms}_${seq}.bin`);
-}
+    onInfo:  (msg, data) => log.info(data ?? {}, msg),
+    onError: (msg, data) => log.error(data ?? {}, msg),
+    onDebug: (msg, data) => log.debug(data ?? {}, msg),
+    onWarn:  (msg, data) => log.warn(data ?? {}, msg),
+
+    // 同时解析 sid 和 projectId
+    parseSid: (req) => {
+        const url = new URL(req.url, `http://localhost:${PORT}`);
+        return {
+            sid:  url.searchParams.get('sid') || null,
+            meta: { projectId: url.searchParams.get('projectId') || null },
+        };
+    },
+
+    // 无 sid 时用递增序号（与原逻辑保持一致）
+    makeSuffix: () => String(++_traceConnSeq).padStart(3, '0'),
+
+    // 关闭会话后写 _project_map.json（记录 trace 文件来源工作空间）
+    onSessionClosed: (entry) => {
+        const projectId = entry.meta?.projectId;
+        if (!projectId) return;
+        const traceFileName = basename(entry.traceFile);
+        const pmapPath = join(TRACES_DIR, '_project_map.json');
+        try {
+            let pmap = {};
+            if (existsSync(pmapPath)) {
+                try { pmap = JSON.parse(readFileSync(pmapPath, 'utf8')); } catch { /* ignore */ }
+            }
+            pmap[traceFileName] = projectId;
+            writeFileSync(pmapPath, JSON.stringify(pmap, null, 2));
+        } catch { /* ignore */ }
+    },
+});
+
+/** 统计对象（向后兼容 /api/trace/stats 路由） */
+const traceStats = traceCollector.stats;
 
 // ── 初始化数据库 ─────────────────────────────────────────────────────────────
 
@@ -197,20 +234,20 @@ app.get('/api/config', (req, res) => {
 
 // Trace 统计
 app.get('/api/trace/stats', (req, res) => {
-    const elapsed = ((Date.now() - traceStats.startTime) / 1000).toFixed(1);
-    res.json({ ...traceStats, uptime: elapsed, tracesDir: TRACES_DIR });
+    const elapsed = ((Date.now() - traceCollector.stats.startTime) / 1000).toFixed(1);
+    res.json({ ...traceCollector.stats, uptime: elapsed, tracesDir: TRACES_DIR });
 });
 
 // ── Trace 文件 API ──────────────────────────────────────────────────────────
 
-// 工具：验证 trace 文件名（仅允许同目录的 .bin 文件）
+// 工具：验证 trace 文件名（仅允许同目录的 .bin / .bin.gz 文件）
 function validateTraceFilename(name) {
     return name
         && typeof name === 'string'
         && !name.includes('/')
         && !name.includes('\\')
         && !name.includes('..')
-        && name.endsWith('.bin');
+        && (name.endsWith('.bin') || name.endsWith('.bin.gz'));
 }
 
 // 获取可选择的分析插件列表（Phase 2/3/4，Phase 1 为必须项不可选）
@@ -269,7 +306,7 @@ app.get('/api/trace/files', (req, res) => {
         } catch { /* ignore */ }
 
         let files = readdirSync(TRACES_DIR)
-            .filter(f => f.endsWith('.bin'))
+            .filter(f => f.endsWith('.bin') || f.endsWith('.bin.gz'))
             .map(f => {
                 const fp = join(TRACES_DIR, f);
                 let st = null;
@@ -375,8 +412,10 @@ app.delete('/api/trace/files/:name', (req, res) => {
 
         rmSync(binPath);
 
-        // 同时删除对应 smap 文件（如有）
-        const smapPath = binPath.replace(/\.bin$/, '.smap.json');
+        // 同时删除对应 smap 文件（如有，兼容 .bin 和 .bin.gz）
+        const smapPath = name.endsWith('.bin.gz')
+            ? binPath.replace(/\.bin\.gz$/, '.smap.json')
+            : binPath.replace(/\.bin$/, '.smap.json');
         if (existsSync(smapPath)) {
             try { rmSync(smapPath); } catch { /* ignore */ }
         }
@@ -417,7 +456,9 @@ app.post('/api/trace/files/batch-delete', (req, res) => {
             if (!existsSync(binPath)) { errors.push({ name, error: 'not found' }); continue; }
             try {
                 rmSync(binPath);
-                const smapPath = binPath.replace(/\.bin$/, '.smap.json');
+                const smapPath = name.endsWith('.bin.gz')
+                    ? binPath.replace(/\.bin\.gz$/, '.smap.json')
+                    : binPath.replace(/\.bin$/, '.smap.json');
                 if (existsSync(smapPath)) { try { rmSync(smapPath); } catch { /* ignore */ } }
                 deleted.push(name);
             } catch (e) {
@@ -492,8 +533,10 @@ app.post('/api/trace/import', async (req, res) => {
                 }
             } catch { /* ignore */ }
         } else {
-            // 查找同名 smap.json
-            const autoSmap = binPath.replace(/\.bin$/, '.smap.json');
+            // 查找同名 smap.json（兼容 .bin 和 .bin.gz）
+            const autoSmap = filename.endsWith('.bin.gz')
+                ? binPath.replace(/\.bin\.gz$/, '.smap.json')
+                : binPath.replace(/\.bin$/, '.smap.json');
             if (existsSync(autoSmap)) smapPath = autoSmap;
         }
 
@@ -503,7 +546,7 @@ app.post('/api/trace/import', async (req, res) => {
             smapPath,
             sourcePath,
             projectId: projectId || null,
-            name: sessionName || filename.replace(/\.bin$/, ''),
+            name: sessionName || filename.replace(/\.bin\.gz$/, '').replace(/\.bin$/, ''),
             wsProgressBroadcast: req.app.get('wsProgressBroadcast'),
             selectedPlugins: Array.isArray(selectedPlugins) ? selectedPlugins : null,
         });
@@ -547,7 +590,23 @@ if (existsSync(UI_DIST)) {
 
 const server = createServer(app);
 
+// 为 /ws/trace 单独创建一个 WebSocketServer，启用 permessage-deflate
+const wssTrace = new WebSocketServer({
+    server,
+    path: '/ws/trace',
+    perMessageDeflate: {
+        zlibDeflateOptions: { level: GZIP_LEVEL },
+        // 保留上下文窗口（提升压缩率），服务端和客户端各自维护
+        serverNoContextTakeover: false,
+        clientNoContextTakeover: false,
+    },
+});
+
+// 通用 WebSocket 服务器（进度 / 运行输出等）
 const wss = new WebSocketServer({ server });
+
+// ── /ws/trace 连接处理（委托给 TraceCollector）────────────────────────────
+wssTrace.on('connection', (ws, req) => traceCollector.handleConnection(ws, req));
 
 wss.on('connection', (ws, req) => {
     const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -632,108 +691,7 @@ wss.on('connection', (ws, req) => {
         return;
     }
 
-    // ── Trace 收集：/ws/trace（原 trace-server 功能）────────────────────────
-    if (pathname === '/ws/trace') {
-        const clientAddr = req.socket.remoteAddress;
-        // 支持 ?projectId=xxx 自动关联工作空间
-        const wsProjectId = url.searchParams.get('projectId') || null;
-        traceStats.connections++;
-
-        const traceFilePath = makeTraceFilePath();
-        const traceFileName = basename(traceFilePath);
-        const outStream  = createWriteStream(traceFilePath, { flags: 'w' });
-        let   eventCount = 0;
-        let   headerWritten = false;
-
-        outStream.on('error', (err) => {
-            log.error({ err, traceFilePath }, 'Trace output stream error');
-        });
-
-        log.info({ clientAddr, traceFilePath, projectId: wsProjectId }, `Trace client connected: ${clientAddr}`);
-        ws.binaryType = 'arraybuffer';
-
-        ws.on('message', (data, isBinary) => {
-            try {
-                traceStats.bytesReceived += isBinary
-                    ? (data.byteLength ?? Buffer.byteLength(data))
-                    : Buffer.byteLength(data, 'utf8');
-
-                if (!isBinary) return; // 忽略文本帧
-
-                // 二进制帧：[u32 batchId LE][事件流 bytes]
-                const buf  = data instanceof Buffer
-                    ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
-                    : data;
-                const view = new DataView(buf);
-
-                const batchId    = view.getUint32(0, true);
-                const eventBytes = buf.slice(4);
-
-                // 首次写入：先写文件头
-                if (!headerWritten) {
-                    outStream.write(Buffer.from(createFileHeader()));
-                    headerWritten = true;
-                }
-
-                // 统计事件数
-                let batchEventCount = 0;
-                if (eventBytes.byteLength >= EVENT_HEADER_SIZE) {
-                    const ev = new DataView(eventBytes);
-                    let offset = 0;
-                    while (offset + EVENT_HEADER_SIZE <= eventBytes.byteLength) {
-                        const payloadLen = ev.getUint16(offset + 10, true);
-                        offset += EVENT_HEADER_SIZE + payloadLen;
-                        batchEventCount++;
-                        if (offset <= 0) break;
-                    }
-                }
-
-                if (eventBytes.byteLength > 0) outStream.write(Buffer.from(eventBytes));
-
-                eventCount           += batchEventCount;
-                traceStats.batchesReceived++;
-                traceStats.eventsReceived += batchEventCount;
-
-                // 发送 ack（4 字节二进制）
-                const ack = new ArrayBuffer(4);
-                new DataView(ack).setUint32(0, batchId, true);
-                ws.send(ack);
-
-            } catch (err) {
-                traceStats.errors++;
-                log.error({ err }, 'Trace message processing error');
-            }
-        });
-
-        ws.on('close', () => {
-            traceStats.connections = Math.max(0, traceStats.connections - 1);
-            outStream.end(() => {
-                log.info({ traceFilePath, eventCount }, `Trace saved: ${traceFilePath} (${eventCount} events)`);
-
-                // 记录来源工作空间（若传入了 projectId）
-                if (wsProjectId) {
-                    const pmapPath = join(TRACES_DIR, '_project_map.json');
-                    try {
-                        let pmap = {};
-                        if (existsSync(pmapPath)) {
-                            try { pmap = JSON.parse(readFileSync(pmapPath, 'utf8')); } catch { /* ignore */ }
-                        }
-                        pmap[traceFileName] = wsProjectId;
-                        writeFileSync(pmapPath, JSON.stringify(pmap, null, 2));
-                    } catch { /* ignore */ }
-                }
-            });
-        });
-
-        ws.on('error', (err) => {
-            traceStats.errors++;
-            log.error({ err, clientAddr }, `Trace WS error from ${clientAddr}`);
-        });
-
-        return;
-    }
-
-    // 未知路由
+    // 未知路由（/ws/trace 已由 wssTrace 独立处理）
     ws.send(JSON.stringify({ type: 'error', message: `Unknown WS path: ${pathname}` }));
     ws.close();
 });
@@ -743,7 +701,10 @@ wss.on('connection', (ws, req) => {
 server.listen(PORT, () => {
     log.info({ port: PORT }, `Server listening on http://localhost:${PORT}`);
     log.info(`API:    http://localhost:${PORT}/api/health`);
-    log.info({ tracesDir: TRACES_DIR }, `Trace:  ws://localhost:${PORT}/ws/trace  (output: ${TRACES_DIR})`);
+    log.info(
+        { tracesDir: TRACES_DIR, compress: TRACE_COMPRESS, gzipLevel: GZIP_LEVEL },
+        `Trace:  ws://localhost:${PORT}/ws/trace  (output: ${TRACES_DIR}, compress: ${TRACE_COMPRESS ? `gzip level=${GZIP_LEVEL}` : 'off'}, perMessageDeflate: on)`
+    );
     if (existsSync(UI_DIST)) {
         log.info(`UI:     http://localhost:${PORT}/`);
     } else {

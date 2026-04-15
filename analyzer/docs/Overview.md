@@ -69,7 +69,7 @@ Jani 的插桩引擎已能产出高质量 trace（`.bin` + `.smap.json`），包
 |---|---|---|
 | 后端 | Node.js + Express | 与 Jani 同生态，无额外运行时 |
 | 数据库 | SQLite（**better-sqlite3**，原生同步 API） | 直接写磁盘，无 flush/dirty 机制；同步 API 无 IPC 开销，批量 INSERT 比 sql.js 快 4–8×；WAL 模式支持并发读 |
-| Trace 收集 | 内置 `/ws/trace` WebSocket 端点 | 原独立 `trace-server` 功能已集成进 JTA Server，无需单独启动 |
+| Trace 收集 | 内置 `/ws/trace` WebSocket 端点 + `TraceCollector.mjs` 共享模块 | 核心收集逻辑（会话管理 / 事件去重 / gzip 写盘）抽取为 `tools/trace-server/TraceCollector.mjs`，独立 trace-server 与 JTA 同时复用，无需单独启动 JTA 时也可使用 |
 | 工作空间管理 | `projects` 表 + `/api/projects` 路由 | 一次插桩，反复复用；上传原始 JS 自动触发插桩，后续上传 trace.bin 无需重新插桩 |
 | 前端 | Vue 3 + Vite | 轻量，组件化，易于实现代码编辑器集成 |
 | 代码高亮 | CodeMirror 6 | 支持行高亮、标注、交互点击 |
@@ -85,8 +85,10 @@ Jani/
 ├── bin/
 │   └── jalangi.mjs           # 现有插桩入口
 ├── tools/
-│   ├── trace-parse.mjs        # 现有 CLI
-│   └── trace-render.mjs       # 现有 CLI
+│   ├── trace-parse.mjs        # 现有 CLI（自动识别 .bin / .bin.gz）
+│   ├── trace-render.mjs       # 现有 CLI
+│   └── trace-server/
+│       └── TraceCollector.mjs # WS 收集核心共享模块（会话管理 / 事件去重 / gzip 写盘 / 钩子扩展）
 ├── analyzer/                  # JTA 主目录
 │   ├── server.mjs             # Express 服务入口（默认端口 33000；内置 /ws/trace Trace 收集；/api/config 配置 API）
 │   ├── PluginEngine.mjs       # 插件调度器（含断点恢复、分阶段调度）
@@ -334,6 +336,10 @@ Jani/
 - [x] **`fn_def_iid` 函数定义点 IID**：`call_edges` 表新增 `fn_def_iid` 列，F3 从 `CALL_PRE.fnDefIid` 读取；API 支持按 `fnDefIid` 精确过滤函数调用，区分同名但定义位置不同的函数
 - [x] **函数调用源码注解**（`GET /calls/:callId/annotated-source`）：返回函数调用中每条指令的源码行、事件类型、值，标注子调用范围；前端 `CallDetail.vue` 新增源码注解面板
 - [x] **会话复用**（trace-server `?sid=` 参数）：断线重连后按 `sid` 复用同一文件追加写入，idle 超时自动关闭文件，防止资源泄漏
+- [x] **TraceCollector 共享模块**（`tools/trace-server/TraceCollector.mjs`）：将 trace 收集核心逻辑（会话管理 / 事件去重 / gzip 压缩写盘 / 钩子扩展）抽取为独立模块，同时被 `tools/trace-server/server.mjs`（独立 CLI）和 `analyzer/server.mjs`（JTA 集成）复用，消除代码重复
+- [x] **Trace 传输层压缩**：`/ws/trace` 端点启用 `perMessageDeflate`（WS 传输层 zlib 压缩）；落盘同时支持 gzip 写盘（`.bin.gz`，压缩级别可配置，默认 level 6）
+- [x] **事件序号去重**（`seenSeqs`）：断线重连重传场景下，服务端按事件 seq 编号去重，保证同一事件不被写入两次
+- [x] **F1 EventIndex `.bin.gz` 支持**：F1 插件自动检测 `bin_path` 后缀，`.bin.gz` 文件先 `gunzipSync` 到临时文件再流式解析，解析完后自动清理临时文件
 - [x] **插件检查点统计摘要**（`plugin_checkpoints.summary_json`）：插件完成时持久化统计摘要，供 `OverviewTab.vue` 展示插件产出统计
 - [x] **插件检查点过期标记**（`plugin_checkpoints.is_stale`）：上游插件重跑后，下游依赖插件检查点自动标记为 stale；`ProgressDrawer.vue` 展示过期状态
 - [x] **概览页/帮助抽屉**：新增 `OverviewTab.vue`（插件产出统计 + 算法报告摘要 + 关联工作空间展示）和 `HelpDrawer.vue`（操作指引）
@@ -393,6 +399,9 @@ Jani/
 | A3 函数边界感知循环检测 | own-event 窗口 = 帧 `[call_seq, return_seq]` - 所有子调用帧范围 | 子函数内循环 iid 在父函数 own-event 视角下只出现一次，不会触发"重复"判定；消除跨帧误判 |
 | `value_dict` 复合主键 `(session_id, id)` | 两列联合主键，id 在单 session 内自增 | 多 session 同时导入时各自从 1 开始计数，单列主键 `id` 导致不同 session 相互冲突 |
 | trace-server 会话复用 (`?sid=`) | URL `sid` 参数标识会话，断线重连追加写入同一文件；idle 超时关闭 | 移动端/弱网场景下连接断开不应丢弃已收集数据；idle 超时（默认 60 s）防止文件句柄泄漏 |
+| TraceCollector 共享模块 | `tools/trace-server/TraceCollector.mjs` 提取为独立模块，两处复用 | 避免在 `tools/trace-server/server.mjs` 和 `analyzer/server.mjs` 之间维护两套相同逻辑；逻辑变更只需修改一处 |
+| Trace 落盘 gzip 压缩 | 收镃端写盘时选 gzip 压缩（`.bin.gz`），压缩级别可配置 | 直接减少磁盘占用；`trace-parse.mjs` 和 F1 EventIndex 均自动识别并解压，对后续工具透明 |
+| Trace 事件序号去重 | `seenSeqs` Set 过滤重传 seq | 断线重连重传场景下，盘上 trace 文件每个事件最多写一次，消除重复计数和解析错误 |
 | `plugin_checkpoints.is_stale` 过期标记 | 上游插件重跑后，`DOWNSTREAM_STALE_MAP` 标记所有依赖其的下游检查点为 stale | 避免分析结果不一致（上游数据变更而下游不知情）；stale 状态在 UI 中明确提示用户需重跑 |
 
 ---
