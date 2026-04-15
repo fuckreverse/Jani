@@ -1,6 +1,6 @@
 # JTA REST API 与 WebSocket 协议
 
-**版本：** v1.6  
+**版本：** v1.7  
 
 本文档是 JTA Server（默认端口 33000）所有对外接口的完整参考。
 
@@ -457,6 +457,34 @@ POST /api/storage/delete
     删除 session_dir 时同步删除 DB 中对应 sessions + plugin_checkpoints 记录
     删除 project_dir 时同步删除 DB 中对应 projects 记录并将关联 sessions.project_id 置 null
     返回：{ results: [{ ok, path, type, freedSize?, error? }], freed, freedStr, successCount, errorCount }
+```
+
+---
+
+### 配置
+
+```
+GET  /api/config
+    返回当前生效的运行时配置快照（ui 和 api 子树 + 配置文件路径信息）
+    说明：
+      - 返回的是服务端实际生效的合并后配置（环境变量 > config.json > config.default.json）
+      - 前端 useConfig.js composable 使用此接口获取 UI 相关配置
+    返回：{
+        ui:  { sessionListRefreshMs, sessionDetailRefreshMs, wsReconnectMs,
+               traceMonitorPollMs, traceMonitorPageSize, traceMonitorHistoryMax },
+        api: { defaultPageSize, maxPageSize, hotIidsLimit, valuePatternsLimit,
+               webApiDefaultLimit, objectTimelinesMaxPageSize, ... （api.* 全部字段）},
+        paths: { default: '/path/to/config.default.json',
+                 user:    '/path/to/config.json',
+                 userExists: false }
+    }
+
+    配置覆盖方式：
+      1. 复制 config.default.json → config.json，修改需要的字段
+      2. 设置环境变量 JTA_<UPPER_SNAKE_KEY>（最高优先级）
+         示例：JTA_SERVER_PORT=8080  JTA_RUNNER_TIMEOUTMS=60000
+         键路径规则：点号替换为 _，全部大写，前缀 JTA_
+         示例：plugins.A1_TaintTracker.maxHops → JTA_PLUGINS_A1_TAINTTRACKER_MAXHOPS
 ```
 
 ---

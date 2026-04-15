@@ -274,14 +274,16 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
 import ProgressDrawer from './ProgressDrawer.vue';
 import PluginSelector from '../components/session/PluginSelector.vue';
+import { useConfig } from '../composables/useConfig.js';
 
 const router = useRouter();
+const { ui: uiCfg } = useConfig();
 
-const POLL_INTERVAL = 3000;
 const CHART_W = 600;
 const CHART_H = 60;
-const HISTORY_MAX = 60;
-const PAGE_SIZE = 20;
+const POLL_INTERVAL = computed(() => uiCfg.value.traceMonitorPollMs);
+const HISTORY_MAX   = computed(() => uiCfg.value.traceMonitorHistoryMax);
+const PAGE_SIZE     = computed(() => uiCfg.value.traceMonitorPageSize);
 
 const stats        = ref(null);
 const fetchError   = ref('');
@@ -291,7 +293,7 @@ const loadingFiles = ref(false);
 const connecting   = ref(true);
 
 // 分页和搜索
-const pagination   = ref({ total: 0, offset: 0, limit: PAGE_SIZE, totalPages: 1 });
+const pagination   = ref({ total: 0, offset: 0, limit: PAGE_SIZE.value, totalPages: 1 });
 const searchQuery  = ref('');
 let searchTimer    = null;
 
@@ -403,7 +405,7 @@ async function fetchStats() {
             const dt  = (now - prevTime) / 1000;
             const eps = dt > 0 ? (data.eventsReceived - prevEvents) / dt : 0;
             history.value.push({ t: now, eps: Math.max(0, eps) });
-            if (history.value.length > HISTORY_MAX) history.value.shift();
+            if (history.value.length > HISTORY_MAX.value) history.value.shift();
         }
         prevEvents = data.eventsReceived;
         prevTime   = now;
@@ -677,7 +679,7 @@ onMounted(() => {
     timer = setInterval(() => {
         fetchStats();
         if (!connecting.value) fetchFiles();
-    }, POLL_INTERVAL);
+    }, POLL_INTERVAL.value);
 });
 
 onUnmounted(() => {

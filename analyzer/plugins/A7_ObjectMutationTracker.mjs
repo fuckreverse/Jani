@@ -15,8 +15,7 @@
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
-
-const BATCH_SIZE = 5000;
+import { cfg } from '../Config.mjs';
 
 export default class A7ObjectMutationTracker extends BasePlugin {
     static id = 'A7-ObjectMutationTracker';
@@ -27,6 +26,9 @@ export default class A7ObjectMutationTracker extends BasePlugin {
     async run(ctx) {
         const { sessionId } = ctx;
         const rawDb = db.raw();
+
+        // 在 run() 入口捕获配置
+        const _batchSize = cfg('plugins.A7_ObjectMutationTracker.batchSize');
 
         this.emitProgress(ctx, '清空旧数据...', 0);
         db.run('DELETE FROM object_timelines WHERE session_id = ?', [sessionId]);
@@ -140,7 +142,7 @@ export default class A7ObjectMutationTracker extends BasePlugin {
             }
 
             processed++;
-            if (rows.length >= BATCH_SIZE) {
+            if (rows.length >= _batchSize) {
                 flush();
                 const pct = Math.min(90, 20 + Math.round((processed / fields.length) * 70));
                 this.emitProgress(ctx, `已写入 ${totalWritten} 条时间线记录...`, pct);

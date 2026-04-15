@@ -16,6 +16,7 @@ const log = createLogger('sessions');
 import * as db from '../../db/Database.mjs';
 import { decodeType, TYPE } from '../../db/EventTypeCode.mjs';
 import { safeParseJson, groupBy, makeIsInsideChild } from './utils.mjs';
+import { cfg } from '../../Config.mjs';
 
 const router = Router({ mergeParams: true });
 
@@ -52,7 +53,7 @@ router.get('/events', (req, res) => {
             varName,
             seqFrom,
             seqTo,
-            limit  = '100',
+            limit,
             offset = '0',   // 向后兼容，推荐改用 cursor
             cursor,         // 游标分页：上次返回的最后一个 seq，下次从 id > cursor 开始
         } = req.query;
@@ -123,7 +124,9 @@ router.get('/events', (req, res) => {
         }
 
         const where = conditions.join(' AND ');
-        const limitN  = Math.min(Number(limit)  || 100, 1000);
+        const _eventsDefaultLimit = cfg('api.defaultPageSize');
+        const _eventsMaxCap      = cfg('api.maxEventsCap');
+        const limitN  = Math.min(Number(limit)  || _eventsDefaultLimit, _eventsMaxCap);
         // 游标模式不使用 OFFSET（O(1) 定位）；offset 仅向后兼容
         const offsetN = cursor !== undefined ? 0 : (Number(offset) || 0);
 
@@ -232,7 +235,7 @@ router.get('/events', (req, res) => {
 router.get('/value-search', (req, res) => {
     try {
         const { id } = req.params;
-        const { num, numMin, numMax, str, strLike, varName, source, limit = '200' } = req.query;
+        const { num, numMin, numMax, str, strLike, varName, source, limit } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -244,7 +247,9 @@ router.get('/value-search', (req, res) => {
             });
         }
 
-        const limitN = Math.min(Number(limit) || 200, 1000);
+        const _vsDefaultLimit = cfg('api.valueSearchDefaultLimit');
+        const _vsMaxLimit     = cfg('api.valueSearchMaxLimit');
+        const limitN = Math.min(Number(limit) || _vsDefaultLimit, _vsMaxLimit);
         const conditions = ['session_id = ?'];
         const params = [id];
 
@@ -321,7 +326,7 @@ router.get('/value-search/events', (req, res) => {
     try {
         const { id } = req.params;
         const { num, numMin, numMax, str, strLike, varName, source,
-                limit = '50', offset = '0' } = req.query;
+                limit, offset = '0' } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -333,7 +338,9 @@ router.get('/value-search/events', (req, res) => {
             });
         }
 
-        const limitN  = Math.min(Number(limit)  || 50,  200);
+        const _vseDefaultLimit = cfg('api.valueSearchEventsDefaultLimit');
+        const _vseMaxLimit     = cfg('api.valueSearchEventsMaxLimit');
+        const limitN  = Math.min(Number(limit)  || _vseDefaultLimit, _vseMaxLimit);
         const offsetN = Number(offset) || 0;
 
         // 构建 value_index 查询条件（与 value-search 相同）
@@ -478,8 +485,10 @@ router.get('/value-search/events', (req, res) => {
 router.get('/value-dict/stats', (req, res) => {
     try {
         const { id } = req.params;
-        const { topN = '20' } = req.query;
-        const topNNum = Math.min(Number(topN) || 20, 200);
+        const { topN } = req.query;
+        const _vdTopNDefault = cfg('api.valueDictTopNDefault');
+        const _vdTopNMax     = cfg('api.valueDictTopNMax');
+        const topNNum = Math.min(Number(topN) || _vdTopNDefault, _vdTopNMax);
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
         if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -556,13 +565,15 @@ router.get('/value-dict', (req, res) => {
         const {
             valType, text, textLike, numMin, numMax,
             withRefCount = '0',
-            limit = '100', offset = '0',
+            limit, offset = '0',
         } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
         if (!session) return res.status(404).json({ error: 'Session not found' });
 
-        const limitN  = Math.min(Number(limit)  || 100, 500);
+        const _vdDefaultLimit = cfg('api.valueDictDefaultLimit');
+        const _vdMaxLimit     = cfg('api.valueDictMaxLimit');
+        const limitN  = Math.min(Number(limit)  || _vdDefaultLimit, _vdMaxLimit);
         const offsetN = Number(offset) || 0;
 
         const conds  = ['vd.session_id = ?'];
@@ -759,7 +770,7 @@ router.post('/events/export', async (req, res) => {
         // （不再用 BETWEEN firstSeq AND lastSeq，避免拉进子调用内部的行）
 
         // 每批 events 行数（按实际输出行数，非 SEQ 步长）
-        const BATCH = 500;
+        const BATCH = cfg('events.exportBatchSize');
 
         // ── 诊断计数器 ──────────────────────────────────────────────────────────
         const _t0export = performance.now();

@@ -159,6 +159,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue';
+import { useConfig } from '../../composables/useConfig.js';
 
 const props = defineProps({
     sessionId: { type: String, required: true },
@@ -179,7 +180,8 @@ const filterConfidence  = ref('');
 const searchText        = ref('');
 let searchTimer = null;
 
-const pageSize     = 200;
+const { api: apiCfg } = useConfig();
+const pageSize     = computed(() => apiCfg.value.webApiDefaultLimit);
 const currentOffset = ref(0);
 
 // ─── 计算属性 ──────────────────────────────────────────────────────────────
@@ -235,7 +237,7 @@ async function loadItems(resetPage = false) {
     itemLoading.value = true;
     try {
         const params = new URLSearchParams({
-            limit: pageSize,
+            limit: pageSize.value,
             offset: currentOffset.value,
         });
         if (activeCategory.value)   params.set('category', activeCategory.value);
@@ -274,12 +276,12 @@ function onSearchInput() {
 }
 
 function prevPage() {
-    currentOffset.value = Math.max(0, currentOffset.value - pageSize);
+    currentOffset.value = Math.max(0, currentOffset.value - pageSize.value);
     loadItems(false);
 }
 
 function nextPage() {
-    currentOffset.value += pageSize;
+    currentOffset.value += pageSize.value;
     loadItems(false);
 }
 

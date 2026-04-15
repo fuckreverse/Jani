@@ -1,7 +1,7 @@
 # Jani Trace Analyzer — 概览与路线图
 
-**版本：** v1.7（已实现）  
-**日期：** 2026-04-13  
+**版本：** v1.8（已实现）  
+**日期：** 2026-04-15  
 **目标：** 为 JS 动态 trace 提供一站式逆向分析平台，支持算法识别、污点追踪、签名还原等场景。
 
 ---
@@ -88,10 +88,12 @@ Jani/
 │   ├── trace-parse.mjs        # 现有 CLI
 │   └── trace-render.mjs       # 现有 CLI
 ├── analyzer/                  # JTA 主目录
-│   ├── server.mjs             # Express 服务入口（默认端口 33000；内置 /ws/trace Trace 收集）
+│   ├── server.mjs             # Express 服务入口（默认端口 33000；内置 /ws/trace Trace 收集；/api/config 配置 API）
 │   ├── PluginEngine.mjs       # 插件调度器（含断点恢复、分阶段调度）
 │   ├── InstrumentRunner.mjs   # 服务端沙箱运行（WS 推流输出）
 │   ├── logger.mjs             # 日志封装（pino）
+│   ├── Config.mjs             # 统一配置门面（deepMerge + 环境变量覆盖 + cfg() / reload() / snapshot()）
+│   ├── config.default.json    # 默认配置（所有可调参数及注释，复制为 config.json 后可覆盖）
 │   ├── db/
 │   │   ├── schema.sql         # 表结构定义（含 projects / plugin_checkpoints 等全部表）
 │   │   ├── Database.mjs       # SQLite 封装（better-sqlite3，LRU stmt 缓存 + 在线迁移）
@@ -162,7 +164,8 @@ Jani/
 │       │   │       ├── ImportFromTraceDialog.vue   # 从 trace 目录导入对话框
 │       │   │       └── DeleteConfirmDialog.vue      # 删除确认对话框
 │       │   ├── composables/
-│       │   │   └── useSessionUtils.js     # 会话工具函数
+│       │   │   ├── useSessionUtils.js     # 会话工具函数
+│       │   │   └── useConfig.js           # 配置 composable（单例，从 /api/config 获取，响应式 + 默认值回退）
 │       │   └── views/
 │       │       ├── WorkspaceList.vue       # 工作空间列表（/workspaces）
 │       │       ├── WorkspaceDetail.vue     # 工作空间详情（/workspaces/:id）
@@ -307,6 +310,17 @@ Jani/
 - [x] **Trace 对比页面**（`TraceDiff.vue`，路由 `/diff`）：多会话执行行为差异可视化，导航栏新增入口
 - [x] **`routes/compare.mjs`（新文件）**：多对比 API 全部实现，内建函数黑名单预拼 SQL 供 LRU 缓存
 
+### Phase 12：统一配置系统 ✅ 已完成
+- [x] **`Config.mjs` 统一配置门面**：`cfg(path)` / `reload()` / `snapshot()` / `configPaths()` API
+  - 加载优先级：环境变量（`JTA_<UPPER_SNAKE_KEY>`）> `config.json` > `config.default.json`
+  - 深度合并（`deepMerge`），自动类型转换（环境变量字符串 → 数字/布尔）
+  - 支持热重载（`reload()`），调用方无感知
+- [x] **`config.default.json` 统一默认值**：server / runner / db / api / compare / functions / events / plugins（所有 F/A/I）/ traceServer / mcp / logger / serialize / tools / ui / storage 共 200+ 可配置项
+- [x] **后端全量配置化**：所有插件（F1-F4 / A1-A3 / A5 / A7-A8 / I1-I5）、路由层（events / functions / analysis / compare / storage）、InstrumentRunner 所有硬编码参数替换为 `cfg()` 调用；热循环入口处一次性捕获，避免重复查找
+- [x] **配置 API**（`GET /api/config`）：返回 `{ ui, api, paths }` 供前端消费
+- [x] **前端配置 composable**（`useConfig.js`）：单例懒加载，响应式暴露 `{ api, ui }`，支持默认值回退；所有 UI 组件的分页大小、轮询间隔等通过此 composable 获取
+- [x] **配置项覆盖方式**：复制 `config.default.json` 为 `config.json` 后修改；或设置 `JTA_*` 环境变量（最高优先级）
+
 ### Phase 11：分析深化与体验优化 ✅ 已完成
 - [x] **`writes/reads/fields` 去冗余**：移除三张表冗余 `value` 列，统一通过 `value_id` JOIN `value_dict` 获取完整值；Schema 迁移自动处理旧数据库
 - [x] **`value_dict` 复合主键修复**：`(session_id, id)` 双列主键，修复多 session 共用 `id=1` 的主键冲突
@@ -370,6 +384,9 @@ Jani/
 | 单函数 CFG 基本块划分 | 按行号聚类（相邻行号差 ≤ LINE_GAP=3），采样多次调用取 union iid 集合 | 无需静态分析，纯动态数据；采样 union 确保覆盖不同执行路径；行号差阈值过滤无关 iid |
 | 多会话对比查询优化 | 所有维度用 `IN(${ph})` 一次查询 + `GROUP BY session_id` 聚合，最多 6 次 SQL（原来 6N 次） | N=8 会话时性能提升 8×；预拼 BUILTIN_NOT_IN_SQL 常量供 LRU 缓存 |
 | 对比页 `/diff` 分歧计算 | delta/pct 纯 JS 层计算（以 sessions[0] 为基准），不下推 SQL | 计算量 O(N × |types|)，远小于 DB 往返时延；保持 SQL 结构简单，LRU 友好 |
+| 统一配置门面 | `Config.mjs` + `cfg(path)` 单一入口；加载优先级：环境变量 > config.json > config.default.json | 所有硬编码参数集中到 `config.default.json`；调用方无需关心来源，后续可无缝替换为 DB / HTTP 来源 |
+| 配置化性能策略 | 插件/路由入口处一次性捕获配置值到局部变量 | 避免在事件循环热路径中重复调用 `cfg()`；与直接读 JSON 等价，无额外开销 |
+| 前端配置单例 | `useConfig.js` composable 单例懒加载，响应式 ref | 避免多个 Vue 组件重复请求 `/api/config`；配置变更自动触发重渲染 |
 | `writes/reads/fields` 去冗余 `value` 列 | 统一通过 `value_id` JOIN `value_dict` | 去除三张表冗余存储，节省磁盘空间；值只需在 `value_dict` 维护一份，更新即全生效 |
 | `fn_def_iid` 函数定义点 IID | `call_edges` 新增列，`CALL_PRE` 事件携带 | 函数名相同但定义位置不同（如多次 `function foo()`）的情况，仅靠 `fn_name` 无法区分；`fn_def_iid` 精确唯一定位函数定义点 |
 | I5 WebApiDetector 三级置信度 | confirmed（oid_aliases 精确匹配）> propagated（OID 传播）> inferred（属性名启发） | OID 路径精确但覆盖率低；属性名路径覆盖率高但误报高；三级结合兼顾精确度与召回率 |

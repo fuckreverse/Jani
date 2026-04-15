@@ -13,9 +13,10 @@
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { cfg } from '../Config.mjs';
 import { TYPE } from '../db/EventTypeCode.mjs';
 
-const BATCH_SIZE = 10000;
+const BATCH_SIZE = () => cfg('plugins.F3_CallGraphBuilder.batchSize');
 
 export default class F3CallGraphBuilder extends BasePlugin {
     static id = 'F3-CallGraphBuilder';
@@ -26,6 +27,7 @@ export default class F3CallGraphBuilder extends BasePlugin {
     async run(ctx) {
         const { sessionId } = ctx;
         const rawDb = db.raw();
+        const _batchSize = BATCH_SIZE();
 
         this.emitProgress(ctx, '清空旧数据...', 0);
         rawDb.prepare('DELETE FROM call_edges WHERE session_id = ?').run(sessionId);
@@ -191,7 +193,7 @@ export default class F3CallGraphBuilder extends BasePlugin {
                     stack[stack.length - 1].child_event_span += totalSpan;
                 }
 
-                if (edges.length >= BATCH_SIZE) {
+                if (edges.length >= _batchSize) {
                     flushEdges();
                     const pct = Math.min(95, 40 + Math.round((processed / totalEvents) * 55));
                     this.emitProgress(ctx, `已写入 ${edgeCount} 条调用边...`, pct);

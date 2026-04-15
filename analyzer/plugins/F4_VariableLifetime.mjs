@@ -7,8 +7,9 @@
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { cfg } from '../Config.mjs';
 
-const BATCH_SIZE = 5000;
+const BATCH_SIZE = () => cfg('plugins.F4_VariableLifetime.batchSize');
 
 export default class F4VariableLifetime extends BasePlugin {
     static id = 'F4-VariableLifetime';
@@ -19,6 +20,7 @@ export default class F4VariableLifetime extends BasePlugin {
     async run(ctx) {
         const { sessionId } = ctx;
         const rawDb = db.raw();
+        const _batchSize = BATCH_SIZE();
 
         this.emitProgress(ctx, '清空旧数据...', 0);
         db.run('DELETE FROM var_lifetime WHERE session_id = ?', [sessionId]);
@@ -73,7 +75,7 @@ export default class F4VariableLifetime extends BasePlugin {
         });
 
         // 分批执行（超大数据集时避免单事务过重）
-        const CHUNK = BATCH_SIZE;
+        const CHUNK = _batchSize;
         for (let i = 0; i < writeStats.length; i += CHUNK) {
             // 首批同时处理 read-only 变量，后续批次传空数组
             const readChunk = i === 0 ? readStats : [];

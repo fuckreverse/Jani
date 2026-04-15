@@ -241,6 +241,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { truncate } from '../../composables/useSessionUtils.js';
 import { openValueViewer } from '../../composables/useValueViewer.js';
+import { useConfig } from '../../composables/useConfig.js';
 
 const props = defineProps({
     sessionId: { type: String, required: true },
@@ -265,8 +266,10 @@ const patternsLoading = ref(false);
 const totalCount      = ref(0);   // 服务端真实总数
 
 // ── 分页状态 ──────────────────────────────────────────────────────────────────
+const { api: apiCfg } = useConfig();
 const currentPage = ref(1);
-const pageSize    = ref(100);
+// 初始值从配置读取，用户可在 UI 中修改
+const pageSize    = ref(apiCfg.value.defaultPageSize ?? 100);
 const jumpInput   = ref('');
 
 const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize.value)));

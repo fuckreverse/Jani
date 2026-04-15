@@ -9,8 +9,9 @@
 import { readFileSync } from 'fs';
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { cfg } from '../Config.mjs';
 
-const BATCH_SIZE = 1000;
+const BATCH_SIZE = () => cfg('plugins.F2_SmapLoader.batchSize');
 
 export default class F2SmapLoader extends BasePlugin {
     static id = 'F2-SmapLoader';
@@ -20,6 +21,7 @@ export default class F2SmapLoader extends BasePlugin {
 
     async run(ctx) {
         const { sessionId } = ctx;
+        const _batchSize = BATCH_SIZE();
 
         const session = db.get('SELECT * FROM sessions WHERE id = ?', sessionId);
         if (!session) throw new Error(`Session ${sessionId} not found`);
@@ -76,8 +78,8 @@ export default class F2SmapLoader extends BasePlugin {
         let count = 0;
 
         // 分批写入
-        for (let i = 0; i < entries.length; i += BATCH_SIZE) {
-            const batch = entries.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < entries.length; i += _batchSize) {
+            const batch = entries.slice(i, i + _batchSize);
             db.transaction(() => {
                 for (const [key, arr] of batch) {
                     if (!Array.isArray(arr) || arr.length < 4) continue;
@@ -97,7 +99,7 @@ export default class F2SmapLoader extends BasePlugin {
                 }
             });
             const progress = Math.min(95, Math.floor((i / entries.length) * 85) + 10);
-            this.emitProgress(ctx, `已处理 ${Math.min(i + BATCH_SIZE, entries.length)} / ${entries.length} iids`, progress);
+            this.emitProgress(ctx, `已处理 ${Math.min(i + _batchSize, entries.length)} / ${entries.length} iids`, progress);
         }
 
         // Phase D：events 表已无 line/col/src_text 列，smap 是唯一来源，无需回填。

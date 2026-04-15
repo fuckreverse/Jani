@@ -20,6 +20,7 @@ import { mkdirSync, existsSync, createWriteStream, readdirSync, rmSync, statSync
 import { fileURLToPath } from 'url';
 import cors from 'cors';
 import { createLogger } from './logger.mjs';
+import { cfg, configPaths } from './Config.mjs';
 
 const log = createLogger('server');
 
@@ -48,7 +49,7 @@ const tracesDirArg  = args.indexOf('--traces-dir');
 // --no-clear-traces 保留向后兼容（已无实际效果，默认不清空；--clear-traces 才清空）
 const _noClearTraces = args.includes('--no-clear-traces'); // eslint-disable-line no-unused-vars
 
-const PORT    = portArg >= 0 ? Number(args[portArg + 1])   : (process.env.PORT ? Number(process.env.PORT) : 33000);
+const PORT    = portArg >= 0 ? Number(args[portArg + 1])   : (process.env.PORT ? Number(process.env.PORT) : cfg('server.port'));
 const DB_PATH = dbArg   >= 0 ? args[dbArg + 1]             : resolve(__dirname, 'data/jta.db');
 const UPLOAD_DIR   = resolve(__dirname, 'data/uploads');
 const SESSIONS_DIR = resolve(__dirname, 'data/sessions');
@@ -118,13 +119,13 @@ app.use((req, res, next) => {
 });
 
 // JSON body parser
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: cfg('server.maxJsonBodySize') }));
 app.use(express.urlencoded({ extended: true }));
 
 // multer — 文件上传（临时存储到 UPLOAD_DIR）
 const upload = multer({
     dest: UPLOAD_DIR,
-    limits: { fileSize: 1024 * 1024 * 1024 }, // 1GB
+    limits: { fileSize: cfg('server.maxFileSize') },
 });
 
 // 文件上传中间件（sessions 路由需要）
@@ -185,6 +186,15 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', version: '1.0.0', uptime: process.uptime() });
 });
 
+// 配置查询（前端用于读取 UI 相关的可配置项）
+app.get('/api/config', (req, res) => {
+    res.json({
+        ui: cfg('ui'),
+        api: cfg('api'),
+        paths: configPaths(),
+    });
+});
+
 // Trace 统计
 app.get('/api/trace/stats', (req, res) => {
     const elapsed = ((Date.now() - traceStats.startTime) / 1000).toFixed(1);
@@ -234,9 +244,11 @@ app.get('/api/plugins', async (req, res) => {
 // Trace 文件列表（支持搜索 ?q= 和分页 ?offset=&limit=）
 app.get('/api/trace/files', (req, res) => {
     try {
-        const { q = '', offset = '0', limit = '100' } = req.query;
+        const { q = '', offset = '0', limit = '0' } = req.query;
         const offsetN = Math.max(0, Number(offset) || 0);
-        const limitN  = Math.min(Math.max(1, Number(limit) || 100), 500);
+        const _defaultPageSize = cfg('api.defaultPageSize');
+        const _maxPageSize = cfg('api.maxPageSize');
+        const limitN  = Math.min(Math.max(1, Number(limit) || _defaultPageSize), _maxPageSize);
 
         // 读取 trace_aliases：alias.json 记录 { filename: aliasName }
         const aliasPath = join(TRACES_DIR, '_aliases.json');

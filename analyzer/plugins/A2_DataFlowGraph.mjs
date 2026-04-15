@@ -17,12 +17,7 @@
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
-
-const BATCH_SIZE = 5000;
-// copy 边每个事件的上界：防止解构赋值/大表达式产生组合爆炸
-// 例：const {a,b,c,d,e} = obj 有 5 reads × 5 writes = 25 条，正常
-// 但 eval 类场景可能产生数百个 read/write，需限制
-const MAX_COPY_PER_EVENT = 20;
+import { cfg } from '../Config.mjs';
 
 // 二分：在有序 arr 中找最后一个 key(item) < target 的位置
 function upperBoundLt(arr, target, key) {
@@ -55,6 +50,10 @@ export default class A2DataFlowGraph extends BasePlugin {
     async run(ctx) {
         const { sessionId } = ctx;
         const rawDb = db.raw();
+
+        // 在 run() 入口捕获配置（避免循环内调用 cfg）
+        const _batchSize = cfg('plugins.A2_DataFlowGraph.batchSize');
+        const _maxCopyPerEvent = cfg('plugins.A2_DataFlowGraph.maxCopyPerEvent');
 
         this.emitProgress(ctx, '清空旧数据...', 0);
         rawDb.prepare('DELETE FROM dataflow_edges WHERE session_id = ?').run(sessionId);
@@ -156,7 +155,7 @@ export default class A2DataFlowGraph extends BasePlugin {
                 meta?.line ?? null,
             ]);
 
-            if (edges.length >= BATCH_SIZE) {
+            if (edges.length >= _batchSize) {
                 flush();
                 this.emitProgress(ctx, `assign 边已写 ${totalWritten}...`, 45);
             }
@@ -207,8 +206,8 @@ export default class A2DataFlowGraph extends BasePlugin {
                     ]);
                     copyCount++;
                     perEvent++;
-                    if (perEvent >= MAX_COPY_PER_EVENT) break outer; // 防止组合爆炸
-                    if (edges.length >= BATCH_SIZE) {
+                    if (perEvent >= _maxCopyPerEvent) break outer; // 防止组合爆炸
+                    if (edges.length >= _batchSize) {
                         flush();
                         this.emitProgress(ctx, `copy 边已写 ${copyCount}...`, 54);
                     }
@@ -328,7 +327,7 @@ export default class A2DataFlowGraph extends BasePlugin {
                     }
                 }
 
-                if (edges.length >= BATCH_SIZE) {
+                if (edges.length >= _batchSize) {
                     flush();
                     callEdgeCount = totalWritten - prevWritten;
                 }
@@ -361,7 +360,7 @@ export default class A2DataFlowGraph extends BasePlugin {
                 edges.push([sessionId, null, f.event_id, baseLabel, varLabel, 'field_read', meta?.iid ?? null, meta?.line ?? null]);
             }
 
-            if (edges.length >= BATCH_SIZE) {
+            if (edges.length >= _batchSize) {
                 flush();
                 this.emitProgress(ctx, `field 边已写 ${totalWritten}...`, 90);
             }

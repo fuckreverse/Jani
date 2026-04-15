@@ -13,6 +13,7 @@
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { cfg } from '../Config.mjs';
 
 // ─── 已知密码学魔术常数映射（十进制字符串 / 十六进制字符串 → 常数名）────────
 
@@ -244,12 +245,21 @@ const CRYPTO_CONSTANTS = new Map([
 
 const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
-// ─── 时间戳边界：模块加载时计算一次（当前时间 ±10 年）────────────────────────
-const _now      = Date.now();
-const TS_MS_MIN = _now - 10 * 365.25 * 24 * 3600 * 1000;   // 10 年前（ms）
-const TS_MS_MAX = _now + 10 * 365.25 * 24 * 3600 * 1000;   // 10 年后（ms）
-const TS_S_MIN  = Math.floor(TS_MS_MIN / 1000);              // 10 年前（s）
-const TS_S_MAX  = Math.ceil(TS_MS_MAX  / 1000);              // 10 年后（s）
+// ─── 时间戳边界：延迟计算（首次调用 detectValueType 时根据配置计算）────────
+let _tsBounds = null;
+function getTsBounds() {
+    if (_tsBounds) return _tsBounds;
+    const years = cfg('plugins.A8_ValuePatternDetector.timestampWindowYears');
+    const _now = Date.now();
+    const msYear = 365.25 * 24 * 3600 * 1000;
+    _tsBounds = {
+        msMin: _now - years * msYear,
+        msMax: _now + years * msYear,
+        sMin:  Math.floor((_now - years * msYear) / 1000),
+        sMax:  Math.ceil((_now + years * msYear) / 1000),
+    };
+    return _tsBounds;
+}
 
 // ─── 正则预编译（模块级，避免每次调用重建）────────────────────────────────────
 const RE_UUID         = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -286,6 +296,8 @@ function detectValueType(value) {
     let str = String(value).trim();
     if (str === '') return null;
 
+    const ts = getTsBounds();
+
     // ── val_text 解包：value_dict 存储的字符串型值带 JSON 引号（"hello"）────
     // 检测前先还原为真实字符串内容，避免引号干扰长度/字符集检测
     if (str.startsWith('"') && str.endsWith('"') && str.length >= 2) {
@@ -295,13 +307,13 @@ function detectValueType(value) {
     if (str === '') return null;
 
     // ── 数值型特判（时间戳）────────────────────────────────────────────────
-    // 用模块加载时算好的边界（当前时间 ±10 年），比硬编码年份更合理
+    // 用配置化的时间窗口边界
     const numVal = Number(str);
     if (!isNaN(numVal) && isFinite(numVal) && String(numVal) === str) {
         // 13 位毫秒时间戳（先判，范围更窄）
-        if (numVal >= TS_MS_MIN && numVal <= TS_MS_MAX) return 'timestamp';
+        if (numVal >= ts.msMin && numVal <= ts.msMax) return 'timestamp';
         // 10 位秒时间戳
-        if (numVal >= TS_S_MIN  && numVal <= TS_S_MAX)  return 'timestamp';
+        if (numVal >= ts.sMin  && numVal <= ts.sMax)  return 'timestamp';
         return null; // 普通数字，无语义
     }
 
@@ -321,13 +333,15 @@ function detectValueType(value) {
     // ── UUID ────────────────────────────────────────────────────────────────
     if (str.length === 36 && RE_UUID.test(str)) return 'uuid';
 
-    // ── JSON 对象/数组（字符串形式，非空）─────────────────────────────────
+        // ── JSON 对象/数组（字符串形式，非空）─────────────────────────────────
     if ((str.startsWith('{') && str.endsWith('}')) || (str.startsWith('[') && str.endsWith(']'))) {
         try {
             const parsed = JSON.parse(str);
             if (Array.isArray(parsed)) {
                 const len = parsed.length;
-                if (len >= 16 && len <= 512) {
+                const byteArrMin = cfg('plugins.A8_ValuePatternDetector.byteArrayMinLen');
+                const byteArrMax = cfg('plugins.A8_ValuePatternDetector.byteArrayMaxLen');
+                if (len >= byteArrMin && len <= byteArrMax) {
                     const allBytes = parsed.every(n => typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= 255);
                     if (allBytes) return 'byte_array';
                 }
@@ -439,6 +453,10 @@ export default class A8ValuePatternDetector extends BasePlugin {
         const { sessionId } = ctx;
         const rawDb = db.raw();
 
+        // 在 run() 入口捕获配置
+        const _plainMinLen = cfg('plugins.A8_ValuePatternDetector.plainStringMinLen');
+        const _insertBatchSize = cfg('plugins.A8_ValuePatternDetector.insertBatchSize');
+
         this.emitProgress(ctx, '清空旧数据...', 0);
         db.run('DELETE FROM value_patterns WHERE session_id = ?', [sessionId]);
 
@@ -457,22 +475,19 @@ export default class A8ValuePatternDetector extends BasePlugin {
 
         this.emitProgress(ctx, `检测 ${allValues.length} 个唯一值的模式...`, 20);
 
-        // plain 字符串最低长度（过滤 "ok"/"id"/"el" 等框架噪音）
-        const PLAIN_MIN_LEN = 4;
-
         const toInsert = [];
         for (const vd of allValues) {
             const matched     = detectConstant(vd.value);
             const patternType = detectValueType(vd.value);
 
-            // 无特征的普通字符串：val_type='str'，去掉 JSON 引号后长度 >= PLAIN_MIN_LEN
+            // 无特征的普通字符串：val_type='str'，去掉 JSON 引号后长度 >= _plainMinLen
             // 写入 pattern_type='plain'，供值面板"全量字符串"浏览
             let finalType = patternType;
             if (!matched && !patternType && vd.val_type === 'str') {
                 // val_text 对字符串是 JSON 序列化形式（带引号），解码取真实字符串内容
                 let rawStr = vd.value;
                 try { rawStr = JSON.parse(vd.value); } catch { /* 保持原始 */ }
-                if (typeof rawStr === 'string' && rawStr.length >= PLAIN_MIN_LEN) {
+                if (typeof rawStr === 'string' && rawStr.length >= _plainMinLen) {
                     finalType = 'plain';
                 }
             }
@@ -505,8 +520,8 @@ export default class A8ValuePatternDetector extends BasePlugin {
             const insertBatch = rawDb.transaction((batch) => {
                 for (const row of batch) stmt.run(...row);
             });
-            for (let i = 0; i < toInsert.length; i += 2000) {
-                insertBatch(toInsert.slice(i, i + 2000));
+            for (let i = 0; i < toInsert.length; i += _insertBatchSize) {
+                insertBatch(toInsert.slice(i, i + _insertBatchSize));
             }
         }
 

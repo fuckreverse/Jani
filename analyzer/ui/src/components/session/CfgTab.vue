@@ -226,6 +226,7 @@
 <script setup>
 import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import cytoscape from 'cytoscape';
+import { useConfig } from '../../composables/useConfig.js';
 
 // ── Props / Emits ─────────────────────────────────────────────────────────
 
@@ -931,6 +932,7 @@ function fmtNum(n) {
 
 // ── 循环迭代抽屉 ────────────────────────────────────────────────────────────
 
+const { api: apiCfg } = useConfig();
 const loopDrawer = reactive({
     open:       false,
     loading:    false,
@@ -942,7 +944,7 @@ const loopDrawer = reactive({
     varNames:   [],
     total:      0,
     page:       0,
-    pageSize:   50,
+    pageSize:   apiCfg.value.cfgLoopsLimit ?? 50,
 });
 
 async function openLoopDrawer(nodeData) {

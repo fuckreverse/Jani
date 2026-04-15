@@ -18,13 +18,14 @@
 import { Router } from 'express';
 import { createLogger } from '../logger.mjs';
 import * as db from '../db/Database.mjs';
+import { cfg } from '../Config.mjs';
 
 const log = createLogger('compare');
 const router = Router();
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
-const MAX_SESSIONS = 8;
+const MAX_SESSIONS = cfg('compare.maxSessions');
 
 // 内建函数黑名单（固定列表，SQL 一次拼好不重复）
 const BUILTIN_SET = new Set([
@@ -134,6 +135,7 @@ router.post('/sessions', (req, res) => {
         const fnStatMap = new Map(fnStatRows.map(r => [r.session_id, r]));
 
         // ── 3. Top-5 热点 IID（ROW_NUMBER 窗口函数，SQLite 3.25+）
+        const _topHotIids = cfg('compare.topHotIidsPerSession');
         const hotIidRows = db.all(
             `SELECT session_id, iid, count, line, src_text
              FROM (
@@ -141,7 +143,7 @@ router.post('/sessions', (req, res) => {
                       ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY count DESC) AS rn
                FROM iid_counts
                WHERE session_id IN (${ph})
-             ) WHERE rn <= 5`,
+             ) WHERE rn <= ${_topHotIids}`,
             ...sessionIds
         );
         const hotIidMap = new Map(); // session_id → [{iid,count,line,src_text}]
@@ -233,14 +235,16 @@ router.post('/sessions', (req, res) => {
 
 router.post('/functions', (req, res) => {
     try {
-        const { sessionIds, limit = 50, hideBuiltin = false } = req.body;
+        const { sessionIds, limit, hideBuiltin = false } = req.body;
         const err = validateSessionIds(sessionIds);
         if (err) return res.status(400).json({ error: err });
 
         const { error, sessions } = checkAndFetchSessions(sessionIds);
         if (error) return res.status(404).json({ error });
 
-        const limitN = Math.min(Number(limit) || 50, 200);
+        const _fnDefaultLimit = cfg('compare.functionsDefaultLimit');
+        const _fnMaxLimit     = cfg('compare.functionsMaxLimit');
+        const limitN = Math.min(Number(limit) || _fnDefaultLimit, _fnMaxLimit);
         const ph     = placeholders(sessionIds.length);
 
         // 单次查询：所有 session 的函数聚合
@@ -348,14 +352,16 @@ router.post('/functions', (req, res) => {
 
 router.post('/hot-iids', (req, res) => {
     try {
-        const { sessionIds, topN = 30 } = req.body;
+        const { sessionIds, topN } = req.body;
         const err = validateSessionIds(sessionIds);
         if (err) return res.status(400).json({ error: err });
 
         const { error, sessions } = checkAndFetchSessions(sessionIds);
         if (error) return res.status(404).json({ error });
 
-        const topNN = Math.min(Number(topN) || 30, 100);
+        const _topNDefault = cfg('compare.hotIidsDefaultTopN');
+        const _topNMax     = cfg('compare.hotIidsMaxTopN');
+        const topNN = Math.min(Number(topN) || _topNDefault, _topNMax);
         const ph    = placeholders(sessionIds.length);
 
         // 单次 ROW_NUMBER 窗口查询（SQLite 3.25+）

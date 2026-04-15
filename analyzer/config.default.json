@@ -1,0 +1,278 @@
+{
+  "_comment": "JTA 默认配置文件。复制并重命名为 config.json 后修改，server.mjs 启动时优先读取 config.json。",
+
+  "server": {
+    "port": 33000,
+    "maxJsonBodySize": "50mb",
+    "maxFileSize": 1073741824
+  },
+
+  "runner": {
+    "maxConcurrency": 3,
+    "timeoutMs": 30000,
+    "maxOutputBytes": 1048576
+  },
+
+  "db": {
+    "stmtCacheSize": 200,
+    "cacheSizeKb": -16000,
+    "mmapSize": 134217728,
+    "walAutocheckpoint": 10000,
+    "busyTimeout": 5000
+  },
+
+  "api": {
+    "defaultPageSize": 100,
+    "maxPageSize": 500,
+    "maxEventsCap": 1000,
+    "hotIidsLimit": 200,
+    "varLifetimeLimit": 500,
+    "taintPathsLimit": 50,
+    "loopStatsLimit": 100,
+    "hotLoopsLimit": 50,
+    "eventStatsLimit": 2000,
+    "dataflowEdgesLimit": 2000,
+    "smapBatchSize": 200,
+    "valuePatternsLimit": 500,
+    "valuePatternsInsertBatch": 2000,
+    "valueSearchDefaultLimit": 200,
+    "valueSearchMaxLimit": 1000,
+    "valueSearchEventsDefaultLimit": 50,
+    "valueSearchEventsMaxLimit": 200,
+    "valueDictTopNDefault": 20,
+    "valueDictTopNMax": 200,
+    "valueDictDefaultLimit": 100,
+    "valueDictMaxLimit": 500,
+    "codeBlocksMaxBlocks": 50,
+    "codeBlocksMaxIidPerBlock": 40,
+    "codeBlocksMaxLinesPerBlock": 10,
+    "cfgEdgesLimit": 2000,
+    "cfgFnLimit": 500,
+    "cfgIidLimit": 100,
+    "cfgLoopsLimit": 50,
+    "fnCfgMaxCallsCap": 100,
+    "fnCfgRawEventsLimit": 2000,
+    "dataflowSubgraphDefaultHops": 3,
+    "dataflowSubgraphMaxHops": 6,
+    "dataflowSubgraphDefaultMaxNodes": 80,
+    "dataflowSubgraphMaxNodes": 200,
+    "dataflowVarsFwdLimit": 50,
+    "dataflowVarsBwdLimit": 50,
+    "dataflowEventFwdLimit": 30,
+    "dataflowEventBwdLimit": 30,
+    "webApiDefaultLimit": 500,
+    "webApiMaxLimit": 2000,
+    "loopIterationsMaxLimit": 1000,
+    "objectTimelinesMaxPageSize": 500,
+    "objectTimelinesBaseVarStatsLimit": 500,
+    "valueIndexSearchLimit": 50,
+    "codeBlocksSmapBatchSize": 500,
+    "codeBlocksLineGap": 3,
+    "flamegraphMaxDepthCap": 200,
+    "flamegraphDefaultMaxDepth": 50
+  },
+
+  "compare": {
+    "maxSessions": 8,
+    "topHotIidsPerSession": 5,
+    "functionsDefaultLimit": 50,
+    "functionsMaxLimit": 200,
+    "hotIidsDefaultTopN": 30,
+    "hotIidsMaxTopN": 100
+  },
+
+  "functions": {
+    "callGraphLimit": 1000,
+    "maxValsPerLine": 6
+  },
+
+  "events": {
+    "exportBatchSize": 500,
+    "exportMaxFetchSize": 50000
+  },
+
+  "plugins": {
+    "F1_EventIndex": {
+      "windowSize": 33554432,
+      "refillThreshold": 1048576,
+      "batchSize": 50000,
+      "yieldEveryBatches": 10,
+      "viMaxSame": 50,
+      "viMaxStr": 65000
+    },
+    "F2_SmapLoader": {
+      "batchSize": 1000
+    },
+    "F3_CallGraphBuilder": {
+      "batchSize": 10000
+    },
+    "F4_VariableLifetime": {
+      "batchSize": 5000
+    },
+    "A1_TaintTracker": {
+      "maxHops": 10,
+      "maxNodes": 500
+    },
+    "A2_DataFlowGraph": {
+      "batchSize": 5000,
+      "maxCopyPerEvent": 20
+    },
+    "A3_HotPathAnalyzer": {
+      "batchSize": 2000,
+      "minSplitGap": 5,
+      "maxInParams": 10000,
+      "splitFactor": 2,
+      "mergeFactor": 4,
+      "minIterCount": 3
+    },
+    "A5_LoopDetector": {
+      "batchSize": 5000,
+      "maxLoops": 5000,
+      "maxIterPerLoop": 500,
+      "loopBatchSize": 50,
+      "maxReadVarsPerIter": 30
+    },
+    "A7_ObjectMutationTracker": {
+      "batchSize": 5000
+    },
+    "A8_ValuePatternDetector": {
+      "timestampWindowYears": 10,
+      "byteArrayMinLen": 16,
+      "byteArrayMaxLen": 512,
+      "plainStringMinLen": 4,
+      "insertBatchSize": 2000
+    },
+    "I1_CryptoDetector": {
+      "hotPathQueryLimit": 10,
+      "loopsQueryLimit": 10,
+      "callEdgesGroupLimit": 10,
+      "objectTimelinesLimit": 10,
+      "varLifetimeLimit": 20,
+      "xorEventLimit": 5,
+      "fnNameQueryLimit": 2000
+    },
+    "I2_SignatureAnalyzer": {
+      "maxHops": 8,
+      "maxPaths": 100
+    },
+    "I3_ObfuscationDetector": {
+      "varNameSampleLimit": 2000,
+      "entropyThreshold": 3.5,
+      "entropyMinNameLength": 4,
+      "shortVarRatioThreshold": 0.3,
+      "shortVarAbsThreshold": 5,
+      "highEntropyCountThreshold": 5,
+      "decoderMinCalls": 5,
+      "decoderMinDistinctRet": 3,
+      "sqlChunkSize": 900,
+      "maxSamplesPerFunc": 20,
+      "minStringRetCount": 3,
+      "hotIidCountThreshold": 10,
+      "hotIidQueryLimit": 50,
+      "numericWriteMinCalls": 5,
+      "numericWriteMinDistinctVals": 3,
+      "vmpAvgEventThreshold": 5000,
+      "deepStackMinCalls": 10,
+      "deepStackMaxDepthThreshold": 50,
+      "deepStackAvgDepthThreshold": 5,
+      "deepStackSevereThreshold": 200,
+      "deepStackHighThreshold": 100
+    },
+    "I4_AlgorithmSummarizer": {
+      "hotPathQueryLimit": 10,
+      "loopsQueryLimit": 10,
+      "callEdgesGroupLimit": 10,
+      "objectTimelinesLimit": 10,
+      "varLifetimeLimit": 20
+    },
+    "I5_WebApiDetector": {
+      "batchSize": 5000,
+      "callLookupDelta": 8
+    }
+  },
+
+  "traceServer": {
+    "port": 9229,
+    "sessionIdleMs": 30000
+  },
+
+  "mcp": {
+    "ssePort": 4000,
+    "streamablePort": 4001,
+    "serverUrl": "http://localhost:33000"
+  },
+
+  "logger": {
+    "wsBackend": {
+      "url": "ws://127.0.0.1:9229/trace",
+      "mainWindowSize": 4,
+      "workerWindowSize": 16,
+      "maxRetries": 10,
+      "retryBaseMs": 500,
+      "retryMaxMs": 30000,
+      "connectTimeoutMs": 10000,
+      "sabSlotCount": 64,
+      "sabSlotDataBytes": 65536,
+      "sabBackpressureTimeoutMs": 200
+    },
+    "nodeStreamBackend": {
+      "defaultFile": "jalangi-trace.bin",
+      "highWaterMark": 65536
+    },
+    "idbBackend": {
+      "dbName": "jalangi-traces",
+      "storeName": "events",
+      "maxPendingBatches": 8,
+      "writeTimeoutMs": 10000
+    },
+    "ringBuffer": {
+      "defaultCapacity": 4096
+    },
+    "logManager": {
+      "defaultBatchSize": 500,
+      "flushIntervalMs": 100
+    }
+  },
+
+  "serialize": {
+    "maxBytes": 1000,
+    "maxDepth": 2,
+    "maxArrayItems": 200,
+    "maxMapItems": 100,
+    "jsonMaxDepth": 3,
+    "jsonMaxArrayItems": 10
+  },
+
+  "tools": {
+    "traceCallTree": {
+      "maxNodes": 50000
+    },
+    "traceParse": {
+      "highWaterMarkBytes": 524288,
+      "singleThreadOutBatch": 2048,
+      "multiThreadBatchLines": 8192
+    },
+    "traceRangeExtract": {
+      "defaultBeforeLines": 10,
+      "defaultAfterLines": 10,
+      "defaultContextLines": 10
+    },
+    "traceVarTimeline": {
+      "defaultLimit": 100
+    }
+  },
+
+  "ui": {
+    "sessionListRefreshMs": 5000,
+    "sessionDetailRefreshMs": 10000,
+    "wsReconnectMs": 5000,
+    "traceMonitorPollMs": 3000,
+    "traceMonitorPageSize": 20,
+    "traceMonitorHistoryMax": 60
+  },
+
+  "storage": {
+    "oldSessionDays": 30,
+    "oldSessionMinMb": 1
+  }
+}

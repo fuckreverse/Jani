@@ -94,6 +94,7 @@
 <script setup>
 import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
+import { useConfig } from '../composables/useConfig.js';
 
 import ProgressDrawer  from './ProgressDrawer.vue';
 import HelpDrawer      from './HelpDrawer.vue';
@@ -111,6 +112,8 @@ import ObjMutTab       from '../components/session/ObjMutTab.vue';
 import ObfuscationTab  from '../components/session/ObfuscationTab.vue';
 import CfgTab          from '../components/session/CfgTab.vue';
 import WebApiTab       from '../components/session/WebApiTab.vue';
+
+const { ui: uiCfg } = useConfig();
 
 // ─── 路由 ─────────────────────────────────────────────────────────────────────
 const route = useRoute();
@@ -473,7 +476,7 @@ function connectWs() {
         // 始终尝试重连（除非组件已卸载）
         // 注意：即使分析已完成(ready)，后续仍可能触发重跑，需要收到新的 init/stale 消息
         if (!wsDestroyed) {
-            wsReconnectTimer = setTimeout(connectWs, 5000);
+            wsReconnectTimer = setTimeout(connectWs, uiCfg.value.wsReconnectMs);
         }
     };
 }
@@ -484,7 +487,7 @@ let refreshTimer = null;
 onMounted(async () => {
     await loadSession();
     connectWs();
-    refreshTimer = setInterval(loadSession, 10000);
+    refreshTimer = setInterval(loadSession, uiCfg.value.sessionDetailRefreshMs);
 });
 
 onUnmounted(() => {

@@ -9,9 +9,10 @@
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { cfg } from '../Config.mjs';
 
-const MAX_HOPS  = 10;
-const MAX_NODES = 500;
+const MAX_HOPS  = () => cfg('plugins.A1_TaintTracker.maxHops');
+const MAX_NODES = () => cfg('plugins.A1_TaintTracker.maxNodes');
 
 export default class A1TaintTracker extends BasePlugin {
     static id = 'A1-TaintTracker';
@@ -22,6 +23,8 @@ export default class A1TaintTracker extends BasePlugin {
     async run(ctx) {
         const { sessionId, sourceVar, sourceEventId, direction = 'forward' } = ctx;
         const rawDb = db.raw();
+        const _maxHops  = MAX_HOPS();
+        const _maxNodes = MAX_NODES();
 
         if (!sourceVar && !sourceEventId) {
             throw new Error('A1-TaintTracker: sourceVar or sourceEventId required');
@@ -117,7 +120,7 @@ export default class A1TaintTracker extends BasePlugin {
             frontier = [{ eventId: sourceEventId, var: null, pathSoFar: [sourceEventId] }];
         }
 
-        for (let hop = 0; hop < MAX_HOPS && frontier.length > 0 && visited.size < MAX_NODES; hop++) {
+        for (let hop = 0; hop < _maxHops && frontier.length > 0 && visited.size < _maxNodes; hop++) {
             const nextFrontier = [];
 
             for (const node of frontier) {
@@ -148,7 +151,7 @@ export default class A1TaintTracker extends BasePlugin {
                             eventIds:      newPath,
                         });
                         nextFrontier.push({ eventId: reId, var: varName, pathSoFar: newPath });
-                        if (paths.length >= MAX_NODES * 10) break; // 安全上限
+                        if (paths.length >= _maxNodes * 10) break; // 安全上限
                     }
                 }
             }
@@ -175,7 +178,7 @@ export default class A1TaintTracker extends BasePlugin {
             frontier = [{ eventId: sourceEventId, var: null, pathSoFar: [sourceEventId] }];
         }
 
-        for (let hop = 0; hop < MAX_HOPS && frontier.length > 0 && visited.size < MAX_NODES; hop++) {
+        for (let hop = 0; hop < _maxHops && frontier.length > 0 && visited.size < _maxNodes; hop++) {
             const nextFrontier = [];
 
             for (const node of frontier) {
@@ -208,7 +211,7 @@ export default class A1TaintTracker extends BasePlugin {
                             eventIds:      newPath,
                         });
                         nextFrontier.push({ eventId: weId, var: varName, pathSoFar: newPath });
-                        if (paths.length >= MAX_NODES * 10) break;
+                        if (paths.length >= _maxNodes * 10) break;
                     }
                 }
             }

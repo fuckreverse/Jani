@@ -15,6 +15,7 @@
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { cfg } from '../Config.mjs';
 
 // ─── 宿主对象分类规则 ────────────────────────────────────────────────────────
 //
@@ -294,7 +295,7 @@ for (const rule of HOST_RULES) {
     }
 }
 
-const BATCH_SIZE = 5000;
+// 配置项在 run() 入口处一次性捕获
 
 export default class I5WebApiDetector extends BasePlugin {
     static id = 'I5-WebApiDetector';
@@ -305,6 +306,10 @@ export default class I5WebApiDetector extends BasePlugin {
     async run(ctx) {
         const { sessionId } = ctx;
         const rawDb = db.raw();
+
+        // 一次性捕获配置，避免在热循环中频繁调用 cfg()
+        const _batchSize = cfg('plugins.I5_WebApiDetector.batchSize');
+        const _callLookupDelta = cfg('plugins.I5_WebApiDetector.callLookupDelta');
 
         this.emitProgress(ctx, '清空旧数据...', 0);
         rawDb.prepare('DELETE FROM web_api_calls WHERE session_id = ?').run(sessionId);
@@ -468,7 +473,7 @@ export default class I5WebApiDetector extends BasePlugin {
             let returnValue = null;
             if (!f.is_write) {
                 // 在 event_id 之后的小窗口内找 call_seq
-                for (let delta = 1; delta <= 8; delta++) {
+                for (let delta = 1; delta <= _callLookupDelta; delta++) {
                     const edge = callEdgeBySeq.get(f.event_id + delta);
                     if (edge) {
                         accessType = 'call';
@@ -501,7 +506,7 @@ export default class I5WebApiDetector extends BasePlugin {
                 srcText,
             ]);
 
-            if (resultBatch.length >= BATCH_SIZE) {
+            if (resultBatch.length >= _batchSize) {
                 flush();
                 const pct = Math.min(90, 25 + Math.round((i / fields.length) * 65));
                 this.emitProgress(ctx, `已写入 ${total} 条记录...`, pct);

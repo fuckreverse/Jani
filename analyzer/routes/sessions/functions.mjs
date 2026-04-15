@@ -17,6 +17,7 @@ const log = createLogger('sessions');
 import * as db from '../../db/Database.mjs';
 import { decodeType } from '../../db/EventTypeCode.mjs';
 import { safeParseJson, groupBy, BUILTIN_FN_NAMES, makeIsInsideChild as makeIsInsideChildUtil } from './utils.mjs';
+import { cfg } from '../../Config.mjs';
 
 const router = Router({ mergeParams: true });
 
@@ -99,8 +100,10 @@ router.get('/functions', (req, res) => {
             params.push(Number(line));
         }
 
+        const _fnDefaultLimit = cfg('api.defaultPageSize');
+        const _fnMaxLimit     = cfg('api.maxPageSize');
         const minCallsN  = Math.max(1, Number(minCalls) || 1);
-        const limitN     = Math.min(Number(limit)  || 100, 500);
+        const limitN     = Math.min(Number(limit)  || _fnDefaultLimit, _fnMaxLimit);
         const offsetN    = Number(offset) || 0;
         const minEventsN = minEvents !== undefined && minEvents !== '' ? Number(minEvents) : null;
         const maxEventsN = maxEvents !== undefined && maxEvents !== '' ? Number(maxEvents) : null;
@@ -174,12 +177,14 @@ router.get('/functions', (req, res) => {
 router.get('/functions/:fnName/calls', (req, res) => {
     try {
         const { id, fnName } = req.params;
-        const { limit = '200', offset = '0', fnIid, callSeq } = req.query;
+        const { limit, offset = '0', fnIid, callSeq } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: `Session ${id} not found` });
 
-        const limitN  = Math.min(Number(limit)  || 200, 1000);
+        const _callsDefaultLimit = cfg('api.defaultPageSize') * 2;
+        const _callsMaxLimit     = cfg('api.maxEventsCap');
+        const limitN  = Math.min(Number(limit)  || _callsDefaultLimit, _callsMaxLimit);
 
         // 支持按 fn_iid 精确过滤，避免同名不同位置的函数调用混在一起
         const conditions = ['session_id = ?', 'fn_name = ?'];
@@ -260,12 +265,14 @@ router.get('/functions/:fnName/calls', (req, res) => {
 router.get('/functions/:fnName/callers', (req, res) => {
     try {
         const { id, fnName } = req.params;
-        const { fnIid, limit = '100', offset = '0' } = req.query;
+        const { fnIid, limit, offset = '0' } = req.query;
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: `Session ${id} not found` });
 
-        const limitN  = Math.min(Number(limit)  || 100, 500);
+        const _callersDefaultLimit = cfg('api.defaultPageSize');
+        const _callersMaxLimit     = cfg('api.maxPageSize');
+        const limitN  = Math.min(Number(limit)  || _callersDefaultLimit, _callersMaxLimit);
         const offsetN = Number(offset) || 0;
 
         // 目标函数的过滤条件
@@ -361,7 +368,7 @@ router.get('/functions/:fnName/callers', (req, res) => {
 router.get('/calls/:callId/own-events', (req, res) => {
     try {
         const { id, callId } = req.params;
-        const { limit = '200', cursor } = req.query;
+        const { limit, cursor } = req.query;
         const _t0 = performance.now();
 
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
@@ -375,7 +382,9 @@ router.get('/calls/:callId/own-events', (req, res) => {
         if (!call) return res.status(404).json({ error: `Call ${callId} not found` });
 
         const { call_seq: callSeqN, return_seq: returnSeqN, depth: depthN } = call;
-        const limitN = Math.min(Number(limit) || 200, 500);
+        const _ownEventsDefaultLimit = cfg('api.defaultPageSize') * 2;
+        const _ownEventsMaxLimit     = cfg('api.maxPageSize');
+        const limitN = Math.min(Number(limit) || _ownEventsDefaultLimit, _ownEventsMaxLimit);
         const _t1 = performance.now();
 
         // ── Step 1: 计算"自身区间"段列表 ─────────────────────────────────────
@@ -586,8 +595,9 @@ router.get('/call-graph', (req, res) => {
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: 'Session not found' });
 
+        const _callGraphLimit = cfg('functions.callGraphLimit');
         const edges = db.all(
-            'SELECT * FROM call_edges WHERE session_id = ? ORDER BY call_seq ASC LIMIT 1000',
+            `SELECT * FROM call_edges WHERE session_id = ? ORDER BY call_seq ASC LIMIT ${_callGraphLimit}`,
             id
         );
 
@@ -748,7 +758,8 @@ router.get('/flamegraph', (req, res) => {
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: `Session ${id} not found` });
 
-        const maxDepthN = Math.min(Number(maxDepth) || 50, 200);
+        const _flamegraphMaxDepthCap = cfg('api.flamegraphMaxDepthCap');
+        const maxDepthN = Math.min(Number(maxDepth) || cfg('api.flamegraphDefaultMaxDepth'), _flamegraphMaxDepthCap);
         const minSelfN  = Number(minSelf) || 0;
 
         // ── Step 1: 从 call_edges 取调用数据 ──────────────────────────────
@@ -888,7 +899,7 @@ router.get('/flamegraph', (req, res) => {
 //   5. 按行号聚合 reads/writes，每行最多取 MAX_VALS_PER_LINE 个不重复值
 //   6. 按行号组装 lines[] 返回
 
-const MAX_VALS_PER_LINE = 6;
+const MAX_VALS_PER_LINE = cfg('functions.maxValsPerLine');
 
 router.get('/calls/:callId/annotated-source', (req, res) => {
     try {

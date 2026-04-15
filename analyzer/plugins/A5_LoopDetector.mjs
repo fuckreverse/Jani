@@ -25,18 +25,7 @@
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
-
-const BATCH_SIZE = 5000;
-
-// 安全上限：防止混淆代码产生天文数字的循环/迭代记录
-const MAX_LOOPS          = 5000;   // 最多处理前 N 个循环（按迭代次数降序）
-const MAX_ITER_PER_LOOP  = 500;    // 每个循环最多记录 N 次迭代
-
-// 进度报告粒度
-const LOOP_BATCH_SIZE = 50;
-
-// 每次迭代的 reads 快照：最多记录 N 个不同变量名（防止大量读操作的循环爆炸）
-const MAX_READ_VARS_PER_ITER = 30;
+import { cfg } from '../Config.mjs';
 
 // 二分查找第一个 >= target 的位置
 function lowerBound(arr, target) {
@@ -58,6 +47,13 @@ export default class A5LoopDetector extends BasePlugin {
     async run(ctx) {
         const { sessionId } = ctx;
         const rawDb = db.raw();
+
+        // 在 run() 入口捕获配置（避免循环内调用 cfg）
+        const _batchSize = cfg('plugins.A5_LoopDetector.batchSize');
+        const _maxLoops = cfg('plugins.A5_LoopDetector.maxLoops');
+        const _maxIterPerLoop = cfg('plugins.A5_LoopDetector.maxIterPerLoop');
+        const _loopBatchSize = cfg('plugins.A5_LoopDetector.loopBatchSize');
+        const _maxReadVarsPerIter = cfg('plugins.A5_LoopDetector.maxReadVarsPerIter');
 
         this.emitProgress(ctx, '清空旧数据...', 0);
 
@@ -94,8 +90,8 @@ export default class A5LoopDetector extends BasePlugin {
             return;
         }
 
-        const skipped = allLoops.length > MAX_LOOPS ? allLoops.length - MAX_LOOPS : 0;
-        const loops = allLoops.slice(0, MAX_LOOPS);
+        const skipped = allLoops.length > _maxLoops ? allLoops.length - _maxLoops : 0;
+        const loops = allLoops.slice(0, _maxLoops);
 
         this.emitProgress(ctx, `找到 ${allLoops.length} 个循环（处理前 ${loops.length} 个）...`, 5);
 
@@ -142,7 +138,7 @@ export default class A5LoopDetector extends BasePlugin {
 
         // ── Step 2: 逐循环处理 ───────────────────────────────────────────────
         for (let i = 0; i < loops.length; i++) {
-            if (i % LOOP_BATCH_SIZE === 0) {
+            if (i % _loopBatchSize === 0) {
                 this.emitProgress(
                     ctx,
                     `处理循环 ${i + 1}/${loops.length}，已生成 ${totalIter} 次迭代...`,
@@ -202,7 +198,7 @@ export default class A5LoopDetector extends BasePlugin {
             //   iter[last].start = iidHits[last-1]
             //   iter[last].end   = loop.end_seq
 
-            const iterLimit = Math.min(iidHits.length, MAX_ITER_PER_LOOP);
+            const iterLimit = Math.min(iidHits.length, _maxIterPerLoop);
 
             for (let j = 0; j < iterLimit; j++) {
                 // 迭代起点：
@@ -239,7 +235,7 @@ export default class A5LoopDetector extends BasePlugin {
                         const rds = readsByEventId.get(readEventIds[k]);
                         if (rds) {
                             for (const r of rds) {
-                                if (!(r.name in rSnap) && readVarCount >= MAX_READ_VARS_PER_ITER) continue;
+                                if (!(r.name in rSnap) && readVarCount >= _maxReadVarsPerIter) continue;
                                 if (!(r.name in rSnap)) readVarCount++;
                                 // 使用最后一次读取的值（后覆盖前）
                                 rSnap[r.name] = vdMap.get(r.value_id) ?? null;
@@ -261,7 +257,7 @@ export default class A5LoopDetector extends BasePlugin {
                     JSON.stringify(snapshot),
                 ]);
 
-                if (pending.length >= BATCH_SIZE) flushBatch();
+                if (pending.length >= _batchSize) flushBatch();
             }
 
             // 每个循环处理完立即释放内存

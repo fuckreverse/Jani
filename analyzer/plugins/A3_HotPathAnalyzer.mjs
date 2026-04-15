@@ -29,16 +29,17 @@
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { cfg } from '../Config.mjs';
 
-const BATCH_SIZE = 2000;
+const BATCH_SIZE     = () => cfg('plugins.A3_HotPathAnalyzer.batchSize');
 
-// ── 自适应阈值参数 ────────────────────────────────────────────────────────────
-const MIN_SPLIT_GAP   = 5;
+// ── 自适应阈值参数：来自配置 ──────────────────────────────────────────────────
+const MIN_SPLIT_GAP  = () => cfg('plugins.A3_HotPathAnalyzer.minSplitGap');
 // SQL IN (...) 的最大占位符数量（SQLite 限制 ~32766，留余量）
-const MAX_IN_PARAMS   = 10000;
-const SPLIT_FACTOR    = 2;
-const MERGE_FACTOR    = 4;
-const MIN_ITER_COUNT  = 3;
+const MAX_IN_PARAMS  = () => cfg('plugins.A3_HotPathAnalyzer.maxInParams');
+const SPLIT_FACTOR   = () => cfg('plugins.A3_HotPathAnalyzer.splitFactor');
+const MERGE_FACTOR   = () => cfg('plugins.A3_HotPathAnalyzer.mergeFactor');
+const MIN_ITER_COUNT = () => cfg('plugins.A3_HotPathAnalyzer.minIterCount');
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 
@@ -56,16 +57,17 @@ function median(arr) {
  * @param {number[]} seqs  — 已按升序排列的 event_id 数组
  * @returns {{ start: number, end: number, count: number, medianGap: number }[]}
  */
-function segmentAndMerge(seqs) {
-    if (seqs.length < MIN_ITER_COUNT) return [];
+function segmentAndMerge(seqs, params) {
+    const { minIterCount, splitFactor, mergeFactor, minSplitGap } = params;
+    if (seqs.length < minIterCount) return [];
 
     // ── Step A：计算相邻间距，求中位数 ──────────────────────────────────────
     const gaps = [];
     for (let i = 1; i < seqs.length; i++) gaps.push(seqs[i] - seqs[i - 1]);
     const med = median(gaps);
 
-    const splitThresh = Math.max(med * SPLIT_FACTOR, MIN_SPLIT_GAP);
-    const mergeThresh = Math.max(med * MERGE_FACTOR, MIN_SPLIT_GAP);
+    const splitThresh = Math.max(med * splitFactor, minSplitGap);
+    const mergeThresh = Math.max(med * mergeFactor, minSplitGap);
 
     // ── Step B：按 splitThresh 切段 ──────────────────────────────────────────
     const rawSegs = [];
@@ -79,7 +81,7 @@ function segmentAndMerge(seqs) {
             segCount++;
             segPrev = seqs[i];
         } else {
-            if (segCount >= MIN_ITER_COUNT) {
+            if (segCount >= minIterCount) {
                 rawSegs.push({ start: segStart, end: segPrev, count: segCount });
             }
             segStart = seqs[i];
@@ -87,7 +89,7 @@ function segmentAndMerge(seqs) {
             segCount = 1;
         }
     }
-    if (segCount >= MIN_ITER_COUNT) {
+    if (segCount >= minIterCount) {
         rawSegs.push({ start: segStart, end: segPrev, count: segCount });
     }
 
@@ -108,7 +110,7 @@ function segmentAndMerge(seqs) {
 
     // ── Step D：附上中位数信息 ───────────────────────────────────────────────
     return merged
-        .filter(s => s.count >= MIN_ITER_COUNT)
+        .filter(s => s.count >= minIterCount)
         .map(s => ({ ...s, medianGap: med }));
 }
 
@@ -192,6 +194,17 @@ export default class A3HotPathAnalyzer extends BasePlugin {
         const { sessionId } = ctx;
         const rawDb = db.raw();
 
+        // ── 从配置读取所有运行参数 ────────────────────────────────────────────
+        const _batchSize    = BATCH_SIZE();
+        const _maxInParams  = MAX_IN_PARAMS();
+        const _minIterCount = MIN_ITER_COUNT();
+        const _segParams    = {
+            minIterCount: _minIterCount,
+            splitFactor:  SPLIT_FACTOR(),
+            mergeFactor:  MERGE_FACTOR(),
+            minSplitGap:  MIN_SPLIT_GAP(),
+        };
+
         this.emitProgress(ctx, '清空旧数据...', 0);
         db.run('DELETE FROM iid_counts WHERE session_id = ?', [sessionId]);
         db.run('DELETE FROM loops WHERE session_id = ?', [sessionId]);
@@ -218,8 +231,8 @@ export default class A3HotPathAnalyzer extends BasePlugin {
         const insertIidBatch = rawDb.transaction((batch) => {
             for (const c of batch) insertIid.run(sessionId, c.iid, c.count, c.line, c.src_text);
         });
-        for (let i = 0; i < counts.length; i += BATCH_SIZE) {
-            insertIidBatch(counts.slice(i, i + BATCH_SIZE));
+        for (let i = 0; i < counts.length; i += _batchSize) {
+            insertIidBatch(counts.slice(i, i + _batchSize));
         }
 
         // ── Step 1.5: 预加载 smap ───────────────────────────────────────────
@@ -232,7 +245,7 @@ export default class A3HotPathAnalyzer extends BasePlugin {
         }
 
         // 热点 iid 集合（执行次数 >= MIN_ITER_COUNT 的 iid 才可能产生循环）
-        const hotIids   = counts.filter(c => c.count >= MIN_ITER_COUNT).map(c => c.iid);
+        const hotIids   = counts.filter(c => c.count >= _minIterCount).map(c => c.iid);
         const hotIidSet = new Set(hotIids);
 
         if (hotIidSet.size === 0) {
@@ -313,7 +326,7 @@ export default class A3HotPathAnalyzer extends BasePlugin {
         this.emitProgress(ctx, `加载热点事件 (${hotIidSet.size} 个热点 iid)...`, 40);
 
         let hotEvents; // { id, iid }[]，已按 id ASC
-        if (hotIids.length <= MAX_IN_PARAMS) {
+        if (hotIids.length <= _maxInParams) {
             const placeholders = hotIids.map(() => '?').join(',');
             hotEvents = rawDb.prepare(
                 `SELECT id, iid FROM events
@@ -390,7 +403,7 @@ export default class A3HotPathAnalyzer extends BasePlugin {
             const fnName     = edgeFnName.get(edgeKey) ?? null;
 
             for (const [iid, seqs] of iidSeqs) {
-                const segments = segmentAndMerge(seqs);
+                const segments = segmentAndMerge(seqs, _segParams);
                 if (segments.length === 0) continue;
                 const smapInfo = smapMap.get(iid) ?? {};
                 for (const seg of segments) {
@@ -462,8 +475,8 @@ export default class A3HotPathAnalyzer extends BasePlugin {
             }
         });
 
-        for (let i = 0; i < withTempId.length; i += BATCH_SIZE) {
-            insertLoopBatch(withTempId.slice(i, i + BATCH_SIZE));
+        for (let i = 0; i < withTempId.length; i += _batchSize) {
+            insertLoopBatch(withTempId.slice(i, i + _batchSize));
         }
 
         // ── Step 8: 查回真实 id，补写 parent_loop_id ────────────────────────
@@ -503,8 +516,8 @@ export default class A3HotPathAnalyzer extends BasePlugin {
             }
         }
 
-        for (let i = 0; i < parentUpdates.length; i += BATCH_SIZE) {
-            updateParentBatch(parentUpdates.slice(i, i + BATCH_SIZE));
+        for (let i = 0; i < parentUpdates.length; i += _batchSize) {
+            updateParentBatch(parentUpdates.slice(i, i + _batchSize));
         }
 
         // ── 统计嵌套深度分布 ─────────────────────────────────────────────────

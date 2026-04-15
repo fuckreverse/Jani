@@ -24,6 +24,7 @@ import { readFileSync, mkdirSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
+import { cfg } from '../Config.mjs';
 
 const require = createRequire(import.meta.url);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -32,8 +33,8 @@ const SCHEMA_PATH = resolve(__dirname, 'schema.sql');
 let _db = null;
 
 // ── LRU prepared statement 缓存 ─────────────────────────────────────────────
-// 容量 200：覆盖所有插件的热路径 SQL，消除重复 compile 开销
-const STMT_CACHE_SIZE = 200;
+// 容量来自配置：覆盖所有插件的热路径 SQL，消除重复 compile 开销
+const STMT_CACHE_SIZE = () => cfg('db.stmtCacheSize');
 const _stmtCache = new Map(); // sql → PreparedStatement（LRU 顺序）
 
 function _getStmt(sql) {
@@ -46,7 +47,7 @@ function _getStmt(sql) {
     }
     // 未命中：编译并插入
     const stmt = _db.prepare(sql);
-    if (_stmtCache.size >= STMT_CACHE_SIZE) {
+    if (_stmtCache.size >= STMT_CACHE_SIZE()) {
         // 淘汰最久未使用（Map 迭代顺序 = 插入顺序，第一个即 LRU）
         _stmtCache.delete(_stmtCache.keys().next().value);
     }
@@ -80,16 +81,16 @@ export async function init(path) {
     _db.pragma('foreign_keys = ON');
     // 适当放宽同步策略（WAL 模式下 NORMAL 足够安全，比 FULL 快）
     _db.pragma('synchronous = NORMAL');
-    // 页缓存：~64MB（-16000 表示 KB 单位，负值）
-    _db.pragma('cache_size = -16000');
-    // mmap：128MB，顺序扫描大表时减少系统调用
-    _db.pragma('mmap_size = 134217728');
+    // 页缓存（来自配置，负数表示 KB 单位）
+    _db.pragma(`cache_size = ${cfg('db.cacheSizeKb')}`);
+    // mmap 大小（来自配置）
+    _db.pragma(`mmap_size = ${cfg('db.mmapSize')}`);
     // 临时表存内存，避免磁盘 I/O
     _db.pragma('temp_store = MEMORY');
-    // WAL 自动 checkpoint：每 10000 页触发，减少 WAL 文件膨胀
-    _db.pragma('wal_autocheckpoint = 10000');
-    // 忙等超时：5 秒，避免并发写时立即失败
-    _db.pragma('busy_timeout = 5000');
+    // WAL 自动 checkpoint（来自配置）
+    _db.pragma(`wal_autocheckpoint = ${cfg('db.walAutocheckpoint')}`);
+    // 忙等超时（来自配置）
+    _db.pragma(`busy_timeout = ${cfg('db.busyTimeout')}`);
 
     // 建表（幂等 — CREATE TABLE IF NOT EXISTS）
     const schema = readFileSync(SCHEMA_PATH, 'utf8');

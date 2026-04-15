@@ -133,6 +133,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { truncate } from '../../composables/useSessionUtils.js';
 import { openValueViewer } from '../../composables/useValueViewer.js';
+import { useConfig } from '../../composables/useConfig.js';
 
 const props = defineProps({
     sessionId: { type: String, required: true },
@@ -153,10 +154,11 @@ const filteredObjBaseStats = computed(() => {
 });
 
 // 分页状态
+const { api: apiCfg } = useConfig();
 const currentPage = ref(1);
 const totalPages  = ref(1);
 const total       = ref(0);
-const pageSize    = ref(100);
+const pageSize    = ref(apiCfg.value.defaultPageSize ?? 100); // 初始值从配置读取，用户可在 UI 中修改
 const jumpPage    = ref(1);
 
 async function loadObjTimelines(page = currentPage.value) {

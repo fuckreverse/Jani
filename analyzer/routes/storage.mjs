@@ -17,6 +17,7 @@ import {
 import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import * as db from '../db/Database.mjs';
+import { cfg } from '../Config.mjs';
 
 const router = Router();
 const __dirname = resolve(dirname(fileURLToPath(import.meta.url)));
@@ -356,10 +357,13 @@ function _buildSuggestions({ uploadFiles, sessionItems, projectItems, dbSize, to
         });
     }
 
-    // ── 建议 5：清理超过 30 天的旧会话（体积 > 1MB）────────────────────────
-    const OLD_THRESHOLD = 30 * 24 * 3600 * 1000; // 30 天
+    // ── 建议 5：清理超过指定天数的旧会话（体积超过阈值）─────────────────
+    const _oldSessionDays   = cfg('storage.oldSessionDays');
+    const _oldSessionMinMb  = cfg('storage.oldSessionMinMb');
+    const OLD_THRESHOLD     = _oldSessionDays * 24 * 3600 * 1000;
+    const OLD_SIZE_THRESHOLD = _oldSessionMinMb * 1024 * 1024;
     const oldSessions = sessionItems.filter(
-        s => !s.orphan && s.size > 1024 * 1024 && (Date.now() - s.mtime) > OLD_THRESHOLD
+        s => !s.orphan && s.size > OLD_SIZE_THRESHOLD && (Date.now() - s.mtime) > OLD_THRESHOLD
     );
     if (oldSessions.length > 0) {
         const savedSize = oldSessions.reduce((s, i) => s + i.size, 0);
@@ -367,8 +371,8 @@ function _buildSuggestions({ uploadFiles, sessionItems, projectItems, dbSize, to
             id:          'old-sessions',
             priority:    'low',
             category:    'sessions',
-            title:       `${oldSessions.length} 个大型旧会话超过 30 天未使用`,
-            description: '这些会话体积超过 1 MB 且 30 天内未被访问，如不再需要可删除以释放空间。',
+            title:       `${oldSessions.length} 个大型旧会话超过 ${_oldSessionDays} 天未使用`,
+            description: `这些会话体积超过 ${_oldSessionMinMb} MB 且 ${_oldSessionDays} 天内未被访问，如不再需要可删除以释放空间。`,
             savedSize,
             savedSizeStr: fmtBytes(savedSize),
             items:       oldSessions.map(s => ({

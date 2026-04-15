@@ -40,18 +40,18 @@ try {
 
 const { FILE_HEADER_SIZE, EVENT_HEADER_SIZE, deserializeEvent, isBinaryTrace, readFileVersion } = EventSerializer;
 
-// 滑动窗口大小：32MB，保证单个超长事件也能容纳
-const WINDOW_SIZE = 32 * 1024 * 1024;
-// 窗口剩余低水位：低于此值时补充数据
-const REFILL_THRESHOLD = 1 * 1024 * 1024;
-// 每次 DB 事务提交的事件数：50000 条一批，大幅减少事务提交次数
-const BATCH_SIZE = 50000;
-// 每隔多少个 batch 让出一次事件循环（值越大吞吐越高，但每次 HTTP/WS 响应延迟越长）
-const YIELD_EVERY_BATCHES = 10;
+// 滑动窗口大小：来自配置
+const WINDOW_SIZE         = () => cfg('plugins.F1_EventIndex.windowSize');
+// 窗口剩余低水位：来自配置
+const REFILL_THRESHOLD    = () => cfg('plugins.F1_EventIndex.refillThreshold');
+// 每次 DB 事务提交的事件数：来自配置
+const BATCH_SIZE          = () => cfg('plugins.F1_EventIndex.batchSize');
+// 每隔多少个 batch 让出一次事件循环：来自配置
+const YIELD_EVERY_BATCHES = () => cfg('plugins.F1_EventIndex.yieldEveryBatches');
 
-// value_index 配置
-const VI_MAX_SAME = 50;   // 同一值最多记录 50 条（防止循环变量爆炸）
-const VI_MAX_STR  = 65000;  // 字符串截断长度（与 EventSerializer STRING 类型截断上限对齐，留出 payload 头部余量）
+// value_index 配置：来自配置
+const VI_MAX_SAME = () => cfg('plugins.F1_EventIndex.viMaxSame');
+const VI_MAX_STR  = () => cfg('plugins.F1_EventIndex.viMaxStr');
 
 export default class F1EventIndex extends BasePlugin {
     static id = 'F1-EventIndex';
@@ -61,6 +61,14 @@ export default class F1EventIndex extends BasePlugin {
 
     async run(ctx) {
         const { sessionId } = ctx;
+
+        // ── 从配置读取所有运行参数（一次性，避免热循环中重复调用 cfg()）───────
+        const _windowSize         = WINDOW_SIZE();
+        const _refillThreshold    = REFILL_THRESHOLD();
+        const _batchSize          = BATCH_SIZE();
+        const _yieldEveryBatches  = YIELD_EVERY_BATCHES();
+        const _viMaxSame          = VI_MAX_SAME();
+        const _viMaxStr           = VI_MAX_STR();
 
         const session = db.get('SELECT * FROM sessions WHERE id = ?', sessionId);
         if (!session) throw new Error(`Session ${sessionId} not found`);
@@ -186,14 +194,14 @@ export default class F1EventIndex extends BasePlugin {
         });
 
         // ── 滑动窗口状态 ──────────────────────────────────────────────────────
-        const window = Buffer.alloc(WINDOW_SIZE);
+        const window = Buffer.alloc(_windowSize);
         let windowStart = FILE_HEADER_SIZE; // 跳过文件头
         let windowLen   = 0;
         let filePos     = FILE_HEADER_SIZE; // 下次从文件读的位置
         let relOffset   = 0;               // window 内当前偏移
 
         // 初始填充
-        const initRead = Math.min(WINDOW_SIZE, fileSize - filePos);
+        const initRead = Math.min(_windowSize, fileSize - filePos);
         if (initRead > 0) {
             windowLen = readSync(fd, window, 0, initRead, filePos);
             filePos += windowLen;
@@ -247,7 +255,7 @@ export default class F1EventIndex extends BasePlugin {
                     // 解包 JSON 引号后，截断到 VI_MAX_STR 存入 val_str，类型标记为 'ta'
                     let s = t;
                     try { s = JSON.parse(t); } catch { /* keep raw */ }
-                    val_type = 'ta'; val_num = null; val_str = s.substring(0, VI_MAX_STR);
+                    val_type = 'ta'; val_num = null; val_str = s.substring(0, _viMaxStr);
                 } else {
                     // 字符串：去掉 JSON 引号包裹
                     let s = t;
@@ -255,12 +263,12 @@ export default class F1EventIndex extends BasePlugin {
                         try { s = JSON.parse(s); } catch { /* keep raw */ }
                     }
                     if (s.length === 0) return; // 空字符串不索引
-                    val_type = 'str'; val_num = null; val_str = s.substring(0, VI_MAX_STR);
+                    val_type = 'str'; val_num = null; val_str = s.substring(0, _viMaxStr);
                 }
             }
             const key = `${val_type}:${val_type === 'num' ? val_num : val_str}`;
             const cnt = viCount.get(key) ?? 0;
-            if (cnt >= VI_MAX_SAME) return;
+            if (cnt >= _viMaxSame) return;
             viCount.set(key, cnt + 1);
             viBatch.push([sessionId, eventId, val_type, val_num, val_str, varName ?? null, source]);
         };
@@ -270,7 +278,7 @@ export default class F1EventIndex extends BasePlugin {
             const remaining = windowLen - relOffset;
 
             // 补充数据：剩余低于阈值且文件还有数据
-            if (remaining < REFILL_THRESHOLD && filePos < fileSize) {
+            if (remaining < _refillThreshold && filePos < fileSize) {
                 if (relOffset > 0) {
                     // compact：把未处理部分移到头部，然后重建 DataView
                     window.copyWithin(0, relOffset, windowLen);
@@ -280,7 +288,7 @@ export default class F1EventIndex extends BasePlugin {
                     // 窗口地址未变但有效长度改变，重建 DataView
                     view = new DataView(window.buffer, window.byteOffset, windowLen);
                 }
-                const toRead = Math.min(WINDOW_SIZE - windowLen, fileSize - filePos);
+                const toRead = Math.min(_windowSize - windowLen, fileSize - filePos);
                 if (toRead > 0) {
                     const n = readSync(fd, window, windowLen, toRead, filePos);
                     windowLen += n;
@@ -391,7 +399,7 @@ export default class F1EventIndex extends BasePlugin {
                 }
             }
 
-            if (eventBatch.length >= BATCH_SIZE) {
+            if (eventBatch.length >= _batchSize) {
                 flush();
                 batchCount++;
 
@@ -415,7 +423,7 @@ export default class F1EventIndex extends BasePlugin {
                     { eventsPerSec, totalEvents, elapsedMs: now - startTime }
                 );
 
-                if (batchCount % YIELD_EVERY_BATCHES === 0) {
+                if (batchCount % _yieldEveryBatches === 0) {
                     await setImmediateAsync();
                 }
             }

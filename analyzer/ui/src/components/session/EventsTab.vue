@@ -334,6 +334,7 @@
 import { ref, computed, reactive, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { truncate, formatValue } from '../../composables/useSessionUtils.js';
 import { openValueViewer } from '../../composables/useValueViewer.js';
+import { useConfig } from '../../composables/useConfig.js';
 
 const props = defineProps({
     sessionId: { type: String, required: true },
@@ -342,7 +343,8 @@ const props = defineProps({
 
 const emit = defineEmits(['goto-function']);
 
-const PAGE_SIZE = 100;
+const { api: apiCfg } = useConfig();
+const PAGE_SIZE = apiCfg.value.defaultPageSize ?? 100;
 
 const events        = ref([]);
 const eventsLoading = ref(false);

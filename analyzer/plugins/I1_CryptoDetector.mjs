@@ -517,6 +517,7 @@ function matchLibRules(callFnCounts, fieldOffsets, source) {
 }
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { cfg } from '../Config.mjs';
 
 export default class I1CryptoDetector extends BasePlugin {
     static id = 'I1-CryptoDetector';
@@ -1013,6 +1014,7 @@ export default class I1CryptoDetector extends BasePlugin {
         this.emitProgress(ctx, '扫描库调用特征（call_edges）...', 83);
 
         // 1. 获取调用频率统计（all fn_name from call_edges，按调用次数降序）
+        const _fnNameQueryLimit = cfg('plugins.I1_CryptoDetector.fnNameQueryLimit');
         let callFnCounts = [];
         try {
             callFnCounts = db.all(
@@ -1021,12 +1023,13 @@ export default class I1CryptoDetector extends BasePlugin {
                  WHERE session_id = ? AND fn_name IS NOT NULL
                  GROUP BY fn_name
                  ORDER BY cnt DESC
-                 LIMIT 2000`,
-                [sessionId]
+                 LIMIT ?`,
+                [sessionId, _fnNameQueryLimit]
             );
         } catch { /* call_edges 可能未运行 */ }
 
         // 2. 获取 fields 表中出现的 offset（属性访问名）
+        const _fieldOffsetLimit = cfg('plugins.I1_CryptoDetector.fnNameQueryLimit');
         let fieldOffsets = [];
         try {
             fieldOffsets = db.all(
@@ -1035,8 +1038,8 @@ export default class I1CryptoDetector extends BasePlugin {
                  WHERE session_id = ? AND offset IS NOT NULL
                  GROUP BY offset
                  ORDER BY cnt DESC
-                 LIMIT 2000`,
-                [sessionId]
+                 LIMIT ?`,
+                [sessionId, _fieldOffsetLimit]
             );
         } catch { /* fields 可能为空 */ }
 

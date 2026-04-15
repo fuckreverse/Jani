@@ -317,6 +317,7 @@ import { ref, watch, onUnmounted, nextTick } from 'vue';
 import cytoscape from 'cytoscape';
 import { truncate, formatValue, formatArgValue } from '../../composables/useSessionUtils.js';
 import { openValueViewer } from '../../composables/useValueViewer.js';
+import { useConfig } from '../../composables/useConfig.js';
 
 const props = defineProps({
   sessionId:  { type: String,  required: true },
@@ -530,7 +531,8 @@ async function loadStack() {
   }
 }
 
-const EVENTS_PAGE_SIZE = 100;
+const { api: apiCfg } = useConfig();
+const EVENTS_PAGE_SIZE = apiCfg.value.defaultPageSize ?? 100;
 
 async function loadEvents() {
   eventsLoading.value = true;

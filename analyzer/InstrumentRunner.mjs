@@ -17,6 +17,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import * as db from './db/Database.mjs';
 import { createLogger } from './logger.mjs';
+import { cfg } from './Config.mjs';
 
 const log = createLogger('InstrumentRunner');
 
@@ -26,14 +27,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const JANI_ROOT = resolve(__dirname, '../');
 const JALANGI_BIN = resolve(JANI_ROOT, 'bin/jalangi.mjs');
 
-/** 最大并发运行数 */
-const MAX_CONCURRENCY = 3;
+/** 最大并发运行数（来自配置） */
+const MAX_CONCURRENCY = () => cfg('runner.maxConcurrency');
 
-/** 单次运行超时（毫秒） */
-const TIMEOUT_MS = 30_000;
+/** 单次运行超时（毫秒）（来自配置） */
+const TIMEOUT_MS = () => cfg('runner.timeoutMs');
 
-/** stdout/stderr 最大字节数（1MB） */
-const MAX_OUTPUT_BYTES = 1 * 1024 * 1024;
+/** stdout/stderr 最大字节数（来自配置） */
+const MAX_OUTPUT_BYTES = () => cfg('runner.maxOutputBytes');
 
 /** 当前运行中的任务数 */
 let activeCount = 0;
@@ -86,7 +87,7 @@ function broadcast(runId, msg) {
  * 获取并发令牌（超过 MAX_CONCURRENCY 时排队等待）
  */
 function acquireSlot() {
-    if (activeCount < MAX_CONCURRENCY) {
+    if (activeCount < MAX_CONCURRENCY()) {
         activeCount++;
         return Promise.resolve();
     }
@@ -219,18 +220,19 @@ async function executeRun(runId, { code, filename, options, env, dataDir }) {
         // 超时定时器
         const timeoutTimer = setTimeout(() => {
             child.kill('SIGKILL');
-        }, TIMEOUT_MS);
+        }, TIMEOUT_MS());
 
         // 处理 stdout
         child.stdout.on('data', (chunk) => {
             const str = chunk.toString('utf8');
             broadcast(runId, { type: 'stdout', data: str });
             stdoutBytes += Buffer.byteLength(str);
-            if (stdoutBytes <= MAX_OUTPUT_BYTES) {
+            const _maxOut = MAX_OUTPUT_BYTES();
+            if (stdoutBytes <= _maxOut) {
                 stdoutBuf += str;
             } else if (!stdoutTruncated) {
                 stdoutTruncated = true;
-                stdoutBuf += '\n[... stdout truncated at 1MB ...]';
+                stdoutBuf += `\n[... stdout truncated at ${Math.round(_maxOut / 1024)}KB ...]`;
             }
         });
 
@@ -239,11 +241,11 @@ async function executeRun(runId, { code, filename, options, env, dataDir }) {
             const str = chunk.toString('utf8');
             broadcast(runId, { type: 'stderr', data: str });
             stderrBytes += Buffer.byteLength(str);
-            if (stderrBytes <= MAX_OUTPUT_BYTES) {
+            if (stderrBytes <= MAX_OUTPUT_BYTES()) {
                 stderrBuf += str;
             } else if (!stderrTruncated) {
                 stderrTruncated = true;
-                stderrBuf += '\n[... stderr truncated at 1MB ...]';
+                stderrBuf += `\n[... stderr truncated at ${Math.round(MAX_OUTPUT_BYTES() / 1024)}KB ...]`;
             }
         });
 
@@ -263,14 +265,15 @@ async function executeRun(runId, { code, filename, options, env, dataDir }) {
 
         // 检查超时
         if (exitCode === null) {
-            log.warn({ runId, filename, timeoutMs: TIMEOUT_MS }, `Run ${runId} 超时 (${TIMEOUT_MS / 1000}s)`);
+            const _timeout = TIMEOUT_MS();
+        log.warn({ runId, filename, timeoutMs: _timeout }, `Run ${runId} 超时 (${_timeout / 1000}s)`);
             db.run(
                 `UPDATE run_tasks SET status = 'timeout', stdout = ?, stderr = ?, duration_ms = ?, error_msg = ? WHERE id = ?`,
                 stdoutBuf, stderrBuf, duration,
-                'execution timed out after 30s',
+                `execution timed out after ${TIMEOUT_MS() / 1000}s`,
                 runId
             );
-            broadcast(runId, { type: 'error', message: 'execution timed out after 30s' });
+            broadcast(runId, { type: 'error', message: `execution timed out after ${TIMEOUT_MS() / 1000}s` });
             return;
         }
 

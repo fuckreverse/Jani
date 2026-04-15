@@ -71,6 +71,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
+import { useConfig } from '../composables/useConfig.js';
 
 import ProgressDrawer         from './ProgressDrawer.vue';
 import UploadDialog           from '../components/session/UploadDialog.vue';
@@ -79,6 +80,7 @@ import DeleteConfirmDialog    from '../components/session/DeleteConfirmDialog.vu
 import SessionCard            from '../components/session/SessionCard.vue';
 
 const router = useRouter();
+const { ui: uiCfg } = useConfig();
 
 // ─── 会话列表状态 ─────────────────────────────────────────────────────────────
 const sessions = ref([]);
@@ -146,7 +148,7 @@ let refreshTimer = null;
 
 onMounted(() => {
     loadSessions();
-    refreshTimer = setInterval(loadSessions, 5000);
+    refreshTimer = setInterval(loadSessions, uiCfg.value.sessionListRefreshMs);
 });
 
 onUnmounted(() => {

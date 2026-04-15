@@ -6,6 +6,7 @@
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
 import { decodeType } from '../db/EventTypeCode.mjs';
+import { cfg } from '../Config.mjs';
 
 export default class I4AlgorithmSummarizer extends BasePlugin {
     static id = 'I4-AlgorithmSummarizer';
@@ -38,13 +39,15 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
 
         // ── 热路径 ──────────────────────────────────────────────────────────
         this.emitProgress(ctx, '读取热路径...', 20);
+        const _hotPathLimit = cfg('plugins.I4_AlgorithmSummarizer.hotPathQueryLimit');
+        const _loopsLimit = cfg('plugins.I4_AlgorithmSummarizer.loopsQueryLimit');
         const topHotIids = db.all(
-            'SELECT iid, count, line, src_text FROM iid_counts WHERE session_id = ? ORDER BY count DESC LIMIT 10',
-            [sessionId]
+            'SELECT iid, count, line, src_text FROM iid_counts WHERE session_id = ? ORDER BY count DESC LIMIT ?',
+            [sessionId, _hotPathLimit]
         );
         const loops = db.all(
-            'SELECT iid, start_seq, end_seq, iteration_count, line FROM loops WHERE session_id = ? ORDER BY iteration_count DESC LIMIT 10',
-            [sessionId]
+            'SELECT iid, start_seq, end_seq, iteration_count, line FROM loops WHERE session_id = ? ORDER BY iteration_count DESC LIMIT ?',
+            [sessionId, _loopsLimit]
         );
 
         // ── 调用图 ──────────────────────────────────────────────────────────
@@ -53,9 +56,10 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
             'SELECT COUNT(*) as total_calls, COUNT(DISTINCT fn_name) as unique_fns, MAX(depth) as max_depth FROM call_edges WHERE session_id = ?',
             [sessionId]
         );
+        const _callEdgesLimit = cfg('plugins.I4_AlgorithmSummarizer.callEdgesGroupLimit');
         const topCalledFns = db.all(
-            'SELECT fn_name, COUNT(*) as call_count FROM call_edges WHERE session_id = ? GROUP BY fn_name ORDER BY call_count DESC LIMIT 10',
-            [sessionId]
+            'SELECT fn_name, COUNT(*) as call_count FROM call_edges WHERE session_id = ? GROUP BY fn_name ORDER BY call_count DESC LIMIT ?',
+            [sessionId, _callEdgesLimit]
         );
 
         // ── 数据流 ──────────────────────────────────────────────────────────
@@ -75,13 +79,14 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
             'SELECT COUNT(*) as total FROM object_timelines WHERE session_id = ? AND is_write = 1',
             [sessionId]
         );
+        const _objMutLimit = cfg('plugins.I4_AlgorithmSummarizer.objectTimelinesLimit');
         const topMutatedObjects = db.all(
             `SELECT base_var, COUNT(*) as mutation_count
              FROM object_timelines
              WHERE session_id = ? AND is_write = 1
              GROUP BY base_var
-             ORDER BY mutation_count DESC LIMIT 10`,
-            [sessionId]
+             ORDER BY mutation_count DESC LIMIT ?`,
+            [sessionId, _objMutLimit]
         );
 
         // ── 加密检测 ────────────────────────────────────────────────────────
@@ -100,12 +105,13 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
 
         // ── 变量生命周期（高价值变量）────────────────────────────────────────
         this.emitProgress(ctx, '读取关键变量...', 80);
+        const _varLifetimeLimit = cfg('plugins.I4_AlgorithmSummarizer.varLifetimeLimit');
         const keyVars = db.all(
             `SELECT name, write_count, read_count, first_write_seq, last_read_seq
              FROM var_lifetime
              WHERE session_id = ?
-             ORDER BY (write_count + read_count) DESC LIMIT 20`,
-            [sessionId]
+             ORDER BY (write_count + read_count) DESC LIMIT ?`,
+            [sessionId, _varLifetimeLimit]
         );
 
         // ── 构建报告 ────────────────────────────────────────────────────────

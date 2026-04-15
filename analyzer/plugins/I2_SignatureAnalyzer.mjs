@@ -11,6 +11,7 @@
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { cfg } from '../Config.mjs';
 
 // ─── 需要定位的关键签名字段名（精确 + 模糊）────────────────────────────────
 
@@ -18,11 +19,6 @@ const SIGNATURE_FIELDS = [
     'sign', 'signature', 'token', 'access_token', 'timestamp',
     'nonce', 'hmac', 'digest', 'hash', 'x-sign', '_sign', 'mtgsig',
 ];
-
-// ─── 反向追踪最大跳数 / 最大路径数 ──────────────────────────────────────────
-
-const MAX_HOPS   = 8;
-const MAX_PATHS  = 100;
 
 export default class I2SignatureAnalyzer extends BasePlugin {
     static id = 'I2-SignatureAnalyzer';
@@ -33,6 +29,10 @@ export default class I2SignatureAnalyzer extends BasePlugin {
     async run(ctx) {
         const { sessionId } = ctx;
         const rawDb = db.raw();
+
+        // 在 run() 入口捕获配置
+        const _maxHops = cfg('plugins.I2_SignatureAnalyzer.maxHops');
+        const _maxPaths = cfg('plugins.I2_SignatureAnalyzer.maxPaths');
 
         this.emitProgress(ctx, '清空旧数据...', 0);
 
@@ -129,7 +129,7 @@ export default class I2SignatureAnalyzer extends BasePlugin {
 
         for (let fi = 0; fi < SIGNATURE_FIELDS.length; fi++) {
             const field = SIGNATURE_FIELDS[fi];
-            if (results.length >= MAX_PATHS) break;
+            if (results.length >= _maxPaths) break;
 
             const progress = 45 + Math.floor((fi / SIGNATURE_FIELDS.length) * 40);
             this.emitProgress(ctx, `追踪字段 "${field}"...`, progress);
@@ -138,9 +138,9 @@ export default class I2SignatureAnalyzer extends BasePlugin {
             if (allHits.length === 0) continue;
 
             for (const hit of allHits.slice(0, 3)) {
-                if (results.length >= MAX_PATHS) break;
+                if (results.length >= _maxPaths) break;
 
-                const path = this._backwardTrace(hit.event_id, readsIndex, writesNameIndex);
+                const path = this._backwardTrace(hit.event_id, readsIndex, writesNameIndex, _maxHops);
                 if (path.length > 0) {
                     const summary = this._buildSummary(field, hit, path, eventLineMap);
                     results.push({
@@ -179,12 +179,12 @@ export default class I2SignatureAnalyzer extends BasePlugin {
     /**
      * 反向 BFS 追踪（使用预加载的内存索引，零 DB 查询）
      */
-    _backwardTrace(sinkEventId, readsIndex, writesNameIndex) {
+    _backwardTrace(sinkEventId, readsIndex, writesNameIndex, maxHops) {
         const path    = [];
         const visited = new Set();
         const queue   = [{ eventId: sinkEventId, varName: null }];
 
-        while (queue.length > 0 && path.length <= MAX_HOPS) {
+        while (queue.length > 0 && path.length <= maxHops) {
             const { eventId, varName } = queue.shift();
             if (visited.has(eventId)) continue;
             visited.add(eventId);

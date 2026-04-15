@@ -1,6 +1,6 @@
 # JTA Web UI 设计与 MCP Server
 
-**版本：** v1.6  
+**版本：** v1.7  
 
 本文档涵盖两部分内容：
 1. **Web UI 设计**：页面导航、布局、交互说明
@@ -184,6 +184,48 @@ Cytoscape 渲染，节点=函数，边=调用关系，支持缩放/展开/搜索
 **Trace 文件命名规则：** `trace_YYYYMMDD_HHmmss_mmm_NNN.bin`（包含时间戳和序号）
 
 JTA Server 启动时**默认保留**旧 trace 文件，需显式传 `--clear-traces` 参数才会清空目录中的旧 `.bin` / `.smap.json` 文件。`--no-clear-traces` 参数已废弃（向后兼容保留，无实际效果）。
+
+---
+
+### 1.6 配置 Composable（`useConfig.js`）
+
+前端通过统一的 `useConfig()` composable 从后端获取运行时配置，避免在多个组件中重复请求 `/api/config`。
+
+#### 使用方式
+
+```js
+import { useConfig } from '@/composables/useConfig.js';
+
+// 在 <script setup> 中调用
+const { api: apiCfg, ui: uiCfg } = useConfig();
+
+// 以响应式方式读取配置
+const pageSize = ref(apiCfg.value?.defaultPageSize ?? 100);
+const refreshMs = uiCfg.value?.sessionListRefreshMs ?? 5000;
+```
+
+#### 设计特性
+
+| 特性 | 说明 |
+|------|------|
+| **单例懒加载** | 首次调用时触发 `GET /api/config`，后续调用直接复用同一 Promise 和 reactive ref |
+| **响应式** | `api` 和 `ui` 均为 Vue `ref`，配置加载后自动触发依赖该值的计算属性/侦听器更新 |
+| **默认值回退** | 加载前（`null`）或加载失败时，组件使用 `?? 默认值` 表达式提供兜底值，不会出现 `undefined` 报错 |
+| **覆盖配置** | 后端 `config.json` 或环境变量修改后，重启服务即生效；前端下次刷新页面时读到新值 |
+
+#### 哪些 UI 组件使用了 `useConfig`
+
+| 组件 | 配置项 |
+|------|--------|
+| `SessionList.vue` | `ui.sessionListRefreshMs`（会话列表自动刷新间隔） |
+| `SessionDetail.vue` | `ui.wsReconnectMs`（WS 重连间隔）、`ui.sessionDetailRefreshMs`（进度轮询间隔） |
+| `TraceMonitor.vue` | `ui.traceMonitorPollMs`（轮询间隔）、`ui.traceMonitorHistoryMax`（历史最大条数）、`ui.traceMonitorPageSize`（文件列表页大小） |
+| `WebApiTab.vue` | `api.webApiDefaultLimit`（分页大小） |
+| `PatternsTab.vue` | `api.valuePatternsLimit`（分页大小） |
+| `ObjMutTab.vue` | `api.objectTimelinesMaxPageSize`（分页大小） |
+| `CfgTab.vue` | `api.loopIterationsMaxLimit`（循环迭代抽屉分页大小） |
+| `LoopsTab.vue` | `api.loopStatsLimit`（循环列表大小）、`api.loopIterationsMaxLimit`（迭代记录大小） |
+| `CallDetail.vue` | `api.defaultPageSize`（事件分页大小） |
 
 ---
 

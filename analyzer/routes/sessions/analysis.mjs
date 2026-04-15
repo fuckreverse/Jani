@@ -20,6 +20,7 @@ import { createLogger } from '../../logger.mjs';
 const log = createLogger('sessions');
 import * as db from '../../db/Database.mjs';
 import { safeParseJson } from './utils.mjs';
+import { cfg } from '../../Config.mjs';
 
 const router = Router({ mergeParams: true });
 
@@ -31,8 +32,9 @@ router.get('/hot-iids', (req, res) => {
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: 'Session not found' });
 
+        const _hotIidsLimit = cfg('api.hotIidsLimit');
         const hotIids = db.all(
-            'SELECT iid, count, line, src_text FROM iid_counts WHERE session_id = ? ORDER BY count DESC LIMIT 200',
+            `SELECT iid, count, line, src_text FROM iid_counts WHERE session_id = ? ORDER BY count DESC LIMIT ${_hotIidsLimit}`,
             id
         );
         const loops = db.all(
@@ -56,8 +58,9 @@ router.get('/var-lifetime', (req, res) => {
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: 'Session not found' });
 
+        const _varLifetimeLimit = cfg('api.varLifetimeLimit');
         const rows = db.all(
-            'SELECT * FROM var_lifetime WHERE session_id = ? ORDER BY write_count DESC LIMIT 500',
+            `SELECT * FROM var_lifetime WHERE session_id = ? ORDER BY write_count DESC LIMIT ${_varLifetimeLimit}`,
             id
         );
         res.json(rows);
@@ -89,8 +92,9 @@ router.post('/taint', async (req, res) => {
             },
         });
 
+        const _taintPathsLimit = cfg('api.taintPathsLimit');
         const paths = db.all(
-            'SELECT * FROM taint_paths WHERE session_id = ? AND source_var = ? ORDER BY id DESC LIMIT 50',
+            `SELECT * FROM taint_paths WHERE session_id = ? AND source_var = ? ORDER BY id DESC LIMIT ${_taintPathsLimit}`,
             [id, sourceVar || '']
         );
         res.json({ paths });
@@ -153,7 +157,8 @@ router.get('/loop-iterations', (req, res) => {
             params.push(Number(seqTo));
         }
 
-        const limitN  = Math.min(Number(limit)  || 200, 1000);
+        const _loopIterMaxLimit = cfg('api.loopIterationsMaxLimit');
+        const limitN  = Math.min(Number(limit)  || 200, _loopIterMaxLimit);
         const offsetN = Number(offset) || 0;
 
         const rows = db.all(
@@ -256,7 +261,8 @@ router.get('/value-patterns', (req, res) => {
             ...params
         );
 
-        const limitN  = Math.max(1, Math.min(Number(limit)  || 100, 500));
+        const _vpMaxLimit = cfg('api.valuePatternsLimit');
+        const limitN  = Math.max(1, Math.min(Number(limit)  || 100, _vpMaxLimit));
         const offsetN = Math.max(0, Number(offset) || 0);
 
         const rows = db.all(
@@ -332,7 +338,7 @@ router.get('/value-index-search', (req, res) => {
                AND vd.val_text LIKE ?
              GROUP BY vd.id
              ORDER BY occurrence_count DESC
-             LIMIT 50`,
+             LIMIT ${cfg('api.valueIndexSearchLimit')}`,
             id, `%${keyword}%`
         );
 
@@ -456,7 +462,8 @@ router.get('/dataflow', (req, res) => {
             params.push(Number(seqTo));
         }
 
-        const limitN  = Math.min(Number(limit)  || 200, 1000);
+        const _dfEdgesMaxLimit = cfg('api.dataflowEdgesLimit');
+        const limitN  = Math.min(Number(limit)  || 200, _dfEdgesMaxLimit);
         const offsetN = Number(offset) || 0;
 
         const edges = db.all(
@@ -500,7 +507,8 @@ router.get('/dataflow/vars', (req, res) => {
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
         if (!session) return res.status(404).json({ error: 'Session not found' });
 
-        const limitN = Math.min(Number(limit) || 100, 500);
+        const _dfVarsMaxLimit = cfg('api.maxPageSize');
+        const limitN = Math.min(Number(limit) || 100, _dfVarsMaxLimit);
 
         let vars;
         if (prefix) {
@@ -570,8 +578,12 @@ router.get('/dataflow/subgraph', (req, res) => {
         const session = db.get('SELECT id FROM sessions WHERE id = ?', [id]);
         if (!session) return res.status(404).json({ error: 'Session not found' });
 
-        const hopsN    = Math.min(Number(hops)     || 3, 6);
-        const maxNodesN = Math.min(Number(maxNodes) || 80, 200);
+        const _dfSubgraphDefaultHops    = cfg('api.dataflowSubgraphDefaultHops');
+        const _dfSubgraphMaxHops        = cfg('api.dataflowSubgraphMaxHops');
+        const _dfSubgraphDefaultMaxNodes = cfg('api.dataflowSubgraphDefaultMaxNodes');
+        const _dfSubgraphMaxNodes        = cfg('api.dataflowSubgraphMaxNodes');
+        const hopsN    = Math.min(Number(hops)     || _dfSubgraphDefaultHops,  _dfSubgraphMaxHops);
+        const maxNodesN = Math.min(Number(maxNodes) || _dfSubgraphDefaultMaxNodes, _dfSubgraphMaxNodes);
 
         // ── BFS 状态 ──────────────────────────────────────────────────────
         // 节点：以变量名（字符串）或事件 ID（整数前缀 "e:"）为键
@@ -656,20 +668,22 @@ router.get('/dataflow/subgraph', (req, res) => {
                 let rows = [];
                 if (direction === 'forward' || direction === 'both') {
                     // from_var = vn → 找下游（该变量被 read 后流向哪）
+                    const _fwdLimit = cfg('api.dataflowVarsFwdLimit');
                     const fwd = db.all(
                         `SELECT id, from_event_id, to_event_id, from_var, to_var, edge_type, iid, line
                          FROM dataflow_edges WHERE session_id = ? AND from_var = ?
-                         LIMIT 50`,
+                         LIMIT ${_fwdLimit}`,
                         [id, vn]
                     );
                     rows = rows.concat(fwd);
                 }
                 if (direction === 'backward' || direction === 'both') {
                     // to_var = vn → 找上游（谁写了该变量）
+                    const _bwdLimit = cfg('api.dataflowVarsBwdLimit');
                     const bwd = db.all(
                         `SELECT id, from_event_id, to_event_id, from_var, to_var, edge_type, iid, line
                          FROM dataflow_edges WHERE session_id = ? AND to_var = ?
-                         LIMIT 50`,
+                         LIMIT ${_bwdLimit}`,
                         [id, vn]
                     );
                     rows = rows.concat(bwd);
@@ -693,19 +707,21 @@ router.get('/dataflow/subgraph', (req, res) => {
 
                 let rows = [];
                 if (direction === 'forward' || direction === 'both') {
+                    const _evFwdLimit = cfg('api.dataflowEventFwdLimit');
                     const fwd = db.all(
                         `SELECT id, from_event_id, to_event_id, from_var, to_var, edge_type, iid, line
                          FROM dataflow_edges WHERE session_id = ? AND from_event_id = ?
-                         LIMIT 30`,
+                         LIMIT ${_evFwdLimit}`,
                         [id, eid]
                     );
                     rows = rows.concat(fwd);
                 }
                 if (direction === 'backward' || direction === 'both') {
+                    const _evBwdLimit = cfg('api.dataflowEventBwdLimit');
                     const bwd = db.all(
                         `SELECT id, from_event_id, to_event_id, from_var, to_var, edge_type, iid, line
                          FROM dataflow_edges WHERE session_id = ? AND to_event_id = ?
-                         LIMIT 30`,
+                         LIMIT ${_evBwdLimit}`,
                         [id, eid]
                     );
                     rows = rows.concat(bwd);
@@ -736,7 +752,7 @@ router.get('/dataflow/subgraph', (req, res) => {
         const eventNodes = nodes.filter(n => n.type === 'event' && n.iid != null);
         if (eventNodes.length > 0) {
             const iids = [...new Set(eventNodes.map(n => n.iid))];
-            const BATCH = 200;
+            const BATCH = cfg('api.smapBatchSize');
             const smapMap = new Map();
             for (let i = 0; i < iids.length; i += BATCH) {
                 const chunk = iids.slice(i, i + BATCH);
@@ -823,7 +839,8 @@ router.get('/object-timelines', (req, res) => {
         }
 
         const where   = conditions.join(' AND ');
-        const pageSizeN = Math.min(Math.max(Number(pageSize) || 100, 1), 500);
+        const _otMaxPageSize = cfg('api.objectTimelinesMaxPageSize');
+        const pageSizeN = Math.min(Math.max(Number(pageSize) || 100, 1), _otMaxPageSize);
         const pageN     = Math.max(Number(page) || 1, 1);
         const offsetN   = (pageN - 1) * pageSizeN;
 
@@ -841,6 +858,7 @@ router.get('/object-timelines', (req, res) => {
         );
 
         // 按 base_var 分组的统计（含读写，全量，LIMIT 500 防超大数据集）
+        const _otBaseVarStatsLimit = cfg('api.objectTimelinesBaseVarStatsLimit');
         const baseVarStats = db.all(
             `SELECT base_var, COUNT(*) as total_count,
                     SUM(is_write) as write_count,
@@ -849,7 +867,7 @@ router.get('/object-timelines', (req, res) => {
              WHERE session_id = ?
              GROUP BY base_var
              ORDER BY write_count DESC, total_count DESC
-             LIMIT 500`,
+             LIMIT ${_otBaseVarStatsLimit}`,
             [id]
         );
 
@@ -984,7 +1002,7 @@ router.get('/cfg', (req, res) => {
              WHERE session_id = ?${rootFnClause} AND depth <= ?
              GROUP BY fn_name, fn_iid
              ORDER BY call_count DESC
-             LIMIT 500`,
+             LIMIT ${cfg('api.cfgFnLimit')}`,
             ...(rootFn ? [id, rootFn, depthN] : [id, depthN])
         );
 
@@ -1024,7 +1042,7 @@ router.get('/cfg', (req, res) => {
                AND p.call_seq  <= c.child_call_seq
                AND p.return_seq >= c.child_call_seq
              GROUP BY caller_fn, caller_iid, callee_fn, callee_iid
-             LIMIT 2000`,
+             LIMIT ${cfg('api.cfgEdgesLimit')}`,
             id, depthN, id
         );
 
@@ -1034,7 +1052,7 @@ router.get('/cfg', (req, res) => {
             iidNodes = db.all(
                 `SELECT iid, count, line, src_text FROM iid_counts
                  WHERE session_id = ? AND count >= ?
-                 ORDER BY count DESC LIMIT 100`,
+                 ORDER BY count DESC LIMIT ${cfg('api.cfgIidLimit')}`,
                 id, minCountN
             );
         }
@@ -1043,7 +1061,7 @@ router.get('/cfg', (req, res) => {
         const loopRows = db.all(
             `SELECT iid, SUM(iteration_count) AS total_iters, MIN(line) AS line
              FROM loops WHERE session_id = ?
-             GROUP BY iid ORDER BY total_iters DESC LIMIT 50`,
+             GROUP BY iid ORDER BY total_iters DESC LIMIT ${cfg('api.cfgLoopsLimit')}`,
             id
         );
 
@@ -1227,7 +1245,8 @@ router.get('/fn-cfg', (req, res) => {
         const session = db.get('SELECT id FROM sessions WHERE id = ?', id);
         if (!session) return res.status(404).json({ error: 'Session not found' });
 
-        const maxCallsN = Math.min(Number(maxCalls) || 20, 100);
+        const _fnCfgMaxCallsCap = cfg('api.fnCfgMaxCallsCap');
+        const maxCallsN = Math.min(Number(maxCalls) || 20, _fnCfgMaxCallsCap);
 
         // ─ Step 1: 找到目标函数的调用记录（采样 maxCallsN 次）──────────────
         const fnConds = ['session_id = ?', 'fn_name = ?'];
@@ -1349,7 +1368,7 @@ router.get('/fn-cfg', (req, res) => {
                 `SELECT id, iid FROM events
                  WHERE session_id = ? AND id >= ? AND id <= ? AND iid IS NOT NULL
                  ORDER BY id ASC
-                 LIMIT 2000`,
+                 LIMIT ${cfg('api.fnCfgRawEventsLimit')}`,
                 id, call.call_seq, call.return_seq
             );
 
@@ -1418,8 +1437,8 @@ router.get('/fn-cfg', (req, res) => {
             });
         }
 
-        // IN(...) 列表过长会触发 SQLite expression tree 超限，分批查询（每批 500 个）
-        const BATCH = 500;
+        // IN(...) 列表过长会触发 SQLite expression tree 超限，分批查询
+        const BATCH = cfg('api.codeBlocksSmapBatchSize');
         function queryInBatches(table, selectCols, iids) {
             const rows = [];
             for (let i = 0; i < iids.length; i += BATCH) {
@@ -1483,8 +1502,8 @@ router.get('/fn-cfg', (req, res) => {
 
         // 行号分块（同一行或相邻行归为一块，每块最多 MAX_IID_PER_BLOCK 个 iid）
         // 注意：MAX_IID_PER_BLOCK 设大一点，减少碎块；行号差阈值 LINE_GAP 控制分块粒度
-        const MAX_IID_PER_BLOCK = 40;  // 单块最多 40 个唯一 iid（行去重后通常 ≤ 10 行）
-        const LINE_GAP = 3;            // 行号差 > 3 时分新块（原为 2）
+        const MAX_IID_PER_BLOCK = cfg('api.codeBlocksMaxIidPerBlock');  // 单块最多 N 个唯一 iid（行去重后通常 ≤ 10 行）
+        const LINE_GAP = cfg('api.codeBlocksLineGap');  // 行号差阈值，超过此值则分新块
         const blocks = [];
         let currentBlock = null;
         let prevLine = -999;
@@ -1611,7 +1630,7 @@ router.get('/fn-cfg', (req, res) => {
         // ─ Step 7.5: 总块数上限（防止超大函数渲染崩溃）──────────────────────
         // Cytoscape breadthfirst 布局 + label 渲染有节点数上限，超过 50 块时
         // 按 presence 降序保留最重要的块（最常执行的路径）
-        const MAX_BLOCKS = 50;
+        const MAX_BLOCKS = cfg('api.codeBlocksMaxBlocks');
         let blocksToOutput = blocks;
         let keptBlockIds = null;  // null = 全部保留
         if (blocks.length > MAX_BLOCKS) {
@@ -1642,7 +1661,7 @@ router.get('/fn-cfg', (req, res) => {
 
             // 每块最多显示 MAX_LINES_PER_BLOCK 行，超出时截断并记录省略数量
             // 这直接控制了 Cytoscape 节点 label 的行数，避免 expression tree 超限
-            const MAX_LINES_PER_BLOCK = 10;
+            const MAX_LINES_PER_BLOCK = cfg('api.codeBlocksMaxLinesPerBlock');
             const omitted = lineList.length > MAX_LINES_PER_BLOCK
                 ? lineList.length - MAX_LINES_PER_BLOCK
                 : 0;
@@ -1789,7 +1808,9 @@ router.get('/web-api', (req, res) => {
         if (confidence_level)  { conds.push('confidence_level = ?');  params.push(confidence_level); }
         if (search)            { conds.push('property_name LIKE ?');  params.push(`%${search}%`); }
 
-        const limitN  = Math.min(Number(limit)  || 500, 2000);
+        const _webApiDefaultLimit = cfg('api.webApiDefaultLimit');
+        const _webApiMaxLimit     = cfg('api.webApiMaxLimit');
+        const limitN  = Math.min(Number(limit)  || _webApiDefaultLimit, _webApiMaxLimit);
         const offsetN = Number(offset) || 0;
 
         const rows = db.all(

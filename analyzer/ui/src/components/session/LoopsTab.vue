@@ -240,6 +240,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue';
 import { openValueViewer } from '../../composables/useValueViewer.js';
+import { useConfig } from '../../composables/useConfig.js';
 
 const props = defineProps({
     sessionId: { type: String, required: true },
@@ -247,12 +248,14 @@ const props = defineProps({
 
 defineEmits(['goto-seq']);
 
+const { api: apiCfg } = useConfig();
+
 // ── 循环列表（一次性加载，前端分页） ───────────────────────────────────────
 const allLoops   = ref([]);
 const loopsLoading = ref(false);
 const loopSearch = ref('');
 const loopPage   = ref(1);
-const LOOP_PAGE_SIZE = 30;
+const LOOP_PAGE_SIZE  = Math.min(apiCfg.value.defaultPageSize ?? 30, 50);
 
 const filteredLoops = computed(() => {
     const q = loopSearch.value.trim();
@@ -279,7 +282,7 @@ const iterTotal    = ref(0);
 const iterPage     = ref(1);
 const iterJump     = ref(1);
 const iterLoading  = ref(false);
-const ITER_PAGE_SIZE = 100;
+const ITER_PAGE_SIZE  = apiCfg.value.defaultPageSize ?? 100;
 
 // ── 快照展示控制 ──────────────────────────────────────────────────────────
 /** 'write' | 'read' | 'both' */

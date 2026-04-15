@@ -18,6 +18,7 @@
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
+import { cfg } from '../Config.mjs';
 
 // 计算字符串熵（越高 = 越随机 = 越像混淆名）
 function entropy(s) {
@@ -39,6 +40,17 @@ function isShortObfuscated(name) {
     return false;
 }
 
+// ─── 熵阈值（延迟读取配置）─────────────────────────────────────────────────
+let _entropyCfg = null;
+function getEntropyThreshold() {
+    if (_entropyCfg) return _entropyCfg;
+    _entropyCfg = {
+        threshold: cfg('plugins.I3_ObfuscationDetector.entropyThreshold'),
+        minNameLength: cfg('plugins.I3_ObfuscationDetector.entropyMinNameLength'),
+    };
+    return _entropyCfg;
+}
+
 export default class I3ObfuscationDetector extends BasePlugin {
     static id = 'I3-ObfuscationDetector';
     static deps = ['F1-EventIndex', 'A3-HotPathAnalyzer'];
@@ -49,6 +61,29 @@ export default class I3ObfuscationDetector extends BasePlugin {
         const { sessionId } = ctx;
         const rawDb = db.raw();
 
+        // 在 run() 入口捕获配置
+        const _varNameSampleLimit = cfg('plugins.I3_ObfuscationDetector.varNameSampleLimit');
+        const _shortVarRatioThreshold = cfg('plugins.I3_ObfuscationDetector.shortVarRatioThreshold');
+        const _shortVarAbsThreshold = cfg('plugins.I3_ObfuscationDetector.shortVarAbsThreshold');
+        const _highEntropyCountThreshold = cfg('plugins.I3_ObfuscationDetector.highEntropyCountThreshold');
+        const _decoderMinCalls = cfg('plugins.I3_ObfuscationDetector.decoderMinCalls');
+        const _decoderMinDistinctRet = cfg('plugins.I3_ObfuscationDetector.decoderMinDistinctRet');
+        const _sqlChunkSize = cfg('plugins.I3_ObfuscationDetector.sqlChunkSize');
+        const _maxSamplesPerFunc = cfg('plugins.I3_ObfuscationDetector.maxSamplesPerFunc');
+        const _minStringRetCount = cfg('plugins.I3_ObfuscationDetector.minStringRetCount');
+        const _hotIidCountThreshold = cfg('plugins.I3_ObfuscationDetector.hotIidCountThreshold');
+        const _hotIidQueryLimit = cfg('plugins.I3_ObfuscationDetector.hotIidQueryLimit');
+        const _numericWriteMinCalls = cfg('plugins.I3_ObfuscationDetector.numericWriteMinCalls');
+        const _numericWriteMinDistinctVals = cfg('plugins.I3_ObfuscationDetector.numericWriteMinDistinctVals');
+        const _vmpAvgEventThreshold = cfg('plugins.I3_ObfuscationDetector.vmpAvgEventThreshold');
+        const _deepStackMinCalls = cfg('plugins.I3_ObfuscationDetector.deepStackMinCalls');
+        const _deepStackMaxDepthThreshold = cfg('plugins.I3_ObfuscationDetector.deepStackMaxDepthThreshold');
+        const _deepStackAvgDepthThreshold = cfg('plugins.I3_ObfuscationDetector.deepStackAvgDepthThreshold');
+        const _deepStackSevereThreshold = cfg('plugins.I3_ObfuscationDetector.deepStackSevereThreshold');
+        const _deepStackHighThreshold = cfg('plugins.I3_ObfuscationDetector.deepStackHighThreshold');
+
+        const entCfg = getEntropyThreshold();
+
         this.emitProgress(ctx, '清空旧数据...', 0);
         db.run('DELETE FROM obfuscation_hints WHERE session_id = ?', [sessionId]);
 
@@ -57,7 +92,7 @@ export default class I3ObfuscationDetector extends BasePlugin {
         // ── 1. 短/高熵变量名检测 ────────────────────────────────────────────
         this.emitProgress(ctx, '分析变量名...', 8);
         const varNames = db.all(
-            'SELECT DISTINCT name FROM writes WHERE session_id = ? AND name IS NOT NULL LIMIT 2000',
+            `SELECT DISTINCT name FROM writes WHERE session_id = ? AND name IS NOT NULL LIMIT ${_varNameSampleLimit}`,
             [sessionId]
         );
 
@@ -65,10 +100,10 @@ export default class I3ObfuscationDetector extends BasePlugin {
         let highEntropyCount = 0;
         for (const v of varNames) {
             if (isShortObfuscated(v.name)) shortVarCount++;
-            if (entropy(v.name) > 3.5 && v.name.length > 4) highEntropyCount++;
+            if (entropy(v.name) > entCfg.threshold && v.name.length > entCfg.minNameLength) highEntropyCount++;
         }
 
-        if (varNames.length > 0 && shortVarCount > varNames.length * 0.3 && shortVarCount > 5) {
+        if (varNames.length > 0 && shortVarCount > varNames.length * _shortVarRatioThreshold && shortVarCount > _shortVarAbsThreshold) {
             hints.push([
                 sessionId,
                 'short_var',
@@ -80,7 +115,7 @@ export default class I3ObfuscationDetector extends BasePlugin {
             ]);
         }
 
-        if (highEntropyCount > 5) {
+        if (highEntropyCount > _highEntropyCountThreshold) {
             hints.push([
                 sessionId,
                 'high_entropy_name',
@@ -101,13 +136,13 @@ export default class I3ObfuscationDetector extends BasePlugin {
              FROM call_edges
              WHERE session_id = ? AND return_value IS NOT NULL
              GROUP BY fn_name, fn_iid
-             HAVING cnt >= 5 AND distinct_ret >= 3`,
+             HAVING cnt >= ${_decoderMinCalls} AND distinct_ret >= ${_decoderMinDistinctRet}`,
             [sessionId]
         );
 
         if (callGroups.length > 0) {
-            // 第二步：批量取所有候选函数的 return_value + args_json 样本（最多 20 条/函数）
-            const CHUNK = 900;
+            // 第二步：批量取所有候选函数的 return_value + args_json 样本
+            const CHUNK = _sqlChunkSize;
             const fnNames = callGroups.map(cg => cg.fn_name).filter(Boolean);
 
             // "fn_name:fn_iid" → { retVals: string[], argSamples: string[] }
@@ -127,8 +162,8 @@ export default class I3ObfuscationDetector extends BasePlugin {
                     const key = `${r.fn_name}:${r.fn_iid ?? ''}`;
                     let entry = fnDataMap.get(key);
                     if (!entry) { entry = { retVals: [], argSamples: [] }; fnDataMap.set(key, entry); }
-                    if (entry.retVals.length < 20) entry.retVals.push(r.return_value);
-                    if (entry.argSamples.length < 20 && r.args_json) entry.argSamples.push(r.args_json);
+                    if (entry.retVals.length < _maxSamplesPerFunc) entry.retVals.push(r.return_value);
+                    if (entry.argSamples.length < _maxSamplesPerFunc && r.args_json) entry.argSamples.push(r.args_json);
                 }
             }
 
@@ -136,7 +171,7 @@ export default class I3ObfuscationDetector extends BasePlugin {
                 const key = `${cg.fn_name}:${cg.fn_iid ?? ''}`;
                 const entry = fnDataMap.get(key) || { retVals: [], argSamples: [] };
                 const strRets = entry.retVals.filter(r => r && r.startsWith('"'));
-                if (strRets.length >= 3) {
+                if (strRets.length >= _minStringRetCount) {
                     // ── 增强：检查参数是否全为整数索引 ────────────────────
                     // 字符串池解码器几乎全是 _0x1234(42) 形式——参数只有一个整数
                     let allIntegerArgs = false;
@@ -187,7 +222,7 @@ export default class I3ObfuscationDetector extends BasePlugin {
         // 仅凭动态事件数据难以可靠区分，此处统一检测"状态机式控制流混淆"。
         this.emitProgress(ctx, '检测控制流混淆...', 42);
         const hotIids = db.all(
-            'SELECT iid, count, line FROM iid_counts WHERE session_id = ? AND count >= 10 ORDER BY count DESC LIMIT 50',
+            `SELECT iid, count, line FROM iid_counts WHERE session_id = ? AND count >= ${_hotIidCountThreshold} ORDER BY count DESC LIMIT ${_hotIidQueryLimit}`,
             [sessionId]
         );
 
@@ -198,7 +233,7 @@ export default class I3ObfuscationDetector extends BasePlugin {
                  JOIN value_dict vd ON vd.session_id = w.session_id AND vd.id = w.value_id
                  WHERE w.session_id = ? AND vd.val_type = 'num'
                  GROUP BY w.name
-                 HAVING cnt >= 5 AND distinct_vals >= 3`,
+                 HAVING cnt >= ${_numericWriteMinCalls} AND distinct_vals >= ${_numericWriteMinDistinctVals}`,
                 [sessionId]
             );
 
@@ -214,7 +249,7 @@ export default class I3ObfuscationDetector extends BasePlugin {
                 const avgHotEvents = hotFn?.avg_ev ?? 0;
 
                 let tendencyNote = '';
-                if (avgHotEvents > 5000) {
+                if (avgHotEvents > _vmpAvgEventThreshold) {
                     tendencyNote = '（最热函数事件量极高，可能为 VMP 虚拟机保护；但也可能是深度嵌套的 CFF，需结合源码判断）';
                 } else {
                     tendencyNote = '（特征符合控制流平坦化 CFF；若存在字节码解释器循环也可能为 VMP，建议结合源码确认）';
@@ -245,11 +280,11 @@ export default class I3ObfuscationDetector extends BasePlugin {
             [sessionId]
         );
 
-        if (depthStats && depthStats.total_calls >= 10) {
+        if (depthStats && depthStats.total_calls >= _deepStackMinCalls) {
             const maxDepth = depthStats.max_depth ?? 0;
             const avgDepth = depthStats.avg_depth ?? 0;
 
-            if (maxDepth >= 50 && avgDepth >= 5) {
+            if (maxDepth >= _deepStackMaxDepthThreshold && avgDepth >= _deepStackAvgDepthThreshold) {
                 // 取最深调用帧的信息供前端定位
                 const deepestCall = db.get(
                     `SELECT fn_name, fn_iid, caller_line, depth
@@ -260,16 +295,16 @@ export default class I3ObfuscationDetector extends BasePlugin {
                 );
 
                 let note = '';
-                if (maxDepth >= 200) {
+                if (maxDepth >= _deepStackSevereThreshold) {
                     note = '（调用深度极高，强烈疑似 VMP 虚拟机保护或深度递归混淆）';
-                } else if (maxDepth >= 100) {
+                } else if (maxDepth >= _deepStackHighThreshold) {
                     note = '（调用深度很高，疑似 CFF/VMP 或重度递归混淆）';
                 } else {
                     note = '（调用深度偏高，可能为 CFF 控制流平坦化或深度递归代码）';
                 }
 
-                const conf = maxDepth >= 200 ? 0.85
-                    : maxDepth >= 100 ? 0.75
+                const conf = maxDepth >= _deepStackSevereThreshold ? 0.85
+                    : maxDepth >= _deepStackHighThreshold ? 0.75
                     : 0.60;
 
                 hints.push([
