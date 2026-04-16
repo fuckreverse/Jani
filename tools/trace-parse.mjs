@@ -389,17 +389,24 @@ function injectSmapInfo(event, smapMap) {
  * 第一遍扫描：从 DataView 中提取所有 END_EXPR write 值，建立 iid → writes 映射。
  * 只保留 write 数据（内存占用远小于全量事件），其他事件类型直接跳过。
  *
+ * v3 格式新增：每个 write 条目包含 scopeId（来自 w.scopeId），
+ * 用于在 resolveEventOmitted 中区分同名变量（同一函数多次调用的不同帧）。
+ *
  * @param {DataView} view
- * @returns {Map<number, Array<{name: string, value: *}>>}  iid → writes
+ * @returns {Map<number, Array<{name: string, value: *, scopeId: number|null}>>}  iid → writes
  */
 function collectWriteValues(view) {
     const writeValues = new Map();
     let offset = FILE_HEADER_SIZE;
+    // 读取文件版本号，传给 deserializeEvent 以正确解析 scope_id 字段
+    const fileVersion = view.byteLength >= FILE_HEADER_SIZE
+        ? view.getUint8(4)
+        : 0x01;
 
     while (offset + EVENT_HEADER_SIZE <= view.byteLength) {
         let result;
         try {
-            result = deserializeEvent(view, offset);
+            result = deserializeEvent(view, offset, fileVersion);
         } catch {
             break;
         }
@@ -411,7 +418,12 @@ function collectWriteValues(view) {
 
         for (const w of event.writes) {
             if (!writeValues.has(event.iid)) writeValues.set(event.iid, []);
-            writeValues.get(event.iid).push({ name: w.name, value: w.value });
+            // 保存 scopeId，供 resolveEventOmitted 精确匹配使用
+            writeValues.get(event.iid).push({
+                name:    w.name,
+                value:   w.value,
+                scopeId: w.scopeId ?? null,
+            });
         }
     }
 
@@ -420,6 +432,11 @@ function collectWriteValues(view) {
 
 /**
  * 对单条事件就地回填 omitted reads（流式，无需全量缓存）。
+ *
+ * Bug 修复（递归/循环场景）：
+ *   同一 iid（如函数参数赋值点）可能对应多条 write 记录（每次调用一条）。
+ *   v3 格式新增 scopeId 字段后，优先用 (scopeId + name) 精确匹配；
+ *   scopeId 不可用时降级为仅按 name 匹配（取最后一条，与调用顺序最近）。
  *
  * @param {object} event
  * @param {Map}    smapMap
@@ -433,7 +450,19 @@ function resolveEventOmitted(event, smapMap, writeValues) {
         if (!entry?.defIid) continue;
         const writes = writeValues.get(entry.defIid);
         if (!writes) continue;
-        const match = writes.find(w => w.name === r.name);
+
+        let match;
+        if (r.scopeId != null) {
+            // v3 路径：精确匹配 (scopeId + name)，区分不同调用帧的同名变量
+            match = writes.find(w => w.scopeId === r.scopeId && w.name === r.name);
+        }
+        if (match === undefined) {
+            // 降级路径：仅按 name 匹配（取最后一条，与最近一次调用最接近）
+            // 注：findLast 在 Node.js 18+ 支持，回退到 for 循环保证兼容性
+            for (let i = writes.length - 1; i >= 0; i--) {
+                if (writes[i].name === r.name) { match = writes[i]; break; }
+            }
+        }
         if (match !== undefined) {
             r.value = match.value;
             r.resolvedFromDefIid = entry.defIid;
@@ -468,12 +497,16 @@ function decodeBinaryBuffer(buf, opts, emit) {
     }
 
     // ── 第二遍（或唯一一遍）：流式解码并输出 ───────────────────────────────
+    // 读取文件版本号，确保与 collectWriteValues（第一遍）使用相同版本解析
+    const fileVersion = ab.byteLength >= FILE_HEADER_SIZE
+        ? new DataView(ab).getUint8(4)
+        : 0x01;
     let offset = FILE_HEADER_SIZE;
 
     while (offset + EVENT_HEADER_SIZE <= ab.byteLength) {
         let result;
         try {
-            result = deserializeEvent(view, offset);
+            result = deserializeEvent(view, offset, fileVersion);
         } catch (err) {
             process.stderr.write(`[trace-parse] decode error at offset ${offset}: ${err.message}\n`);
             break;

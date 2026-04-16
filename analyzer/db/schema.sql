@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS writes (
     session_id  TEXT NOT NULL,
     name        TEXT,
     value_id    INTEGER,        -- 引用 value_dict.(session_id, id)，通过 JOIN 获取完整值
-    omitted     INTEGER DEFAULT 0
+    omitted     INTEGER DEFAULT 0,
+    scope_id    INTEGER         -- 变量定义点的静态作用域 ID（v3 新增），NULL 表示旧数据或全局变量
 );
 
 -- ─── 变量读取 ────────────────────────────────────────────────────────────────
@@ -70,7 +71,8 @@ CREATE TABLE IF NOT EXISTS reads (
     session_id  TEXT NOT NULL,
     name        TEXT,
     value_id    INTEGER,        -- 引用 value_dict.(session_id, id)，通过 JOIN 获取完整值
-    omitted     INTEGER DEFAULT 0
+    omitted     INTEGER DEFAULT 0,
+    scope_id    INTEGER         -- 变量定义点的静态作用域 ID（v3 新增），NULL 表示旧数据或全局变量
 );
 
 -- ─── 属性读写 ────────────────────────────────────────────────────────────────
@@ -138,6 +140,7 @@ CREATE TABLE IF NOT EXISTS var_lifetime (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id      TEXT NOT NULL,
     name            TEXT NOT NULL,
+    scope_id        INTEGER,                    -- 变量定义点的静态作用域 ID（v3 新增），NULL 表示旧数据或全局变量
     first_write_seq INTEGER,
     last_read_seq   INTEGER,
     write_count     INTEGER DEFAULT 0,
@@ -515,11 +518,16 @@ CREATE INDEX IF NOT EXISTS idx_fields_event        ON fields(session_id, event_i
 -- 注意：idx_writes_value_id / idx_reads_value_id / idx_fields_value_id
 -- 由 Database.mjs _runMigrations() 在 value_id 列迁移完成后创建，不在此处定义
 -- （原因：旧数据库升级时 schema.sql 先于 ALTER TABLE 执行，此处创建索引会因列不存在而报错）
+-- scope_id 索引（v3 新增）：
+-- 注意：idx_writes_scope / idx_reads_scope / idx_var_lifetime_scope 不在此处定义，
+-- 原因与 idx_writes_value_id 等相同：旧数据库升级时 scope_id 列尚未 ALTER TABLE 添加，
+-- 在列不存在时执行 CREATE INDEX 会报错。这三个索引由 Database.mjs _runMigrations() 负责创建。
 CREATE INDEX IF NOT EXISTS idx_call_edges_session  ON call_edges(session_id);
 CREATE INDEX IF NOT EXISTS idx_call_edges_fn_name  ON call_edges(session_id, fn_name);
 CREATE INDEX IF NOT EXISTS idx_call_edges_retval   ON call_edges(session_id, return_value);
 CREATE INDEX IF NOT EXISTS idx_taint_session       ON taint_paths(session_id);
 CREATE INDEX IF NOT EXISTS idx_var_lifetime_name   ON var_lifetime(session_id, name);
+-- idx_var_lifetime_scope 由 _runMigrations() 创建（scope_id 列是迁移新增，此处执行时可能尚不存在）
 CREATE INDEX IF NOT EXISTS idx_bookmarks_session   ON bookmarks(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_run_tasks_status    ON run_tasks(status);
 -- events 按 type + id：I4 事件分布统计 + 游标分页

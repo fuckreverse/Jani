@@ -1,15 +1,18 @@
 /**
  * F4_VariableLifetime.mjs — 统计变量生命周期
  *
- * 性能优化：
- *  - 用 Map 替代 writeStats.find()（O(N²) → O(1)）
- *  - 使用 prepared statement + 单事务批量 INSERT
+ * scope_id 感知（v3 格式）：
+ *  - 按 (name, scope_id) 分组，区分同名但不同调用帧/作用域的变量
+ *  - scope_id=NULL 的记录表示 v1/v2 旧数据或全局变量，单独聚合为一组
+ *  - var_lifetime 表新增 scope_id 列记录作用域 ID
+ *
+ * 性能优化（重递归场景）：
+ *  - 主路径：全量下推到 SQLite（INSERT ... SELECT ... LEFT JOIN），完全绕开 JS 层内存
+ *  - 统计量（varCount/totalWrites/totalReads）也改为 SQL 聚合查询，不再载入行数据
+ *  - 彻底消除极端重递归时 (name × scope_id) 百万级行全量加载到 JS 内存的瓶颈
  */
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
-import { cfg } from '../Config.mjs';
-
-const BATCH_SIZE = () => cfg('plugins.F4_VariableLifetime.batchSize');
 
 export default class F4VariableLifetime extends BasePlugin {
     static id = 'F4-VariableLifetime';
@@ -20,85 +23,92 @@ export default class F4VariableLifetime extends BasePlugin {
     async run(ctx) {
         const { sessionId } = ctx;
         const rawDb = db.raw();
-        const _batchSize = BATCH_SIZE();
 
         this.emitProgress(ctx, '清空旧数据...', 0);
         db.run('DELETE FROM var_lifetime WHERE session_id = ?', [sessionId]);
 
-        this.emitProgress(ctx, '统计 writes...', 10);
+        this.emitProgress(ctx, '统计并写入 var_lifetime...', 10);
 
-        // 从 writes 统计
-        const writeStats = db.all(
-            `SELECT name, MIN(event_id) as first_write_seq, COUNT(*) as write_count
-             FROM writes
-             WHERE session_id = ? AND name IS NOT NULL
-             GROUP BY name`,
-            [sessionId]
-        );
+        // ── 主路径：全量在 SQLite 内完成统计 + 合并 + INSERT ──────────────────
+        //
+        // 等价逻辑（原 JS 实现）：
+        //   writes 分组（name, scope_id）→ first_write_seq, write_count
+        //   reads  分组（name, scope_id）→ last_read_seq,  read_count
+        //   按 (name, scope_id) LEFT JOIN 合并两侧，生成 var_lifetime 行
+        //
+        // FULL OUTER JOIN 模拟：
+        //   SQLite 不支持 FULL OUTER JOIN，用 UNION ALL + COALESCE 模拟：
+        //   写侧 LEFT JOIN 读侧（覆盖有写/有写且有读两种情况）
+        //   UNION ALL
+        //   读侧 LEFT JOIN 写侧 WHERE 写侧 IS NULL（仅读不写的变量）
+        //
+        // 注意：NULL 在 GROUP BY/JOIN 中视为相同值（SQLite 规范），
+        //       即两边 scope_id=NULL 的记录能正确匹配。
 
-        this.emitProgress(ctx, '统计 reads...', 40);
+        rawDb.transaction(() => {
+            rawDb.exec(`
+                INSERT INTO var_lifetime
+                    (session_id, name, scope_id, first_write_seq, last_read_seq, write_count, read_count)
 
-        // 从 reads 统计
-        const readStats = db.all(
-            `SELECT name, MAX(event_id) as last_read_seq, COUNT(*) as read_count
-             FROM reads
-             WHERE session_id = ? AND name IS NOT NULL
-             GROUP BY name`,
-            [sessionId]
-        );
+                -- 有写（可能也有读）
+                SELECT
+                    ? AS session_id,
+                    w.name,
+                    w.scope_id,
+                    MIN(w.event_id)     AS first_write_seq,
+                    MAX(r.event_id)     AS last_read_seq,
+                    COUNT(DISTINCT w.id) AS write_count,
+                    COUNT(DISTINCT r.id) AS read_count
+                FROM writes w
+                LEFT JOIN reads r
+                    ON r.session_id = w.session_id
+                   AND r.name       = w.name
+                   AND (r.scope_id  = w.scope_id
+                        OR (r.scope_id IS NULL AND w.scope_id IS NULL))
+                WHERE w.session_id = ? AND w.name IS NOT NULL
+                GROUP BY w.name, w.scope_id
 
-        // 合并：用 Map 代替 O(N) find
-        this.emitProgress(ctx, '写入 var_lifetime 表...', 70);
-        const readMap  = new Map(readStats.map(r => [r.name, r]));
-        const writeMap = new Map(writeStats.map(w => [w.name, w]));
+                UNION ALL
 
-        const stmt = rawDb.prepare(
-            `INSERT INTO var_lifetime (session_id, name, first_write_seq, last_read_seq, write_count, read_count)
-             VALUES (?, ?, ?, ?, ?, ?)`
-        );
-        const stmtIgnore = rawDb.prepare(
-            `INSERT OR IGNORE INTO var_lifetime (session_id, name, first_write_seq, last_read_seq, write_count, read_count)
-             VALUES (?, ?, NULL, ?, 0, ?)`
-        );
+                -- 只有读，没有对应写
+                SELECT
+                    ? AS session_id,
+                    r.name,
+                    r.scope_id,
+                    NULL                AS first_write_seq,
+                    MAX(r.event_id)     AS last_read_seq,
+                    0                   AS write_count,
+                    COUNT(DISTINCT r.id) AS read_count
+                FROM reads r
+                WHERE r.session_id = ? AND r.name IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM writes w2
+                      WHERE w2.session_id = r.session_id
+                        AND w2.name       = r.name
+                        AND (w2.scope_id  = r.scope_id
+                             OR (w2.scope_id IS NULL AND r.scope_id IS NULL))
+                  )
+                GROUP BY r.name, r.scope_id
+            `.trim(), [sessionId, sessionId, sessionId, sessionId]);
+        })();
 
-        const insertBatch = rawDb.transaction((writes, reads) => {
-            for (const w of writes) {
-                const r = readMap.get(w.name);
-                stmt.run(sessionId, w.name, w.first_write_seq, r?.last_read_seq ?? null, w.write_count, r?.read_count ?? 0);
-            }
-            // 只有 read 没有 write 的变量
-            for (const r of reads) {
-                if (!writeMap.has(r.name)) {
-                    stmtIgnore.run(sessionId, r.name, r.last_read_seq, r.read_count);
-                }
-            }
-        });
+        this.emitProgress(ctx, '统计汇总...', 90);
 
-        // 分批执行（超大数据集时避免单事务过重）
-        const CHUNK = _batchSize;
-        for (let i = 0; i < writeStats.length; i += CHUNK) {
-            // 首批同时处理 read-only 变量，后续批次传空数组
-            const readChunk = i === 0 ? readStats : [];
-            insertBatch(writeStats.slice(i, i + CHUNK), readChunk);
-            if (i > 0 || writeStats.length > CHUNK) {
-                this.emitProgress(ctx,
-                    `已写入 ${Math.min(i + CHUNK, writeStats.length)}/${writeStats.length} 个变量...`,
-                    70 + Math.round((i / writeStats.length) * 25)
-                );
-            }
-        }
-        // 如果 writeStats 为空，read-only 变量还没处理
-        if (writeStats.length === 0 && readStats.length > 0) {
-            insertBatch([], readStats);
-        }
+        // ── 统计量：也全部在 SQL 中聚合，不再读行到 JS ────────────────────────
+        const stats = rawDb.prepare(`
+            SELECT
+                COUNT(*)            AS varCount,
+                SUM(write_count)    AS totalWrites,
+                SUM(read_count)     AS totalReads
+            FROM var_lifetime
+            WHERE session_id = ?
+        `).get(sessionId);
 
-        this.emitProgress(ctx, `完成，共 ${writeStats.length} 个变量`, 100);
+        const varCount    = stats?.varCount    ?? 0;
+        const totalWrites = stats?.totalWrites ?? 0;
+        const totalReads  = stats?.totalReads  ?? 0;
 
-        // 统计总读写次数（writeStats/readStats 在内存中，O(N) 求和）
-        const totalWrites = writeStats.reduce((s, w) => s + (w.write_count || 0), 0);
-        const totalReads  = readStats.reduce((s, r) => s + (r.read_count  || 0), 0);
-        const varCount    = writeStats.length + readStats.filter(r => !writeStats.some(w => w.name === r.name)).length;
-
+        this.emitProgress(ctx, `完成，共 ${varCount} 个变量`, 100);
         this.emitDone(ctx, { varCount, totalWrites, totalReads });
     }
 }

@@ -17,7 +17,7 @@
  *   - value_dict：内存 Map 分配局部 ID，避免 N+1 查询；INSERT OR IGNORE 保证幂等
  */
 
-import { openSync, readSync, fstatSync, closeSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
+import { openSync, readSync, fstatSync, closeSync, readFileSync } from 'fs';
 import { setImmediate as setImmediateAsync } from 'timers/promises';
 import { resolve } from 'path';
 import { createRequire } from 'module';
@@ -78,30 +78,46 @@ export default class F1EventIndex extends BasePlugin {
 
         this.emitProgress(ctx, '检查 .bin 文件...', 0);
 
-        // ── 支持 .bin.gz：自动解压为临时文件，解析完后删除 ──────────────────
-        let binPath = session.bin_path;
-        let tmpBinPath = null;
+        // ── 字节源（ByteSource）：抽象 fd 随机读 与 内存 Buffer 读 ───────────────
+        // .bin   → fd + readSync（随机访问，无需全量加载）
+        // .bin.gz → gunzipSync 到内存 Buffer，然后用 Buffer 切片模拟随机读
+        //           不再写临时文件，解压结果仅驻留内存，处理完毕即可 GC
+        let fd = null;
+        let memBuf = null; // 仅 .bin.gz 时使用
+
+        const binPath = session.bin_path;
         if (binPath.endsWith('.bin.gz')) {
-            this.emitProgress(ctx, '解压 .bin.gz 文件...', 1);
-            log.info({ binPath, sessionId }, 'Decompressing .bin.gz trace file...');
+            this.emitProgress(ctx, '解压 .bin.gz 文件（内存）...', 1);
+            log.info({ binPath, sessionId }, 'Decompressing .bin.gz trace file into memory...');
             const compressed = readFileSync(binPath);
-            const decompressed = gunzipSync(compressed);
-            // 写入临时文件（复用目录，文件名加 _tmp_f1 后缀）
-            tmpBinPath = binPath.replace(/\.bin\.gz$/, `._tmp_f1_${sessionId}.bin`);
-            writeFileSync(tmpBinPath, decompressed);
-            binPath = tmpBinPath;
-            log.info({ tmpBinPath, size: decompressed.byteLength }, 'Decompressed to temp file');
+            memBuf = gunzipSync(compressed);
+            log.info({ size: memBuf.byteLength }, 'Decompressed into memory buffer');
+        } else {
+            fd = openSync(binPath, 'r');
         }
 
-        // 用小 buffer 验证文件头，避免大文件整体读入
-        const fd = openSync(binPath, 'r');
-        const fileSize = fstatSync(fd).size;
+        // fileSize：用于进度计算和初始填充量；memBuf 直接取长度，fd 用 fstatSync
+        const fileSize = memBuf ? memBuf.byteLength : fstatSync(fd).size;
+
+        /**
+         * 统一随机读接口：从字节源的 srcPos 处读最多 count 字节写入 dest[destOffset..]。
+         * 返回实际读取字节数（与 fs.readSync 语义一致）。
+         */
+        const readBytes = memBuf
+            ? (dest, destOffset, count, srcPos) => {
+                const end = Math.min(srcPos + count, memBuf.byteLength);
+                const n = end - srcPos;
+                if (n <= 0) return 0;
+                memBuf.copy(dest, destOffset, srcPos, end);
+                return n;
+            }
+            : (dest, destOffset, count, srcPos) => readSync(fd, dest, destOffset, count, srcPos);
+
+        // 验证文件头
         const headerBuf = Buffer.alloc(8);
-        readSync(fd, headerBuf, 0, 8, 0);
+        readBytes(headerBuf, 0, 8, 0);
         if (!isBinaryTrace(headerBuf)) {
-            closeSync(fd);
-            // 清理临时解压文件（如有）
-            if (tmpBinPath) { try { unlinkSync(tmpBinPath); } catch { /* ignore */ } }
+            if (fd !== null) closeSync(fd);
             throw new Error(`文件 "${session.bin_path}" 不是有效的 JTB1 trace 文件`);
         }
 
@@ -134,10 +150,10 @@ export default class F1EventIndex extends BasePlugin {
             'INSERT OR IGNORE INTO value_dict (id, session_id, val_text, val_type, val_num) VALUES (?, ?, ?, ?, ?)'
         );
         const stmtWrite = rawDb.prepare(
-            'INSERT INTO writes (event_id, session_id, name, value_id, omitted) VALUES (?, ?, ?, ?, ?)'
+            'INSERT INTO writes (event_id, session_id, name, value_id, omitted, scope_id) VALUES (?, ?, ?, ?, ?, ?)'
         );
         const stmtRead = rawDb.prepare(
-            'INSERT INTO reads (event_id, session_id, name, value_id, omitted) VALUES (?, ?, ?, ?, ?)'
+            'INSERT INTO reads (event_id, session_id, name, value_id, omitted, scope_id) VALUES (?, ?, ?, ?, ?, ?)'
         );
         const stmtField = rawDb.prepare(
             'INSERT INTO fields (event_id, session_id, offset, is_write, value_id, omitted, base_oid) VALUES (?, ?, ?, ?, ?, ?, ?)'
@@ -222,7 +238,7 @@ export default class F1EventIndex extends BasePlugin {
         // 初始填充
         const initRead = Math.min(_windowSize, fileSize - filePos);
         if (initRead > 0) {
-            windowLen = readSync(fd, window, 0, initRead, filePos);
+            windowLen = readBytes(window, 0, initRead, filePos);
             filePos += windowLen;
         }
 
@@ -307,7 +323,7 @@ export default class F1EventIndex extends BasePlugin {
                 }
                 const toRead = Math.min(_windowSize - windowLen, fileSize - filePos);
                 if (toRead > 0) {
-                    const n = readSync(fd, window, windowLen, toRead, filePos);
+                    const n = readBytes(window, windowLen, toRead, filePos);
                     windowLen += n;
                     filePos   += n;
                     // 数据追加后更新 DataView 有效长度
@@ -345,7 +361,8 @@ export default class F1EventIndex extends BasePlugin {
                 for (const w of event.writes) {
                     const sv = serializeValue(w.value);
                     const vid = internValue(sv, vdBatch);
-                    writeBatch.push([eventId, sessionId, w.name ?? null, vid, w.omitted ? 1 : 0]);
+                    // scope_id：v3 格式新增，区分同名但不同作用域的变量
+                    writeBatch.push([eventId, sessionId, w.name ?? null, vid, w.omitted ? 1 : 0, w.scopeId ?? null]);
                     if (!w.omitted) pushVI(eventId, sv, w.name, 'write');
                     // 方向三：v2 格式时，write.oid != null 表示写入值是对象引用
                     // 记录到 oid_aliases 表（UNIQUE，同一变量只记最早出现的）
@@ -358,7 +375,8 @@ export default class F1EventIndex extends BasePlugin {
                 for (const r of event.reads) {
                     const sv = serializeValue(r.value);
                     const vid = internValue(sv, vdBatch);
-                    readBatch.push([eventId, sessionId, r.name ?? null, vid, r.omitted ? 1 : 0]);
+                    // scope_id：v3 格式新增，区分同名但不同作用域的变量
+                    readBatch.push([eventId, sessionId, r.name ?? null, vid, r.omitted ? 1 : 0, r.scopeId ?? null]);
                     if (!r.omitted) pushVI(eventId, sv, r.name, 'read');
                 }
             }
@@ -369,14 +387,14 @@ export default class F1EventIndex extends BasePlugin {
                 if (event.fn) {
                     const sv = JSON.stringify(event.fn);
                     const vid = internValue(sv, vdBatch);
-                    readBatch.push([eventId, sessionId, 'callee', vid, 0]);
+                    readBatch.push([eventId, sessionId, 'callee', vid, 0, null]);
                 }
                 // fnDefIid：函数定义点 iid（同一函数体每次调用相同），存入 reads 表（name='callee_def_iid'）
                 // F3_CallGraphBuilder 依赖此字段填充 call_edges.fn_def_iid，用于唯一标识函数体
                 if (event.fnDefIid !== undefined && event.fnDefIid !== null) {
                     const sv = String(event.fnDefIid);
                     const vid = internValue(sv, vdBatch);
-                    readBatch.push([eventId, sessionId, 'callee_def_iid', vid, 0]);
+                    readBatch.push([eventId, sessionId, 'callee_def_iid', vid, 0, null]);
                 }
                 // 把参数列表写入 writes 表（name='arg0','arg1',...），F3 读取 args 时依赖此数据
                 if (event.args?.length > 0) {
@@ -385,7 +403,7 @@ export default class F1EventIndex extends BasePlugin {
                         const v = event.args[i];
                         const sv = serializeValue(v);
                         const vid = internValue(sv, vdBatch);
-                        writeBatch.push([eventId, sessionId, `arg${i}`, vid, v === undefined ? 1 : 0]);
+                        writeBatch.push([eventId, sessionId, `arg${i}`, vid, v === undefined ? 1 : 0, null]);
                     }
                 }
             }
@@ -397,7 +415,7 @@ export default class F1EventIndex extends BasePlugin {
                 const omitted = event.result === undefined ? 1 : 0;
                 const sv = serializeValue(event.result);
                 const vid = internValue(sv, vdBatch);
-                writeBatch.push([eventId, sessionId, 'return', vid, omitted]);
+                writeBatch.push([eventId, sessionId, 'return', vid, omitted, null]);
             }
             if (event.fields?.length > 0) {
                 for (const f of event.fields) {
@@ -445,14 +463,8 @@ export default class F1EventIndex extends BasePlugin {
         }
 
         flush();
-        closeSync(fd);
-
-        // 清理临时解压文件（如有）
-        if (tmpBinPath) {
-            try { unlinkSync(tmpBinPath); } catch (e) {
-                log.warn({ tmpBinPath, err: e }, 'Failed to delete temp decompressed file');
-            }
-        }
+        if (fd !== null) closeSync(fd);
+        // memBuf 在此函数返回后自然 GC，无需手动释放
 
         // 恢复外键约束
         rawDb.pragma('foreign_keys = ON');

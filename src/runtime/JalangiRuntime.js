@@ -983,7 +983,7 @@ export class JalangiRuntime {
         }
 
         if (analysis?.readVar) {
-            const aret = analysis.readVar(iid, name, val, isGlobal, isScriptLocal);
+            const aret = analysis.readVar(iid, name, val, isGlobal, isScriptLocal, defScopeId);
             if (aret) val = aret.result;
         }
 
@@ -1016,7 +1016,7 @@ export class JalangiRuntime {
 
         // 通知分析插件（若有 read 钩子，用 isGlobal=false/isScriptLocal=false）
         if (analysis?.readVar) {
-            const aret = analysis.readVar(iid, name, val, false, false);
+            const aret = analysis.readVar(iid, name, val, false, false, defScopeId);
             if (aret) return (this.#lastComputedValue = aret.result);
         }
 
@@ -1029,7 +1029,7 @@ export class JalangiRuntime {
         const analysis = this.analysis;
 
         if (analysis?.writeVar) {
-            const aret = analysis.writeVar(iid, name, val, lhs, isGlobal, isScriptLocal);
+            const aret = analysis.writeVar(iid, name, val, lhs, isGlobal, isScriptLocal, defScopeId);
             if (aret) val = aret.result;
         }
 

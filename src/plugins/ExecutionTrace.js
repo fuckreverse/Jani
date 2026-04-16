@@ -286,19 +286,20 @@ export class ExecutionTraceAnalysis {
 
     // ── 指令级钩子 ────────────────────────────────────────────────────────────
 
-    writeVar(iid, name, val) {
+    writeVar(iid, name, val, lhs, isGlobal, isScriptLocal, defScopeId) {
         // 方向三：如果写入的值是对象引用，附带其 OID（供 F1 建立 oid_aliases 表）
         const oid = (val !== null && val !== undefined &&
                      (typeof val === 'object' || typeof val === 'function'))
             ? (this._sb?.getOid?.(val) ?? null)
             : null;
-        _push(this._pendingWrites, { name, val, oid });
+        // defScopeId：记录变量定义点的静态作用域 ID，用于区分同名变量
+        _push(this._pendingWrites, { name, val, oid, scopeId: defScopeId ?? null });
         return { result: val };
     }
 
-    declareVar(iid, name, val, isArgument, argumentIndex, isCatchParam) {
+    declareVar(iid, name, val, isArgument, argumentIndex, isCatchParam, defScopeId) {
         if (!isArgument && !isCatchParam) {
-            this.writeVar(iid, name, val);
+            this.writeVar(iid, name, val, undefined, false, false, defScopeId);
         }
         return { result: val };
     }
@@ -370,7 +371,9 @@ export class ExecutionTraceAnalysis {
                 if (builtins.has(name)) continue;
                 // useOmits[i] 为 true → LIGHTWEIGHT 路径 → 值可追溯，omit=true
                 const omit = useOmits ? !!useOmits[i] : false;
-                _push(this._pendingReads, { name, val: useValues[i], omit });
+                // useScopes[i]：记录变量定义点的静态作用域 ID，用于区分同名变量
+                const scopeId = (useScopes && useScopes[i] !== undefined) ? useScopes[i] : null;
+                _push(this._pendingReads, { name, val: useValues[i], omit, scopeId });
             }
         }
 
@@ -389,14 +392,22 @@ export class ExecutionTraceAnalysis {
         }
 
         // 构建 END_EXPR 事件（oid 字段透传：v2 格式 END_EXPR writes 条目末尾附加 val_oid u32）
-        const evWrites = writes.map(w => ({
-            name: w.name,
-            val:  w.val,
-            ...(w.oid != null ? { oid: w.oid } : {}),
-        }));
+        // scopeId 字段透传：v3 格式 reads/writes 条目附加 scope_id u32，用于区分同名变量
+        // 注：避免使用 `...(cond ? {k:v} : {})` 模式——条件为 false 时仍会分配空对象，
+        //     改用直接属性赋值（仅在需要时写入字段，避免 null 分支的无意义对象分配）
+        const evWrites = writes.map(w => {
+            const ev = { name: w.name, val: w.val };
+            if (w.oid != null) ev.oid = w.oid;
+            if (w.scopeId != null) ev.scopeId = w.scopeId;
+            return ev;
+        });
         const evReads  = reads
             .filter(r => !writtenNames.has(r.name))
-            .map(r => ({ name: r.name, val: r.val, omit: r.omit === true }));
+            .map(r => {
+                const ev = { name: r.name, val: r.val, omit: r.omit === true };
+                if (r.scopeId != null) ev.scopeId = r.scopeId;
+                return ev;
+            });
         const evFields = fields.map(f => ({
             offset:  f.offset,
             val:     f.val,

@@ -55,9 +55,10 @@
  *   CALL            = 0x04   payload: [fnName_str][result_val]
  *   FUNCTION_ENTER  = 0x05   无 payload
  *   FUNCTION_EXIT   = 0x06   payload: [flags.hasException → exception_val]
- *   END_EXPR        = 0x07   payload: [write_count u8]([name_str][val])*
- *                                     [read_count u8]([name_str][val])*  ← val 可能是 OMITTED
+ *   END_EXPR        = 0x07   payload: [write_count u8]([name_str][val][val_oid u32][scope_id u32])*
+ *                                     [read_count u8]([name_str][val][scope_id u32])*  ← val 可能是 OMITTED
  *                                     [field_count u8]([offset_str][isWrite u8][val][base_oid u32])*
+ *                                     注：val_oid 仅 v2+ 有效；scope_id 仅 v3+ 有效（0=无作用域信息）
  *                                                       base_oid = 0 表示非对象（primitive / null / OID 未知）
  *   KEY_EVENT       = 0x08   payload: [level u8][text_str]
  *   WRITE_VAR       = 0x0B   payload: [name_str][val]
@@ -104,9 +105,10 @@ for (const proto of [
 
 /** 文件魔数：ASCII "JTB1" */
 export const MAGIC = new Uint8Array([0x4A, 0x54, 0x42, 0x31]);
-export const FORMAT_VERSION = 0x02;
-/** v1: 无 write.oid；v2: END_EXPR writes 条目末尾附加 val_oid u32 */
+export const FORMAT_VERSION = 0x03;
+/** v1: 无 write.oid；v2: END_EXPR writes 条目末尾附加 val_oid u32；v3: reads/writes 条目末尾附加 scope_id u32 */
 export const FORMAT_VERSION_V1 = 0x01;
+export const FORMAT_VERSION_V2 = 0x02;
 
 /** 文件头大小（魔数 4B + 版本 1B + 保留 3B = 8B） */
 export const FILE_HEADER_SIZE = 8;
@@ -616,14 +618,16 @@ function measureEvent(event) {
                 const nm = measureStr(w.name);
                 const mv = measureValue(w.val, w.omit === true);
                 // v2：writes 条目末尾附加 val_oid u32（4B，0=非对象）
-                size += strFieldBytes(nm) + 1 + mv.extraBytes + 4;
-                wm.push({ nm, mv, val: w.val, omit: w.omit, oid: w.oid ?? 0 });
+                // v3：writes 条目末尾再附加 scope_id u32（4B，0=无作用域信息）
+                size += strFieldBytes(nm) + 1 + mv.extraBytes + 4 + 4;
+                wm.push({ nm, mv, val: w.val, omit: w.omit, oid: w.oid ?? 0, scopeId: w.scopeId ?? 0 });
             }
             for (const r of reads) {
                 const nm = measureStr(r.name);
                 const mv = measureValue(r.val, r.omit === true);
-                size += strFieldBytes(nm) + 1 + mv.extraBytes;
-                rm.push({ nm, mv, val: r.val, omit: r.omit });
+                // v3：reads 条目末尾附加 scope_id u32（4B，0=无作用域信息）
+                size += strFieldBytes(nm) + 1 + mv.extraBytes + 4;
+                rm.push({ nm, mv, val: r.val, omit: r.omit, scopeId: r.scopeId ?? 0 });
             }
             for (const f of fields) {
                 const onm = measureStr(String(f.offset ?? ''));
@@ -722,10 +726,14 @@ function writePayload(view, offset, type, _m) {
                 offset = writeValue(view, offset, w.mv, w.val);
                 // v2: writes 条目末尾附加 val_oid u32（0=非对象）
                 view.setUint32(offset, (w.oid ?? 0) >>> 0, true);  offset += 4;
+                // v3: writes 条目末尾附加 scope_id u32（0=无作用域信息）
+                view.setUint32(offset, (w.scopeId ?? 0) >>> 0, true);  offset += 4;
             }
             for (const r of _m.rm) {
                 offset = writeStr(view, offset, r.nm);
                 offset = writeValue(view, offset, r.mv, r.val);
+                // v3: reads 条目末尾附加 scope_id u32（0=无作用域信息）
+                view.setUint32(offset, (r.scopeId ?? 0) >>> 0, true);  offset += 4;
             }
             for (const f of _m.fm) {
                 // [offset_str][isWrite 1B][val][base_oid u32 小端，0=null]
@@ -883,7 +891,7 @@ export function isBinaryTrace(buf) {
  * 从文件头读取格式版本号（字节偏移 4）。
  * 调用方需先确认魔数正确（isBinaryTrace）。
  * @param {DataView|Buffer} viewOrBuf
- * @returns {number}  版本号（0x01=旧版，0x02=支持 write.oid）
+ * @returns {number}  版本号（0x01=旧版，0x02=支持 write.oid，0x03=支持 scope_id）
  */
 export function readFileVersion(viewOrBuf) {
     const view = viewOrBuf instanceof DataView
@@ -1003,14 +1011,28 @@ export function deserializeEvent(view, offset, version = FORMAT_VERSION) {
                     writeOid = rawOid === 0 ? null : rawOid;
                     pos += 4;
                 }
-                event.writes.push({ name: rn.str, value: rv.value, omitted: rv.omitted, oid: writeOid });
+                let writeScopeId = null;
+                if (version >= 0x03) {
+                    // v3：条目末尾有 scope_id u32（0=无作用域信息）
+                    const rawScopeId = view.getUint32(pos, true);
+                    writeScopeId = rawScopeId === 0 ? null : rawScopeId;
+                    pos += 4;
+                }
+                event.writes.push({ name: rn.str, value: rv.value, omitted: rv.omitted, oid: writeOid, scopeId: writeScopeId });
             }
             for (let i = 0; i < readCount; i++) {
                 const rn = readStr(view, pos);
                 pos = rn.end;
                 const rv = readValue(view, pos);
                 pos = rv.end;
-                event.reads.push({ name: rn.str, value: rv.value, omitted: rv.omitted });
+                let readScopeId = null;
+                if (version >= 0x03) {
+                    // v3：条目末尾有 scope_id u32（0=无作用域信息）
+                    const rawScopeId = view.getUint32(pos, true);
+                    readScopeId = rawScopeId === 0 ? null : rawScopeId;
+                    pos += 4;
+                }
+                event.reads.push({ name: rn.str, value: rv.value, omitted: rv.omitted, scopeId: readScopeId });
             }
             for (let i = 0; i < fieldCount; i++) {
                 // [offset_str][isWrite 1B][val][base_oid u32]

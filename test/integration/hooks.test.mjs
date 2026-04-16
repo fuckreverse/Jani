@@ -58,7 +58,7 @@ describe('Spy 钩子参数验证', () => {
 
         const writeCalls = calls.get('writeVar');
         assert.ok(writeCalls.length > 0, 'write 钩子应至少被调用一次');
-        // writeVar(iid, name, val, lhs, isGlobal, isScriptLocal)
+        // writeVar(iid, name, val, lhs, isGlobal, isScriptLocal, defScopeId)
         const xWrite = writeCalls.find(([_iid, name]) => name === 'x');
         assert.ok(xWrite !== undefined, 'write 钩子中应有变量 x 的写入');
         assert.equal(xWrite[2], 42, 'write 钩子传入的 val 应等于 42');
@@ -76,7 +76,7 @@ describe('Spy 钩子参数验证', () => {
 
         const readCalls = calls.get('readVar');
         assert.ok(readCalls.length > 0, 'read 钩子应至少被调用一次');
-        // readVar(iid, name, val, isGlobal, isScriptLocal)
+        // readVar(iid, name, val, isGlobal, isScriptLocal, defScopeId)
         const xRead = readCalls.find(([_iid, name, val]) => name === 'x' && val === 10);
         assert.ok(xRead !== undefined, 'read 钩子中应有 x=10 的读取记录');
     });

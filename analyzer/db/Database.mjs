@@ -698,6 +698,59 @@ function _runMigrations(db) {
         }
     }
 
+    // ── var_lifetime 新增 scope_id 列（v3 格式，区分同名变量）────────────────
+    // scope_id: 变量定义点的静态作用域 ID，按 (name, scope_id) 分组区分不同调用帧
+    try {
+        const cols = new Set(db.pragma('table_info(var_lifetime)').map(r => r.name));
+        if (cols.size > 0 && !cols.has('scope_id')) {
+            db.exec('ALTER TABLE var_lifetime ADD COLUMN scope_id INTEGER');
+        }
+    } catch (e) {
+        console.warn('[Database] add var_lifetime.scope_id failed (non-fatal):', e.message);
+    }
+    // var_lifetime scope_id 索引
+    try {
+        const exists = db.prepare(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_var_lifetime_scope'"
+        ).get('idx_var_lifetime_scope');
+        if (!exists) {
+            db.exec('CREATE INDEX IF NOT EXISTS idx_var_lifetime_scope ON var_lifetime(session_id, name, scope_id)');
+        }
+    } catch (e) {
+        console.warn('[Database] create index idx_var_lifetime_scope failed (non-fatal):', e.message);
+    }
+
+    // ── writes/reads 新增 scope_id 列（v3 格式，区分同名变量）──────────────
+    // scope_id: 变量定义点的静态作用域 ID（来自 EventSerializer v3 格式的 scope_id 字段）
+    // NULL 表示旧数据（v1/v2 格式 trace）或全局变量（isGlobal=true）
+    for (const tbl of ['writes', 'reads']) {
+        try {
+            const cols = new Set(db.pragma(`table_info(${tbl})`).map(r => r.name));
+            if (cols.size > 0 && !cols.has('scope_id')) {
+                db.exec(`ALTER TABLE ${tbl} ADD COLUMN scope_id INTEGER`);
+            }
+        } catch (e) {
+            console.warn(`[Database] add ${tbl}.scope_id failed (non-fatal):`, e.message);
+        }
+    }
+    // scope_id 索引：按 (session_id, name, scope_id) 快速过滤同名不同作用域的变量
+    const scopeIdIndexes = [
+        ['idx_writes_scope',  'writes', 'session_id, name, scope_id'],
+        ['idx_reads_scope',   'reads',  'session_id, name, scope_id'],
+    ];
+    for (const [idxName, tbl, cols] of scopeIdIndexes) {
+        try {
+            const exists = db.prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name=?"
+            ).get(idxName);
+            if (!exists) {
+                db.exec(`CREATE INDEX IF NOT EXISTS ${idxName} ON ${tbl}(${cols})`);
+            }
+        } catch (e) {
+            console.warn(`[Database] create index ${idxName} failed (non-fatal):`, e.message);
+        }
+    }
+
     // ── dataflow_edges 性能索引（v2 新增，用于子图 BFS / 变量搜索）──────────
     const dfIndexes = [
         ['idx_df_from_event', 'dataflow_edges', 'session_id, from_event_id'],
