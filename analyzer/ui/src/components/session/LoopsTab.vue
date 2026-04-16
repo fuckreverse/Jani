@@ -21,11 +21,24 @@
           <span class="sidebar-count">{{ allLoops.length }} 个</span>
         </div>
 
-        <!-- 筛选 -->
+        <!-- 函数名筛选下拉 -->
+        <div class="sidebar-filter">
+          <select
+            v-model="loopFnFilter"
+            class="filter-select"
+            @change="loopPage = 1"
+            title="按所属函数筛选循环"
+          >
+            <option value="">全部函数</option>
+            <option value="__toplevel__">(toplevel)</option>
+            <option v-for="fn in uniqueFnNames" :key="fn" :value="fn">ƒ {{ fn }}</option>
+          </select>
+        </div>
+        <!-- 关键字筛选 -->
         <div class="sidebar-filter">
           <input
             v-model="loopSearch"
-            placeholder="按行号/迭代次数过滤..."
+            placeholder="行号 / 迭代数 / 源码..."
             class="filter-input"
             @input="loopPage = 1"
           />
@@ -273,20 +286,43 @@ const { api: apiCfg } = useConfig();
 // ── 循环列表（一次性加载，前端分页） ───────────────────────────────────────
 const allLoops   = ref([]);
 const loopsLoading = ref(false);
-const loopSearch = ref('');
-const loopPage   = ref(1);
+const loopSearch   = ref('');
+/** 函数名下拉筛选：'' = 全部，'__toplevel__' = 顶层，其他 = 具体函数名 */
+const loopFnFilter = ref('');
+const loopPage     = ref(1);
 const LOOP_PAGE_SIZE  = Math.min(apiCfg.value.defaultPageSize ?? 30, 50);
 
+/** 从循环列表中提取所有不重复的函数名（非 toplevel） */
+const uniqueFnNames = computed(() => {
+    const set = new Set();
+    for (const l of allLoops.value) {
+        if (l.fn_name) set.add(l.fn_name);
+    }
+    return [...set].sort();
+});
+
 const filteredLoops = computed(() => {
-    const q = loopSearch.value.trim();
-    if (!q) return allLoops.value;
-    return allLoops.value.filter(l =>
-        String(l.line ?? '').includes(q) ||
-        String(l.iteration_count ?? '').includes(q) ||
-        String(l.id).includes(q) ||
-        (l.src_text ?? '').includes(q) ||
-        (l.fn_name ?? '').includes(q)
-    );
+    const q  = loopSearch.value.trim();
+    const fn = loopFnFilter.value;
+
+    return allLoops.value.filter(l => {
+        // 函数名下拉过滤
+        if (fn === '__toplevel__') {
+            if (l.fn_name) return false;
+        } else if (fn) {
+            if (l.fn_name !== fn) return false;
+        }
+        // 关键字过滤（行号 / 迭代数 / id / 源码）
+        if (q) {
+            return (
+                String(l.line ?? '').includes(q) ||
+                String(l.iteration_count ?? '').includes(q) ||
+                String(l.id).includes(q) ||
+                (l.src_text ?? '').includes(q)
+            );
+        }
+        return true;
+    });
 });
 
 const loopTotalPages = computed(() => Math.max(1, Math.ceil(filteredLoops.value.length / LOOP_PAGE_SIZE)));
@@ -626,6 +662,15 @@ onMounted(loadLoops);
     box-sizing: border-box;
 }
 .filter-input:focus { outline: none; border-color: rgba(99,102,241,0.5); }
+.filter-select {
+    width: 100%; padding: 4px 6px; font-size: 11px;
+    border: 1px solid var(--border-color); border-radius: 4px;
+    background: var(--bg-primary); color: var(--text-primary);
+    box-sizing: border-box; cursor: pointer;
+    /* 截断过长函数名 */
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+}
+.filter-select:focus { outline: none; border-color: rgba(99,102,241,0.5); }
 .loop-list { flex: 1; overflow-y: auto; max-height: 520px; }
 .loop-item {
     padding: 8px 12px; cursor: pointer; border-bottom: 1px solid rgba(45,49,72,0.4);
