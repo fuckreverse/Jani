@@ -1275,3 +1275,34 @@ r[I] = s + 5, (r = u)['key'] = 100;
         );
     });
 });
+
+describe('Instrumentation semantic regression matrix', () => {
+    for (const [name, code, expected] of [
+        ['TDZ', 'function f(){ try { return x; } catch(e){ return e.name; } let x=1; } $out.value=f();', 'ReferenceError'],
+        ['mapped arguments', 'function f(x){ arguments[0]=7; return x; } $out.value=f(1);', 7],
+        ['closure instances', 'function f(x){ return function(){ return ++x; }; } var a=f(1),b=f(10); $out.value=[a(),b(),a()].join(",");', '2,11,3'],
+        ['read modify write', 'function f(){ let x=1; x=x+1; return x; } $out.value=f();', 2],
+        ['short circuit side effects', 'let n=0; const p=null; p?.[n++]; false && n++; $out.value=n;', 0],
+    ]) {
+        test(name, () => assert.equal(instrAndRun(code).out.value, expected));
+    }
+    test('rejected await restores context in catch and finally', async () => {
+        init(ALL_CONFIG);
+        const code = instrumentCode({ code: `
+            async function f(){ try { await Promise.reject('x'); }
+              catch(e) { $out.caught=J$.currentContextId; }
+              finally { $out.final=J$.currentContextId; } }
+            $out.done=f();
+        `, origCodeFileName: 'async-rejection.js' }).code;
+        const sb = new JalangiSandbox(); const out = {};
+        runInSandbox(code, sb, { $out: out });
+        sb.activateContext(9999);
+        await out.done;
+        assert.notEqual(out.caught,9999); assert.equal(out.caught,out.final);
+    });
+});
+
+test('async arrow owns its await context', async () => {
+    const {out}=instrAndRun('$out.done=(async x => { await Promise.resolve(); return x+1; })(4);');
+    assert.equal(await out.done,5);
+});

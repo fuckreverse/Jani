@@ -133,6 +133,10 @@ export class ExecutionTraceAnalysis {
      */
     _emit(event) {
         event.seq = ++this._seq;
+        event.scriptId ??= this._sb?.sid ?? 0;
+        event.callId ??= this._sb?.currentCallId ?? 0;
+        event.parentCallId ??= this._sb?.parentCallId ?? 0;
+        event.contextId ??= this._sb?.currentContextId ?? 0;
         this._logger.trace(event);
     }
 
@@ -148,7 +152,7 @@ export class ExecutionTraceAnalysis {
 
         // 保存当前语句的 pending 上下文，防止被调函数内部钩子污染
         _push(this._callStack, {
-            iid, name,
+            iid, name, invocationId: this._seq + 1,
             isConstructor, isMethod,
             args: args ? Array.from(args) : [],
             base,
@@ -166,6 +170,7 @@ export class ExecutionTraceAnalysis {
         this._emit({
             type: 'CALL_PRE',
             iid,
+            callPairId: this._callStack[this._callStack.length - 1].invocationId,
             fn:            name,
             isConstructor: !!isConstructor,
             isMethod:      !!isMethod,
@@ -193,6 +198,7 @@ export class ExecutionTraceAnalysis {
         this._emit({
             type:   'CALL',
             iid,
+            callPairId: callInfo.invocationId,
             fn:     name,
             result,
         });
@@ -226,11 +232,12 @@ export class ExecutionTraceAnalysis {
 
         if (topCall && !topCall._feCovered) {
             topCall._feCovered = true;
+            this._emit({ type: 'FUNCTION_ENTER', iid, fn: f?.name || '(anonymous)' });
             _push(this._flatFnStack, { _coveredByCallPre: true });
         } else {
             // 无 callPre：native 直接调用（异步回调等），emit FUNCTION_ENTER 事件
             const name = f?.name || '(anonymous)';
-            const callMeta = { iid, name, directFe: true };
+            const callMeta = { iid, name, directFe: true, invocationId: this._seq + 1 };
             _push(this._callStack, {
                 ...callMeta,
                 _directFe: true,
@@ -242,7 +249,7 @@ export class ExecutionTraceAnalysis {
             this._pendingReads  = [];
             this._pendingFields = [];
             _push(this._flatFnStack, { _coveredByCallPre: false });
-            this._emit({ type: 'FUNCTION_ENTER', iid, fn: name, directFe: true });
+            this._emit({ type: 'FUNCTION_ENTER', iid, fn: name, directFe: true, callPairId: callMeta.invocationId });
         }
     }
 
@@ -253,11 +260,20 @@ export class ExecutionTraceAnalysis {
                 type:      'FUNCTION_EXIT',
                 iid,
                 exception: wrappedExceptionVal.exception,
+                callPairId: this._callStack[this._callStack.length - 1]?.invocationId,
             });
             this._logger.key('warn', `[iid=${iid}] ✗ throw ; exception=${exStr}`);
         }
 
         const fnEntry = _pop(this._flatFnStack);
+        if (wrappedExceptionVal && fnEntry?._coveredByCallPre) {
+            const callInfo = _pop(this._callStack);
+            if (callInfo) {
+                this._pendingWrites = callInfo.savedWrites;
+                this._pendingReads = callInfo.savedReads;
+                this._pendingFields = callInfo.savedFields;
+            }
+        }
         if (fnEntry && !fnEntry._coveredByCallPre) {
             // 对应 _directFe 路径（无 callPre），输出 CALL（返回值）
             if (this._callStack.length > 0) {
@@ -268,6 +284,7 @@ export class ExecutionTraceAnalysis {
                 this._emit({
                     type:   'CALL',
                     iid,
+                    callPairId: callInfo.invocationId,
                     fn:     callInfo.name ?? '(anonymous)',
                     result: returnVal,
                 });
@@ -276,31 +293,36 @@ export class ExecutionTraceAnalysis {
         }
         // callPre 覆盖路径：CALL 行已在 call() 里输出
 
-        if (!wrappedExceptionVal) {
-            // 仅在没有异常时输出 FUNCTION_EXIT（不重复输出）
-            // 注意：若有异常，FUNCTION_EXIT 已在上方输出（含 exception 字段）
-        }
+        if (!wrappedExceptionVal) this._emit({ type: 'FUNCTION_EXIT', iid });
 
         return { returnVal, wrappedExceptionVal, isBacktrack: false };
     }
 
     // ── 指令级钩子 ────────────────────────────────────────────────────────────
 
-    writeVar(iid, name, val, lhs, isGlobal, isScriptLocal, defScopeId) {
+    awaitSuspend(iid) {
+        this.endExpression(iid);
+    }
+
+    readVar(iid, name, val, isGlobal, isScriptLocal, defScopeId, bindingId) {
+        _push(this._pendingReads, { name, val, scopeId: defScopeId ?? null,
+            bindingId: bindingId ?? this._sb?.getBindingId?.(defScopeId) });
+        return { result: val };
+    }
+
+    writeVar(iid, name, val, lhs, isGlobal, isScriptLocal, defScopeId, bindingId) {
         // 方向三：如果写入的值是对象引用，附带其 OID（供 F1 建立 oid_aliases 表）
         const oid = (val !== null && val !== undefined &&
                      (typeof val === 'object' || typeof val === 'function'))
             ? (this._sb?.getOid?.(val) ?? null)
             : null;
         // defScopeId：记录变量定义点的静态作用域 ID，用于区分同名变量
-        _push(this._pendingWrites, { name, val, oid, scopeId: defScopeId ?? null });
+        _push(this._pendingWrites, { name, val, oid, scopeId: defScopeId ?? null, bindingId: bindingId ?? this._sb?.getBindingId?.(defScopeId) });
         return { result: val };
     }
 
-    declareVar(iid, name, val, isArgument, argumentIndex, isCatchParam, defScopeId) {
-        if (!isArgument && !isCatchParam) {
-            this.writeVar(iid, name, val, undefined, false, false, defScopeId);
-        }
+    declareVar(iid, name, val, isArgument, argumentIndex, isCatchParam, defScopeId, bindingId) {
+        if (name !== 'arguments') this.writeVar(iid, name, val, undefined, false, false, defScopeId, bindingId);
         return { result: val };
     }
 
@@ -357,26 +379,8 @@ export class ExecutionTraceAnalysis {
      * @param {boolean[]} [useOmits] 对应变量是否应省略值（LIGHTWEIGHT 路径）
      */
     endExpression(iid, val, useNames, useScopes, useValues, useOmits) {
-        // 方案F：若提供了 useNames/useValues，从中构建 reads 列表
-        if (useNames && useValues && useNames.length > 0) {
-            const builtins = new Set(['String', 'Number', 'Boolean', 'Object', 'Array',
-                'Function', 'Symbol', 'BigInt', 'Math', 'Date', 'RegExp', 'Error',
-                'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError',
-                'JSON', 'Promise', 'Map', 'Set', 'WeakMap', 'WeakSet', 'Proxy', 'Reflect',
-                'console', 'window', 'global', 'globalThis', 'document', 'navigator',
-                'undefined', 'NaN', 'Infinity']);
-
-            for (let i = 0; i < useNames.length; i++) {
-                const name = useNames[i];
-                if (builtins.has(name)) continue;
-                // useOmits[i] 为 true → LIGHTWEIGHT 路径 → 值可追溯，omit=true
-                const omit = useOmits ? !!useOmits[i] : false;
-                // useScopes[i]：记录变量定义点的静态作用域 ID，用于区分同名变量
-                const scopeId = (useScopes && useScopes[i] !== undefined) ? useScopes[i] : null;
-                _push(this._pendingReads, { name, val: useValues[i], omit, scopeId });
-            }
-        }
-
+        // Only executed readVar hooks contribute dependencies. Static use sets
+        // include untaken branches and can invent data-flow edges.
         // 聚合当前语句的所有 kv
         const writes = this._pendingWrites;
         const reads  = this._pendingReads;
@@ -384,12 +388,6 @@ export class ExecutionTraceAnalysis {
         this._pendingWrites = [];
         this._pendingReads  = [];
         this._pendingFields = [];
-
-        // 过滤：reads 中排除已写入的变量名
-        const writtenNames = new Set();
-        for (const w of writes) {
-            if (w.name) writtenNames.add(w.name);
-        }
 
         // 构建 END_EXPR 事件（oid 字段透传：v2 格式 END_EXPR writes 条目末尾附加 val_oid u32）
         // scopeId 字段透传：v3 格式 reads/writes 条目附加 scope_id u32，用于区分同名变量
@@ -399,13 +397,15 @@ export class ExecutionTraceAnalysis {
             const ev = { name: w.name, val: w.val };
             if (w.oid != null) ev.oid = w.oid;
             if (w.scopeId != null) ev.scopeId = w.scopeId;
+            if (w.bindingId != null) ev.bindingId = w.bindingId;
             return ev;
         });
         const evReads  = reads
-            .filter(r => !writtenNames.has(r.name))
+            // Preserve read-modify-write dependencies (x = x + 1).
             .map(r => {
                 const ev = { name: r.name, val: r.val, omit: r.omit === true };
                 if (r.scopeId != null) ev.scopeId = r.scopeId;
+                if (r.bindingId != null) ev.bindingId = r.bindingId;
                 return ev;
             });
         const evFields = fields.map(f => ({
@@ -445,12 +445,16 @@ export class ExecutionTraceAnalysis {
      * @returns {Promise<void>}
      */
     async close() {
+        if (this._traceClosed) return;
+        this._traceClosed = true;
+        this._emit({ type: 'TRACE_END', iid: 0 });
         this._logger.key('info', `=== ExecutionTrace: closed, total ${this._seq} events ===`);
         try {
             await this._loggerReady;
             await this._logger.close();
         } catch (err) {
             dbg.error('close: logger close error:', err.message, err.stack ?? '');
+            throw err;
         }
     }
 

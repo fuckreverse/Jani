@@ -70,6 +70,7 @@ export class LogManager {
         const {
             backends        = [],
             capacity        = 65536,
+            maxCapacity     = Math.max(capacity, 1048576),
             flushThreshold  = 512,
             flushIntervalMs = 0,
             drainBatchSize  = 1024,
@@ -79,8 +80,10 @@ export class LogManager {
 
         this._backends       = [...backends];
         this._drainBatchSize = drainBatchSize;
-        this._ring           = new RingBuffer({ capacity, flushThreshold });
+        this._ring           = new RingBuffer({ capacity, maxCapacity, flushThreshold });
 
+        this._flushTask = Promise.resolve();
+        this._writeFailure = null;
         this._flushPending   = false;   // 防止重复调度 flush
         this._closed         = false;
         this._flushTimer     = null;
@@ -128,7 +131,10 @@ export class LogManager {
      */
     push(event) {
         if (this._closed) return;
-        this._ring.push(event);
+        if (!this._ring.push(event)) {
+            this._writeFailure = new Error('Trace buffer capacity exceeded; recording is incomplete');
+            return false;
+        }
         this.stats.totalLogged++;
 
         // 【验证用】强制同步 flush：主线程繁忙时绕过 queueMicrotask 直接发送
@@ -156,6 +162,7 @@ export class LogManager {
     async flush() {
         log.debug(`flush() called — ring.size=${this._ring.size}`);
         await this._drainAll();
+        if (this._writeFailure) throw this._writeFailure;
     }
 
     /**
@@ -181,12 +188,14 @@ export class LogManager {
         for (let i = 0; i < closeResults.length; i++) {
             const r = closeResults[i];
             if (r.status === 'rejected') {
+                this._writeFailure ??= r.reason;
                 log.error(`backend[${i}] close() failed:`, r.reason?.message ?? r.reason, r.reason?.stack ?? '');
             } else {
                 log.debug(`backend[${i}] closed`);
             }
         }
 
+        if (this._writeFailure) throw this._writeFailure;
         log.debug('close() complete', {
             totalLogged:  this.stats.totalLogged,
             totalFlushed: this.stats.totalFlushed,
@@ -253,6 +262,7 @@ export class LogManager {
                 }
             } catch (err) {
                 this.stats.flushErrors++;
+                this._writeFailure = r.reason instanceof Error ? r.reason : new Error(String(r.reason));
                 log.error('_doFlushSync error:', err.message, err.stack ?? '');
             }
         }
@@ -262,7 +272,13 @@ export class LogManager {
      * 从 RingBuffer 取出一批事件，分发给所有后端。
      * 这是异步的，不会阻塞主线程中 log() 的调用。
      */
-    async _doFlush() {
+    _doFlush() {
+        const task = this._flushTask.then(() => this._flushBatch());
+        this._flushTask = task.catch(error => { this._writeFailure = error; });
+        return this._flushTask;
+    }
+
+    async _flushBatch() {
         this._flushPending = false;
 
         if (this._ring.size === 0) return;
@@ -286,6 +302,7 @@ export class LogManager {
             const r = results[i];
             if (r.status === 'rejected') {
                 this.stats.flushErrors++;
+                this._writeFailure = r.reason instanceof Error ? r.reason : new Error(String(r.reason));
                 log.error(
                     `backend[${i}] write failed (batch=${batch.length}, totalErrors=${this.stats.flushErrors}):`,
                     r.reason?.message ?? r.reason
@@ -304,6 +321,7 @@ export class LogManager {
 
     /** 持续 drain 直到 RingBuffer 清空（用于 close 时） */
     async _drainAll() {
+        await this._flushTask;
         let rounds = 0;
         while (this._ring.size > 0) {
             rounds++;
@@ -314,6 +332,7 @@ export class LogManager {
         for (let i = 0; i < flushResults.length; i++) {
             const r = flushResults[i];
             if (r.status === 'rejected') {
+                this._writeFailure ??= r.reason;
                 log.error(`backend[${i}] flush() failed:`, r.reason?.message ?? r.reason, r.reason?.stack ?? '');
             }
         }

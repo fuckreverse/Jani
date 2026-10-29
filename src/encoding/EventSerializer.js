@@ -105,7 +105,7 @@ for (const proto of [
 
 /** 文件魔数：ASCII "JTB1" */
 export const MAGIC = new Uint8Array([0x4A, 0x54, 0x42, 0x31]);
-export const FORMAT_VERSION = 0x03;
+export const FORMAT_VERSION = 0x04;
 /** v1: 无 write.oid；v2: END_EXPR writes 条目末尾附加 val_oid u32；v3: reads/writes 条目末尾附加 scope_id u32 */
 export const FORMAT_VERSION_V1 = 0x01;
 export const FORMAT_VERSION_V2 = 0x02;
@@ -127,6 +127,7 @@ export const EVENT_TYPE = Object.freeze({
     FUNCTION_EXIT:  0x06,
     END_EXPR:       0x07,
     KEY_EVENT:      0x08,
+    TRACE_END:      0x0D,
     WRITE_VAR:      0x0B,  // 单独写变量事件（低频路径，如 declare）
     READ_VAR_FULL:  0x0C,  // fai 路径的读取（含实际值）
 });
@@ -192,7 +193,8 @@ function encodeUtf8(s) {
 function readUtf8u16(view, offset) {
     const len = view.getUint16(offset, true);
     offset += 2;
-    const bytes = new Uint8Array(view.buffer, offset, len);
+    if (offset + len > view.byteLength) throw new RangeError('Truncated string');
+    const bytes = new Uint8Array(view.buffer, view.byteOffset + offset, len);
     const str = td ? td.decode(bytes) : Buffer.from(bytes).toString('utf8');
     return { str, end: offset + len };
 }
@@ -206,7 +208,8 @@ function readUtf8u16(view, offset) {
 function readUtf8u8(view, offset) {
     const len = view.getUint8(offset);
     offset += 1;
-    const bytes = new Uint8Array(view.buffer, offset, len);
+    if (offset + len > view.byteLength) throw new RangeError('Truncated string');
+    const bytes = new Uint8Array(view.buffer, view.byteOffset + offset, len);
     const str = td ? td.decode(bytes) : Buffer.from(bytes).toString('utf8');
     return { str, end: offset + len };
 }
@@ -537,7 +540,8 @@ function readValue(view, offset) {
 function readStr(view, offset) {
     const len = view.getUint16(offset, true);
     offset += 2;
-    const bytes = new Uint8Array(view.buffer, offset, len);
+    if (offset + len > view.byteLength) throw new RangeError('Truncated string');
+    const bytes = new Uint8Array(view.buffer, view.byteOffset + offset, len);
     const str = td ? td.decode(bytes) : Buffer.from(bytes).toString('utf8');
     return { str, end: offset + len };
 }
@@ -552,6 +556,21 @@ function readStr(view, offset) {
  * @returns {{ payloadSize: number, _m: object }}  _m 为中间测量结果（供 writeEventPayload 使用）
  */
 function measureEvent(event) {
+    const result = measureEventPayload(event);
+    const metadata = { scriptId: event.scriptId, callId: event.callId,
+        parentCallId: event.parentCallId, contextId: event.contextId, callPairId: event.callPairId,
+        writeBindings: event.writes?.map(w => w.bindingId ?? null),
+        readBindings: event.reads?.map(r => r.bindingId ?? null) };
+    _objDefineProperty(metadata, 'toJSON', { value: undefined });
+    if (metadata.writeBindings) _objDefineProperty(metadata.writeBindings, 'toJSON', { value: undefined });
+    if (metadata.readBindings) _objDefineProperty(metadata.readBindings, 'toJSON', { value: undefined });
+    const meta = measureStr(_jsonStringify(metadata));
+    result.payloadSize += strFieldBytes(meta);
+    result._m.meta = meta;
+    return result;
+}
+
+function measureEventPayload(event) {
     const { type } = event;
 
     switch (type) {
@@ -598,6 +617,7 @@ function measureEvent(event) {
             return { payloadSize: strFieldBytes(fnm) + 1 + mv.extraBytes, _m: { fnm, mv, result: event.result } };
         }
 
+        case 'TRACE_END':
         case 'FUNCTION_ENTER':
             return { payloadSize: 0, _m: {} };
 
@@ -612,6 +632,7 @@ function measureEvent(event) {
             const writes = event.writes ?? [];
             const reads  = event.reads  ?? [];
             const fields = event.fields ?? [];
+            if ([writes, reads, fields].some(items => items.length > 255)) throw new RangeError('Too many entries in END_EXPR');
             let size = 1 + 1 + 1;  // writeCount + readCount + fieldCount (all u8)
             const wm = [], rm = [], fm = [];
             for (const w of writes) {
@@ -707,6 +728,7 @@ function writePayload(view, offset, type, _m) {
             break;
         }
 
+        case 'TRACE_END':
         case 'FUNCTION_ENTER':
             break;
 
@@ -759,7 +781,7 @@ function writePayload(view, offset, type, _m) {
             break;
         }
     }
-    return offset;
+    return writeStr(view, offset, _m.meta);
 }
 
 /**
@@ -797,6 +819,7 @@ if (event.type === 'CALL_PRE') {
 export function serializeEvent(event) {
     const { payloadSize, _m } = measureEvent(event);
     const { typeByte, flagsByte } = computeTypeAndFlags(event);
+    if (payloadSize > 65535) throw new RangeError('Event payload exceeds 65535 bytes');
     const totalSize = EVENT_HEADER_SIZE + payloadSize;
 
     const buf  = new ArrayBuffer(totalSize);
@@ -829,6 +852,7 @@ export function serializeBatch(events) {
     let totalSize = 0;
     for (let i = 0; i < events.length; i++) {
         const m = measureEvent(events[i]);
+        if (m.payloadSize > 65535) throw new RangeError('Event payload exceeds 65535 bytes');
         const { typeByte, flagsByte } = computeTypeAndFlags(events[i]);
         measured[i] = { ...m, typeByte, flagsByte };
         totalSize += EVENT_HEADER_SIZE + m.payloadSize;
@@ -918,6 +942,9 @@ export function deserializeEvent(view, offset, version = FORMAT_VERSION) {
     const payloadLen = view.getUint16(offset + 10, true);
     const payloadStart = offset + EVENT_HEADER_SIZE;
     const payloadEnd   = payloadStart + payloadLen;
+    if (payloadEnd > view.byteLength) throw new RangeError('Truncated event payload');
+    // Bound every value/string decoder to this record, never the following event.
+    view = new DataView(view.buffer, view.byteOffset, payloadEnd);
 
     const typeName = EVENT_TYPE_NAME[typeByte] ?? 'UNKNOWN';
     let pos = payloadStart;
@@ -976,6 +1003,8 @@ export function deserializeEvent(view, offset, version = FORMAT_VERSION) {
             pos = r.end;
             break;
         }
+
+        case 'TRACE_END': break;
 
         case 'FUNCTION_ENTER': {
             event.directFe = !!(flagsByte & FLAGS.DIRECT_FE);
@@ -1072,6 +1101,18 @@ export function deserializeEvent(view, offset, version = FORMAT_VERSION) {
         }
     }
 
+    if (version >= 4) {
+        const metadata = readStr(view, pos);
+        pos = metadata.end;
+        const meta = JSON.parse(metadata.str);
+        for (const key of ['scriptId', 'callId', 'parentCallId', 'contextId', 'callPairId']) {
+            if (meta[key] !== undefined) event[key] = meta[key];
+        }
+        event.writes?.forEach((w, i) => { if (meta.writeBindings?.[i] != null) w.bindingId = meta.writeBindings[i]; });
+        event.reads?.forEach((r, i) => { if (meta.readBindings?.[i] != null) r.bindingId = meta.readBindings[i]; });
+    }
+    if (typeName === 'UNKNOWN') throw new Error(`Unknown event type ${typeByte}`);
+    if (pos !== payloadEnd) throw new Error(`Event payload length mismatch: ${pos} != ${payloadEnd}`);
     return { event, nextOffset: payloadEnd };
 }
 
@@ -1088,7 +1129,9 @@ export function iterateBinary(buf, callback, options = {}) {
     const { dedupe = false } = options;
     const ab   = buf instanceof ArrayBuffer ? buf : buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
     const view = new DataView(ab);
-    const version = ab.byteLength >= FILE_HEADER_SIZE ? readFileVersion(view) : FORMAT_VERSION;
+    if (ab.byteLength < FILE_HEADER_SIZE || !isBinaryTrace(ab)) throw new Error('Invalid trace header');
+    const version = readFileVersion(view);
+    if (version < 1 || version > FORMAT_VERSION) throw new Error(`Unsupported trace version ${version}`);
     let offset = FILE_HEADER_SIZE;
     let index  = 0;
     const seenSeqs  = dedupe ? new Set() : null;  // seq 去重集合
@@ -1106,6 +1149,7 @@ export function iterateBinary(buf, callback, options = {}) {
 
         callback(event, index++);
     }
+    if (offset !== ab.byteLength) throw new Error('Truncated event header');
 }
 
 /**

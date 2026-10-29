@@ -28,6 +28,10 @@ export class RingBuffer {
             maxCapacity    = Infinity,
         } = options;
 
+        if (!Number.isSafeInteger(capacity) || capacity < 1 ||
+            !(maxCapacity === Infinity || (Number.isSafeInteger(maxCapacity) && maxCapacity >= capacity))) {
+            throw new RangeError('Invalid ring buffer capacity');
+        }
         this._capacity       = capacity;
         this._initialCapacity = capacity;
         this._maxCapacity    = maxCapacity;
@@ -42,7 +46,7 @@ export class RingBuffer {
         this.stats = {
             totalPushed:   0,
             totalDrained:  0,
-            totalDropped:  0,  // 始终为 0（不再丢弃）
+            totalDropped:  0,  // 达到容量上限时拒绝的新事件数
             totalResizes:  0,  // 扩容次数
             flushCount:    0,
         };
@@ -69,9 +73,7 @@ export class RingBuffer {
         );
 
         if (newCapacity <= this._capacity) {
-            // 无法扩容（已达上限），但仍然不丢弃
-            // 这种情况下会继续写入，_buf 会自动扩容（JS Array 特性）
-            // 只是我们无法精确控制容量了
+            // At the configured limit, push() explicitly rejects the new event.
             return;
         }
 
@@ -106,7 +108,7 @@ export class RingBuffer {
     /**
      * 向缓冲区压入一条事件。
      * @param {*} event  任意可序列化对象
-     * @returns {boolean} 始终返回 true（不再丢弃）
+     * @returns {boolean} 成功返回 true；容量上限处返回 false
      */
     push(event) {
         this.stats.totalPushed++;
@@ -116,6 +118,10 @@ export class RingBuffer {
             this._resize();
         }
 
+        if (this._size >= this._capacity) {
+            this.stats.totalDropped++;
+            return false; // Reject newest event; never overwrite unread entries.
+        }
         this._buf[this._tail] = event;
         this._tail = (this._tail + 1) % this._capacity;
         this._size++;

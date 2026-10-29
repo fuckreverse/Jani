@@ -1184,3 +1184,10 @@ node tools/trace-parse.mjs traces/trace_*.bin --smap traces/trace_*.smap.json
 node tools/trace-parse.mjs traces/trace_*.bin --smap traces/trace_*.smap.json \
   | node tools/trace-render.mjs --format io
 ```
+
+## v4 完整性约束
+
+有限 RingBuffer 达到上限时拒绝新事件并统计 totalDropped，不覆盖未读事件；
+LogManager 默认最多积压 1,048,576 条（可配置 maxCapacity）。异步批次按顺序写入；显式 flush/close 会抛出后端错误。
+ExecutionTrace.close 发出 TRACE_END；endExecution 不表示异步任务全部结束。
+JTB1 v4 在 payload 尾部追加长度前缀 JSON 元数据，携带动态身份与读写绑定 ID；新版保留 v1–v3 解码。

@@ -55,6 +55,7 @@ import { fileURLToPath } from 'url';
 // ── 二进制解码依赖 ──────────────────────────────────────────────────────────────
 import {
     FILE_HEADER_SIZE,
+    FORMAT_VERSION,
     EVENT_HEADER_SIZE,
     MAGIC,
     deserializeEvent,
@@ -408,7 +409,7 @@ function collectWriteValues(view) {
         try {
             result = deserializeEvent(view, offset, fileVersion);
         } catch {
-            break;
+            throw new Error(`Invalid trace at byte ${offset}`);
         }
         const { event, nextOffset } = result;
         if (nextOffset <= offset) break;
@@ -489,6 +490,7 @@ function decodeBinaryBuffer(buf, opts, emit) {
 
     const ab   = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
     const view = new DataView(ab);
+    if (buf.length < FILE_HEADER_SIZE || !isBinaryTrace(buf)) throw new Error('Invalid trace magic/header');
 
     // ── 第一遍（仅在 resolveValues 时）：提取所有 write 值 ──────────────────
     let writeValues = null;
@@ -501,6 +503,7 @@ function decodeBinaryBuffer(buf, opts, emit) {
     const fileVersion = ab.byteLength >= FILE_HEADER_SIZE
         ? new DataView(ab).getUint8(4)
         : 0x01;
+    if (fileVersion < 1 || fileVersion > FORMAT_VERSION) throw new Error(`Unsupported trace version ${fileVersion}`);
     let offset = FILE_HEADER_SIZE;
 
     while (offset + EVENT_HEADER_SIZE <= ab.byteLength) {
@@ -509,7 +512,7 @@ function decodeBinaryBuffer(buf, opts, emit) {
             result = deserializeEvent(view, offset, fileVersion);
         } catch (err) {
             process.stderr.write(`[trace-parse] decode error at offset ${offset}: ${err.message}\n`);
-            break;
+            throw new Error(`Invalid trace at byte ${offset}`);
         }
         const { event, nextOffset } = result;
         if (nextOffset <= offset) break;
@@ -532,6 +535,7 @@ function decodeBinaryBuffer(buf, opts, emit) {
         emitBinaryEvent(event, pretty, emit);
     }
 
+    if (offset !== ab.byteLength) throw new Error(`Truncated event at byte ${offset}`);
     return stats;
 }
 
@@ -679,7 +683,7 @@ async function main() {
             await fd.close();
             // .bin（JTB1 魔数）或 .bin.gz（gzip 魔数）均视为二进制模式
             isBinary = isBinaryTrace(hdr) || isGzipTrace(hdr)
-                || inputPath.endsWith('.bin.gz');
+                || inputPath.endsWith('.bin.gz') || inputPath.endsWith('.bin');
         } catch { /* 若读取失败，fallback 到文本模式 */ }
     } else {
         // stdin：无法提前知道格式，暂不自动检测（用户可通过 --smap 等选项暗示使用二进制模式，或显式检测）

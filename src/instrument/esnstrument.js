@@ -459,14 +459,24 @@ function runInstrumentPass(file) {
             },
         },
 
+        TryStatement: {
+            exit(path) {
+                if (path.node.finalizer && path.getFunctionParent()?.node.async) {
+                    W.restoreAsyncContext(path.node.finalizer.body, path.getFunctionParent().node);
+                }
+            },
+        },
+
         CatchClause: {
             enter(path) { W.setScope(path.node); },
             exit(path) {
                 const node = path.node;
+                const fn = path.getFunctionParent();
                 // ES2019+: optional catch binding 时 node.param 为 null
                 if (node.param?.type === 'Identifier') {
                     W.wrapCatchClause(node, node.body.body, node.param.name);
                 }
+                if (fn?.node.async) W.restoreAsyncContext(node.body.body, fn.node);
                 W.popScope();
             },
         },
@@ -663,24 +673,9 @@ function runInstrumentPass(file) {
             },
         },
 
-        // OptionalMemberExpression（a?.b）：在 RHS 上下文中注入 J$.G 属性读取钩子
-        OptionalMemberExpression: {
-            exit(path) {
-                if (ignoreSubAst(path.node)) return;
-                if (getContext(path) !== CONTEXT.RHS) return;
-                const ret = W.instrumentLoad(path.node, false);
-                if (ret !== path.node) replaceAndMark(path, ret);
-            },
-        },
-
-        // OptionalCallExpression（a?.()）：注入 J$.M / J$.F 调用钩子
-        OptionalCallExpression: {
-            exit(path) {
-                if (ignoreSubAst(path.node)) return;
-                const node = path.node;
-                node.callee = W.instrumentCall(node, false);
-            },
-        },
+        // Keep the optional chain native: eager G/M arguments would evaluate
+        // computed keys and call arguments even when the chain short-circuits.
+        // Operand hooks are still visited; property/call hooks are omitted here.
 
         SequenceExpression: {
             exit(path) {

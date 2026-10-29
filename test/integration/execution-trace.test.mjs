@@ -648,3 +648,34 @@ describe('FlatFormatter — 输出格式', () => {
         assert.ok(!line.includes(' ; '), '无 kv 时不应含 " ; "');
     });
 });
+
+describe('Dynamic binding identities', () => {
+    test('separate closure instances retain their own lexical identities', async () => {
+        const {events}=await instrAndTrace(`
+            function factory(x){return function(){x=x+1;return x;};}
+            var a=factory(1), b=factory(10); a();b();a();
+        `);
+        const writes=events.filter(e=>e.type==='END_EXPR').flatMap(e=>e.writes??[]).filter(w=>w.name==='x' && w.val>=2);
+        const a=writes.find(w=>w.val===2), b=writes.find(w=>w.val===11), again=writes.find(w=>w.val===3);
+        assert.ok(a?.bindingId && b?.bindingId && again?.bindingId);
+        assert.equal(a.bindingId,again.bindingId); assert.notEqual(a.bindingId,b.bindingId);
+    });
+    test('concurrent async invocations do not share binding IDs', async () => {
+        init({...ALL_CONFIG});
+        const {code}=instrumentCode({code:`
+            async function f(x){await Promise.resolve(); x=x+1; return x;}
+            $out.done=Promise.all([f(1),f(10)]);
+        `,origCodeFileName:'async-bindings.js'});
+        const sb=new JalangiSandbox(); const backend=new MemoryBackend();
+        const logger=new TraceLogger({nodeConsole:false,nodeFile:false,keyToConsole:false,logManagerOptions:{backends:[backend]}});
+        await logger.init(); const analysis=new ExecutionTraceAnalysis(sb,'',{logger}); sb.analysis=analysis;
+        const out={}; runInSandbox(code,sb,{$out:out});
+        assert.deepEqual(Array.from(await out.done),[2,11]); await analysis.flush();
+        const writes=backend.getEvents().flatMap(e=>e.writes??[]).filter(w=>w.name==='x');
+        const one=writes.find(w=>w.val===1), two=writes.find(w=>w.val===2);
+        const ten=writes.find(w=>w.val===10), eleven=writes.find(w=>w.val===11);
+        assert.ok(one?.bindingId && ten?.bindingId);
+        assert.equal(one.bindingId,two.bindingId);assert.equal(ten.bindingId,eleven.bindingId);
+        assert.notEqual(one.bindingId,ten.bindingId); await analysis.close();
+    });
+});

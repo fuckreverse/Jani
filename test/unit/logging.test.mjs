@@ -548,7 +548,7 @@ describe('TraceLogger', () => {
         await logger._mgr.flush();
 
         const events = backend.getEvents();
-        const keyEvent = events.find(e => e.type === 'key');
+        const keyEvent = events.find(e => e.type === 'KEY_EVENT');
         assert.ok(keyEvent, '应找到 key 事件');
         assert.equal(keyEvent.level, 'info');
         assert.ok(keyEvent.text.includes('test.js'));
@@ -563,7 +563,7 @@ describe('TraceLogger', () => {
         await logger._mgr.flush();
 
         const events = backend.getEvents();
-        const levels = events.filter(e => e.type === 'key').map(e => e.level);
+        const levels = events.filter(e => e.type === 'KEY_EVENT').map(e => e.level);
         assert.ok(levels.includes('info'), '应有 info 级别');
         assert.ok(levels.includes('warn'), '应有 warn 级别');
         assert.ok(levels.includes('error'), '应有 error 级别');
@@ -681,7 +681,7 @@ describe('TraceLogger', () => {
 
         const events = backend.getEvents();
         const traceEvents = events.filter(e => e.type === 'trace');
-        const keyEvents   = events.filter(e => e.type === 'key');
+        const keyEvents   = events.filter(e => e.type === 'KEY_EVENT');
 
         assert.ok(traceEvents.length > 0, '应有 trace 类型事件');
         assert.ok(keyEvents.length > 0, '应有 key 类型事件');
@@ -694,3 +694,53 @@ describe('TraceLogger', () => {
 // ════════════════════════════════════════════════════════════════════════════════
 
 // END OF FILE
+
+describe('Trace integrity regressions', () => {
+    test('finite ring capacity rejects newest without corrupting unread events', () => {
+        const rb = new RingBuffer({ capacity: 2, maxCapacity: 2 });
+        assert.equal(rb.push(1), true); assert.equal(rb.push(2), true);
+        assert.equal(rb.push(3), false);
+        assert.deepEqual(rb.drain(), [1, 2]);
+        assert.equal(rb.getStats().totalDropped, 1);
+        assert.equal(rb.push(4), true); assert.deepEqual(rb.drain(), [4]);
+    });
+    test('v4 identities roundtrip through an offset DataView', () => {
+        const source = { type: 'END_EXPR', seq: 2, callId: 17, contextId: 23, scriptId: 1,
+            writes: [{ name: 'x', val: 'hello', scopeId: 4, bindingId: '1:4:17' }] };
+        const encoded = new Uint8Array(serializeEvent(source));
+        const bytes = new Uint8Array(encoded.length + 9); bytes.set(encoded, 9);
+        const { event } = deserializeEvent(new DataView(bytes.buffer, 9), 0);
+        assert.equal(event.writes[0].value, 'hello');
+        assert.equal(event.writes[0].bindingId, '1:4:17'); assert.equal(event.contextId, 23);
+    });
+    test('truncated records and count overflow are rejected', () => {
+        const bytes = serializeEvent({ type: 'CALL', seq: 1, fn: 'test', result: 1 });
+        assert.throws(() => deserializeEvent(new DataView(bytes.slice(0, -1)), 0), /Truncated/);
+        assert.throws(() => serializeEvent({type:'END_EXPR',writes:Array.from({length:256},()=>({name:'x',val:1}))}), /Too many/);
+    });
+    test('legacy v3 record remains readable', () => {
+        const bytes = new ArrayBuffer(12);
+        const view = new DataView(bytes); view.setUint8(0, EVENT_TYPE.SCRIPT_EXIT); view.setUint32(6, 1, true);
+        assert.equal(deserializeEvent(view, 0, 3).event.type, 'SCRIPT_EXIT');
+    });
+});
+
+describe('Async logging delivery', () => {
+    test('flush waits for in-flight writes and preserves batch ordering', async () => {
+        const delivered=[]; let release;
+        const gate=new Promise(resolve=>{release=resolve;});
+        const manager=new LogManager({autoClose:false,drainBatchSize:1,flushThreshold:1,
+            backends:[{async write(batch){if(batch[0]===1) await gate;delivered.push(...batch);}}]});
+        manager.push(1); const first=manager._doFlush();
+        manager.push(2); let finished=false; const flushed=manager.flush().then(()=>{finished=true;});
+        await new Promise(resolve=>setImmediate(resolve));
+        assert.equal(finished,false); release(); await first; await flushed;
+        assert.deepEqual(delivered,[1,2]); await manager.close();
+    });
+    test('explicit flush surfaces backend failure without throwing from program hooks', async () => {
+        const manager=new LogManager({autoClose:false,backends:[{async write(){throw new Error('disk unavailable');}}]});
+        assert.doesNotThrow(()=>manager.push({seq:1}));
+        await assert.rejects(manager.flush(),/disk unavailable/);
+        await assert.rejects(manager.close(),/disk unavailable/);
+    });
+});

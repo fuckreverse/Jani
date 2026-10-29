@@ -139,16 +139,16 @@ export declare class JalangiRuntime {
     P(iid: number, base: unknown, offset: unknown, val: unknown, flags: number): unknown;
 
     /** 变量读取（全量） */
-    R(iid: number, name: string, val: unknown, flags: number, defScopeId?: number): unknown;
+    R(iid: number, name: string, val: unknown, flags: number, defScopeId?: number, bindingId?: string | null): unknown;
 
     /**
      * 变量读取（轻量）。
      * 不接收 value 参数，直接从 Shadow Frame 查找变量值。
      */
-    Rl(iid: number, defScopeId: number, name: string): unknown;
+    Rl(iid: number, defScopeId: number, name: string, bindingId?: string | null): unknown;
 
     /** 变量写入 */
-    W(iid: number, name: string, val: unknown, lhs: unknown, flags: number, defScopeId?: number): unknown;
+    W(iid: number, name: string, val: unknown, lhs: unknown, flags: number, defScopeId?: number, bindingId?: string | null): unknown;
 
     /** with 语句 */
     Wi(iid: number, val: unknown): unknown;
@@ -227,7 +227,12 @@ export declare class JalangiRuntime {
     // ── 异步 ContextID 公开接口（TODO-15）──────────────────────────────────
 
     /** await 恢复点钩子（J$.Aw） */
-    Aw(iid: number): void;
+    As<T>(iid: number, value: T, contextId?: number): T;
+    Aw<T>(iid: number, value: T, contextId?: number): T;
+    newBindingFrame(): number;
+    bindingIdentity(defScopeId: number, frameId: number): string;
+    getBindingId(defScopeId: number): string | null;
+    get parentCallId(): number;
 
     /** 为新的异步任务创建独立的 ContextID */
     newAsyncContext(): number;

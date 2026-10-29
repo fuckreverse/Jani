@@ -141,15 +141,24 @@ export function analyzeDefUse(ast) {
             //   var obj = {};  obj.x = 1;
             // 中 binding.constant === true（obj 本身未被重赋值），
             // 但 obj 指向的对象有属性变化，轻量路径无法感知，必须全量。
+            const functionParent = path.getFunctionParent();
+            const declaration = binding.path;
+            const safeDeclaration = declaration?.isVariableDeclarator() && declaration.node.init &&
+                declaration.node.id.type === 'Identifier' && binding.constant &&
+                binding.scope === path.scope &&
+                node.start > declaration.node.end && !functionParent?.node.async && !functionParent?.node.generator;
+            if (!safeDeclaration) {
+                decisions.set(key, Decision.FULL);
+                return;
+            }
             const hasMutation = _checkMutation(binding);
             if (hasMutation) {
                 decisions.set(key, Decision.FULL);
                 return;
             }
 
-            // Q-3 修复：无论 binding.constant 是 true 还是 false，
-            // 只要没有属性 mutation（已在上方排除），都走轻量路径（Rl/Shadow Frame）。
-            // Shadow Frame 对重赋值也能正确追踪，因此两个分支可合并为无条件赋值。
+            // Only initialized immutable local bindings reach the lightweight path.
+            // Mutable bindings, TDZ reads, async/generator and captured reads retain native values.
             //
             // 同时记录 def-site 的位置 key，供 wrappers.js 在插桩完成后关联 defIid（smap 用途）。
             // def-site 是 binding.path.node 或 binding.identifier：

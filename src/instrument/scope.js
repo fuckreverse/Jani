@@ -237,6 +237,7 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
         const parentScope = currentScope;
         currentScope = new Scope(currentScope, false);
         node.scope = currentScope;
+        currentScope.frameName = path.scope.generateUidIdentifier('janiFrame').name;
 
         switch (node.type) {
             case 'FunctionDeclaration': {
@@ -291,6 +292,7 @@ function addScopes(fileOrProgram, jalangiVar = JALANGI_VAR) {
             enter(path) {
                 currentScope = new Scope(null, false);
                 path.node.scope = currentScope;
+                currentScope.frameName = path.scope.generateUidIdentifier('janiFrame').name;
             },
             exit: exitScope,
         },

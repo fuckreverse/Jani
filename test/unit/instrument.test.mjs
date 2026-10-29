@@ -233,9 +233,9 @@ describe('ES2020 语法', () => {
     before(() => init({ ...ALL_CONFIG }));
     after(restoreConfig);
 
-    test('optional chaining (?.) 内部属性访问被插桩', () => {
+    test('optional chaining (?.) 保留惰性访问语义', () => {
         const r = instr('var x = obj?.foo?.bar;');
-        assert.ok(r.code.includes('J$.G('), 'optional chaining 内部属性访问应注入 J$.G');
+        assert.ok(r.code.includes('?.'), 'optional chain must remain lazy');
     });
 
     test('nullish coalescing (??) 注入条件钩子', () => {

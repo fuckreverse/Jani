@@ -180,6 +180,7 @@ export class JalangiRuntime {
 
     /** 调用 ID 全局单调计数器 */
     #callIdCounter = 0;
+    #bindingFrameCounter = 0;
 
     /** 当前调用帧的 callId（0 = 顶层 / 脚本作用域） */
     #currentCallId = 0;
@@ -885,7 +886,7 @@ export class JalangiRuntime {
     }
 
     /** 变量声明初始化 — Declare（J$.Dc）*/
-    Dc(iid, name, val, flags) {
+    Dc(iid, name, val, flags, defScopeId, bindingId) {
         const [isArgument, isLocalSync, isCatchParam] = decodeBitPattern(flags, 3);
         const analysis = this.analysis;
 
@@ -893,7 +894,7 @@ export class JalangiRuntime {
 
         if (!isLocalSync && analysis?.declareVar) {
             const idx  = (isArgument && this.#argIndex > 1) ? this.#argIndex - 2 : -1;
-            const aret = analysis.declareVar(iid, name, val, isArgument, idx, isCatchParam);
+            const aret = analysis.declareVar(iid, name, val, isArgument, idx, isCatchParam, defScopeId, bindingId);
             if (aret) val = aret.result;
         }
 
@@ -972,7 +973,7 @@ export class JalangiRuntime {
     }
 
     /** 变量读取 — Read variable（J$.R）。第五个参数 defScopeId 由插桩器注入（来自 wrapRead）。 */
-    R(iid, name, val, flags, defScopeId) {
+    R(iid, name, val, flags, defScopeId, bindingId) {
         const [isGlobal, isScriptLocal] = decodeBitPattern(flags, 2);
         const analysis = this.analysis;
 
@@ -983,7 +984,7 @@ export class JalangiRuntime {
         }
 
         if (analysis?.readVar) {
-            const aret = analysis.readVar(iid, name, val, isGlobal, isScriptLocal, defScopeId);
+            const aret = analysis.readVar(iid, name, val, isGlobal, isScriptLocal, defScopeId, bindingId);
             if (aret) val = aret.result;
         }
 
@@ -1000,7 +1001,7 @@ export class JalangiRuntime {
      * @param {string} name        - 变量名
      * @returns {*} 变量当前值
      */
-    Rl(iid, defScopeId, name) {
+    Rl(iid, defScopeId, name, bindingId) {
         const raw = this.#shadowLookup(defScopeId, this.#resolveCallId(defScopeId), name);
 
         // 检测 sentinel：与 undefined 相同的静默降级，但会留下可观测的诊断记录
@@ -1016,7 +1017,7 @@ export class JalangiRuntime {
 
         // 通知分析插件（若有 read 钩子，用 isGlobal=false/isScriptLocal=false）
         if (analysis?.readVar) {
-            const aret = analysis.readVar(iid, name, val, false, false, defScopeId);
+            const aret = analysis.readVar(iid, name, val, false, false, defScopeId, bindingId);
             if (aret) return (this.#lastComputedValue = aret.result);
         }
 
@@ -1024,12 +1025,12 @@ export class JalangiRuntime {
     }
 
     /** 变量写入 — Write variable（J$.W）。第六个参数 defScopeId 由插桩器注入。 */
-    W(iid, name, val, lhs, flags, defScopeId) {
+    W(iid, name, val, lhs, flags, defScopeId, bindingId) {
         const [isGlobal, isScriptLocal, isDeclaration] = decodeBitPattern(flags, 3);
         const analysis = this.analysis;
 
         if (analysis?.writeVar) {
-            const aret = analysis.writeVar(iid, name, val, lhs, isGlobal, isScriptLocal, defScopeId);
+            const aret = analysis.writeVar(iid, name, val, lhs, isGlobal, isScriptLocal, defScopeId, bindingId);
             if (aret) val = aret.result;
         }
 
@@ -1540,6 +1541,11 @@ export class JalangiRuntime {
      * @param {number} [ctxId] 本次 async 函数调用的 callId（由插桩注入，可选）
      * @returns {*}           透传 val（保持语义不变）
      */
+    As(iid, val, ctxId) {
+        this.analysis?.awaitSuspend?.(iid, ctxId, val);
+        return val;
+    }
+
     Aw(iid, val, ctxId) {
         // 将 #currentContextId 更新为本次 async 函数的上下文 ID。
         // ctxId 由插桩器注入（async 函数入口处捕获的 callId），
@@ -1568,7 +1574,7 @@ export class JalangiRuntime {
      * @returns {number}  新分配的 ContextID（唯一单调递增）
      */
     newAsyncContext() {
-        return ++this.#asyncContextIdCounter;
+        return ++this.#callIdCounter; // Shared allocator prevents collisions with async function call IDs.
     }
 
     /**
@@ -1598,6 +1604,18 @@ export class JalangiRuntime {
      *
      * @returns {number}  当前 CallID（0 = 顶层脚本作用域）
      */
+    newBindingFrame() { return ++this.#bindingFrameCounter; }
+    bindingIdentity(defScopeId, frameId) { return `0:${defScopeId}:${frameId}`; }
+
+    getBindingId(defScopeId) {
+        if (defScopeId == null) return null;
+        return `${this.sid ?? 0}:${defScopeId}:${this.#resolveCallId(defScopeId)}`;
+    }
+
+    get parentCallId() {
+        return this.#callIdStack[this.#callIdStack.length - 1]?.callId ?? 0;
+    }
+
     get currentCallId() {
         return this.#currentCallId;
     }

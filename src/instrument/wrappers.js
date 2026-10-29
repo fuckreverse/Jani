@@ -274,6 +274,27 @@ function wrapGetField(node, base, offset, isComputed, isOptional) {
     return node;
 }
 
+// Lexically captured frame IDs distinguish closure instances and async invocations
+// independently of the runtime's synchronous call stack.
+function bindingIdentity(scopeId) {
+    let scope = _scope;
+    while (scope && scope.id !== scopeId) scope = scope.parent;
+    while (scope && !scope.frameName) scope = scope.parent;
+    if (!scope) return t.nullLiteral();
+    const frame = t.identifier(scope.frameName);
+    return t.conditionalExpression(
+        t.binaryExpression('===', t.unaryExpression('typeof', t.cloneNode(frame)), t.stringLiteral('undefined')),
+        t.nullLiteral(),
+        callExpr(memberExpr(_jalangiVar, 'bindingIdentity'), [t.numericLiteral(scopeId), frame])
+    );
+}
+
+function bindingFrameDeclaration(scope) {
+    if (!scope?.frameName) return [];
+    return [t.variableDeclaration('var', [t.variableDeclarator(t.identifier(scope.frameName),
+        callExpr(memberExpr(_jalangiVar, 'newBindingFrame'), []))])];
+}
+
 function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal, scopeId) {
     assertAstNode(node, 'wrapRead/node');
     assertAstNode(name, 'wrapRead/name');
@@ -289,7 +310,7 @@ function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal, scopeId)
         const bitsNode = t.numericLiteral(createBitPattern(isGlobal, isScriptLocal));
         const args = [iidNode, name, val, bitsNode];
         if (scopeId !== undefined && scopeId !== null) {
-            args.push(t.numericLiteral(scopeId));
+            args.push(t.numericLiteral(scopeId), bindingIdentity(scopeId));
         }
         const ret = callExpr(memberExpr(_jalangiVar, 'R'), args);
         transferLoc(ret, node);
@@ -315,12 +336,20 @@ function wrapReadWithUndefinedCheck(node, name) {
  * await 恢复点包装器。
  * 将 `await expr` 转换为 `J$.Aw(iid, await expr, ctxId)`。
  */
+function restoreAsyncContext(body, node) {
+    if (Config.INSTR_AWAIT && !Config.INSTR_AWAIT(node)) return;
+    body.unshift(t.expressionStatement(callExpr(memberExpr(_jalangiVar, 'activateContext'),
+        [t.identifier(`${_jalangiVar}__ctx`)])));
+}
+
 function wrapAwait(node, argument) {
     if (!Config.INSTR_AWAIT || Config.INSTR_AWAIT(node)) {
         IID.printIidToLoc(node);
         const iidNode = IID.getIid();
 
-        const awaitNode = t.awaitExpression(argument);
+        const suspended = jalangiCall('As', t.cloneNode(iidNode), argument,
+            t.identifier(`${_jalangiVar}__ctx`));
+        const awaitNode = t.awaitExpression(suspended);
         if (node.loc) awaitNode.loc = node.loc;
 
         const ctxVarNode = t.identifier(`${_jalangiVar}__ctx`);
@@ -352,7 +381,8 @@ function wrapReadLightweight(node, name, defScopeId, defLocKey) {
         const ret = jalangiCall('Rl',
             iidNode,
             t.numericLiteral(defScopeId),
-            name
+            name,
+            bindingIdentity(defScopeId)
         );
         transferLoc(ret, node);
         return ret;
@@ -384,7 +414,7 @@ function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration,
             const lhsNode = lhs ?? t.identifier('undefined');
             const args = [iidNode, name, val, lhsNode, bitsNode];
             if (scopeId !== undefined && scopeId !== null) {
-                args.push(t.numericLiteral(scopeId));
+                args.push(t.numericLiteral(scopeId), bindingIdentity(scopeId));
             }
             const ret = callExpr(memberExpr(_jalangiVar, 'W'), args);
             transferLoc(ret, node);
@@ -395,7 +425,7 @@ function wrapWrite(node, name, val, lhs, isGlobal, isScriptLocal, isDeclaration,
         const lhsNode = lhs ?? t.identifier('undefined');
         const args = [IID.getIid(), name, val, lhsNode, bitsNode];
         if (scopeId !== undefined && scopeId !== null) {
-            args.push(t.numericLiteral(scopeId));
+            args.push(t.numericLiteral(scopeId), bindingIdentity(scopeId));
         }
         const ret = callExpr(memberExpr(_jalangiVar, 'W'), args);
         transferLoc(ret, node);
@@ -753,7 +783,9 @@ function createCallInitAsStatement(node, name, val, isArgumentSync, lhs, isCatch
     }
     IID.printIidToLoc(node);
     const bitsNode = t.numericLiteral(createBitPattern(isArgumentSync, false, isCatchParam));
-    const callN = jalangiCall('Dc', IID.getIid(), name, val, bitsNode);
+    const def = _findDefScope(_scope, name.value);
+    const callN = jalangiCall('Dc', IID.getIid(), name, val, bitsNode,
+        def ? t.numericLiteral(def.id) : t.nullLiteral(), def ? bindingIdentity(def.id) : t.nullLiteral());
     let exprStmt;
     if (isAssign) {
         const assign = t.assignmentExpression('=', lhs, callN);
@@ -1141,17 +1173,17 @@ function instrumentFunctionEntryExit(node, ast, omitThis = false) {
         ? [_createAsyncCtxCaptureStatement()]
         : [];
 
-    return [...body, ...asyncCtxCapture, ...syncDefuns(node, _scope, false), ...ast];
+    return [...body, ...bindingFrameDeclaration(_scope), ...asyncCtxCapture, ...syncDefuns(node, _scope, false), ...ast];
 }
 
 /**
  * 构造 `var __j$ctx = J$.currentCallId` 的 AST 语句节点。
  */
-function _createAsyncCtxCaptureStatement() {
+function _createAsyncCtxCaptureStatement(arrow = false) {
     return t.variableDeclaration('var', [
         t.variableDeclarator(
             t.identifier(`${_jalangiVar}__ctx`),
-            memberExpr(_jalangiVar, 'currentCallId')
+            arrow ? callExpr(memberExpr(_jalangiVar, 'newAsyncContext'), []) : memberExpr(_jalangiVar, 'currentCallId')
         ),
     ]);
 }
@@ -1161,11 +1193,9 @@ function _createAsyncCtxCaptureStatement() {
  * 箭头函数没有独立的 arguments 绑定，不注入 arguments 初始化钩子。
  */
 function instrumentArrowFunctionBody(node) {
-    if (node.body.type !== 'BlockStatement') return;
-    const synced = syncArrowDefuns(node, _scope);
-    if (synced.length > 0) {
-        node.body.body = [...synced, ...node.body.body];
-    }
+    if (node.body.type !== 'BlockStatement') node.body = t.blockStatement([t.returnStatement(node.body)]);
+    const capture = node.async ? [_createAsyncCtxCaptureStatement(true)] : [];
+    node.body.body = [...bindingFrameDeclaration(_scope), ...capture, ...syncArrowDefuns(node, _scope), ...node.body.body];
 }
 
 /**
@@ -1179,7 +1209,8 @@ function instrumentScriptEntryExit(node, body0, instFile, origFile) {
     const body = (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node))
         ? createCallAsScriptEnterStatement(node, instFile, origFile)
         : [];
-    return [...body, ...syncDefuns(node, _scope, true), ...body0];
+    return [...body, ...bindingFrameDeclaration(_scope), _createAsyncCtxCaptureStatement(true),
+        ...syncDefuns(node, _scope, true), ...body0];
 }
 
 // ─── instrumentStore / instrumentLoad / instrumentLoadModStore / instrumentPreIncDec
@@ -1240,22 +1271,6 @@ function instrumentLoad(ast, isTypeof) {
 
             if (decisionStr === 'lightweight' && isSafeForLightweight) {
                 return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id, defLocKey);
-            }
-
-            if (decision === null) {
-                const canUseLightweight =
-                    defScope !== null &&
-                    !isGlobal &&
-                    !defScope.isArrow &&
-                    !_scope.usesEval() &&
-                    !_scope.usesWith() &&
-                    defScope.hasOwnVar(ast.name) !== 'catch' &&
-                    defScope.hasOwnVar(ast.name) !== 'blockDefun' &&
-                    ast.name !== 'arguments';
-                if (canUseLightweight) {
-                    // decision===null 时无 defLocKey（未经 analyzeDefUse 分析），defLocKey 传 null
-                    return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id, null);
-                }
             }
 
             // isGlobal 作为 isScriptLocal 传入：全局作用域中的变量 isScriptLocal = isGlobal
@@ -1423,7 +1438,7 @@ export {
     wrapReturn, wrapThrow, wrapWithX1, wrapHash, wrapEvalArg,
     wrapUnaryOp, wrapBinaryOp, wrapLogicalAnd, wrapLogicalOr, wrapLogicalNullish,
     wrapSwitchDiscriminant, wrapSwitchTest, wrapWith, wrapConditional,
-    wrapLiteral, wrapForIn, wrapCatchClause, wrapAwait,
+    wrapLiteral, wrapForIn, wrapCatchClause, wrapAwait, restoreAsyncContext,
     wrapScriptBodyWithTryCatch, wrapFunBodyWithTryCatch,
     // 高级函数
     instrumentStore, instrumentLoad, instrumentLoadModStore,

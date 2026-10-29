@@ -752,8 +752,8 @@ class _SabTransport {
 
         if (data.byteLength > this._slotDataBytes) {
             this.stats.errors++;
-            log.warn(`write: batch serialized size ${data.byteLength} > slotDataBytes ${this._slotDataBytes}, dropping`);
-            return;
+            this.stats.dropped += batch.length;
+            throw new Error(`Trace batch exceeds SAB slot capacity (${data.byteLength} bytes)`);
         }
 
         const success = await this._writeToRing(data);
@@ -762,7 +762,7 @@ class _SabTransport {
             this.stats.totalEvents += batch.length;
         } else {
             this.stats.dropped++;
-            log.warn(`write: ring full after ${this._backpressureTimeoutMs}ms backpressure timeout, batch dropped (total dropped=${this.stats.dropped})`);
+            throw new Error('Trace SAB backpressure timeout; recording is incomplete');
         }
     }
 

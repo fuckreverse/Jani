@@ -413,6 +413,10 @@ export class AnalysisTemplate {
      * @param {number} contextId - 当前 async 函数调用的唯一标识（复用 callId）
      * @param {*}      val       - await 的 resolved value
      */
+    awaitSuspend(iid, contextId, val) {
+        // Called before native await suspends; return value is ignored.
+    }
+
     awaitResume(iid, contextId, val) {
         // 返回值被忽略（不影响 val 的透传）
     }

@@ -49,7 +49,7 @@ const HOOKS = $freeze([
     'scriptEnter', 'scriptExit', 'unaryPre',
     'unary', 'writeVar',
     // async/await 恢复点钩子（J$.Aw 触发）
-    'awaitResume',
+    'awaitResume', 'awaitSuspend',
 ]);
 
 /**

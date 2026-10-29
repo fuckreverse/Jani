@@ -298,7 +298,7 @@ export class TraceLogger {
             if (item.kind === 'trace') {
                 this._mgr.push(item.event);
             } else if (item.kind === 'key') {
-                this._mgr.push({ type: 'key', level: item.level, text: item.text });
+                this._mgr.push({ type: 'KEY_EVENT', level: item.level, text: item.text });
             }
         }
     }
@@ -344,7 +344,7 @@ export class TraceLogger {
             fn('[Jalangi]', text);
         }
         if (this._mgr) {
-            this._mgr.push({ type: 'key', level, text });
+            this._mgr.push({ type: 'KEY_EVENT', level, text });
         } else if (this._preInitQueue !== null) {
             this._preInitQueue.push({ kind: 'key', level, text });
         }
