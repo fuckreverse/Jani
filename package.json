@@ -20,9 +20,9 @@
     "@babel/generator"
   ],
   "scripts": {
-    "test": "node --test test/unit/instrument.test.mjs test/unit/logging.test.mjs test/unit/native-proxy.test.mjs test/integration/runtime.test.mjs test/integration/e2e.test.mjs test/integration/hooks.test.mjs test/integration/logging.test.mjs test/integration/execution-trace.test.mjs test/integration/dlint.test.mjs",
-    "test:unit": "node --test test/unit/instrument.test.mjs test/unit/logging.test.mjs test/unit/native-proxy.test.mjs",
-    "test:integration": "node --test test/integration/runtime.test.mjs test/integration/e2e.test.mjs test/integration/hooks.test.mjs test/integration/logging.test.mjs test/integration/execution-trace.test.mjs test/integration/dlint.test.mjs",
+    "test": "node --test test/unit/*.test.mjs test/integration/*.test.mjs",
+    "test:unit": "node --test test/unit/*.test.mjs",
+    "test:integration": "node --test test/integration/*.test.mjs",
     "test:logging": "node --test test/unit/logging.test.mjs test/integration/logging.test.mjs",
     "analyzer": "npm run dev:full --prefix analyzer",
     "analyzer:prod": "cd analyzer && npm run build:ui && npm run start",
@@ -36,7 +36,8 @@
     "instrument-and-run": "node bin/jalangi.mjs instrument-and-run",
     "preprocess": "node bin/preprocess.mjs",
     "preprocess:full": "node bin/preprocess.mjs --preset full",
-    "preprocess:transpile": "node bin/preprocess.mjs --preset transpile"
+    "preprocess:transpile": "node bin/preprocess.mjs --preset transpile",
+    "test:backend": "npm test --prefix analyzer"
   },
   "engines": {
     "node": ">=22.0.0"

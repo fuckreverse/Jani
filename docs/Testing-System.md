@@ -378,3 +378,15 @@ npm run test:logging
 | `integration/dlint.test.mjs` | 集成 | ~33 |
 | `integration/full-pipeline.test.mjs` | 集成/全流程 | ~51 |
 | **合计** | | **~507** |
+
+## 自动发现与后端回归
+
+根 npm test 自动运行 test/unit/*.test.mjs 和 test/integration/*.test.mjs。
+后端使用 npm test --prefix analyzer，覆盖 worker、失败回滚、旧库迁移、动态绑定、污点覆盖写入、gzip、调用配对、MCP 和真实服务端运行器。
+可复现基准：node analyzer/benchmark.mjs 50000（独立临时数据库）。
+
+## 分片图回归
+
+`analyzer/test/graph-store.test.mjs` 验证跨文件邻接、分页、快照、回滚、兼容 API 及小堆预算构图。
+`LOG_LEVEL=error node --max-old-space-size=48 analyzer/benchmark-graph.mjs 1000000`
+可独立复现百万边磁盘构图，不混入 F1 导入的内存占用。

@@ -1,7 +1,7 @@
 {
   "name": "jta-server",
   "version": "1.0.0",
-  "description": "Jani Trace Analyzer — 本地 Web 分析平台（后端）",
+  "description": "Jani Trace Analyzer \u2014 \u672c\u5730 Web \u5206\u6790\u5e73\u53f0\uff08\u540e\u7aef\uff09",
   "type": "module",
   "main": "server.mjs",
   "scripts": {
@@ -12,7 +12,8 @@
     "dev:full": "node --input-type=module --eval \"import{spawn}from'child_process';import{resolve,dirname}from'path';import{fileURLToPath}from'url';const d=dirname(fileURLToPath(import.meta.url));function run(cmd,args,cwd,tag){const c=spawn(cmd,args,{cwd,stdio:'pipe',shell:false});const pre=s=>s.replace(/^/gm,tag);c.stdout.on('data',b=>process.stdout.write(pre(b.toString())));c.stderr.on('data',b=>process.stderr.write(pre(b.toString())));c.on('exit',code=>{console.log(tag+'exited with '+code);process.exit(code??0)});return c;}const be=run('node',['--watch','server.mjs'],d,'[server] ');const fe=run('npm',['run','dev'],resolve(d,'ui'),'[vite]   ');process.on('SIGINT',()=>{be.kill();fe.kill();process.exit(0)});\"",
     "mcp:stdio": "node mcp/jta-mcp-stdio.mjs",
     "mcp:sse": "node mcp/jta-mcp-sse.mjs",
-    "mcp:streamable": "node mcp/jta-mcp-streamable.mjs"
+    "mcp:streamable": "node mcp/jta-mcp-streamable.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
