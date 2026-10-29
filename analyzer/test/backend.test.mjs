@@ -12,7 +12,7 @@ import { validateFilename, allowedOrigin, executionEnv } from '../ExecutionPolic
 
 const dir = mkdtempSync(join(tmpdir(), 'jani-backend-test-'));
 before(async () => { await db.init(join(dir, 'test.db')); });
-after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+after(async () => { const { drainAnalysis } = await import('../AnalysisQueue.mjs'); await drainAnalysis(); db.close(); rmSync(dir, { recursive: true, force: true }); });
 function session(id, file = null) {
     db.run('INSERT INTO sessions(id,bin_path) VALUES (?,?)', id, file);
 }
@@ -208,4 +208,112 @@ test('missing trace prefix cannot be labelled complete', async () => {
     writeFileSync(path,Buffer.concat([Buffer.from(createFileHeader()),Buffer.from(serializeBatch([{type:'TRACE_END',seq:5}]))]));
     session('missing-prefix',path);await new F1().run({sessionId:'missing-prefix',emit:noop});
     assert.equal(db.get("SELECT trace_integrity FROM sessions WHERE id='missing-prefix'").trace_integrity,'gaps');
+});
+
+test('single-plugin reruns preserve prerequisite checkpoints and invalidate transitive consumers', async () => {
+    const { runSinglePlugin, getCheckpoints } = await import('../PluginEngine.mjs');
+    session('single-lifecycle');
+    let prerequisites = 0, value = 0;
+    registerPlugin(class { static id = 'test-prerequisite'; static deps = []; async run(ctx) {
+        prerequisites++; assert.equal(ctx.value, undefined);
+    } });
+    registerPlugin(class { static id = 'test-producer'; static deps = ['test-prerequisite']; async run(ctx) { value = ctx.value ?? 1; } });
+    registerPlugin(class { static id = 'test-consumer'; static deps = ['test-producer']; async run() {} });
+    registerPlugin(class { static id = 'test-summary'; static deps = ['test-consumer']; async run() {} });
+    await schedule('single-lifecycle', { worker: false, plugins: ['test-summary'] });
+    await runSinglePlugin('single-lifecycle', 'test-producer', { worker: false, extraCtx: { value: 7 } });
+    assert.equal(value, 7); assert.equal(prerequisites, 1);
+    const checkpoints = Object.fromEntries(getCheckpoints('single-lifecycle').map(c => [c.plugin_id, c]));
+    assert.equal(checkpoints['test-producer'].is_stale, 0);
+    assert.equal(checkpoints['test-consumer'].is_stale, 1);
+    assert.equal(checkpoints['test-summary'].is_stale, 1);
+});
+
+test('optional inputs invalidate summaries without forcing absent analyses', async () => {
+    const { getCheckpoints } = await import('../PluginEngine.mjs');
+    session('optional-input'); let optionalRuns = 0, summaries = 0;
+    registerPlugin(class { static id = 'test-optional'; static deps = []; async run() { optionalRuns++; } });
+    registerPlugin(class { static id = 'test-aggregate'; static deps = []; static observes = ['test-optional']; async run() { summaries++; } });
+    await schedule('optional-input', { worker: false, plugins: ['test-aggregate'] });
+    assert.equal(optionalRuns, 0);
+    await schedule('optional-input', { worker: false, plugins: ['test-optional'] });
+    assert.equal(getCheckpoints('optional-input').find(c => c.plugin_id === 'test-aggregate').is_stale, 1);
+    await schedule('optional-input', { worker: false, plugins: ['test-aggregate'] });
+    assert.equal(summaries, 2); assert.equal(optionalRuns, 1);
+    markStale('optional-input', ['test-optional']);
+    await schedule('optional-input', { worker: false, plugins: ['test-aggregate'] });
+    assert.equal(optionalRuns, 2); assert.equal(summaries, 3);
+});
+
+test('a real worker completes all four phases and protects the whole workflow from duplicate jobs', async () => {
+    const { analyzeSession } = await import('../SessionAnalysis.mjs');
+    const path = join(dir, 'workflow.bin');
+    writeFileSync(path, Buffer.concat([Buffer.from(createFileHeader()), Buffer.from(serializeBatch([
+        { type: 'END_EXPR', seq: 1, iid: 8, writes: [{ name: 'token', val: 'x', scopeId: 1, bindingId: '0:1:1' }] },
+        { type: 'END_EXPR', seq: 2, iid: 16, reads: [{ name: 'token', val: 'x', scopeId: 1, bindingId: '0:1:1' }] },
+        { type: 'TRACE_END', seq: 3 },
+    ]))]));
+    session('workflow', path); const events = [];
+    const smapPath = join(dir, 'workflow.smap.json');
+    writeFileSync(smapPath, JSON.stringify({ version:1, iids:{ '8':[1,1,1,20], '16':[2,1,2,20] } }));
+    db.run("UPDATE sessions SET smap_path=? WHERE id='workflow'", smapPath);
+    const completionStates = [];
+    const job = analyzeSession('workflow', { dataDir: join(dir, 'workflow'), hasSmap:true, onProgress: event => {
+        events.push(event);
+        if (event.type === 'all_done') completionStates.push(db.get("SELECT status FROM sessions WHERE id='workflow'").status);
+    } });
+    await assert.rejects(schedule('workflow', { plugins: ['F1-EventIndex'] }), /already has an analysis job/);
+    await job;
+    assert.deepEqual(events.filter(e => e.type === 'phase_start').map(e => e.phase), ['phase1', 'phase2', 'phase3', 'phase4']);
+    assert.deepEqual(events.filter(e => e.type === 'all_done').map(e => e.phase), ['phase1', 'phase2', 'phase3', 'phase4']);
+    assert.ok(completionStates.every(status => status !== 'ready'));
+    assert.equal(db.get("SELECT status FROM sessions WHERE id='workflow'").status, 'ready');
+    assert.equal(db.get("SELECT COUNT(*) n FROM smap WHERE session_id='workflow'").n, 2);
+    assert.ok(db.get("SELECT id FROM plugin_checkpoints WHERE session_id='workflow' AND plugin_id='I2-SignatureAnalyzer'"));
+    assert.equal(db.get("SELECT id FROM plugin_checkpoints WHERE session_id='workflow' AND plugin_id='A1-TaintTracker'"), undefined);
+    // The finished promise releases the queue even when every checkpoint is skipped.
+    await analyzeSession('workflow', { dataDir: join(dir, 'workflow'), selectedPlugins: ['F3-CallGraphBuilder'] });
+});
+
+test('a failed workflow stops before later phases and releases the session reservation', async () => {
+    const { analyzeSession } = await import('../SessionAnalysis.mjs');
+    const path = join(dir, 'workflow-bad.bin'); writeFileSync(path, Buffer.from('invalid trace'));
+    session('workflow-failed', path); const events = [];
+    await assert.rejects(analyzeSession('workflow-failed', { dataDir: join(dir, 'workflow-failed'), onProgress: e => events.push(e) }), /Analysis failed/);
+    assert.deepEqual(events.filter(e => e.type === 'phase_start').map(e => e.phase), ['phase1']);
+    assert.equal(db.get("SELECT status FROM sessions WHERE id='workflow-failed'").status, 'failed');
+    writeFileSync(path, Buffer.concat([Buffer.from(createFileHeader()), Buffer.from(serializeBatch([{ type: 'TRACE_END', seq: 1 }]))]));
+    await analyzeSession('workflow-failed', { dataDir: join(dir, 'workflow-failed'), selectedPlugins: [] });
+    assert.equal(db.get("SELECT status FROM sessions WHERE id='workflow-failed'").status, 'ready');
+});
+
+test('workflow cancellation stops its worker and releases the shared execution budget', async () => {
+    const { analyzeSession } = await import('../SessionAnalysis.mjs');
+    const { executionBudget } = await import('../ExecutionBudget.mjs');
+    const path = join(dir, 'workflow-abort.bin');
+    writeFileSync(path, Buffer.concat([Buffer.from(createFileHeader()), Buffer.from(serializeBatch([{ type: 'TRACE_END', seq: 1 }]))]));
+    session('workflow-abort', path); const controller = new AbortController();
+    await assert.rejects(analyzeSession('workflow-abort', {
+        dataDir: join(dir, 'workflow-abort'), signal: controller.signal,
+        onProgress: event => { if (event.type === 'plugin_start') controller.abort(); },
+    }), /cancelled/);
+    assert.equal(db.get("SELECT status FROM sessions WHERE id='workflow-abort'").status, 'failed');
+    assert.equal(executionBudget.active, 0);
+    await analyzeSession('workflow-abort', { dataDir: join(dir, 'workflow-abort'), selectedPlugins: [] });
+});
+
+test('analysis timeout releases its worker, queue and resource reservation', async () => {
+    const { analyzeSession } = await import('../SessionAnalysis.mjs');
+    const { executionBudget } = await import('../ExecutionBudget.mjs');
+    const { reload } = await import('../Config.mjs');
+    const path = join(dir, 'workflow-timeout.bin');
+    writeFileSync(path, Buffer.concat([Buffer.from(createFileHeader()), Buffer.from(serializeBatch([{ type:'TRACE_END', seq:1 }]))]));
+    session('workflow-timeout', path);
+    process.env.JTA_ANALYSIS_TIMEOUTMS = '1'; reload();
+    try {
+        await assert.rejects(analyzeSession('workflow-timeout', { dataDir: join(dir,'workflow-timeout') }), /timed out/);
+        assert.equal(executionBudget.active, 0);
+        assert.equal(db.get("SELECT status FROM sessions WHERE id='workflow-timeout'").status, 'failed');
+    } finally { delete process.env.JTA_ANALYSIS_TIMEOUTMS; reload(); }
+    await analyzeSession('workflow-timeout', { dataDir: join(dir,'workflow-timeout'), selectedPlugins: [] });
 });

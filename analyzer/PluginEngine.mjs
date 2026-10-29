@@ -83,7 +83,7 @@ function topologicalSort(pluginIds) {
     for (const id of idSet) {
         const PluginClass = pluginRegistry.get(id);
         if (!PluginClass) continue;
-        for (const dep of (PluginClass.deps || [])) {
+        for (const dep of [...(PluginClass.deps || []), ...(PluginClass.observes || [])]) {
             if (!idSet.has(dep)) continue; // Completed prerequisites are checked before execution.
             graph.get(dep).push(id);
             inDegree.set(id, (inDegree.get(id) || 0) + 1);
@@ -231,7 +231,11 @@ export async function schedule(sessionId, options = {}) {
     }
     if (activeSessions.has(sessionId)) throw new Error(`Session ${sessionId} is already running`);
     activeSessions.add(sessionId);
-    try { return await scheduleLocal(sessionId, options); }
+    try {
+        return await scheduleLocal(sessionId, { ...options, onProgress: event => {
+            try { options.onProgress?.(event); } catch (error) { log.warn({ err: error }, 'Progress observer failed'); }
+        } });
+    }
     finally { activeSessions.delete(sessionId); }
 }
 
@@ -252,7 +256,12 @@ async function scheduleLocal(sessionId, options = {}) {
     }
     // Include missing/stale prerequisites recursively, retaining the requested phase API.
     for (let i = 0; i < pluginIds.length; i++) {
-        for (const dep of pluginRegistry.get(pluginIds[i]).deps || []) {
+        const plugin = pluginRegistry.get(pluginIds[i]);
+        for (const dep of plugin.observes || []) {
+            if (db.get('SELECT id FROM plugin_checkpoints WHERE session_id=? AND plugin_id=?', sessionId, dep)
+                && !hasCheckpoint(sessionId, dep) && !pluginIds.includes(dep)) pluginIds.push(dep);
+        }
+        for (const dep of plugin.deps || []) {
             if (!pluginRegistry.has(dep)) throw new Error(`Missing dependency: ${dep}`);
             if (!pluginIds.includes(dep) && !hasCheckpoint(sessionId, dep)) pluginIds.push(dep);
         }
@@ -275,7 +284,7 @@ async function scheduleLocal(sessionId, options = {}) {
     const toRun = [];
     if (skipCompleted) {
         for (const id of pluginIds) {
-            if (hasCheckpoint(sessionId, id)) skipped.push(id);
+            if (!(options.forcePlugins || []).includes(id) && hasCheckpoint(sessionId, id)) skipped.push(id);
             else toRun.push(id);
         }
     } else {
@@ -319,7 +328,7 @@ async function scheduleLocal(sessionId, options = {}) {
         if (typeof onProgress === 'function') {
             onProgress({ type: 'all_done', sessionId, phase: phase || null, skipped, toRun: [] });
         }
-        db.run('UPDATE sessions SET status = ? WHERE id = ?', 'ready', sessionId);
+        db.run('UPDATE sessions SET status = ? WHERE id = ?', options.settleSession === false ? 'indexing' : 'ready', sessionId);
         return;
     }
 
@@ -328,7 +337,8 @@ async function scheduleLocal(sessionId, options = {}) {
     db.run("UPDATE sessions SET status = 'processing' WHERE id = ?", sessionId);
     for (const layer of layers) {
         for (const pluginId of layer.filter(id => toRunSet.has(id))) {
-            const deps = pluginRegistry.get(pluginId).deps || [];
+            const plugin = pluginRegistry.get(pluginId);
+            const deps = [...(plugin.deps || []), ...(plugin.observes || [])];
             if (deps.some(dep => failed.has(dep))) {
                 failed.add(pluginId);
                 updatePluginStatus(sessionId, pluginId, 'blocked');
@@ -337,11 +347,11 @@ async function scheduleLocal(sessionId, options = {}) {
             }
             // Results downstream of a rerun cannot remain fresh.
             markStale(sessionId, downstreamOf(pluginId));
-            try { await runPlugin(sessionId, pluginId, { onProgress, dataDir, phase }); }
+            try { await runPlugin(sessionId, pluginId, { onProgress, dataDir, phase, extraCtx: options.pluginContexts?.[pluginId] }); }
             catch { failed.add(pluginId); }
         }
     }
-    const status = failed.size ? 'failed' : 'ready';
+    const status = failed.size ? 'failed' : options.settleSession === false ? 'indexing' : 'ready';
     db.run('UPDATE sessions SET status = ? WHERE id = ?', status, sessionId);
     onProgress?.({ type: failed.size ? 'schedule_failed' : 'all_done', sessionId, phase: phase || null, skipped, toRun, failed: [...failed] });
     if (failed.size) throw new Error(`Analysis failed: ${[...failed].join(', ')}`);
@@ -381,8 +391,10 @@ async function runPlugin(sessionId, pluginId, options = {}) {
     };
 
     const rollbackHandlers = [];
+    const commitHandlers = [];
     const ctx = {
         onRollback: handler => rollbackHandlers.push(handler),
+        onCommit: handler => commitHandlers.push(handler),
         sessionId,
         db,
         emit,
@@ -408,6 +420,7 @@ async function runPlugin(sessionId, pluginId, options = {}) {
         // 写入检查点（断点恢复）+ summary 持久化
         writeCheckpoint(sessionId, pluginId, phase, duration, lastSummary);
         db.exec('COMMIT');
+        for (const handler of commitHandlers) { try { handler(); } catch (error) { log.warn({ err: error }, 'Post-commit cleanup deferred'); } }
 
         log.info({ sessionId, pluginId, durationMs: duration }, `插件 ${pluginId} 执行完成 (${duration}ms)`);
         emit({ type: 'plugin_done', plugin: pluginId, status: 'done', durationMs: duration, summary: lastSummary });
@@ -439,10 +452,11 @@ async function runPlugin(sessionId, pluginId, options = {}) {
  */
 export async function runSinglePlugin(sessionId, pluginId, options = {}) {
     if (isMainThread && options.worker !== false) return enqueueAnalysis('single', sessionId, { ...options, pluginId });
-    if (!pluginRegistry.has(pluginId)) throw new Error(`Unknown plugin: ${pluginId}`);
-    const dependencies = pluginRegistry.get(pluginId).deps || [];
-    if (dependencies.length) await schedule(sessionId, { ...options, plugins: dependencies, worker: false });
-    return runPlugin(sessionId, pluginId, { ...options, phase: options.phase || 'manual' });
+    return schedule(sessionId, {
+        ...options, plugins: [pluginId], forcePlugins: [pluginId],
+        phase: options.phase || 'manual', worker: false,
+        pluginContexts: { [pluginId]: options.extraCtx ?? {} },
+    });
 }
 
 /**
@@ -478,7 +492,7 @@ function downstreamOf(id) {
     const result = new Set();
     const visit = upstream => {
         for (const [key, cls] of pluginRegistry) {
-            if ((cls.deps || []).includes(upstream) && !result.has(key)) {
+            if ([...(cls.deps || []), ...(cls.observes || [])].includes(upstream) && !result.has(key)) {
                 result.add(key); visit(key);
             }
         }

@@ -1,3 +1,4 @@
+import { executionBudget } from './ExecutionBudget.mjs';
 /**
  * InstrumentRunner.mjs — 服务端插桩代码运行器
  *
@@ -29,20 +30,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const JANI_ROOT = resolve(__dirname, '../');
 const JALANGI_BIN = resolve(JANI_ROOT, 'bin/jalangi.mjs');
 
-/** 最大并发运行数（来自配置） */
-const MAX_CONCURRENCY = () => cfg('runner.maxConcurrency');
-
 /** 单次运行超时（毫秒）（来自配置） */
 const TIMEOUT_MS = () => cfg('runner.timeoutMs');
 
 /** stdout/stderr 最大字节数（来自配置） */
 const MAX_OUTPUT_BYTES = () => cfg('runner.maxOutputBytes');
-
-/** 当前运行中的任务数 */
-let activeCount = 0;
-
-/** 等待队列 */
-const waitQueue = [];
 
 /** WebSocket 客户端注册表：runId → Set<WebSocket> */
 const wsClients = new Map();
@@ -86,29 +78,6 @@ function broadcast(runId, msg) {
 }
 
 /**
- * 获取并发令牌（超过 MAX_CONCURRENCY 时排队等待）
- */
-function acquireSlot() {
-    if (activeCount < MAX_CONCURRENCY()) {
-        activeCount++;
-        return Promise.resolve();
-    }
-    return new Promise(resolve => waitQueue.push(resolve));
-}
-
-/**
- * 释放并发令牌
- */
-function releaseSlot() {
-    if (waitQueue.length > 0) {
-        const next = waitQueue.shift();
-        next();
-    } else {
-        activeCount--;
-    }
-}
-
-/**
  * 创建并启动插桩运行任务
  *
  * @param {object} params
@@ -129,21 +98,23 @@ export function startRun(params) {
     } = params;
 
     validateFilename(filename);
-    if (waitQueue.length >= (cfg('runner.maxQueue') ?? 32)) {
-        const error = new Error('Run queue is full'); error.status = 429; throw error;
-    }
+    const ticket = executionBudget.reserve();
     const runId = uuidv4();
     const now = Date.now();
 
     // 记录到数据库
-    db.run(
-        `INSERT INTO run_tasks (id, created_at, status, code, filename, env)
-         VALUES (?, ?, 'queued', ?, ?, ?)`,
-        runId, now, code, filename, env
-    );
+    try {
+        db.run(
+            `INSERT INTO run_tasks (id, created_at, status, code, filename, env)
+             VALUES (?, ?, 'queued', ?, ?, ?)`,
+            runId, now, code, filename, env
+        );
+    } catch (error) {
+        ticket.release(); throw error;
+    }
 
     // 异步执行（不阻塞返回）
-    executeRun(runId, { code, filename, options, env, dataDir }).catch(e => {
+    executeRun(runId, { code, filename, options, env, dataDir }, ticket).catch(e => {
         log.error({ err: e, runId }, `Run ${runId} 执行异常`);
     });
 
@@ -153,9 +124,9 @@ export function startRun(params) {
 /**
  * 内部执行函数
  */
-async function executeRun(runId, { code, filename, options, env, dataDir }) {
+async function executeRun(runId, { code, filename, options, env, dataDir }, ticket) {
     // 等待并发槽位
-    await acquireSlot();
+    await ticket.ready;
 
     const startTime = Date.now();
     let stdoutBuf = '';
@@ -337,7 +308,7 @@ async function executeRun(runId, { code, filename, options, env, dataDir }) {
         );
         broadcast(runId, { type: 'error', message: e.message });
     } finally {
-        releaseSlot();
+        ticket.release();
         // 清理临时文件（不删除 trace 文件，它已被复制到 data/sessions）
         try {
             rmSync(workDir, { recursive: true, force: true });
@@ -385,13 +356,10 @@ async function createSessionFromRun({ runId, workDir, sourceFile, traceFile, sma
     );
 
     // 异步触发插件（不等待）
-    const { schedule, autoDiscover } = await import('./PluginEngine.mjs');
-    autoDiscover().then(() =>
-        schedule(sessionId, {
-            plugins: ['F1-EventIndex', 'F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer', smapDest ? 'F2-SmapLoader' : null].filter(Boolean),
-            dataDir: sessionDir,
-        })
-    ).catch(e => log.error({ err: e, sessionId }, 'Plugin schedule error'));
+    const { analyzeSession, PHASE2_PLUGINS } = await import('./SessionAnalysis.mjs');
+    analyzeSession(sessionId, {
+        dataDir: sessionDir, hasSmap: !!smapDest, selectedPlugins: PHASE2_PLUGINS,
+    }).catch(e => log.error({ err: e, sessionId }, 'Plugin schedule error'));
 
     return sessionId;
 }

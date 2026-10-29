@@ -1,6 +1,6 @@
 /**
  * I2_SignatureAnalyzer.mjs — 签名 / Token 生成路径还原
- * 依赖：F1-EventIndex（writes/fields 表）、A1-TaintTracker（taint_paths 表）
+ * 依赖：F1-EventIndex（writes/fields/reads 表）
  *
  * 定位签名/Token 相关字段的赋值点，反向追踪计算路径，写入 signature_paths 表。
  *
@@ -21,8 +21,9 @@ const SIGNATURE_FIELDS = [
 ];
 
 export default class I2SignatureAnalyzer extends BasePlugin {
+    static observes = ['F2-SmapLoader'];
     static id = 'I2-SignatureAnalyzer';
-    static deps = ['F1-EventIndex', 'A1-TaintTracker'];
+    static deps = ['F1-EventIndex'];
     static description = '定位签名/Token 字段，反向追踪计算路径，写入 signature_paths 表';
     static displayName = 'I2 · SignatureAnalyzer';
 

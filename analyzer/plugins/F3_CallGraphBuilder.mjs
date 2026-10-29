@@ -19,6 +19,7 @@ import { TYPE } from '../db/EventTypeCode.mjs';
 const BATCH_SIZE = () => cfg('plugins.F3_CallGraphBuilder.batchSize');
 
 export default class F3CallGraphBuilder extends BasePlugin {
+    static observes = ['F2-SmapLoader'];
     static id = 'F3-CallGraphBuilder';
     static deps = ['F1-EventIndex'];
     static description = '配对 CALL_PRE/CALL 事件，重建调用图，写入 call_edges 表';

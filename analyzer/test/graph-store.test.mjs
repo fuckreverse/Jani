@@ -217,3 +217,109 @@ test('page reads and exact-variable filters prune irrelevant shards using the ca
         assert.equal(exact.metrics.shardsOpened,1);
     }finally{exact.close();}
 });
+
+test('retired generations are reclaimed only after the last reader releases its snapshot', () => {
+    session('gc-pinned');
+    const old = writer('gc-pinned'); old.add(edge(1,2)); old.publish();
+    const first = new GraphReader('gc-pinned'), second = new GraphReader('gc-pinned');
+    const next = writer('gc-pinned'); next.add(edge(1,3)); next.publish();
+    assert.equal(existsSync(old.path), true);
+    assert.equal(first.list().edges[0].to_event_id, 2);
+    first.close(); assert.equal(existsSync(old.path), true);
+    second.close(); assert.equal(existsSync(old.path), false);
+    assert.equal(withGraph('gc-pinned', reader => reader.list().edges[0].to_event_id), 3);
+    assert.equal(existsSync(next.path), true);
+});
+
+test('forced worker termination cleans unpublished files and leases while preserving the committed graph', async () => {
+    const { Worker } = await import('worker_threads');
+    const { once } = await import('events');
+    const { collectGraphGenerations } = await import('../GraphStore.mjs');
+    session('gc-killed');
+    const previous = writer('gc-killed'); previous.add(edge(1,2)); previous.publish();
+    const owner = 'test-terminated-worker';
+    const worker = new Worker(`
+        const { workerData, parentPort } = await import('worker_threads');
+        const db = await import(workerData.dbModule);
+        const { GraphWriter, GraphReader } = await import(workerData.graphModule);
+        await db.init(workerData.dbPath);
+        const reader = new GraphReader(workerData.sessionId);
+        db.exec('BEGIN IMMEDIATE');
+        const writer = new GraphWriter(workerData.sessionId, { dataDir: workerData.dataDir });
+        writer.add({ from_event_id: 1, to_event_id: 99, edge_type: 'assign' }); writer.publish();
+        // Termination may interrupt a lifecycle critical section in this same PID.
+        const { mkdirSync, writeFileSync } = await import('fs');
+        const { dirname, join } = await import('path');
+        const lock = join(dirname(workerData.dbPath), '.graph-lifecycle.lock');
+        mkdirSync(lock);
+        writeFileSync(join(lock,'owner.json'), JSON.stringify({ pid:process.pid, graphOwner:workerData.graphOwner }));
+        parentPort.postMessage({ path: writer.path });
+        setInterval(() => {}, 1000);
+    `, { eval: true, type: 'module', workerData: {
+        graphOwner: owner, sessionId: 'gc-killed', dbPath: db.raw().name,
+        dbModule: new URL('../db/Database.mjs', import.meta.url).href,
+        graphModule: new URL('../GraphStore.mjs', import.meta.url).href,
+        dataDir: join(directory, 'gc-killed'),
+    } });
+    let orphan;
+    try {
+        [orphan] = await once(worker, 'message');
+        assert.equal(existsSync(orphan.path), true);
+    } finally { await worker.terminate(); }
+    collectGraphGenerations('gc-killed', { dataDir: join(directory, 'gc-killed'), finishedOwner: owner });
+    assert.equal(existsSync(orphan.path), false);
+    assert.equal(readdirSync(previous.path).some(name => name.startsWith('.reader-')), false);
+    assert.equal(withGraph('gc-killed', reader => reader.list().edges[0].to_event_id), 2);
+});
+
+test('recovery reclaims abandoned and legacy generations but preserves live unfinished writers', async () => {
+    const { writeFileSync } = await import('fs');
+    const { collectGraphGenerations } = await import('../GraphStore.mjs');
+    session('gc-recovery');
+    const old = writer('gc-recovery'); old.add(edge(1,2)); old.publish();
+    const pinned = new GraphReader('gc-recovery');
+    const current = writer('gc-recovery'); current.add(edge(1,3)); current.publish();
+    const orphan = writer('gc-recovery');
+    collectGraphGenerations('gc-recovery', { dataDir: join(directory,'gc-recovery') });
+    assert.equal(existsSync(orphan.path), true);
+    // Simulate an interrupted process's owner record and an older on-disk format.
+    orphan.catalog.close(); orphan.catalog = null;
+    writeFileSync(join(orphan.path,'.generation.json'), JSON.stringify({ sessionId:'gc-recovery', pid:2147483647, released:false }));
+    rmSync(join(old.path,'.generation.json'), { force:true });
+    pinned.close();
+    assert.equal(existsSync(old.path), false);
+    collectGraphGenerations('gc-recovery', { dataDir: join(directory,'gc-recovery') });
+    assert.equal(existsSync(orphan.path), false);
+    assert.equal(existsSync(current.path), true);
+});
+
+test('a reader in another worker keeps its generation alive through publication and reclamation', async () => {
+    const { Worker } = await import('worker_threads');
+    const { once } = await import('events');
+    session('gc-other-reader');
+    const old = writer('gc-other-reader'); old.add(edge(1,2)); old.publish();
+    const worker = new Worker(`
+        const { workerData, parentPort } = await import('worker_threads');
+        const db = await import(workerData.dbModule);
+        const { GraphReader } = await import(workerData.graphModule);
+        await db.init(workerData.dbPath);
+        const reader = new GraphReader('gc-other-reader');
+        parentPort.postMessage('pinned');
+        parentPort.once('message', () => {
+            const target = reader.list().edges[0].to_event_id;
+            reader.close(); db.close(); parentPort.postMessage(target); parentPort.close();
+        });
+    `, { eval:true, type:'module', workerData: {
+        dbPath:db.raw().name, dbModule:new URL('../db/Database.mjs',import.meta.url).href,
+        graphModule:new URL('../GraphStore.mjs',import.meta.url).href,
+    } });
+    try {
+        await once(worker,'message');
+        const next = writer('gc-other-reader'); next.add(edge(1,3)); next.publish();
+        assert.equal(existsSync(old.path),true);
+        const response = once(worker,'message'); worker.postMessage('read');
+        assert.deepEqual(await response,[2]);
+        assert.equal(existsSync(old.path),false);
+        assert.equal(withGraph('gc-other-reader',reader=>reader.list().edges[0].to_event_id),3);
+    } finally { await worker.terminate(); }
+});

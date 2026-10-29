@@ -390,3 +390,10 @@ npm run test:logging
 `analyzer/test/graph-store.test.mjs` 验证跨文件邻接、分页、快照、回滚、兼容 API 及小堆预算构图。
 `LOG_LEVEL=error node --max-old-space-size=48 analyzer/benchmark-graph.mjs 1000000`
 可独立复现百万边磁盘构图，不混入 F1 导入的内存占用。
+
+### 接入前执行流程回归
+
+`npm test --prefix analyzer` 覆盖完整四阶段 worker 流程、源码映射、重复任务拒绝、失败/取消/超时后恢复，
+单插件重跑与可选输入的检查点失效，以及混合任务的共享执行预算。
+图存储回归另外验证旧 reader 保留快照、最后一个 reader 关闭后回收、强制终止 worker 后清理未发布文件与租约。
+测试在关闭数据库前等待分析队列结束，避免以中间的会话状态代替后台任务真正完成。

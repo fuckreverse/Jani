@@ -1,3 +1,5 @@
+import { drainAnalysis } from './AnalysisQueue.mjs';
+import { collectGraphGenerations } from './GraphStore.mjs';
 /**
  * server.mjs — JTA Express 服务入口
  *
@@ -139,6 +141,10 @@ db.run("UPDATE run_tasks SET status = 'failed', error_msg = 'Server restarted du
 
 // 自动发现并注册插件
 await autoDiscover();
+for (const session of db.all('SELECT id FROM sessions')) {
+    try { collectGraphGenerations(session.id, { dataDir: resolve(SESSIONS_DIR, session.id) }); }
+    catch (error) { log.warn({ err: error, sessionId: session.id }, 'Graph cleanup deferred'); }
+}
 
 // ── Express 应用 ─────────────────────────────────────────────────────────────
 
@@ -261,7 +267,7 @@ function validateTraceFilename(name) {
 app.get('/api/plugins', async (req, res) => {
     try {
         await autoDiscover();
-        const { PHASE2_PLUGINS, PHASE3_PLUGINS, PHASE4_PLUGINS } = await import('./routes/sessions/core.mjs');
+        const { PHASE2_PLUGINS, PHASE3_PLUGINS, PHASE4_PLUGINS } = await import('./SessionAnalysis.mjs');
         const all = listPlugins();
         const byId = Object.fromEntries(all.map(p => [p.id, p]));
 
@@ -740,14 +746,16 @@ server.listen(PORT, cfg('server.host') ?? '127.0.0.1', () => {
 
 // 优雅退出
 process.on('SIGTERM', () => {
-    server.close(() => {
+    server.close(async () => {
+        await drainAnalysis();
         db.close();
         process.exit(0);
     });
 });
 
 process.on('SIGINT', () => {
-    server.close(() => {
+    server.close(async () => {
+        await drainAnalysis();
         db.close();
         process.exit(0);
     });

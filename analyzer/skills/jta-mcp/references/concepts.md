@@ -67,32 +67,20 @@ Use `get_event_types(sessionId)` to see all types present + their counts in a sp
 
 ## 3. Plugin Execution Order
 
-Plugins run in 4 phases. Later phases depend on earlier ones.
+Plugins run as one background workflow, with sequential phases. `all_done` is a per-phase progress event, not permission to start another job for the same session.
 
 ```
-Phase 1 (synchronous, runs on session creation):
-  F1_EventIndex       — indexes all events into SQLite; enables all event queries
-
-Phase 2 (background, auto-scheduled after Phase 1):
-  F2_SmapLoader       — loads source map; enables line↔iid mapping + srcText fields
-  F3_CallGraphBuilder — builds call_edges table; enables function analysis
-  F4_VariableLifetime — lifetime analysis for variable reads/writes
-
-Phase 3 (background, after Phase 2):
-  A1_TaintTracker     — taint propagation (enables trace_taint)
-  A2_DataFlowGraph    — dataflow edges (enables get_dataflow*)
-  A3_HotPathAnalyzer  — iid execution counts (enables get_hot_paths, get_cfg)
-  A5_LoopDetector     — loop detection (enables get_loop_detail)
-  A7_ObjectMutationTracker — property timelines (enables get_object_timelines)
-  A8_ValuePatternDetector  — pattern detection (enables get_value_patterns)
-
-Phase 4 (background, after Phase 3):
-  I1_CryptoDetector   — crypto pattern detection (enables detect_crypto)
-  I2_SignatureAnalyzer
-  I3_ObfuscationDetector
-  I4_AlgorithmSummarizer — full report (enables analyze_signature)
-  I5_WebApiDetector   — Web API detection (enables get_web_api_calls)
+Phase 1: F1-EventIndex, F2-SmapLoader (when smap is available)
+Phase 2: F3-CallGraphBuilder, F4-VariableLifetime, A3-HotPathAnalyzer
+Phase 3: A5-LoopDetector, A8-ValuePatternDetector, I1-CryptoDetector, I2-SignatureAnalyzer
+Phase 4: A2-DataFlowGraph, A7-ObjectMutationTracker, I3-ObfuscationDetector,
+         I4-AlgorithmSummarizer, I5-WebApiDetector
 ```
+
+`selectedPlugins` controls phases 2–4; phase 1 is required. A1-TaintTracker runs on demand through `trace_taint`, with a source and direction. I2 traces reads/writes itself and does not require A1.
+A6-LoopVarClassifier is available on demand and depends on A5.
+Single-plugin reruns use the same dependency/checkpoint lifecycle as batch jobs. Optional inputs invalidate consumers when changed, without forcing absent analyses to run.
+Preprocessing, instrumentation, execution and analysis share the configured execution budget; overload may reject work. Retry after the current work has settled.
 
 **If a tool returns empty results**, check `get_session_checkpoints(sessionId)` — the required plugin may not have run yet. Trigger manually with `run_plugin(sessionId, { plugins: ["PluginId"] })`.
 

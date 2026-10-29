@@ -298,6 +298,7 @@ for (const rule of HOST_RULES) {
 // 配置项在 run() 入口处一次性捕获
 
 export default class I5WebApiDetector extends BasePlugin {
+    static observes = ['F2-SmapLoader'];
     static id = 'I5-WebApiDetector';
     static deps = ['F1-EventIndex', 'F3-CallGraphBuilder'];
     static description = '检测运行时对 BOM/DOM 宿主对象（document/window/navigator 等）的属性访问与方法调用，写入 web_api_calls 表';

@@ -1,3 +1,4 @@
+import { analyzeSession } from '../SessionAnalysis.mjs';
 /**
  * routes/sessions.mjs — 分析会话 REST API（入口，组合子路由）
  *
@@ -14,10 +15,10 @@ import coreRouter     from './sessions/core.mjs';
 import eventsRouter   from './sessions/events.mjs';
 import fnRouter       from './sessions/functions.mjs';
 import analysisRouter from './sessions/analysis.mjs';
-import { DATA_DIR, _schedulePhase2, PHASE1_PLUGINS } from './sessions/core.mjs';
+import { DATA_DIR } from './sessions/core.mjs';
 
 // 重新导出供 server.mjs 内部调用（/api/trace/import）
-export { DATA_DIR, _schedulePhase2 };
+export { DATA_DIR };
 
 const router = Router();
 
@@ -62,7 +63,6 @@ export async function createSession({
     wsProgressBroadcast = null,
     selectedPlugins = null,   // null 表示运行所有 Phase 2 插件（默认）
 }) {
-    const { PHASE2_PLUGINS, PHASE3_PLUGINS, PHASE4_PLUGINS } = await import('./sessions/core.mjs');
 
     const sessionId  = uuid();
     const sessionDir = resolve(DATA_DIR, sessionId);
@@ -93,32 +93,10 @@ export async function createSession({
         sessionId, sessionName, now, sourceDest, binDest, smapDest, projectId
     );
 
-    const phase1Plugins = [...PHASE1_PLUGINS];
-    if (smapDest) phase1Plugins.push('F2-SmapLoader');
-
-    // 过滤 selectedPlugins：null 表示运行所有；否则只运行在 selectedPlugins 中指定的插件
-    const filterBySelection = (plugins) =>
-        selectedPlugins === null ? plugins : plugins.filter(id => selectedPlugins.includes(id));
-
-    const phase2Selected = filterBySelection(PHASE2_PLUGINS);
-    const phase3Selected = filterBySelection(PHASE3_PLUGINS);
-    const phase4Selected = filterBySelection(PHASE4_PLUGINS);
-
-    autoDiscover().then(() =>
-        schedule(sessionId, {
-            plugins: phase1Plugins,
-            dataDir: sessionDir,
-            phase: 'phase1',
-            skipCompleted: true,
-            onProgress: (evt) => {
-                wsProgressBroadcast?.(sessionId, evt);
-                if (evt.type === 'all_done' && evt.phase === 'phase1') {
-                    _schedulePhase2(sessionId, sessionDir, wsProgressBroadcast, !!smapDest,
-                        phase2Selected, phase3Selected, phase4Selected);
-                }
-            },
-        })
-    ).catch(e => {
+    analyzeSession(sessionId, {
+        dataDir: sessionDir, hasSmap: !!smapDest, selectedPlugins,
+        onProgress: evt => wsProgressBroadcast?.(sessionId, evt),
+    }).catch(e => {
         log.error({ err: e }, '[createSession] plugin schedule error:');
         db.run("UPDATE sessions SET status = 'failed' WHERE id = ?", sessionId);
         wsProgressBroadcast?.(sessionId, { type: 'error', sessionId, message: e.message });

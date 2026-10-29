@@ -25,7 +25,7 @@
       → confirms pluginStatus, smapAvailable, eventCount
 
 4. [If plugins still running] wait, then re-check get_session or get_plugin_stats
-      → Phase1 (F1) is instant; Phase2–4 run in background (~seconds to minutes)
+      → Phase1 (F1 + optional F2) and selected Phase2–4 run sequentially in one background job; wait for session ready
 
 5. Start analysis → go to SOP-2 / SOP-3 / SOP-4 based on user goal
 ```

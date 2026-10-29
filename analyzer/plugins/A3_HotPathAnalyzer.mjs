@@ -185,6 +185,7 @@ function computeOwnRanges(frameStart, frameEnd, directChildren) {
 }
 
 export default class A3HotPathAnalyzer extends BasePlugin {
+    static observes = ['F2-SmapLoader'];
     static id = 'A3-HotPathAnalyzer';
     static deps = ['F1-EventIndex'];
     static description = '统计各 iid 执行次数，检测循环（v3：函数边界感知 + 自适应阈值 + 嵌套识别），写入 iid_counts/loops 表';

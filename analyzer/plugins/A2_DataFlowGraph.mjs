@@ -10,6 +10,7 @@ import Database from 'better-sqlite3';
 
 const SKIP = new Set(['callee','callee_def_iid','return','arg0','arg1','arg2','arg3','arg4','arg5','arg6','arg7']);
 export default class A2DataFlowGraph extends BasePlugin {
+    static observes = ['F2-SmapLoader'];
     static id = 'A2-DataFlowGraph';
     static deps = ['F1-EventIndex'];
     static description = '流式构建数据流图，按边数写入独立磁盘分片';
@@ -26,6 +27,7 @@ export default class A2DataFlowGraph extends BasePlugin {
         const writer = new GraphWriter(sessionId, { dataDir: ctx.dataDir });
         // If a later checkpoint write fails, the scheduler removes unpublished files.
         ctx.onRollback?.(() => writer.abort());
+        ctx.onCommit?.(() => writer.release());
         const byBinding = raw.prepare(`SELECT event_id FROM writes WHERE session_id=? AND name=?
             AND binding_id=? AND event_id<? ORDER BY event_id DESC,id DESC LIMIT 1`);
         const byScope = raw.prepare(`SELECT event_id FROM writes WHERE session_id=? AND name=?
@@ -99,7 +101,7 @@ export default class A2DataFlowGraph extends BasePlugin {
             main.prepare('DELETE FROM dataflow_edges WHERE session_id=?').run(sessionId);
             this.emitProgress(ctx,`完成，共 ${summary.edgeCount} 条边 / ${summary.shardCount} 个磁盘分片`,100);
             this.emitDone(ctx,summary);
-            if (ownTransaction) main.exec('COMMIT');
+            if (ownTransaction) { main.exec('COMMIT'); writer.release(); }
         } catch (error) {
             if (ownTransaction && main.inTransaction) main.exec('ROLLBACK');
             writer.abort(); throw error;

@@ -3,8 +3,10 @@
  * maps event/variable adjacency to shards, including edges crossing event ranges.
  */
 import Database from 'better-sqlite3';
-import { mkdirSync, rmSync } from 'fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, statSync } from 'fs';
+import { workerData } from 'worker_threads';
 import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { randomUUID, createHash } from 'crypto';
 import * as db from './db/Database.mjs';
 import { cfg } from './Config.mjs';
@@ -50,15 +52,91 @@ function boundedLimit(limit = 200) {
     catch (error) { error.status=400; throw error; }
 }
 
+function processAlive(pid) {
+    if (!Number.isInteger(pid) || pid < 1) return false;
+    try { process.kill(pid, 0); return true; } catch (error) { return error.code !== 'ESRCH'; }
+}
+function readJson(path) {
+    try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }
+}
+function graphBase(sessionId, dataDir) {
+    return dataDir ?? resolve(dirname(db.raw().name), 'sessions', createHash('sha256').update(sessionId).digest('hex'));
+}
+function abandonedLock(path, owner, finishedOwner) {
+    if (owner) return !processAlive(owner.pid) || (finishedOwner && owner.graphOwner === finishedOwner);
+    // An interrupted creator may have made the directory before writing its owner.
+    try { return Date.now() - statSync(path).mtimeMs > 30000; }
+    catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+}
+// A short filesystem critical section protects manifest acquisition + reader leases
+// against reclamation, without taking SQLite's writer lock from WAL readers.
+function lifecycleLock(callback, finishedOwner) {
+    const path = resolve(dirname(db.raw().name), '.graph-lifecycle.lock');
+    const deadline = Date.now() + 5000;
+    while (true) {
+        try { mkdirSync(path); break; }
+        catch (error) {
+            if (error.code !== 'EEXIST') throw error;
+            if (!existsSync(path)) continue;
+            const owner = readJson(resolve(path, 'owner.json'));
+            if (!existsSync(path)) continue;
+            if (abandonedLock(path, owner, finishedOwner)) {
+                rmSync(path, { recursive: true, force: true }); continue;
+            }
+            if (Date.now() >= deadline) throw new Error('Graph lifecycle is busy');
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+        }
+    }
+    try { writeFileSync(resolve(path, 'owner.json'), JSON.stringify({ pid: process.pid, graphOwner: workerData?.graphOwner })); return callback(); }
+    finally { rmSync(path, { recursive: true, force: true }); }
+}
+
+// Call only after the owning transaction has settled / worker has exited.
+export function collectGraphGenerations(sessionId, { dataDir, finishedOwner } = {}) {
+    if (db.raw().inTransaction) return;
+    return lifecycleLock(() => {
+        const current = db.get('SELECT root_path FROM dataflow_graphs WHERE session_id=?', sessionId)?.root_path;
+        const roots = new Set([resolve(graphBase(sessionId, dataDir), 'dataflow'),
+            resolve(fileURLToPath(new URL('./data/sessions/', import.meta.url)), sessionId, 'dataflow')]);
+        if (current) roots.add(dirname(current));
+        for (const root of roots) {
+            if (!existsSync(root)) continue;
+            for (const entry of readdirSync(root, { withFileTypes: true })) {
+                if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/.test(entry.name)) continue;
+                const path = resolve(root, entry.name), metaPath = resolve(path, '.generation.json');
+                const meta = readJson(metaPath) ?? (existsSync(resolve(path, 'catalog.sqlite'))
+                    ? { sessionId, released: true } : null);
+                if (!meta || meta.sessionId !== sessionId) continue;
+                if ((finishedOwner && meta.owner === finishedOwner) || (meta.pid && !processAlive(meta.pid))) {
+                    meta.released = true; writeFileSync(metaPath, JSON.stringify(meta));
+                }
+                let pinned = false;
+                for (const name of readdirSync(path).filter(name => name.startsWith('.reader-'))) {
+                    const lease = readJson(resolve(path, name));
+                    if (!lease || (processAlive(lease.pid) && !(finishedOwner && lease.owner === finishedOwner))) pinned = true;
+                    else rmSync(resolve(path, name), { force: true });
+                }
+                if (path !== current && meta.released && !pinned) rmSync(path, { recursive: true, force: true });
+            }
+        }
+    }, finishedOwner);
+}
+
 export class GraphWriter {
     constructor(sessionId, { dataDir, shardEdgeLimit, batchSize } = {}) {
         this.sessionId = sessionId;
         this.shardEdgeLimit = positive(shardEdgeLimit, cfg('graph.shardEdgeLimit') ?? 100000);
         this.batchSize = Math.min(positive(batchSize, cfg('graph.batchSize') ?? 1000), this.shardEdgeLimit);
-        const base = dataDir ?? resolve(dirname(db.raw().name), 'sessions', createHash('sha256').update(sessionId).digest('hex'));
+        const base = graphBase(sessionId, dataDir);
         this.generation = randomUUID();
         this.path = resolve(base, 'dataflow', this.generation);
-        mkdirSync(this.path, { recursive: true });
+        this.owner = workerData?.graphOwner ?? randomUUID();
+        lifecycleLock(() => {
+            mkdirSync(this.path, { recursive: true });
+            writeFileSync(resolve(this.path, '.generation.json'), JSON.stringify({
+                sessionId, pid: process.pid, owner: this.owner, released: false,
+            }));
+        });
         this.catalog = new Database(resolve(this.path, 'catalog.sqlite'));
         configure(this.catalog, true);
         this.catalog.exec(`CREATE TABLE shards(id INTEGER PRIMARY KEY, edge_count INTEGER, first_id INTEGER, last_id INTEGER);
@@ -135,7 +213,12 @@ export class GraphWriter {
             shard_count=excluded.shard_count,version=excluded.version,created_at=excluded.created_at`,
         this.sessionId,this.generation,this.path,this.count,this.shardCount,GRAPH_STORE_VERSION,Date.now());
         this.published = true;
+        if (!db.raw().inTransaction) this.release();
         return { edgeCount: this.count, shardCount: this.shardCount, storage: 'disk-sharded', ...this.metrics };
+    }
+    release() {
+        try { collectGraphGenerations(this.sessionId, { dataDir: dirname(dirname(this.path)), finishedOwner: this.owner }); }
+        catch (error) { console.warn(`[GraphStore] Committed graph cleanup deferred for ${this.sessionId}: ${error.message}`); }
     }
     abort() {
         if (this.shard?.open) this.shard.close();
@@ -148,14 +231,22 @@ export class GraphWriter {
 export class GraphReader {
     constructor(sessionId, { maxOpenShards } = {}) {
         this.sessionId = sessionId;
-        this.manifest = db.get('SELECT * FROM dataflow_graphs WHERE session_id=?',sessionId);
         this.handles = new Map();
         this.maxOpenShards = Math.min(positive(maxOpenShards, cfg('graph.maxOpenShards') ?? 4), 32);
         this.metrics = { shardsOpened: 0, maxOpenShards: 0, truncated: false };
+        lifecycleLock(() => {
+            this.manifest = db.get('SELECT * FROM dataflow_graphs WHERE session_id=?',sessionId);
+            if (this.manifest) {
+                this.lease = resolve(this.manifest.root_path, `.reader-${randomUUID()}`);
+                writeFileSync(this.lease, JSON.stringify({ pid: process.pid, owner: workerData?.graphOwner }));
+            }
+        });
         if (this.manifest) {
-            if (this.manifest.version !== GRAPH_STORE_VERSION) throw new Error('Unsupported graph store version');
-            this.catalog = new Database(resolve(this.manifest.root_path,'catalog.sqlite'), { readonly: true, fileMustExist: true });
-            configure(this.catalog);
+            try {
+                if (this.manifest.version !== GRAPH_STORE_VERSION) throw new Error('Unsupported graph store version');
+                this.catalog = new Database(resolve(this.manifest.root_path,'catalog.sqlite'), { readonly: true, fileMustExist: true });
+                configure(this.catalog);
+            } catch (error) { this.close(); throw error; }
         }
     }
     shard(id) {
@@ -233,6 +324,11 @@ export class GraphReader {
     close() {
         for (const connection of this.handles.values()) connection.close();
         this.handles.clear(); this.catalog?.close(); this.catalog = null;
+        if (this.lease) {
+            rmSync(this.lease, { force: true }); this.lease = null;
+            try { collectGraphGenerations(this.sessionId, { dataDir: dirname(dirname(this.manifest.root_path)) }); }
+            catch (error) { console.warn(`[GraphStore] Retired graph cleanup deferred for ${this.sessionId}: ${error.message}`); }
+        }
     }
 }
 

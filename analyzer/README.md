@@ -323,3 +323,11 @@ analyzer/
 A2 已使用独立 SQLite 分片和目录邻接索引，流式构图、按需读取，不再载入整个会话的图索引。
 旧会话重跑 A2 即可迁移，现有数据流 API/MCP 工具保持兼容。
 配置、磁盘布局、失败恢复和百万边测试见 [Disk-Sharded-Graph.md](docs/Disk-Sharded-Graph.md)。
+
+### 分析执行与资源预算
+
+会话创建后的自动分析由 `SessionAnalysis.mjs` 统一编排，同一会话的完整流程只占一个分析任务；
+请等待任务完成再手动重跑。单插件与批量分析共用检查点及下游失效规则。
+`runner.maxConcurrency` / `runner.maxQueue` 是预处理、插桩、源码运行和分析共用的活动/等待上限，
+不再分别给每种执行器一份额度；分析同时受 `analysis.maxQueue` 会话队列限制。
+图重建会保留正在被 reader 使用的旧代，并在释放后回收；超时、取消和启动恢复也会清理无引用文件。

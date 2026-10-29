@@ -2,16 +2,10 @@ import { spawn } from 'child_process';
 import { cfg } from './Config.mjs';
 import { executionEnv, killProcessTree } from './ExecutionPolicy.mjs';
 
-let instrumentActive = 0;
-const instrumentWaiting = [];
-export async function runProcess(cmd, args, opts = {}) {
-    if (instrumentWaiting.length >= (cfg('runner.maxQueue') ?? 32)) {
-        const error = new Error('Instrumentation queue is full'); error.status = 429; throw error;
-    }
-    if (instrumentActive >= cfg('runner.maxConcurrency')) await new Promise(resolve => instrumentWaiting.push(resolve));
-    else instrumentActive++;
-    try { return await runProcessImpl(cmd, args, opts); }
-    finally { if (instrumentWaiting.length) instrumentWaiting.shift()(); else instrumentActive--; }
+import { executionBudget } from './ExecutionBudget.mjs';
+
+export function runProcess(cmd, args, opts = {}) {
+    return executionBudget.run(() => runProcessImpl(cmd, args, opts));
 }
 function runProcessImpl(cmd, args, opts = {}) {
     return new Promise((resolve) => {

@@ -6,6 +6,8 @@
  *   ctx.sessionId  {string}   当前会话 ID
  *   ctx.db         {object}   Database 模块（get/all/run/transaction/raw）
  *   ctx.emit       {Function} 进度事件回调 (event: object) => void
+ *   ctx.onCommit  {Function} 注册提交后的资源释放回调
+ *   ctx.onRollback {Function} 注册回滚清理回调
  *   ctx.dataDir    {string}   会话数据目录路径
  */
 
@@ -21,6 +23,9 @@ export default class BasePlugin {
      * @type {string[]}
      */
     static deps = [];
+
+    /** Optional inputs: invalidate on change; rebuild only if previously produced. */
+    static observes = [];
 
     /**
      * 插件描述

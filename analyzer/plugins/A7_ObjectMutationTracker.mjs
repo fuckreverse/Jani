@@ -18,6 +18,7 @@ import * as db from '../db/Database.mjs';
 import { cfg } from '../Config.mjs';
 
 export default class A7ObjectMutationTracker extends BasePlugin {
+    static observes = ['F2-SmapLoader'];
     static id = 'A7-ObjectMutationTracker';
     static deps = ['F1-EventIndex'];
     static description = '按 (base_oid, offset) 重建对象属性变化时间线，写入 object_timelines 表';

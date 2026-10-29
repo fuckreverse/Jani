@@ -520,6 +520,7 @@ import * as db from '../db/Database.mjs';
 import { cfg } from '../Config.mjs';
 
 export default class I1CryptoDetector extends BasePlugin {
+    static observes = ['F2-SmapLoader'];
     static id = 'I1-CryptoDetector';
     static deps = ['A3-HotPathAnalyzer', 'A8-ValuePatternDetector'];
     static description = '两路检测：①魔术常数特征（MD5/SHA1/SHA256/SHA512/SHA3/AES/RC4/DES/3DES/Blowfish/ChaCha20/RIPEMD-160/CRC32/CRC16/Tiger/Whirlpool/MurmurHash3/FNV/xxHash/Adler32 等）② 库调用特征（Web Crypto API/Node.js crypto/CryptoJS/forge/sjcl/jsrsasign/TweetNaCl/bcrypt.js/jsonwebtoken/elliptic/OpenPGP.js/@noble/argon2 等）';

@@ -444,6 +444,7 @@ function detectConstant(value) {
 }
 
 export default class A8ValuePatternDetector extends BasePlugin {
+    static observes = ['F2-SmapLoader'];
     static id = 'A8-ValuePatternDetector';
     static deps = ['F1-EventIndex'];
     static description = '检测高频魔术常数和密码学特征值，写入 value_patterns 表';

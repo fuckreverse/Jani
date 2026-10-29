@@ -135,7 +135,7 @@ POST /api/sessions/:id/re-run
     重新运行分析插件（支持断点续跑或强制重跑）
     body: { forceRerun?: boolean, phase?: 'phase1'|'phase2'|'phase3'|'phase4', plugins?: string[] }
     说明：
-      - forceRerun=true 时清除检查点后全量重跑
+      - forceRerun=true 时在队列任务内重跑目标插件并使下游检查点失效；失败保留上次已提交结果
       - forceRerun=false（默认）时跳过已完成的插件（断点续跑）
       - 也可传 plugins 数组指定具体插件 ID 列表
     返回：{ status: 'scheduled', plugins, phase, forceRerun }
@@ -601,3 +601,6 @@ direction（forward/backward）。MCP trace_taint 映射至此 POST，返回 pat
 子图严格执行 maxNodes/邻接数量上限；发生截断时 stats.truncated=true，hops=0 只返回种子节点。
 负数/非整数限制和非法方向返回 400；已发布文件缺失或损坏返回服务错误。
 通过已有 re-run 接口运行 A2-DataFlowGraph 可迁移旧会话，详见 [Disk-Sharded-Graph.md](Disk-Sharded-Graph.md)。
+
+自动分析由单个后台任务顺序执行各阶段。`all_done` 只表示当前阶段完成；会话 `ready` 在 worker 退出和文件清理完成后由队列发布。
+预处理、插桩、运行及分析共用整体活动预算 `runner.maxConcurrency`；整体等待预算为 `runner.maxQueue`，分析另外受 `analysis.maxQueue` 限制。

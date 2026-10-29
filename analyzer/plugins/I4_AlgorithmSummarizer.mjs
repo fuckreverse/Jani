@@ -11,6 +11,8 @@ import { withGraph } from '../GraphStore.mjs';
 
 export default class I4AlgorithmSummarizer extends BasePlugin {
     static id = 'I4-AlgorithmSummarizer';
+    static observes = ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A5-LoopDetector',
+        'A7-ObjectMutationTracker', 'A2-DataFlowGraph', 'I1-CryptoDetector'];
     static deps = [
         'A3-HotPathAnalyzer',
         'I3-ObfuscationDetector',
