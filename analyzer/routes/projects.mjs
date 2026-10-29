@@ -20,7 +20,8 @@ import { resolve, basename, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
 import { v4 as uuidv4 } from 'uuid';
-import { spawn } from 'child_process';
+import { runProcess as _spawnProcess } from '../ProcessRunner.mjs';
+import { validateFilename } from '../ExecutionPolicy.mjs';
 import * as db from '../db/Database.mjs';
 import { schedule, autoDiscover } from '../PluginEngine.mjs';
 
@@ -56,7 +57,7 @@ router.post('/', async (req, res) => {
         mkdirSync(projectDir, { recursive: true });
 
         // 保存原始文件
-        const originalName = file.originalname || 'script.js';
+        const originalName = validateFilename(file.originalname || 'script.js');
         const sourceDest   = resolve(projectDir, originalName);
         copyFileSync(file.path, sourceDest);
 
@@ -110,7 +111,7 @@ router.post('/', async (req, res) => {
 
     } catch (e) {
         log.error({ err: e }, '[POST /api/projects] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -126,7 +127,7 @@ router.get('/', (req, res) => {
         return res.json(rows);
     } catch (e) {
         log.error({ err: e }, '[GET /api/projects] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -169,7 +170,7 @@ router.get('/:id', (req, res) => {
         });
     } catch (e) {
         log.error({ err: e }, '[GET /api/projects/:id] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -242,7 +243,7 @@ router.post('/:id/fork', async (req, res) => {
 
     } catch (e) {
         log.error({ err: e }, '[POST /api/projects/:id/fork] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -269,7 +270,7 @@ router.delete('/:id', (req, res) => {
         return res.json({ deleted: true });
     } catch (e) {
         log.error({ err: e }, '[DELETE /api/projects/:id] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -298,7 +299,7 @@ router.post('/:id/sessions', async (req, res) => {
         mkdirSync(sessionDir, { recursive: true });
 
         // 复制 bin 文件
-        const binDest = resolve(sessionDir, binFile.originalname || 'trace.bin');
+        const binDest = resolve(sessionDir, validateFilename(binFile.originalname || 'trace.bin'));
         copyFileSync(binFile.path, binDest);
 
         // 复制项目的 smap
@@ -379,7 +380,7 @@ router.post('/:id/sessions', async (req, res) => {
 
     } catch (e) {
         log.error({ err: e }, '[POST /api/projects/:id/sessions] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -403,7 +404,7 @@ router.get('/:id/sessions', (req, res) => {
         })));
     } catch (e) {
         log.error({ err: e }, '[GET /api/projects/:id/sessions] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -423,7 +424,7 @@ router.get('/:id/source', (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename="${basename(project.source_file)}"`);
         res.send(readFileSync(project.source_file, 'utf8'));
     } catch (e) {
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -443,7 +444,7 @@ router.get('/:id/instrumented', (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename="${basename(project.instrumented_path)}"`);
         res.send(readFileSync(project.instrumented_path, 'utf8'));
     } catch (e) {
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -463,7 +464,7 @@ router.get('/:id/preprocessed', (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename="${basename(project.preprocessed_path)}"`);
         res.send(readFileSync(project.preprocessed_path, 'utf8'));
     } catch (e) {
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -483,7 +484,7 @@ router.get('/:id/smap', (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename="${basename(project.smap_path)}"`);
         res.send(readFileSync(project.smap_path, 'utf8'));
     } catch (e) {
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -499,7 +500,7 @@ router.get('/:id/progress', (req, res) => {
         if (!row) return res.status(404).json({ error: 'Project not found' });
         return res.json(row);
     } catch (e) {
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -526,7 +527,7 @@ async function _runInstrumentation(projectId, projectDir, sourcePath, originalNa
         wsProgressBroadcast?.(projectId, { type: 'preprocess_start', projectId });
         try {
             const originalCode = readFileSync(sourcePath, 'utf8');
-            const { preprocessCode } = await import(`${JANI_ROOT}/src/preprocess/index.js`);
+            const { preprocessCode } = await import('../PreprocessRunner.mjs');
 
             const {
                 preset,
@@ -715,18 +716,6 @@ async function _schedulePhase2(
 }
 
 // ── 工具函数 ─────────────────────────────────────────────────────────────────
-
-function _spawnProcess(cmd, args, opts = {}) {
-    return new Promise((resolve) => {
-        let stdout = '';
-        let stderr = '';
-        const child = spawn(cmd, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
-        child.stdout.on('data', d => { stdout += d.toString(); });
-        child.stderr.on('data', d => { stderr += d.toString(); });
-        child.on('close', code => { resolve({ exitCode: code ?? 0, stdout, stderr }); });
-        child.on('error', err => { resolve({ exitCode: 1, stdout, stderr: err.message }); });
-    });
-}
 
 function safeParseJson(str, fallback = null) {
     if (str === null || str === undefined) return fallback;

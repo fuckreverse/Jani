@@ -1,18 +1,18 @@
 {
   "_comment": "JTA 默认配置文件。复制并重命名为 config.json 后修改，server.mjs 启动时优先读取 config.json。",
-
   "server": {
     "port": 33000,
     "maxJsonBodySize": "50mb",
-    "maxFileSize": 1073741824
+    "maxFileSize": 1073741824,
+    "host": "127.0.0.1",
+    "allowedOrigins": ""
   },
-
   "runner": {
     "maxConcurrency": 3,
     "timeoutMs": 30000,
-    "maxOutputBytes": 1048576
+    "maxOutputBytes": 1048576,
+    "maxQueue": 32
   },
-
   "db": {
     "stmtCacheSize": 200,
     "cacheSizeKb": -16000,
@@ -20,7 +20,6 @@
     "walAutocheckpoint": 10000,
     "busyTimeout": 5000
   },
-
   "api": {
     "defaultPageSize": 100,
     "maxPageSize": 500,
@@ -71,7 +70,6 @@
     "flamegraphMaxDepthCap": 200,
     "flamegraphDefaultMaxDepth": 50
   },
-
   "compare": {
     "maxSessions": 8,
     "topHotIidsPerSession": 5,
@@ -80,17 +78,14 @@
     "hotIidsDefaultTopN": 30,
     "hotIidsMaxTopN": 100
   },
-
   "functions": {
     "callGraphLimit": 1000,
     "maxValsPerLine": 6
   },
-
   "events": {
     "exportBatchSize": 500,
     "exportMaxFetchSize": 50000
   },
-
   "plugins": {
     "F1_EventIndex": {
       "windowSize": 33554432,
@@ -196,20 +191,17 @@
       "callLookupDelta": 8
     }
   },
-
   "traceServer": {
     "port": 9229,
     "sessionIdleMs": 30000,
     "compress": true,
     "gzipLevel": 6
   },
-
   "mcp": {
     "ssePort": 4000,
     "streamablePort": 4001,
     "serverUrl": "http://localhost:33000"
   },
-
   "logger": {
     "wsBackend": {
       "url": "ws://127.0.0.1:9229/trace",
@@ -241,7 +233,6 @@
       "flushIntervalMs": 100
     }
   },
-
   "serialize": {
     "maxBytes": 1000,
     "maxDepth": 2,
@@ -250,7 +241,6 @@
     "jsonMaxDepth": 3,
     "jsonMaxArrayItems": 10
   },
-
   "tools": {
     "traceCallTree": {
       "maxNodes": 50000
@@ -269,7 +259,6 @@
       "defaultLimit": 100
     }
   },
-
   "ui": {
     "sessionListRefreshMs": 5000,
     "sessionDetailRefreshMs": 10000,
@@ -278,9 +267,19 @@
     "traceMonitorPageSize": 20,
     "traceMonitorHistoryMax": 60
   },
-
   "storage": {
     "oldSessionDays": 30,
     "oldSessionMinMb": 1
+  },
+  "analysis": {
+    "maxQueue": 32,
+    "timeoutMs": 600000,
+    "maxTraceBytes": 4294967296,
+    "maxHeapMb": 512
+  },
+  "graph": {
+    "shardEdgeLimit": 100000,
+    "batchSize": 1000,
+    "maxOpenShards": 4
   }
 }

@@ -19,6 +19,8 @@ import * as db from './db/Database.mjs';
 import { createLogger } from './logger.mjs';
 import { cfg } from './Config.mjs';
 
+import { validateFilename, executionEnv, killProcessTree } from './ExecutionPolicy.mjs';
+
 const log = createLogger('InstrumentRunner');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -126,13 +128,17 @@ export function startRun(params) {
         dataDir = resolve(__dirname, 'data/sessions'),
     } = params;
 
+    validateFilename(filename);
+    if (waitQueue.length >= (cfg('runner.maxQueue') ?? 32)) {
+        const error = new Error('Run queue is full'); error.status = 429; throw error;
+    }
     const runId = uuidv4();
     const now = Date.now();
 
     // 记录到数据库
     db.run(
         `INSERT INTO run_tasks (id, created_at, status, code, filename, env)
-         VALUES (?, ?, 'running', ?, ?, ?)`,
+         VALUES (?, ?, 'queued', ?, ?, ?)`,
         runId, now, code, filename, env
     );
 
@@ -161,12 +167,12 @@ async function executeRun(runId, { code, filename, options, env, dataDir }) {
 
     // 创建临时工作目录
     const workDir = resolve(tmpdir(), `jta-run-${runId}`);
-    mkdirSync(workDir, { recursive: true });
-
     const sourceFile = resolve(workDir, filename);
     const traceFile  = resolve(workDir, 'trace.bin');
 
     try {
+        mkdirSync(workDir, { recursive: true });
+        db.run("UPDATE run_tasks SET status = 'running' WHERE id = ?", runId);
         // 写入源码文件
         writeFileSync(sourceFile, code, 'utf8');
 
@@ -211,21 +217,22 @@ async function executeRun(runId, { code, filename, options, env, dataDir }) {
         broadcast(runId, { type: 'stdout', data: `$ node ${args.join(' ')}\n` });
 
         // 启动子进程
-        const child = spawn('node', args, {
-            cwd: JANI_ROOT,
-            env: { ...process.env },
+        const child = spawn(process.execPath, args, {
+            cwd: workDir,
+            env: executionEnv(),
+            detached: process.platform !== 'win32',
             stdio: ['ignore', 'pipe', 'pipe'],
         });
 
         // 超时定时器
         const timeoutTimer = setTimeout(() => {
-            child.kill('SIGKILL');
+            killProcessTree(child);
         }, TIMEOUT_MS());
 
         // 处理 stdout
         child.stdout.on('data', (chunk) => {
             const str = chunk.toString('utf8');
-            broadcast(runId, { type: 'stdout', data: str });
+            if (stdoutBytes < MAX_OUTPUT_BYTES()) broadcast(runId, { type: 'stdout', data: str.slice(0, MAX_OUTPUT_BYTES() - stdoutBytes) });
             stdoutBytes += Buffer.byteLength(str);
             const _maxOut = MAX_OUTPUT_BYTES();
             if (stdoutBytes <= _maxOut) {
@@ -239,7 +246,7 @@ async function executeRun(runId, { code, filename, options, env, dataDir }) {
         // 处理 stderr
         child.stderr.on('data', (chunk) => {
             const str = chunk.toString('utf8');
-            broadcast(runId, { type: 'stderr', data: str });
+            if (stderrBytes < MAX_OUTPUT_BYTES()) broadcast(runId, { type: 'stderr', data: str.slice(0, MAX_OUTPUT_BYTES() - stderrBytes) });
             stderrBytes += Buffer.byteLength(str);
             if (stderrBytes <= MAX_OUTPUT_BYTES()) {
                 stderrBuf += str;
@@ -250,7 +257,8 @@ async function executeRun(runId, { code, filename, options, env, dataDir }) {
         });
 
         // 等待进程结束
-        const exitCode = await new Promise((resolve) => {
+        const exitCode = await new Promise((resolve, reject) => {
+            child.on('error', error => { clearTimeout(timeoutTimer); reject(error); });
             child.on('close', (code, signal) => {
                 clearTimeout(timeoutTimer);
                 if (signal === 'SIGKILL') {

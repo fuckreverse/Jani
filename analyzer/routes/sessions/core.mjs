@@ -12,6 +12,7 @@
  */
 
 import { Router } from 'express';
+import { validateFilename } from '../../ExecutionPolicy.mjs';
 import { createLogger } from '../../logger.mjs';
 
 const log = createLogger('sessions');
@@ -175,14 +176,14 @@ router.post('/', async (req, res) => {
         mkdirSync(sessionDir, { recursive: true });
 
         // 移动 bin 文件
-        const binDest = resolve(sessionDir, binFile.originalname || 'trace.bin');
+        const binDest = resolve(sessionDir, validateFilename(binFile.originalname || 'trace.bin'));
         copyFileSync(binFile.path, binDest);
 
         // 可选：smap 文件
         const smapFile = files?.smap?.[0] ?? files?.['smap']?.[0];
         let smapDest = null;
         if (smapFile) {
-            smapDest = resolve(sessionDir, smapFile.originalname || 'trace.smap.json');
+            smapDest = resolve(sessionDir, validateFilename(smapFile.originalname || 'trace.smap.json'));
             copyFileSync(smapFile.path, smapDest);
         }
 
@@ -190,7 +191,7 @@ router.post('/', async (req, res) => {
         const sourceFile = files?.source?.[0] ?? files?.['source']?.[0];
         let sourceDest = null;
         if (sourceFile) {
-            sourceDest = resolve(sessionDir, sourceFile.originalname || 'source.js');
+            sourceDest = resolve(sessionDir, validateFilename(sourceFile.originalname || 'source.js'));
             copyFileSync(sourceFile.path, sourceDest);
         }
 
@@ -263,7 +264,7 @@ router.post('/', async (req, res) => {
 
     } catch (e) {
         log.error({ err: e }, '[POST /api/sessions] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -290,7 +291,7 @@ router.get('/', (req, res) => {
         return res.json(result);
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -370,7 +371,7 @@ router.get('/:id', (req, res) => {
         });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -397,7 +398,7 @@ router.delete('/:id', (req, res) => {
             // F2/F3/F4
             'smap', 'call_edges', 'var_lifetime', 'iid_counts',
             // A 系列分析结果
-            'taint_paths', 'dataflow_edges', 'loops', 'loop_iterations', 'loop_var_roles',
+            'taint_paths', 'dataflow_edges', 'dataflow_graphs', 'loops', 'loop_iterations', 'loop_var_roles',
             'object_timelines', 'value_patterns',
             // I 系列分析结果
             'string_events', 'fn_signatures', 'crypto_hints', 'signature_paths',
@@ -426,7 +427,7 @@ router.delete('/:id', (req, res) => {
         return res.json({ deleted: true });
     } catch (e) {
         log.error({ err: e }, '[DELETE /api/sessions/:id] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -442,7 +443,7 @@ router.get('/:id/checkpoints', (req, res) => {
         res.json({ checkpoints });
     } catch (e) {
         log.error({ err: e }, '[GET /api/sessions/:id/checkpoints] error:');
-        res.status(500).json({ error: e.message });
+        res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -515,7 +516,7 @@ router.post('/:id/re-run', async (req, res) => {
         return res.json({ status: 'scheduled', plugins: targetPlugins, phase: resolvedPhase, forceRerun });
     } catch (e) {
         log.error({ err: e }, '[POST /api/sessions/:id/re-run] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -553,7 +554,7 @@ router.post('/:id/run-phase3', async (req, res) => {
         return res.json({ status: 'scheduled', plugins, phase: 'phase3' });
     } catch (e) {
         log.error({ err: e }, '[POST /api/sessions/:id/run-phase3] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -590,7 +591,7 @@ router.post('/:id/run-phase4', async (req, res) => {
         return res.json({ status: 'scheduled', plugins, phase: 'phase4' });
     } catch (e) {
         log.error({ err: e }, '[POST /api/sessions/:id/run-phase4] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 

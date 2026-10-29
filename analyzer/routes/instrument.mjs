@@ -9,12 +9,14 @@
 import { Router } from 'express';
 import { createLogger } from '../logger.mjs';
 
+import { validateFilename } from '../ExecutionPolicy.mjs';
+
 const log = createLogger('instrument');
 import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from 'fs';
 import { resolve } from 'path';
 import { tmpdir } from 'os';
 import { v4 as uuidv4 } from 'uuid';
-import { spawn } from 'child_process';
+import { runProcess } from '../ProcessRunner.mjs';
 import { fileURLToPath } from 'url';
 import { startRun, getRunStatus } from '../InstrumentRunner.mjs';
 
@@ -29,6 +31,7 @@ const DATA_DIR = resolve(__dirname, '../data/sessions');
 // ── POST /api/instrument ───────────────────────────────────────────────────
 
 router.post('/', async (req, res) => {
+    let workDir;
     try {
         const { code, filename = 'script.js', options = {}, preprocess = null } = req.body;
 
@@ -55,9 +58,10 @@ router.post('/', async (req, res) => {
         }
 
         // 创建临时目录
-        const workDir = resolve(tmpdir(), `jta-instrument-${uuidv4()}`);
+        workDir = resolve(tmpdir(), `jta-instrument-${uuidv4()}`);
         mkdirSync(workDir, { recursive: true });
 
+        validateFilename(filename);
         const sourceFile = resolve(workDir, filename);
         writeFileSync(sourceFile, codeToInstrument, 'utf8');
 
@@ -146,7 +150,9 @@ router.post('/', async (req, res) => {
 
     } catch (e) {
         log.error({ err: e }, '[POST /api/instrument] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
+    } finally {
+        if (workDir) rmSync(workDir, { recursive: true, force: true });
     }
 });
 
@@ -187,7 +193,7 @@ router.post('/run', async (req, res) => {
 
     } catch (e) {
         log.error({ err: e }, '[POST /api/instrument/run] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -216,7 +222,7 @@ router.get('/run/:runId', (req, res) => {
 
     } catch (e) {
         log.error({ err: e }, '[GET /api/instrument/run/:runId] error:');
-        return res.status(500).json({ error: e.message });
+        return res.status(e.status ?? 500).json({ error: e.message });
     }
 });
 
@@ -245,7 +251,7 @@ const ES_YEAR_TARGETS = {
 
 async function _runPreprocess(code, preprocessOpts) {
     // 动态导入（避免循环依赖，同时保持 top-level 路径隔离）
-    const { preprocessCode } = await import(`${JANI_ROOT}/src/preprocess/index.js`);
+    const { preprocessCode } = await import('../PreprocessRunner.mjs');
 
     const {
         preset,
@@ -273,27 +279,5 @@ async function _runPreprocess(code, preprocessOpts) {
 /**
  * 执行子进程并返回结果
  */
-function runProcess(cmd, args, opts = {}) {
-    return new Promise((resolve) => {
-        let stdout = '';
-        let stderr = '';
-
-        const child = spawn(cmd, args, {
-            ...opts,
-            stdio: ['ignore', 'pipe', 'pipe'],
-        });
-
-        child.stdout.on('data', d => { stdout += d.toString(); });
-        child.stderr.on('data', d => { stderr += d.toString(); });
-
-        child.on('close', (code) => {
-            resolve({ exitCode: code ?? 0, stdout, stderr });
-        });
-
-        child.on('error', (err) => {
-            resolve({ exitCode: 1, stdout, stderr: err.message });
-        });
-    });
-}
 
 export default router;

@@ -19,6 +19,7 @@ import { resolve, dirname, join, basename } from 'path';
 import { mkdirSync, existsSync, readdirSync, rmSync, statSync, createReadStream, readFileSync, writeFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
+import { allowedOrigin } from './ExecutionPolicy.mjs';
 import { createLogger } from './logger.mjs';
 import { cfg, configPaths } from './Config.mjs';
 import { TraceCollector } from '../tools/trace-server/TraceCollector.mjs';
@@ -133,6 +134,8 @@ const traceStats = traceCollector.stats;
 
 await db.init(DB_PATH);
 log.info({ dbPath: DB_PATH }, 'Database initialized');
+db.run("UPDATE sessions SET status = 'failed' WHERE status IN ('processing','indexing')");
+db.run("UPDATE run_tasks SET status = 'failed', error_msg = 'Server restarted during execution' WHERE status IN ('running','queued')");
 
 // 自动发现并注册插件
 await autoDiscover();
@@ -142,7 +145,11 @@ await autoDiscover();
 const app = express();
 
 // CORS（开发模式允许所有来源）
-app.use(cors());
+app.use((req, res, next) => {
+    if (!allowedOrigin(req.headers.origin, PORT, cfg('server.allowedOrigins') ?? '')) return res.status(403).json({ error: 'Origin not allowed' });
+    next();
+});
+app.use(cors({ origin: (origin, callback) => callback(null, allowedOrigin(origin, PORT, cfg('server.allowedOrigins') ?? '')) }));
 
 // HTTP 请求日志（debug 级别，不刷屏，只记录方法、路径、状态、耗时）
 app.use((req, res, next) => {
@@ -609,6 +616,7 @@ const wss = new WebSocketServer({ noServer: true });
 
 // 统一处理 HTTP Upgrade 请求，按路径路由到对应的 WSS
 server.on('upgrade', (req, socket, head) => {
+    if (!allowedOrigin(req.headers.origin, PORT, cfg('server.allowedOrigins') ?? '')) { socket.destroy(); return; }
     const url = new URL(req.url, `http://localhost:${PORT}`);
     const pathname = url.pathname;
 
@@ -716,7 +724,7 @@ wss.on('connection', (ws, req) => {
 
 // ── 启动 ─────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, () => {
+server.listen(PORT, cfg('server.host') ?? '127.0.0.1', () => {
     log.info({ port: PORT }, `Server listening on http://localhost:${PORT}`);
     log.info(`API:    http://localhost:${PORT}/api/health`);
     log.info(
