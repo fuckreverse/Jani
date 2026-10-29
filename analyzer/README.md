@@ -4,9 +4,9 @@
 
 ## 技术栈
 
-- **后端**：Node.js + Express + sql.js（SQLite WASM）+ ws
+- **后端**：Node.js + Express + better-sqlite3（SQLite WAL）+ ws
 - **前端**：Vue 3 + Vite + vue-router
-- **数据库**：SQLite（`data/jta.db`，通过 sql.js WASM 实现，零编译依赖）
+- **数据库**：SQLite（`data/jta.db`，通过 better-sqlite3 实现，启用 WAL）
 - **工作空间管理**：`projects` 表 + `/api/projects` 路由
 
 ## 快速启动
@@ -204,13 +204,13 @@ skills/
 ```
 analyzer/
 ├── data/                    # 数据目录（运行时生成）
-│   ├── jta.db               # SQLite 数据库（sql.js WASM）
+│   ├── jta.db               # SQLite 数据库（better-sqlite3）
 │   ├── projects/            # 工作空间目录（每个 uuid 一个子目录）
 │   ├── sessions/            # 会话目录（每个 uuid 一个子目录）
 │   └── uploads/             # multer 临时上传目录
 ├── db/
 │   ├── schema.sql           # 完整 SQLite 建表 SQL（含 projects / plugin_checkpoints 等全部表）
-│   └── Database.mjs         # SQLite 封装（sql.js WASM，内存 db + flush 写盘）
+│   └── Database.mjs         # SQLite 封装（better-sqlite3，事务直接写盘）
 ├── plugins/                 # 分析插件（共 17 个）
 │   ├── BasePlugin.mjs       # 插件基类
 │   ├── F1_EventIndex.mjs    # Foundation：解析 .bin → events/writes/reads/fields 表
@@ -300,3 +300,26 @@ analyzer/
 | I2-SignatureAnalyzer ⭐| `I2_SignatureAnalyzer.mjs`     | signature_paths    | 签名路径还原（反向 BFS）           |
 | I3-ObfuscationDetector| `I3_ObfuscationDetector.mjs`   | obfuscation_hints  | 混淆检测（控制流平坦化/字符串解密）|
 | I4-AlgorithmSummarizer| `I4_AlgorithmSummarizer.mjs`   | analysis_summary   | 综合算法摘要（Markdown 报告）      |
+
+## 后端可靠性与运行边界
+
+后端默认监听 `127.0.0.1`。HTTP 和 WebSocket 的 Origin 必须来自本机 UI，或列入
+`server.allowedOrigins`（逗号分隔的完整 Origin）。在其他网站运行浏览器插桩代码时，
+需把该网站 Origin 加入配置后再连接 `/ws/trace`。
+
+分析和预处理在有队列上限、超时和 JS 堆上限的 worker 中执行。插件结果与检查点按插件事务
+原子提交，失败会回滚，依赖失败的插件标记 `blocked`；session 不再误报 `ready`。
+检查点以输入内容、插件实现和配置的 SHA-256 指纹校验。服务重启后未完成任务标记失败，可重跑。
+
+`/api/instrument/run` 是受限参数和资源的本地 Node 子进程，**不是操作系统安全沙箱**；
+只能执行可信代码。它使用任务临时目录、最小环境变量、并发/排队限制、进程组超时清理和输出上限。
+
+验证：`npm test`（根目录）、`npm test --prefix analyzer`。
+性能复现：`node analyzer/benchmark.mjs 50000`（只使用临时数据库）。
+详细变更、兼容性与剩余边界见 [Backend-Hardening.md](docs/Backend-Hardening.md)。
+
+## 磁盘分片数据流图
+
+A2 已使用独立 SQLite 分片和目录邻接索引，流式构图、按需读取，不再载入整个会话的图索引。
+旧会话重跑 A2 即可迁移，现有数据流 API/MCP 工具保持兼容。
+配置、磁盘布局、失败恢复和百万边测试见 [Disk-Sharded-Graph.md](docs/Disk-Sharded-Graph.md)。

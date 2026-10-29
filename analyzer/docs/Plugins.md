@@ -141,7 +141,7 @@ phase1 全部完成 → 通知 UI（type: 'all_done', phase: 'phase1'）
 #### A2 · DataFlowGraph
 - **依赖：** F1
 - **功能：** 构建变量级 def-use 数据流图；支持子图 BFS 查询（从指定节点出发，返回 N 跳可达子图）
-- **输出：** `dataflow_edges` 表；子图结果供前端 Cytoscape 渲染
+- **输出：** 会话目录下的独立 SQLite 边分片及 catalog.sqlite；dataflow_graphs 保存原子发布指针。旧会话兼容 dataflow_edges 表。子图结果供前端 Cytoscape 渲染。
 
 #### A3 · HotPathAnalyzer（v3）
 - **依赖：** F1
@@ -256,3 +256,15 @@ phase1 全部完成 → 通知 UI（type: 'all_done', phase: 'phase1'）
 
 **WebSocket 初始化消息**（`type: 'init'`）现在额外携带 `checkpoints` 字段，
 供抽屉初次打开时立即显示历史已完成插件的状态，无需等待下一轮事件推送。
+
+## 调度可靠性更新
+
+默认由后台 worker 串行执行写任务。每个插件的输出及检查点在同一事务提交；失败回滚并阻断依赖。
+进度通知只有提交后才发送 plugin_done。检查点必须未过期且输入/实现/配置指纹一致。
+重跑保留最后一次已提交结果，session failed 表示本次请求未全部成功。
+
+## 有界图处理
+
+A2 使用源 SQLite 游标和最近定义索引生成边；默认每批 1,000 条、每片 100,000 条。
+A1 污点分析按当前前沿查索引，不再把全会话读写加载到 Map。两者保留语句级分析精度。
+图读取器按目录定位邻接文件并限制打开句柄，详见 [Disk-Sharded-Graph.md](Disk-Sharded-Graph.md)。

@@ -151,3 +151,11 @@ Used in `get_value_patterns(sessionId, { patternType: "..." })`:
 **Crypto magic constants** (detected by `onlyCrypto: true`): S-box constants, MD5/SHA round constants, AES key schedule constants, etc. The `matched_constant` field names the specific constant matched.
 
 **Entropy**: Shannon entropy of the value string. High entropy (>4.5 bits/char) suggests encrypted or random data.
+
+## Trace v4 and reliability
+
+Event seq is session-local. v4 includes dynamic binding_id and call-pair identities; static scope_id alone does not identify a call instance. Legacy traces remain approximate. trace_integrity=complete requires TRACE_END and contiguous sequence numbers; unverified-end is not proof of completeness. Failed analysis blocks dependents; stale or mismatched checkpoints rerun. Results are statement-level, not full SSA proofs.
+
+## Disk-sharded dataflow graphs
+
+New A2 results are immutable generations of independent SQLite edge shards plus a disk adjacency catalog. The session generation pointer commits with the plugin checkpoint. Readers open only matching adjacency shards with a bounded cache. Legacy sessions use the old edge table until A2 is rerun. Edge IDs are generation-local, and graph analysis remains statement-level.

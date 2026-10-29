@@ -307,19 +307,20 @@ export function registerTools(server, client) {
 
     // ── Dataflow / Taint ──────────────────────────────────────────────────────
     server.tool('trace_taint',
-        'Taint tracking: forward=trace pollution path, backward=trace data source. Returns DAG.',
+        'Run statement-level taint analysis: forward=follow uses until overwrite, backward=nearest definition. Legacy traces without dynamic binding IDs are approximate. Returns paths.',
         {
             sessionId: z.string().describe('session ID'),
             varName:   z.string().describe('target variable name'),
             direction: z.enum(['forward','backward']).optional().describe('forward (default) or backward'),
             startSeq:  z.number().int().optional().describe('start event seq (optional)'),
+            sourceScopeId: z.number().int().optional().describe('static scope filter (optional)'),
         },
-        async ({ sessionId, varName, direction = 'forward', startSeq = null }) =>
-            safe(() => client.traceTaint(sessionId, varName, direction, startSeq))
+        async ({ sessionId, varName, direction = 'forward', startSeq = null, sourceScopeId = null }) =>
+            safe(() => client.traceTaint(sessionId, varName, direction, startSeq, sourceScopeId))
     );
 
     server.tool('get_dataflow',
-        'Query dataflow edges (A2 DataFlowGraph) with edge type and variable name filtering.',
+        'Query persisted A2 dataflow edges across disk shards with edge type and variable filters. Legacy sessions remain supported; rerun A2 to migrate.',
         {
             sessionId: z.string().describe('session ID'),
             edgeType:  z.enum(['assign','copy','call_arg','call_ret','field_write','field_read']).optional().describe('edge type filter (optional)'),
@@ -335,7 +336,7 @@ export function registerTools(server, client) {
     );
 
     server.tool('get_dataflow_subgraph',
-        'BFS-expand N-hop dataflow subgraph centered on variable name or event ID.',
+        'Read a bounded N-hop dataflow subgraph across disk shards, centered on a variable or event. Check stats.truncated for incomplete expansion.',
         {
             sessionId: z.string().describe('session ID'),
             varName:   z.string().optional().describe('starting variable name (choose one of varName/eventId)'),
@@ -593,7 +594,7 @@ export function registerTools(server, client) {
 
     // ── Dataflow vars ─────────────────────────────────────────────────────────
     server.tool('get_dataflow_vars',
-        'List all unique variable names appearing in dataflow edges (prefix search).',
+        'List matching variable names from the on-disk dataflow catalog (bounded prefix search).',
         {
             sessionId: z.string().describe('session ID'),
             prefix:    z.string().optional().describe('variable name prefix filter (optional)'),

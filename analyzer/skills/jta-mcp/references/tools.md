@@ -167,3 +167,11 @@
 |---|---|---|
 | `get_storage_stats` | — | Scan data directory: sizes, breakdown, cleanup suggestions |
 | `storage_delete` | `items[]` ({type, path, id?}) | Batch delete orphaned uploads/session dirs/project dirs |
+
+## trace_taint contract update
+
+trace_taint(sessionId, varName, direction?, startSeq?, sourceScopeId?) calls POST /api/sessions/:id/taint with sourceVar/sourceEventId/sourceScopeId/direction. Returns paths. Forward propagation stops at the next definition; backward uses the nearest definition. Missing dynamic identities imply approximate matching.
+
+## Dataflow storage update
+
+get_dataflow/get_dataflow_vars/get_dataflow_subgraph retain their parameter and result contracts while reading disk-sharded A2 results. For subgraphs, stats.truncated=true means a node/edge/adjacency limit was reached. hops=0 returns seeds only. Rerun A2-DataFlowGraph using the existing re-run tool to migrate an old session; no new endpoint or tool is required.

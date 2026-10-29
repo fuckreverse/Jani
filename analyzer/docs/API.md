@@ -586,3 +586,18 @@ WS /ws/trace
       同一 sid 的多次连接（断线重连）共享同一 .bin 文件，追加写入
       会话无活跃连接且超过空闲超时（默认 30s）后自动关闭文件
 ```
+
+## 可靠性与污点参数更新
+
+POST `/api/sessions/:id/taint` 接受 sourceVar、sourceEventId、sourceScopeId（可选整数）和
+direction（forward/backward）。MCP trace_taint 映射至此 POST，返回 paths。分析为语句粒度。
+运行任务排队时 status 为 queued，执行时为 running。插件依赖失败为 blocked，会话为 failed。
+会话详情增加 trace_integrity，旧文件可能为 unverified-end。默认仅监听回环地址，并校验 Origin。
+
+## 磁盘分片图兼容性
+
+`GET /api/sessions/:id/dataflow`、`/dataflow/vars`、`/dataflow/subgraph` 自动读取该会话的已发布分片版本；
+没有分片版本的旧会话继续读取 dataflow_edges。参数和返回结构保持兼容，分页 edge ID 是版本内标识。
+子图严格执行 maxNodes/邻接数量上限；发生截断时 stats.truncated=true，hops=0 只返回种子节点。
+负数/非整数限制和非法方向返回 400；已发布文件缺失或损坏返回服务错误。
+通过已有 re-run 接口运行 A2-DataFlowGraph 可迁移旧会话，详见 [Disk-Sharded-Graph.md](Disk-Sharded-Graph.md)。

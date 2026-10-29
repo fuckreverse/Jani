@@ -615,3 +615,19 @@ PRAGMA temp_store = MEMORY;         -- 临时表放内存，加速排序/聚合
 | I1 CryptoDetector | JOIN value_patterns + iid_counts | value_patterns.iid |
 | I2 SignatureAnalyzer | 反向 BFS from taint_paths | idx_taint_session |
 | I3 ObfuscationDetector | call_edges GROUP BY fn_name HAVING count > N | idx_call_edges_session |
+
+## v4 Trace 与事件身份
+
+events 使用 `(session_id,id)` 联合主键；新增 script_id/call_id/parent_call_id/context_id/call_pair_id。
+reads、writes、var_lifetime 新增 binding_id，区分同一静态作用域的不同动态实例。
+sessions.trace_integrity 标记完整性；plugin_checkpoints.fingerprint 校验输入和实现版本。
+迁移与兼容边界见 [Backend-Hardening.md](Backend-Hardening.md)。
+
+## 磁盘分片图存储
+
+`dataflow_graphs(session_id,generation,root_path,edge_count,shard_count,version,created_at)`
+保存当前图的不可变版本指针，session 删除时级联删除元数据。
+新 A2 的边存于会话目录下 `dataflow/<generation>/edges-N.sqlite`，目录索引在 catalog.sqlite。
+`dataflow_edges` 表保留为旧会话兼容读取；重建后清除该会话的旧边，不保留重复主表副本。
+reads/writes 新增 graph_binding、graph_scope、graph_legacy 索引供流式构图和污点查询使用。
+具体布局与发布协议见 [Disk-Sharded-Graph.md](Disk-Sharded-Graph.md)。

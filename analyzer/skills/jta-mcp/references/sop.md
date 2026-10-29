@@ -190,3 +190,11 @@
 - `get_flamegraph` with `seqFrom/seqTo` focuses on a time window (e.g. one request).
 - High `iteration_count` with low `median_gap` = tight inner loop = prime optimization target.
 - Use `get_call_graph` to see the overall call tree depth and call counts per edge.
+
+## Validate analysis before interpreting results
+
+Check session status and trace_integrity before concluding. A failed/blocked plugin is not a successful empty result. Rerun stale checkpoints; preserve and inspect original Trace on import failure. Treat old traces without dynamic identities and unverified-end traces as incomplete evidence. Run arbitrary untrusted JavaScript only in an external OS sandbox; the local Node runner is not one.
+
+## Large dataflow sessions
+
+Run A2-DataFlowGraph to publish disk shards, then query small subgraphs around specific event IDs or variables. Respect stats.truncated and expand in bounded steps. A failed rebuild preserves the previous successful generation; inspect checkpoint status before interpreting it. Rebuild interrupted jobs from source rather than trying to use partial shard directories.
