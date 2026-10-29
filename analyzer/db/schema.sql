@@ -43,10 +43,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- line/col/src_text 已移除，统一从 smap 表按 iid 查询，避免冗余存储。
 
 CREATE TABLE IF NOT EXISTS events (
-    id          INTEGER PRIMARY KEY,
+    id          INTEGER NOT NULL,
     session_id  TEXT NOT NULL,
     type        INTEGER NOT NULL,   -- 事件类型整数编码，见 EventTypeCode 映射
     iid         INTEGER,
+    PRIMARY KEY (session_id, id),
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 
@@ -568,3 +569,15 @@ CREATE INDEX IF NOT EXISTS idx_loop_iter_start_seq ON loop_iterations(session_id
 CREATE INDEX IF NOT EXISTS idx_value_patterns_session ON value_patterns(session_id);
 CREATE INDEX IF NOT EXISTS idx_crypto_hints_session ON crypto_hints(session_id);
 CREATE INDEX IF NOT EXISTS idx_sig_paths_session   ON signature_paths(session_id);
+
+-- Atomic pointer to the immutable on-disk dataflow graph generation.
+-- Legacy dataflow_edges remains readable until a session is rebuilt with A2.
+CREATE TABLE IF NOT EXISTS dataflow_graphs (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    generation TEXT NOT NULL,
+    root_path TEXT NOT NULL,
+    edge_count INTEGER NOT NULL,
+    shard_count INTEGER NOT NULL,
+    version INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);

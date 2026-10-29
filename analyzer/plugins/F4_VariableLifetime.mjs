@@ -45,52 +45,29 @@ export default class F4VariableLifetime extends BasePlugin {
         // 注意：NULL 在 GROUP BY/JOIN 中视为相同值（SQLite 规范），
         //       即两边 scope_id=NULL 的记录能正确匹配。
 
-        rawDb.transaction(() => {
-            rawDb.exec(`
-                INSERT INTO var_lifetime
-                    (session_id, name, scope_id, first_write_seq, last_read_seq, write_count, read_count)
-
-                -- 有写（可能也有读）
-                SELECT
-                    ? AS session_id,
-                    w.name,
-                    w.scope_id,
-                    MIN(w.event_id)     AS first_write_seq,
-                    MAX(r.event_id)     AS last_read_seq,
-                    COUNT(DISTINCT w.id) AS write_count,
-                    COUNT(DISTINCT r.id) AS read_count
-                FROM writes w
-                LEFT JOIN reads r
-                    ON r.session_id = w.session_id
-                   AND r.name       = w.name
-                   AND (r.scope_id  = w.scope_id
-                        OR (r.scope_id IS NULL AND w.scope_id IS NULL))
-                WHERE w.session_id = ? AND w.name IS NOT NULL
-                GROUP BY w.name, w.scope_id
-
-                UNION ALL
-
-                -- 只有读，没有对应写
-                SELECT
-                    ? AS session_id,
-                    r.name,
-                    r.scope_id,
-                    NULL                AS first_write_seq,
-                    MAX(r.event_id)     AS last_read_seq,
-                    0                   AS write_count,
-                    COUNT(DISTINCT r.id) AS read_count
-                FROM reads r
-                WHERE r.session_id = ? AND r.name IS NOT NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM writes w2
-                      WHERE w2.session_id = r.session_id
-                        AND w2.name       = r.name
-                        AND (w2.scope_id  = r.scope_id
-                             OR (w2.scope_id IS NULL AND r.scope_id IS NULL))
-                  )
-                GROUP BY r.name, r.scope_id
-            `.trim(), [sessionId, sessionId, sessionId, sessionId]);
-        })();
+        // Aggregate each side before joining: joining raw reads/writes produces
+        // a quadratic intermediate result for frequently accessed bindings.
+        rawDb.prepare(`
+            WITH w AS (
+                SELECT name, scope_id, binding_id, MIN(event_id) first_write_seq, COUNT(*) write_count
+                FROM writes WHERE session_id=? AND name IS NOT NULL
+                GROUP BY name,scope_id,binding_id
+            ), r AS (
+                SELECT name, scope_id, binding_id, MAX(event_id) last_read_seq, COUNT(*) read_count
+                FROM reads WHERE session_id=? AND name IS NOT NULL
+                GROUP BY name,scope_id,binding_id
+            )
+            INSERT INTO var_lifetime
+                (session_id,name,scope_id,binding_id,first_write_seq,last_read_seq,write_count,read_count)
+            SELECT ?,w.name,w.scope_id,w.binding_id,w.first_write_seq,r.last_read_seq,
+                   w.write_count,COALESCE(r.read_count,0)
+            FROM w LEFT JOIN r ON r.name=w.name AND r.scope_id IS w.scope_id AND r.binding_id IS w.binding_id
+            UNION ALL
+            SELECT ?,r.name,r.scope_id,r.binding_id,NULL,r.last_read_seq,0,r.read_count
+            FROM r WHERE NOT EXISTS (
+                SELECT 1 FROM w WHERE w.name=r.name AND w.scope_id IS r.scope_id AND w.binding_id IS r.binding_id
+            )
+        `).run(sessionId,sessionId,sessionId,sessionId);
 
         this.emitProgress(ctx, '统计汇总...', 90);
 

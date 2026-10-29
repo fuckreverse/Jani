@@ -1,13 +1,15 @@
 /**
  * PluginEngine.mjs — 插件调度器
- * 拓扑排序 + 串行/并发执行 + 进度回调 + 断点恢复
- *
- * 注：切换到 better-sqlite3 后，全局 DB 互斥锁已移除。
- * better-sqlite3 使用同步 API，不存在 PreparedStatement 并发竞争问题。
+ * Worker-backed DAG scheduling, atomic result publication and validated checkpoints.
+ * Analysis jobs serialize writes; WAL readers retain the last committed snapshot.
  */
 
 import { resolve, dirname } from 'path';
-import { readdirSync } from 'fs';
+import { readdirSync, createReadStream, readFileSync, existsSync } from 'fs';
+import { createHash } from 'crypto';
+import { cfg } from './Config.mjs';
+import { isMainThread } from 'worker_threads';
+import { enqueueAnalysis } from './AnalysisQueue.mjs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as db from './db/Database.mjs';
 import { createLogger } from './logger.mjs';
@@ -82,7 +84,7 @@ function topologicalSort(pluginIds) {
         const PluginClass = pluginRegistry.get(id);
         if (!PluginClass) continue;
         for (const dep of (PluginClass.deps || [])) {
-            if (!idSet.has(dep)) continue; // 依赖不在列表中，忽略
+            if (!idSet.has(dep)) continue; // Completed prerequisites are checked before execution.
             graph.get(dep).push(id);
             inDegree.set(id, (inDegree.get(id) || 0) + 1);
         }
@@ -124,10 +126,15 @@ function topologicalSort(pluginIds) {
 function hasCheckpoint(sessionId, pluginId) {
     try {
         const row = db.get(
-            'SELECT id FROM plugin_checkpoints WHERE session_id = ? AND plugin_id = ?',
+            'SELECT id, fingerprint FROM plugin_checkpoints WHERE session_id = ? AND plugin_id = ? AND is_stale = 0',
             sessionId, pluginId
         );
-        return !!row;
+        if (!row || row.fingerprint !== fingerprints.get(`${sessionId}:${pluginId}`)) return false;
+        if (pluginId === 'A2-DataFlowGraph') {
+            const graph = db.get('SELECT root_path FROM dataflow_graphs WHERE session_id=?',sessionId);
+            if (!graph || !existsSync(resolve(graph.root_path,'catalog.sqlite'))) return false;
+        }
+        return true;
     } catch {
         return false;
     }
@@ -145,12 +152,12 @@ function writeCheckpoint(sessionId, pluginId, phase, durationMs, summary) {
     try {
         const summaryJson = summary ? JSON.stringify(summary) : null;
         db.run(
-            `INSERT OR REPLACE INTO plugin_checkpoints (session_id, plugin_id, phase, completed_at, duration_ms, is_stale, summary_json)
-             VALUES (?, ?, ?, ?, ?, 0, ?)`,
-            sessionId, pluginId, phase || null, Date.now(), durationMs, summaryJson
+            `INSERT OR REPLACE INTO plugin_checkpoints (session_id, plugin_id, phase, completed_at, duration_ms, is_stale, summary_json, fingerprint)
+             VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
+            sessionId, pluginId, phase || null, Date.now(), durationMs, summaryJson, fingerprints.get(`${sessionId}:${pluginId}`) ?? null
         );
     } catch (e) {
-        log.warn({ err: e }, 'writeCheckpoint error');
+        throw e;
     }
 }
 
@@ -217,7 +224,18 @@ export function clearCheckpoints(sessionId, pluginId = null) {
  * @param {boolean} [options.skipCompleted] - 是否跳过已完成的插件（断点恢复，默认 true）
  * @returns {Promise<void>}
  */
+const activeSessions = new Set();
 export async function schedule(sessionId, options = {}) {
+    if (isMainThread && options.worker !== false) {
+        return enqueueAnalysis('schedule', sessionId, options);
+    }
+    if (activeSessions.has(sessionId)) throw new Error(`Session ${sessionId} is already running`);
+    activeSessions.add(sessionId);
+    try { return await scheduleLocal(sessionId, options); }
+    finally { activeSessions.delete(sessionId); }
+}
+
+async function scheduleLocal(sessionId, options = {}) {
     const {
         plugins: requestedPlugins,
         onProgress,
@@ -226,8 +244,19 @@ export async function schedule(sessionId, options = {}) {
         skipCompleted = true,
     } = options;
 
+    await fingerprintInputs(sessionId);
     // 确定要执行的插件列表
-    const pluginIds = requestedPlugins ?? [...pluginRegistry.keys()];
+    const pluginIds = [...new Set(requestedPlugins ?? [...pluginRegistry.keys()].filter(id => id !== 'A1-TaintTracker'))];
+    for (const id of pluginIds) {
+        if (!pluginRegistry.has(id)) throw new Error(`Unknown plugin: ${id}`);
+    }
+    // Include missing/stale prerequisites recursively, retaining the requested phase API.
+    for (let i = 0; i < pluginIds.length; i++) {
+        for (const dep of pluginRegistry.get(pluginIds[i]).deps || []) {
+            if (!pluginRegistry.has(dep)) throw new Error(`Missing dependency: ${dep}`);
+            if (!pluginIds.includes(dep) && !hasCheckpoint(sessionId, dep)) pluginIds.push(dep);
+        }
+    }
 
     if (pluginIds.length === 0) {
         return;
@@ -251,6 +280,13 @@ export async function schedule(sessionId, options = {}) {
         }
     } else {
         toRun.push(...pluginIds);
+    }
+
+    for (let i = 0; i < toRun.length; i++) {
+        for (const id of downstreamOf(toRun[i])) {
+            const index = skipped.indexOf(id);
+            if (index >= 0) { skipped.splice(index, 1); toRun.push(id); }
+        }
     }
 
     // 更新 plugin_status：pending（仅待执行的）；已跳过的保持 done
@@ -287,27 +323,29 @@ export async function schedule(sessionId, options = {}) {
         return;
     }
 
-    // 逐层执行（仅执行 toRun 中的插件）
+    const failed = new Set();
     const toRunSet = new Set(toRun);
+    db.run("UPDATE sessions SET status = 'processing' WHERE id = ?", sessionId);
     for (const layer of layers) {
-        const activeInLayer = layer.filter(id => toRunSet.has(id));
-        if (activeInLayer.length === 0) continue;
-
-        // 同层内并发执行
-        await Promise.all(activeInLayer.map(pluginId => runPlugin(sessionId, pluginId, {
-            onProgress,
-            dataDir,
-            phase,
-        })));
+        for (const pluginId of layer.filter(id => toRunSet.has(id))) {
+            const deps = pluginRegistry.get(pluginId).deps || [];
+            if (deps.some(dep => failed.has(dep))) {
+                failed.add(pluginId);
+                updatePluginStatus(sessionId, pluginId, 'blocked');
+                onProgress?.({ type: 'plugin_blocked', sessionId, plugin: pluginId, status: 'blocked' });
+                continue;
+            }
+            // Results downstream of a rerun cannot remain fresh.
+            markStale(sessionId, downstreamOf(pluginId));
+            try { await runPlugin(sessionId, pluginId, { onProgress, dataDir, phase }); }
+            catch { failed.add(pluginId); }
+        }
     }
+    const status = failed.size ? 'failed' : 'ready';
+    db.run('UPDATE sessions SET status = ? WHERE id = ?', status, sessionId);
+    onProgress?.({ type: failed.size ? 'schedule_failed' : 'all_done', sessionId, phase: phase || null, skipped, toRun, failed: [...failed] });
+    if (failed.size) throw new Error(`Analysis failed: ${[...failed].join(', ')}`);
 
-    // 全部完成后通知
-    if (typeof onProgress === 'function') {
-        onProgress({ type: 'all_done', sessionId, phase: phase || null, skipped, toRun });
-    }
-
-    // 更新 session 状态
-    db.run('UPDATE sessions SET status = ? WHERE id = ?', 'ready', sessionId);
 }
 
 /**
@@ -335,13 +373,16 @@ async function runPlugin(sessionId, pluginId, options = {}) {
         // 拦截 done 事件，记录 summary 供 writeCheckpoint 使用
         if (event.status === 'done' && event.summary !== undefined) {
             lastSummary = event.summary;
+            return; // Completion is published only after transaction commit.
         }
         if (typeof onProgress === 'function') {
             onProgress({ ...event, sessionId });
         }
     };
 
+    const rollbackHandlers = [];
     const ctx = {
+        onRollback: handler => rollbackHandlers.push(handler),
         sessionId,
         db,
         emit,
@@ -356,6 +397,9 @@ async function runPlugin(sessionId, pluginId, options = {}) {
         emit({ type: 'plugin_start', plugin: pluginId, status: 'running', message: '开始执行...' });
 
         const plugin = new PluginClass();
+        // Worker owns this connection. Publish results and checkpoint atomically;
+        // WAL readers continue seeing the previous successful snapshot.
+        db.exec('BEGIN IMMEDIATE');
         await plugin.run(ctx);
 
         const duration = Date.now() - startTime;
@@ -363,11 +407,14 @@ async function runPlugin(sessionId, pluginId, options = {}) {
 
         // 写入检查点（断点恢复）+ summary 持久化
         writeCheckpoint(sessionId, pluginId, phase, duration, lastSummary);
+        db.exec('COMMIT');
 
         log.info({ sessionId, pluginId, durationMs: duration }, `插件 ${pluginId} 执行完成 (${duration}ms)`);
         emit({ type: 'plugin_done', plugin: pluginId, status: 'done', durationMs: duration, summary: lastSummary });
 
     } catch (e) {
+        if (db.raw().inTransaction) db.exec('ROLLBACK');
+        for (const handler of rollbackHandlers) { try { handler(); } catch (cleanupError) { log.warn({ err: cleanupError }, 'Plugin cleanup failed'); } }
         const duration = Date.now() - startTime;
         log.error({
             err: e,
@@ -380,6 +427,7 @@ async function runPlugin(sessionId, pluginId, options = {}) {
 
         // 标记 session 失败
         db.run('UPDATE sessions SET status = ? WHERE id = ?', 'failed', sessionId);
+        throw e;
     }
 }
 
@@ -390,6 +438,10 @@ async function runPlugin(sessionId, pluginId, options = {}) {
  * @param {object} options
  */
 export async function runSinglePlugin(sessionId, pluginId, options = {}) {
+    if (isMainThread && options.worker !== false) return enqueueAnalysis('single', sessionId, { ...options, pluginId });
+    if (!pluginRegistry.has(pluginId)) throw new Error(`Unknown plugin: ${pluginId}`);
+    const dependencies = pluginRegistry.get(pluginId).deps || [];
+    if (dependencies.length) await schedule(sessionId, { ...options, plugins: dependencies, worker: false });
     return runPlugin(sessionId, pluginId, { ...options, phase: options.phase || 'manual' });
 }
 
@@ -420,4 +472,37 @@ export function listPlugins() {
         deps: cls.deps || [],
         displayName: cls.displayName || id,
     }));
+}
+
+function downstreamOf(id) {
+    const result = new Set();
+    const visit = upstream => {
+        for (const [key, cls] of pluginRegistry) {
+            if ((cls.deps || []).includes(upstream) && !result.has(key)) {
+                result.add(key); visit(key);
+            }
+        }
+    };
+    visit(id);
+    return [...result];
+}
+
+const fingerprints = new Map();
+async function fingerprintInputs(sessionId) {
+    const session = db.get('SELECT bin_path,smap_path,source_file FROM sessions WHERE id = ?', sessionId);
+    if (!session) throw new Error(`Unknown session: ${sessionId}`);
+    const hash = createHash('sha256');
+    for (const path of [session.bin_path, session.smap_path, session.source_file]) {
+        hash.update(String(path));
+        if (path) for await (const chunk of createReadStream(path)) hash.update(chunk);
+    }
+    hash.update(JSON.stringify(cfg('plugins')));
+    for (const file of readdirSync(resolve(__dirname,'plugins')).filter(f => f.endsWith('.mjs')).sort()) hash.update(readFileSync(resolve(__dirname,'plugins',file)));
+    hash.update(readFileSync(resolve(__dirname,'../src/encoding/EventSerializer.js')));
+    hash.update(readFileSync(resolve(__dirname,'GraphStore.mjs')));
+    hash.update(JSON.stringify(cfg('graph')));
+    const input = hash.digest('hex');
+    for (const [id, cls] of pluginRegistry) {
+        fingerprints.set(`${sessionId}:${id}`, createHash('sha256').update(input).update(cls.toString()).digest('hex'));
+    }
 }

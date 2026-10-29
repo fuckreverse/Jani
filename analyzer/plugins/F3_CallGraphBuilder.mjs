@@ -35,7 +35,7 @@ export default class F3CallGraphBuilder extends BasePlugin {
         // ── Step 1: 一次性读取所有 CALL_PRE 和 CALL 事件 ──────────────────────
         this.emitProgress(ctx, '读取调用事件...', 3);
         const callEvents = rawDb.prepare(
-            `SELECT id, type, iid FROM events WHERE session_id = ? AND type IN (${TYPE.CALL_PRE}, ${TYPE.CALL}) ORDER BY id ASC`
+            `SELECT id, type, iid, call_id, context_id, call_pair_id FROM events WHERE session_id = ? AND (type IN (${TYPE.CALL_PRE}, ${TYPE.CALL}) OR (type IN (${TYPE.FUNCTION_ENTER}, ${TYPE.FUNCTION_EXIT}) AND call_pair_id IS NOT NULL)) ORDER BY id ASC`
         ).all(sessionId);
 
         if (callEvents.length === 0) {
@@ -127,8 +127,8 @@ export default class F3CallGraphBuilder extends BasePlugin {
         this.emitProgress(ctx, '配对调用栈，构建调用图...', 40);
 
         // ── Step 4: 内存配对 CALL_PRE / CALL ──────────────────────────────────────
-        const stack   = [];
-        let depth     = 0;
+        const stacks = new Map();
+        const pairs = new Map();
         let edgeCount = 0;
         const edges   = [];
 
@@ -151,8 +151,12 @@ export default class F3CallGraphBuilder extends BasePlugin {
         for (const evt of callEvents) {
             processed++;
 
-            if (evt.type === TYPE.CALL_PRE) {
-                stack.push({
+            const context = evt.context_id ?? 0;
+            if (!stacks.has(context)) stacks.set(context, []);
+            let stack = stacks.get(context);
+            let depth = stack.length;
+            if (evt.type === TYPE.CALL_PRE || evt.type === TYPE.FUNCTION_ENTER) {
+                const frame = {
                     call_seq:         evt.id,
                     caller_line:      smapLineMap.get(evt.iid) ?? null,
                     fn_iid:           evt.iid,
@@ -160,12 +164,19 @@ export default class F3CallGraphBuilder extends BasePlugin {
                     fn_def_iid:       calleeDefIidMap.get(evt.id) ?? null,
                     args_json:        argsMap.get(evt.id) ?? '[]',
                     depth:            depth++,
-                    child_event_span: 0,  // 直接子调用消耗的 SEQ 跨度之和
-                });
+                    child_event_span: 0,
+                    stack,
+                };
+                stack.push(frame);
+                if (evt.call_pair_id != null) pairs.set(evt.call_pair_id, frame);
 
-            } else if (evt.type === TYPE.CALL) {
-                if (stack.length === 0) { depth = Math.max(0, depth - 1); continue; }
-                const frame = stack.pop();
+            } else if (evt.type === TYPE.CALL || evt.type === TYPE.FUNCTION_EXIT) {
+                const frame = evt.call_pair_id != null ? pairs.get(evt.call_pair_id) : stack[stack.length - 1];
+                if (!frame) continue;
+                if (evt.call_pair_id != null) pairs.delete(evt.call_pair_id);
+                stack = frame.stack;
+                const index = stack.indexOf(frame);
+                if (index >= 0) stack.splice(index, 1);
                 depth = Math.max(0, depth - 1);
 
                 // own_event_count = 全区间跨度 - 所有直接子调用占用的跨度

@@ -203,10 +203,10 @@ return this._get(`/api/sessions/${encodeURIComponent(sessionId)}/loop-var-roles`
 
 // ── 数据流 / 污点 ─────────────────────────────────────────────────────────
 
-    traceTaint(sessionId, varName, direction = 'forward', startSeq = null) {
-        const q = { var: varName, direction };
-        if (startSeq !== null) q.startSeq = startSeq;
-        return this._get(`/api/sessions/${encodeURIComponent(sessionId)}/taint`, q);
+    traceTaint(sessionId, varName, direction = 'forward', startSeq = null, sourceScopeId = null) {
+        return this._post(`/api/sessions/${encodeURIComponent(sessionId)}/taint`, {
+            sourceVar: varName, sourceEventId: startSeq, sourceScopeId, direction,
+        });
     }
 
     getDataflow(sessionId, params = {}) {

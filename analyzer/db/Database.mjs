@@ -180,6 +180,30 @@ export function close() {
 
 // ── 在线迁移（幂等）──────────────────────────────────────────────────────────
 function _runMigrations(db) {
+    // Event sequence numbers are local to a trace, not globally unique.
+    const eventPk = db.pragma('table_info(events)').filter(c => c.pk).map(c => c.name);
+    if (eventPk.length === 1 && eventPk[0] === 'id') {
+        const indexes = db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='events' AND sql IS NOT NULL").all();
+        db.transaction(() => {
+            db.exec(`ALTER TABLE events RENAME TO events_legacy;
+                CREATE TABLE events (id INTEGER NOT NULL, session_id TEXT NOT NULL,
+                    type INTEGER NOT NULL, iid INTEGER, PRIMARY KEY(session_id,id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(id));
+                INSERT INTO events SELECT id,session_id,type,iid FROM events_legacy;
+                DROP TABLE events_legacy;`);
+            for (const index of indexes) db.exec(index.sql);
+        })();
+    }
+    for (const [table, columns] of Object.entries({
+        events: { script_id: 'INTEGER', call_id: 'INTEGER', parent_call_id: 'INTEGER', context_id: 'INTEGER', call_pair_id: 'INTEGER' },
+        writes: { binding_id: 'TEXT' }, reads: { binding_id: 'TEXT' }, var_lifetime: { binding_id: 'TEXT' },
+        sessions: { trace_integrity: "TEXT DEFAULT 'unknown'" },
+    })) {
+        const existing = new Set(db.pragma(`table_info(${table})`).map(c => c.name));
+        for (const [column, type] of Object.entries(columns)) {
+            if (!existing.has(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+        }
+    }
     // 获取 sessions 表的现有列
     const sessionsCols = new Set();
     try {
@@ -213,6 +237,8 @@ function _runMigrations(db) {
     if (checkpointCols.size > 0 && !checkpointCols.has('is_stale')) {
         db.exec('ALTER TABLE plugin_checkpoints ADD COLUMN is_stale INTEGER DEFAULT 0');
     }
+
+    if (!checkpointCols.has('fingerprint')) db.exec('ALTER TABLE plugin_checkpoints ADD COLUMN fingerprint TEXT');
 
     // ── 迁移：plugin_checkpoints 加 summary_json 列 ───────────────────────────
     // 记录每个插件 emitDone() 的统计摘要，避免每次查询概览页都重新 COUNT
@@ -712,7 +738,7 @@ function _runMigrations(db) {
     try {
         const exists = db.prepare(
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_var_lifetime_scope'"
-        ).get('idx_var_lifetime_scope');
+        ).get();
         if (!exists) {
             db.exec('CREATE INDEX IF NOT EXISTS idx_var_lifetime_scope ON var_lifetime(session_id, name, scope_id)');
         }
@@ -771,4 +797,13 @@ function _runMigrations(db) {
             console.warn(`[Database] create dataflow index ${idxName} failed (non-fatal):`, e.message);
         }
     }
+    // Binding lookups must be disk-indexed, including null legacy identities.
+    for (const table of ['writes','reads']) {
+        const cols = new Set(db.pragma(`table_info(${table})`).map(c => c.name));
+        if (!cols.has('binding_id')) db.exec(`ALTER TABLE ${table} ADD COLUMN binding_id TEXT`);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_graph_binding ON ${table}(session_id,name,binding_id,event_id,id);
+            CREATE INDEX IF NOT EXISTS idx_${table}_graph_scope ON ${table}(session_id,name,scope_id,event_id,id);
+            CREATE INDEX IF NOT EXISTS idx_${table}_graph_legacy ON ${table}(session_id,name,scope_id,binding_id,event_id,id);`);
+    }
+
 }

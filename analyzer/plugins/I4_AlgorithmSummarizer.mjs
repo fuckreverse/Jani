@@ -7,6 +7,7 @@ import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
 import { decodeType } from '../db/EventTypeCode.mjs';
 import { cfg } from '../Config.mjs';
+import { withGraph } from '../GraphStore.mjs';
 
 export default class I4AlgorithmSummarizer extends BasePlugin {
     static id = 'I4-AlgorithmSummarizer';
@@ -64,14 +65,8 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
 
         // ── 数据流 ──────────────────────────────────────────────────────────
         this.emitProgress(ctx, '读取数据流统计...', 60);
-        const dfStats = db.get(
-            'SELECT COUNT(*) as total FROM dataflow_edges WHERE session_id = ?',
-            [sessionId]
-        );
-        const dfByType = db.all(
-            'SELECT edge_type, COUNT(*) as cnt FROM dataflow_edges WHERE session_id = ? GROUP BY edge_type ORDER BY cnt DESC',
-            [sessionId]
-        );
+        const dfByType = withGraph(sessionId, graph => graph.stats());
+        const dfStats = { total: dfByType.reduce((sum,row) => sum+row.cnt,0) };
 
         // ── 对象变异 ────────────────────────────────────────────────────────
         this.emitProgress(ctx, '读取对象变异统计...', 65);

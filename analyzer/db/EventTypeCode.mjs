@@ -33,6 +33,7 @@ export const TYPE = Object.freeze({
     FUNCTION_EXIT:  0x06,
     END_EXPR:       0x07,
     KEY_EVENT:      0x08,
+    TRACE_END:      0x0D,
     WRITE_VAR:      0x0B,
     READ_VAR_FULL:  0x0C,
 });
