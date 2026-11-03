@@ -9,6 +9,7 @@ import {GraphWriter,GraphReader,withGraph} from '../GraphStore.mjs';
 import {traverseGraph} from '../GraphTraversal.mjs';
 import A2 from '../plugins/A2_DataFlowGraph.mjs';
 import {reload} from '../Config.mjs';
+import Database from 'better-sqlite3';
 
 const directory=mkdtempSync(join(tmpdir(),'jani-graph-tests-'));
 before(async()=>db.init(join(directory,'source.db')));
@@ -87,6 +88,17 @@ test('legacy graphs remain queryable and session data stays isolated',()=>{
     session('legacy');db.run('INSERT INTO dataflow_edges(session_id,from_event_id,to_event_id,from_var,to_var,edge_type) VALUES (?,?,?,?,?,?)','legacy',1,2,'legacy','target','assign');
     withGraph('legacy',r=>{assert.equal(r.list().total,1);assert.deepEqual(r.variables(),['legacy','target']);});
     assert.equal(withGraph('cross',r=>r.list({varExact:'legacy'}).total),0);
+});
+
+test('v1 disk generations remain readable after evidence is added in v2',()=>{
+    session('disk-v1');const w=writer('disk-v1');w.add(edge(1,2));w.publish();
+    const shard=new Database(join(w.path,'edges-1.sqlite'));
+    try{shard.exec('ALTER TABLE edges DROP COLUMN evidence');}finally{shard.close();}
+    db.run("UPDATE dataflow_graphs SET version=1 WHERE session_id='disk-v1'");
+    withGraph('disk-v1',r=>{
+        assert.equal(r.list().edges[0].from_event_id,1);
+        assert.equal(r.neighbors('event',2,'backward')[0].to_event_id,2);
+    });
 });
 
 test('streamed builder matches binding identity across shards and clears legacy edges',async()=>{

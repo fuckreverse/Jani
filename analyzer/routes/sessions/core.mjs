@@ -232,7 +232,7 @@ router.delete('/:id', (req, res) => {
         // 注意：先关闭外键约束，避免逐行外键校验拖慢大表删除；事务结束后恢复
         const TABLES_WITH_SESSION = [
             // F1 核心事件表（数据量最大，放前面让事务尽快释放空间）
-            'value_index', 'value_dict', 'oid_aliases',
+            'value_index', 'value_dict', 'oid_aliases', 'event_dependencies', 'event_analysis', 'control_regions',
             'writes', 'reads', 'fields', 'events',
             // F2/F3/F4
             'smap', 'call_edges', 'var_lifetime', 'iid_counts',

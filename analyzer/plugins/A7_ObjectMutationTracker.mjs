@@ -140,6 +140,7 @@ export default class A7ObjectMutationTracker extends BasePlugin {
                     0,
                     f.src_text ?? null,
                 ]);
+                lastValueIds.set(key,{id:f.value_id,text:f.value});
             }
 
             processed++;

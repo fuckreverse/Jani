@@ -30,6 +30,7 @@
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
 import { cfg } from '../Config.mjs';
+import { executionEventSql } from '../db/EventTypeCode.mjs';
 
 const BATCH_SIZE     = () => cfg('plugins.A3_HotPathAnalyzer.batchSize');
 
@@ -48,7 +49,7 @@ function median(arr) {
     if (arr.length === 0) return 0;
     const s = arr.slice().sort((a, b) => a - b);
     const m = s.length >> 1;
-    return s.length & 1 ? s[m] : ((s[m - 1] + s[m]) / 2) | 0;
+    return s.length & 1 ? s[m] : Math.floor((s[m - 1] + s[m]) / 2);
 }
 
 /**
@@ -187,7 +188,7 @@ function computeOwnRanges(frameStart, frameEnd, directChildren) {
 export default class A3HotPathAnalyzer extends BasePlugin {
     static observes = ['F2-SmapLoader'];
     static id = 'A3-HotPathAnalyzer';
-    static deps = ['F1-EventIndex'];
+    static deps = ['F1-EventIndex', 'F3-CallGraphBuilder'];
     static description = '统计各 iid 执行次数，检测循环（v3：函数边界感知 + 自适应阈值 + 嵌套识别），写入 iid_counts/loops 表';
     static displayName = 'A3 · HotPathAnalyzer';
 
@@ -217,7 +218,7 @@ export default class A3HotPathAnalyzer extends BasePlugin {
             `SELECT e.iid, COUNT(*) as count, s.sl AS line, s.src_text
              FROM events e
              LEFT JOIN smap s ON s.session_id = e.session_id AND s.iid = e.iid
-             WHERE e.session_id = ? AND e.iid IS NOT NULL
+             WHERE e.session_id = ? AND e.iid IS NOT NULL AND ${executionEventSql()}
              GROUP BY e.iid
              ORDER BY count DESC`,
             [sessionId]
@@ -252,7 +253,7 @@ export default class A3HotPathAnalyzer extends BasePlugin {
         if (hotIidSet.size === 0) {
             this.emitProgress(ctx, '完成，无热点 iid', 100);
             const topHitCount = counts.length > 0 ? counts[0].count : 0;
-            this.emitDone(ctx, { iidCount: counts.length, loopCount: 0, topHitCount });
+            this.emitDone(ctx, { precision: 'heuristic', iterationCountMeaning: 'iid-hit-estimate', iidCount: counts.length, loopCount: 0, topHitCount });
             return;
         }
 
@@ -330,15 +331,15 @@ export default class A3HotPathAnalyzer extends BasePlugin {
         if (hotIids.length <= _maxInParams) {
             const placeholders = hotIids.map(() => '?').join(',');
             hotEvents = rawDb.prepare(
-                `SELECT id, iid FROM events
-                 WHERE session_id = ? AND iid IN (${placeholders})
+                `SELECT id, iid, call_id, script_id FROM events e
+                 WHERE session_id = ? AND iid IN (${placeholders}) AND ${executionEventSql()}
                  ORDER BY id ASC`
             ).all(sessionId, ...hotIids);
         } else {
             // 超出 IN 限制（极大 session 退化路径）：全量拉取后 JS 侧过滤
             hotEvents = rawDb.prepare(
-                `SELECT id, iid FROM events
-                 WHERE session_id = ? AND iid IS NOT NULL
+                `SELECT id, iid, call_id, script_id FROM events e
+                 WHERE session_id = ? AND iid IS NOT NULL AND ${executionEventSql()}
                  ORDER BY id ASC`
             ).all(sessionId).filter(e => hotIidSet.has(e.iid));
         }
@@ -374,6 +375,23 @@ export default class A3HotPathAnalyzer extends BasePlugin {
         // 5b: 双指针收集 — edgeKey → Map<iid, eventId[]>
         const edgeIidSeqs = new Map(); // edgeKey → Map<iid, number[]>
 
+        const modern=hotEvents.every(e=>e.call_id!=null);
+        const invocationInfo=new Map();
+        if(modern) {
+            const byStart=new Map(callEdges.map(edge=>[edge.call_seq,edge]));
+            for(const row of rawDb.prepare(`SELECT e.call_id,e.script_id,a.metadata FROM events e JOIN event_analysis a ON a.session_id=e.session_id AND a.event_id=e.id WHERE e.session_id=? AND a.kind='function_enter'`).iterate(sessionId)) {
+                const invocationId=JSON.parse(row.metadata).invocationId;
+                invocationInfo.set(`frame:${row.script_id}:${row.call_id}`,byStart.get(invocationId));
+            }
+            for(const event of hotEvents) {
+                const key=`frame:${event.script_id}:${event.call_id}`;
+                if(!invocationInfo.has(key))invocationInfo.set(key,byStart.get(-event.call_id));
+                if(!edgeIidSeqs.has(key))edgeIidSeqs.set(key,new Map());
+                const iids=edgeIidSeqs.get(key);
+                if(!iids.has(event.iid))iids.set(event.iid,[]);
+                iids.get(event.iid).push(event.id);
+            }
+        } else {
         let globalPtr = 0;
         for (const { lo, hi, edgeKey } of allWindows) {
             if (lo > hi) continue;
@@ -392,6 +410,8 @@ export default class A3HotPathAnalyzer extends BasePlugin {
             }
         }
 
+        }
+
         // 5c: 对每帧 iidSeqs 做 segmentAndMerge，产生候选循环
         const candidateLoops = [];
 
@@ -400,8 +420,8 @@ export default class A3HotPathAnalyzer extends BasePlugin {
         for (const edge of callEdges) edgeFnName.set(edge.id, edge.fn_name ?? null);
 
         for (const [edgeKey, iidSeqs] of edgeIidSeqs) {
-            const callEdgeId = edgeKey === '__toplevel__' ? null : edgeKey;
-            const fnName     = edgeFnName.get(edgeKey) ?? null;
+            const callEdgeId = modern ? invocationInfo.get(edgeKey)?.id ?? null : edgeKey === '__toplevel__' ? null : edgeKey;
+            const fnName = modern ? invocationInfo.get(edgeKey)?.fn_name ?? null : edgeFnName.get(edgeKey) ?? null;
 
             for (const [iid, seqs] of iidSeqs) {
                 const segments = segmentAndMerge(seqs, _segParams);
@@ -416,6 +436,7 @@ export default class A3HotPathAnalyzer extends BasePlugin {
                         medianGap:       seg.medianGap,
                         line:            smapInfo.line     ?? null,
                         src_text:        smapInfo.src_text ?? null,
+                        frameKey: edgeKey,
                         call_edge_id:    callEdgeId,
                         fn_name:         fnName,
                     });
@@ -428,7 +449,7 @@ export default class A3HotPathAnalyzer extends BasePlugin {
         if (candidateLoops.length === 0) {
             this.emitProgress(ctx, '完成，无循环检测到', 100);
             const topHitCount = counts.length > 0 ? counts[0].count : 0;
-            this.emitDone(ctx, { iidCount: counts.length, loopCount: 0, topHitCount });
+            this.emitDone(ctx, { precision: 'heuristic', iterationCountMeaning: 'iid-hit-estimate', iidCount: counts.length, loopCount: 0, topHitCount });
             return;
         }
 
@@ -439,7 +460,7 @@ export default class A3HotPathAnalyzer extends BasePlugin {
         // 按 call_edge_id 分组（null 归为 'toplevel'）
         const frameGroups = new Map(); // callEdgeId-key → loop[]
         for (const l of withTempId) {
-            const key = l.call_edge_id ?? '__toplevel__';
+            const key = l.frameKey ?? l.call_edge_id ?? '__toplevel__';
             let arr = frameGroups.get(key);
             if (!arr) { arr = []; frameGroups.set(key, arr); }
             arr.push(l);
@@ -532,7 +553,7 @@ export default class A3HotPathAnalyzer extends BasePlugin {
             100
         );
         const topHitCount = counts.length > 0 ? counts[0].count : 0; // counts 已按 count DESC 排序
-        this.emitDone(ctx, {
+        this.emitDone(ctx, { precision: 'heuristic', iterationCountMeaning: 'iid-hit-estimate',
             iidCount:    counts.length,
             loopCount:   candidateLoops.length,
             topHitCount,

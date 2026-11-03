@@ -58,3 +58,12 @@ export function encodeType(typeStr) {
 export function decodeType(code) {
     return _DECODE[code] ?? 'UNKNOWN';
 }
+
+/** Recorder bookkeeping is not another execution of the original instruction. */
+export function executionEventSql(alias = 'e') {
+    return `${alias}.type IN (3,7,11,12) AND (${alias}.type<>7 OR NOT EXISTS (
+        SELECT 1 FROM event_analysis analysis_event WHERE analysis_event.session_id=${alias}.session_id
+        AND analysis_event.event_id=${alias}.id AND analysis_event.kind IN (
+            'declarations','call_input','default_argument','argument','spread_completion','argument_aborted','await_resume',
+            'async_schedule','callback_enter','callback_result','callback_throw','await_reject'))) `;
+}

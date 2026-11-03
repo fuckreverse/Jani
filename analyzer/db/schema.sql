@@ -581,3 +581,22 @@ CREATE TABLE IF NOT EXISTS dataflow_graphs (
     version INTEGER NOT NULL,
     created_at INTEGER NOT NULL
 );
+
+-- Observed dependencies, separate from the derived disk graph. v4 metadata extension.
+CREATE TABLE IF NOT EXISTS event_dependencies (
+ id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+ from_event_id INTEGER NOT NULL, to_event_id INTEGER NOT NULL,
+ from_var TEXT, to_var TEXT, edge_type TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT 'observed'
+);
+CREATE INDEX IF NOT EXISTS idx_dep_in ON event_dependencies(session_id,to_event_id,id);
+CREATE INDEX IF NOT EXISTS idx_dep_out ON event_dependencies(session_id,from_event_id,id);
+CREATE TABLE IF NOT EXISTS event_analysis (
+ session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, event_id INTEGER NOT NULL,
+ kind TEXT NOT NULL, metadata TEXT NOT NULL, PRIMARY KEY(session_id,event_id)
+);
+CREATE TABLE IF NOT EXISTS control_regions (
+ session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, event_id INTEGER NOT NULL,
+ sl INTEGER, sc INTEGER, el INTEGER, ec INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_control_event ON control_regions(session_id,event_id);
+CREATE INDEX IF NOT EXISTS idx_fields_dependency ON fields(session_id,base_oid,offset,is_write,event_id,id);

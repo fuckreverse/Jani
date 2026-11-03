@@ -1191,3 +1191,15 @@ node tools/trace-parse.mjs traces/trace_*.bin --smap traces/trace_*.smap.json \
 LogManager 默认最多积压 1,048,576 条（可配置 maxCapacity）。异步批次按顺序写入；显式 flush/close 会抛出后端错误。
 ExecutionTrace.close 发出 TRACE_END；endExecution 不表示异步任务全部结束。
 JTB1 v4 在 payload 尾部追加长度前缀 JSON 元数据，携带动态身份与读写绑定 ID；新版保留 v1–v3 解码。
+
+
+## 不执行业务代码的值采集
+
+TraceLogger 在事件入队前固定业务值的安全快照，普通对象以稳定的 `[Object #N]` 引用标签记录，事件 OID 继续用于对象关联。采集不遍历普通对象，不调用其 getter、toJSON、toString 或 Proxy trap。函数名称只使用已注册的旁路元数据，未知外部函数允许匿名。对对象类型的属性键也使用引用标签，避免额外执行 ToPrimitive。
+
+TypedArray 和 ArrayBuffer 保留类型、长度及前 64 字节摘要，使用内置槽位读取，绕过实例自定义 constructor、length、byteLength 等 getter。二进制编码器也能独立安全处理业务值。
+
+普通对象不再默认输出深度 JSON；这是为了保证日志采集不改变程序状态。IDB/Worker、控制台和文件后端得到的都是安全值，不会在稍后的序列化或结构化克隆中执行业务 getter。
+
+
+`await logger.flush()` 可在不关闭后端的情况下等待当前缓冲写入并收到后端确认；`ExecutionTraceAnalysis.flush()` 使用这一公开方法。Worker 应先完成运行时/日志初始化并通知调用方 ready，再开始接收业务输入，避免异步初始化期间丢失尚未安装处理器的消息。

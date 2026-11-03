@@ -764,3 +764,26 @@ const { avgUs, acceptable } = benchmarkCallOverhead(1000, 10);
 `installToStringHook()` 在 `Function.prototype.toString` 上安装拦截器：
 若目标函数已通过 `registerOriginalCode()` 注册了原始代码，则返回原始代码；
 否则，透传给原始 `toString`，行为完全正常。
+
+
+## 脚本与模块执行边界
+
+插桩器保留 Program 顶层的声明顺序和词法环境，不使用外层 try/while 包裹。正常完成会调用 Sr；自定义宿主若还需要记录异常退出，应在执行边界接入：
+
+```js
+runtime.runScript(() => executeInstrumentedScript());
+await runtime.runModule(() => loadOrEvaluateInstrumentedModule());
+```
+
+这两个方法会通知异常退出并继续抛出原始异常值。runScript 用于同步执行，runModule 用于异步模块及顶层 await；不要在同一 runtime 上交叠多个独立顶层 runModule 边界。浏览器自行插入 script 或直接动态 import 的宿主需要自行接入相应错误观测；不能通过给 Program 添加块作用域代替执行边界。
+
+函数 IID/SID、名称等观测元数据使用旁路 WeakMap 存储，不再自动读取业务对象上的旧式特殊属性。未知外部函数可以显示为匿名。
+
+
+## 原生引用与补充覆盖
+
+自增自减使用独立访问器引用，由引擎执行原生 `++/--` 的 ToNumeric 和后置返回值，R/W 或 G/P 记录对应读写。`super` 与私有成员通过词法原生访问回调接入 G/P/M，保留 derived receiver、私有品牌检查及 new.target；不把 super 转成普通对象属性读取。
+
+`super()` 构造调用和 with 中动态标识符调用保留原生求值。成功求值后触发 `nativeOperation(iid, operation, value)`；ExecutionTrace 输出 `analysis.kind='native_operation'` 与 `coverage='result_only'`。该事件不承诺函数身份、参数、调用前拦截或异常路径完整性；可选调用的结果事件也不代表实际调用一定发生。原始异常继续由已有函数/宿主边界观测，不能把缺少结果事件解释为未执行。
+
+只读等按需配置没有完整的写入、初始化和函数帧同步时，不使用 Rl 影子缓存替代真实读取。单独采集读写仍使用原变量值。

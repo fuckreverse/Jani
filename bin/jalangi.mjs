@@ -518,7 +518,7 @@ async function buildBrowserRuntimeBundle(opts) {
     const loadFnBody = sourceType === 'module'
         ? `__jalangiLoggerReady
         /* eslint-disable-next-line */
-        .then(function() { return import(/* @vite-ignore */ /* webpackIgnore: true */ src); })
+        .then(function() { return ${sandboxVar}.runModule(function() { return import(/* @vite-ignore */ /* webpackIgnore: true */ src); }); })
         .catch(function(err) { console.error('[jalangi] 插桩代码加载失败:', src, err); });`
         : `__jalangiLoggerReady.then(function() {
         var s = document.createElement('script');
@@ -1196,7 +1196,7 @@ async function cmdInstrumentAndRun(common, iarArgs) {
             }
         }
 
-        mod._compile(result.code, instFilename);
+        sandbox.runScript(() => mod._compile(result.code, instFilename));
     };
 
     // ── 运行目标脚本 ──────────────────────────────────────────────────────────

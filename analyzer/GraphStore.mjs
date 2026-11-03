@@ -11,11 +11,12 @@ import { randomUUID, createHash } from 'crypto';
 import * as db from './db/Database.mjs';
 import { cfg } from './Config.mjs';
 
-export const GRAPH_STORE_VERSION = 1;
+export const GRAPH_STORE_VERSION = 2;
 const COLUMNS = 'id, from_event_id, to_event_id, from_var, to_var, edge_type, iid, line';
+const EVIDENCE_COLUMNS = `${COLUMNS}, evidence`;
 const EDGE_SCHEMA = `CREATE TABLE edges (
     id INTEGER PRIMARY KEY, from_event_id INTEGER, to_event_id INTEGER,
-    from_var TEXT, to_var TEXT, edge_type TEXT NOT NULL, iid INTEGER, line INTEGER);
+    from_var TEXT, to_var TEXT, edge_type TEXT NOT NULL, iid INTEGER, line INTEGER, evidence TEXT);
     CREATE INDEX edges_from_event ON edges(from_event_id,id);
     CREATE INDEX edges_to_event ON edges(to_event_id,id);
     CREATE INDEX edges_from_var ON edges(from_var,id);
@@ -163,7 +164,7 @@ export class GraphWriter {
         this.shardCount++;
         this.shard = new Database(resolve(this.path, `edges-${this.shardCount}.sqlite`));
         configure(this.shard, true); this.shard.exec(EDGE_SCHEMA);
-        this.insert = this.shard.prepare('INSERT INTO edges VALUES (?,?,?,?,?,?,?,?)');
+        this.insert = this.shard.prepare('INSERT INTO edges VALUES (?,?,?,?,?,?,?,?,?)');
         this.shardRows = 0; this.firstId = this.count + 1;
     }
     closeShard() {
@@ -183,7 +184,7 @@ export class GraphWriter {
                     const e = this.pending[position];
                     const id = ++this.count;
                     this.insert.run(id,e.from_event_id ?? null,e.to_event_id ?? null,e.from_var ?? null,
-                        e.to_var ?? null,e.edge_type,e.iid ?? null,e.line ?? null);
+                        e.to_var ?? null,e.edge_type,e.iid ?? null,e.line ?? null,e.evidence ?? 'unspecified');
                     this.shardRows++;
                     for (const [direction, event, variable] of [
                         ['forward',e.from_event_id,e.from_var],['backward',e.to_event_id,e.to_var],
@@ -243,7 +244,7 @@ export class GraphReader {
         });
         if (this.manifest) {
             try {
-                if (this.manifest.version !== GRAPH_STORE_VERSION) throw new Error('Unsupported graph store version');
+                if (![1,GRAPH_STORE_VERSION].includes(this.manifest.version)) throw new Error('Unsupported graph store version');
                 this.catalog = new Database(resolve(this.manifest.root_path,'catalog.sqlite'), { readonly: true, fileMustExist: true });
                 configure(this.catalog);
             } catch (error) { this.close(); throw error; }
@@ -284,7 +285,7 @@ export class GraphReader {
             const count = f.sql === '1=1' ? item.edge_count
                 : this.shard(item.id).prepare(`SELECT COUNT(*) n FROM edges WHERE ${f.sql}`).get(...f.args).n;
             if (edges.length < limit && total + count > offset) {
-                edges.push(...this.shard(item.id).prepare(`SELECT ${COLUMNS} FROM edges WHERE ${f.sql} ORDER BY id LIMIT ? OFFSET ?`)
+                edges.push(...this.shard(item.id).prepare(`SELECT ${this.manifest.version >= 2 ? EVIDENCE_COLUMNS : COLUMNS} FROM edges WHERE ${f.sql} ORDER BY id LIMIT ? OFFSET ?`)
                     .all(...f.args,limit-edges.length,Math.max(0,offset-total)));
             }
             total += count;
@@ -316,7 +317,7 @@ export class GraphReader {
             : this.catalog.prepare('SELECT shard FROM locations WHERE kind=? AND node=? AND direction=? ORDER BY shard').iterate(kind,String(key),direction);
         const rows = [];
         for (const item of shards) {
-            rows.push(...this.shard(item.shard).prepare(`SELECT ${COLUMNS} FROM edges WHERE ${where} ORDER BY id LIMIT ?`).all(...params,limit+1-rows.length));
+            rows.push(...this.shard(item.shard).prepare(`SELECT ${this.manifest.version >= 2 ? EVIDENCE_COLUMNS : COLUMNS} FROM edges WHERE ${where} ORDER BY id LIMIT ?`).all(...params,limit+1-rows.length));
             if (rows.length > limit) { this.metrics.truncated = true; break; }
         }
         return rows.slice(0,limit);

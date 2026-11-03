@@ -21,6 +21,8 @@
   ],
   "scripts": {
     "test": "node --test test/unit/*.test.mjs test/integration/*.test.mjs",
+    "test:semantics": "node --experimental-vm-modules tools/audit-semantics.mjs && node --test test/integration/semantic-preservation.test.mjs test/integration/semantic-regressions.test.mjs test/integration/reference-coverage.test.mjs",
+    "test:browser": "node --test test/browser/*.test.mjs",
     "test:unit": "node --test test/unit/*.test.mjs",
     "test:integration": "node --test test/integration/*.test.mjs",
     "test:logging": "node --test test/unit/logging.test.mjs test/integration/logging.test.mjs",

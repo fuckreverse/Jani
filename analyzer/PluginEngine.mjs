@@ -514,6 +514,9 @@ async function fingerprintInputs(sessionId) {
     for (const file of readdirSync(resolve(__dirname,'plugins')).filter(f => f.endsWith('.mjs')).sort()) hash.update(readFileSync(resolve(__dirname,'plugins',file)));
     hash.update(readFileSync(resolve(__dirname,'../src/encoding/EventSerializer.js')));
     hash.update(readFileSync(resolve(__dirname,'GraphStore.mjs')));
+    hash.update(readFileSync(resolve(__dirname,'DependencyIndex.mjs')));
+    hash.update(readFileSync(resolve(__dirname,'AnalysisQuality.mjs')));
+    hash.update(readFileSync(resolve(__dirname,'db/EventTypeCode.mjs')));
     hash.update(JSON.stringify(cfg('graph')));
     const input = hash.digest('hex');
     for (const [id, cls] of pluginRegistry) {

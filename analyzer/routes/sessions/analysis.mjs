@@ -101,7 +101,9 @@ router.post('/taint', async (req, res) => {
             `SELECT * FROM taint_paths WHERE session_id = ? AND source_var IS ? ORDER BY id DESC LIMIT ${_taintPathsLimit}`,
             [id, sourceVar || null]
         );
-        res.json({ paths });
+        const checkpoint=db.get('SELECT summary_json FROM plugin_checkpoints WHERE session_id=? AND plugin_id=?',id,'A1-TaintTracker');
+        const quality=safeParseJson(checkpoint?.summary_json,null);
+        res.json({ paths:paths.map(path=>({...path,analysis:safeParseJson(path.analysis_json,null)})), analysis:quality });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -460,7 +462,7 @@ router.get('/signature-paths', (req, res) => {
         }
 
         const rows = db.all(
-            `SELECT id, field_name, sink_event_id, path_json, summary, input_vars, hops
+            `SELECT id, field_name, sink_event_id, path_json, summary, input_vars, hops, analysis_json
              FROM signature_paths
              WHERE ${conditions.join(' AND ')}
              ORDER BY hops ASC, id ASC`,
@@ -471,6 +473,7 @@ router.get('/signature-paths', (req, res) => {
             ...r,
             path_json: safeParseJson(r.path_json, []),
             input_vars: safeParseJson(r.input_vars, []),
+            analysis: safeParseJson(r.analysis_json, null),
         }));
 
         res.json({ paths: result, count: result.length });

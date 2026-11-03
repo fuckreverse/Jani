@@ -911,9 +911,10 @@ describe('BUG 回归测试', () => {
         }
     });
 
-    test('BUG7: script 级未捕获异常应向外传播（catch 块应 re-throw）', () => {
+    test('BUG7: script 级未捕获异常保留原生 throw，不引入顶层块作用域', () => {
         const r = instr('throw new Error("test");');
-        assert.ok(r.code.includes('throw J$e'), 'script-level catch 块应包含 re-throw 语句');
+        assert.ok(r.code.includes('throw '), '原生 throw 应保留');
+        assert.ok(!r.code.includes('jalangiLabel'), '脚本顶层不应被循环和 try 块包裹');
     });
 
     test('BUG8: 解构 var 声明不应错误地插入名称为 undefined 的写入钩子', () => {

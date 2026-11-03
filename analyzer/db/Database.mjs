@@ -198,6 +198,7 @@ function _runMigrations(db) {
         events: { script_id: 'INTEGER', call_id: 'INTEGER', parent_call_id: 'INTEGER', context_id: 'INTEGER', call_pair_id: 'INTEGER' },
         writes: { binding_id: 'TEXT' }, reads: { binding_id: 'TEXT' }, var_lifetime: { binding_id: 'TEXT' },
         sessions: { trace_integrity: "TEXT DEFAULT 'unknown'" },
+        taint_paths: { analysis_json: 'TEXT' }, signature_paths: { analysis_json: 'TEXT' },
     })) {
         const existing = new Set(db.pragma(`table_info(${table})`).map(c => c.name));
         for (const [column, type] of Object.entries(columns)) {
@@ -797,6 +798,7 @@ function _runMigrations(db) {
             console.warn(`[Database] create dataflow index ${idxName} failed (non-fatal):`, e.message);
         }
     }
+    db.exec('CREATE INDEX IF NOT EXISTS idx_events_invocation ON events(session_id,call_id,script_id,iid,id)');
     // Binding lookups must be disk-indexed, including null legacy identities.
     for (const table of ['writes','reads']) {
         const cols = new Set(db.pragma(`table_info(${table})`).map(c => c.name));

@@ -78,27 +78,45 @@
  *   优于应用层字典，且对解码器完全透明、无有状态依赖。
  */
 
+import { functionName, referenceLabel } from '../runtime/ValueMetadata.js';
+
 // ─── 原生方法快照（防止被插桩代码 monkey-patch 后触发钩子递归）─────────────────
 // 必须在模块加载时立即快照，此时被分析代码尚未运行。
 const _jsonStringify     = JSON.stringify;
 const _objDefineProperty = Object.defineProperty;
 const _objGetOwnPropDesc = Object.getOwnPropertyDescriptor;
 const _objGetPrototypeOf = Object.getPrototypeOf;
+const _objCreate = Object.create;
+const _objKeys = Object.keys;
+const _arrayIsArray = Array.isArray;
+const _nativeString = String;
+const _arrayMap = Function.call.bind(Array.prototype.map);
 
-// 预先快照所有内置原型上的原生 toJSON（Date 是唯一标准内置带 toJSON 的类型）。
-// 被分析代码运行后可能用插桩函数替换这些原型属性；我们在此记录快照，
-// 序列化时若检测到原型上的 toJSON 已非原生函数，才需要做遮蔽处理。
-// key: 原型对象, value: 原生 toJSON 函数引用
-const _nativeToJsonMap = new Map();
-for (const proto of [
-    Date.prototype,
-    // 以下类型通常没有 toJSON，但防御性地记录（值为 undefined 表示无）
-    // Number.prototype, Boolean.prototype 没有 toJSON，不需要
-]) {
-    const desc = _objGetOwnPropDesc(proto, 'toJSON');
-    if (desc && typeof desc.value === 'function') {
-        _nativeToJsonMap.set(proto, desc.value);
+// Brand checks and intrinsic getters never read user-defined properties, even
+// for proxies/revoked proxies. Keep typed byte previews without calling getters.
+const _applyIntrinsic = Reflect.apply;
+const _isView = ArrayBuffer.isView;
+const _Uint8Array = Uint8Array;
+const _hex = Array.from({length:256}, (_, i) => i.toString(16).padStart(2, '0'));
+const _abLength = _objGetOwnPropDesc(ArrayBuffer.prototype, 'byteLength').get;
+const _taProto = _objGetPrototypeOf(Uint8Array.prototype);
+const _taName = _objGetOwnPropDesc(_taProto, Symbol.toStringTag).get;
+const _taLength = _objGetOwnPropDesc(_taProto, 'length').get;
+const _taByteLength = _objGetOwnPropDesc(_taProto, 'byteLength').get;
+const _taBuffer = _objGetOwnPropDesc(_taProto, 'buffer').get;
+const _taOffset = _objGetOwnPropDesc(_taProto, 'byteOffset').get;
+function typedInfo(value) {
+    if (_isView(value)) {
+        const typeName = _applyIntrinsic(_taName, value, []);
+        if (typeName === undefined) return null; // DataView
+        return {typeName, elementCount:_applyIntrinsic(_taLength,value,[]),
+            byteLength:_applyIntrinsic(_taByteLength,value,[]),
+            bufferRef:_applyIntrinsic(_taBuffer,value,[]),bufferOffset:_applyIntrinsic(_taOffset,value,[])};
     }
+    try {
+        return {typeName:'ArrayBuffer',elementCount:0,
+            byteLength:_applyIntrinsic(_abLength,value,[]),bufferRef:value,bufferOffset:0};
+    } catch { return null; } // Internal-slot mismatch, not user code.
 }
 
 // ─── 魔数 & 版本 ──────────────────────────────────────────────────────────────
@@ -161,11 +179,53 @@ export const VALUE_TYPE = Object.freeze({
     INT32:       0x05,  // 整数，4 字节 i32（小端）— 整数优化
     FLOAT64:     0x06,  // 浮点数，8 字节 f64（小端）
     STRING:      0x07,  // 字符串，u16 长度 + UTF-8
-    OBJECT:      0x08,  // 对象 JSON，u16 长度 + UTF-8
+    OBJECT:      0x08,  // 不透明引用标签或原始值文本，u16 长度 + UTF-8
     FUNCTION:    0x09,  // 函数，u8 名称长度 + ASCII
     TYPED_ARRAY: 0x0B,  // TypedArray/ArrayBuffer：u8 类型名长度 + ASCII(类型名) +
                         //   u32 元素数量 + u32 字节长度 + u16 hex摘要长度 + hex摘要字节（最多128字节）
 });
+
+/** Convert only known event value slots before buffering/structured clone. */
+export function snapshotValue(value) {
+    const type = typeof value;
+    if (value !== null && type === 'object') {
+        const info = typedInfo(value);
+        if (info) return `[${info.typeName}(${info.elementCount}):${info.byteLength}B:${_bufToHex(info.bufferRef, info.bufferOffset, Math.min(info.byteLength, 64))}]`;
+        return referenceLabel(value);
+    }
+    if (type === 'function') return functionName(value) ? `[Function ${functionName(value)}]` : referenceLabel(value);
+    if (type === 'bigint') return `${value}n`;
+    if (type === 'symbol') return _nativeString(value);
+    return value;
+}
+
+export function snapshotEvent(event) {
+    // Event envelopes and metadata are framework-owned. Value slots may contain
+    // arbitrary business objects; only those slots use opaque identity snapshots.
+    const copy = _objCreate(null);
+    for (const key of _objKeys(event)) copy[key] = event[key];
+    _objDefineProperty(copy, 'toJSON', { value: undefined });
+    const list = (items, transform) => {
+        const values = _arrayMap(items, transform);
+        _objDefineProperty(values, 'toJSON', { value: undefined });
+        return values;
+    };
+    for (const key of ['base', 'result', 'exception', 'val']) {
+        if (_objGetOwnPropDesc(event, key)) copy[key] = snapshotValue(event[key]);
+    }
+    if (event.args) copy.args = list(event.args, snapshotValue);
+    for (const key of ['writes', 'reads', 'fields']) {
+        if (event[key]) copy[key] = list(event[key], entry => {
+            const value = _objCreate(null);
+            for (const field of _objKeys(entry)) value[field] = entry[field];
+            value.val = snapshotValue(entry.val);
+            if (key === 'fields' && typeof entry.offset !== 'string') value.offset = _nativeString(snapshotValue(entry.offset));
+            return value;
+        });
+    }
+    if (event.analysis) copy.analysis = metadataTree(event.analysis);
+    return copy;
+}
 
 // ─── 编码工具 ──────────────────────────────────────────────────────────────────
 
@@ -234,51 +294,23 @@ function measureValue(v, omit = false) {
         return { vt: VALUE_TYPE.FLOAT64, extraBytes: 8 };
     }
     if (t === 'function') {
-        const name = v.name ?? '';
+        const name = functionName(v);
         const nb   = encodeUtf8(name.slice(0, 255));
         return { vt: VALUE_TYPE.FUNCTION, extraBytes: 1 + nb.length, strBytes: nb };
     }
     // TypedArray / ArrayBuffer 特殊处理（必须在 typeof 'object' 分支之前检测）
-    if (t === 'object' && v !== null && _isTypedArrayOrBuffer(v)) {
-        return _measureTypedArray(v);
+    if (t === 'object' && v !== null) {
+        const info = typedInfo(v);
+        if (info) return _measureTypedArray(info);
     }
     if (t === 'string') {
         const nb = encodeUtf8(v.length > 65000 ? v.slice(0, 64999) + '…' : v);
         return { vt: VALUE_TYPE.STRING, extraBytes: 2 + nb.length, strBytes: nb };
     }
-    // 对象：使用快照的原生 JSON.stringify。
-    // 若对象原型链上的 toJSON 已被插桩代码替换（不再是原生函数），
-    // 临时在实例上遮蔽它，防止 JSON.stringify 调用插桩函数触发 Jalangi 钩子递归。
-    // 性能优化：
-    //   - 大多数对象是 plain object / Array，原型链上根本没有 toJSON → 零额外开销
-    //   - 只有 Date 等对象才需要检查；且只有当原型上的 toJSON 被替换后才需要遮蔽
-    //   - 检查路径：直接走 proto → _nativeToJsonMap 查表，O(1)，无 getOwnPropertyDescriptor
-    let s;
-    try {
-        let shielded = false;
-        if (v !== null && typeof v === 'object') {
-            const proto = _objGetPrototypeOf(v);
-            const native = proto !== null ? _nativeToJsonMap.get(proto) : undefined;
-            if (native !== undefined) {
-                // 该原型本来有原生 toJSON；检查当前实例或原型上的 toJSON 是否还是原生版本
-                const ownDesc = _objGetOwnPropDesc(v, 'toJSON');
-                const current = ownDesc ? ownDesc.value : proto.toJSON;  // proto.toJSON 此时可能是插桩版
-                if (current !== native && ownDesc === undefined) {
-                    // 原型上的 toJSON 已被替换为插桩版，且实例上没有自有遮蔽 → 需要遮蔽
-                    try {
-                        _objDefineProperty(v, 'toJSON', { value: native, configurable: true, writable: true });
-                        shielded = true;
-                    } catch { /* frozen/sealed 对象无法遮蔽，序列化可能仍会调用插桩 toJSON，catch 兜底 */ }
-                }
-            }
-        }
-        s = _jsonStringify(v);
-        if (shielded) {
-            try { delete v.toJSON; } catch { /* 忽略 */ }
-        }
-    } catch { s = '[object]'; }
-    if (s === undefined) s = '[object]';
-    const nb = encodeUtf8(s.length > 65000 ? s.slice(0, 64999) + '…' : s);
+    // An arbitrary object can be a Proxy: even descriptor/prototype inspection
+    // may execute business code. Record stable identity instead of traversing it.
+    const s = t === 'object' ? referenceLabel(v) : String(v);
+    const nb = encodeUtf8(s);
     return { vt: VALUE_TYPE.OBJECT, extraBytes: 2 + nb.length, strBytes: nb };
 }
 
@@ -287,34 +319,7 @@ function measureValue(v, omit = false) {
  * @param {*} v
  * @returns {boolean}
  */
-function _isTypedArrayOrBuffer(v) {
-    if (v instanceof ArrayBuffer) return true;
-    // TypedArray：具有 buffer 属性 + BYTES_PER_ELEMENT 属性且不是 DataView
-    return (ArrayBuffer.isView(v) && !(v instanceof DataView));
-}
-
-/**
- * 计算 TypedArray/ArrayBuffer 的编码大小。
- * 格式：u8(类型名len) + ASCII(类型名) + u32(element_count) + u32(byte_length) +
- *       u16(hex_len) + ASCII(hex摘要，最多128字符 = 64字节数据)
- * @param {TypedArray|ArrayBuffer} v
- * @returns {{ vt: number, extraBytes: number, _taInfo: object }}
- */
-function _measureTypedArray(v) {
-    let typeName, elementCount, byteLength, bufferRef, bufferOffset;
-    if (v instanceof ArrayBuffer) {
-        typeName     = 'ArrayBuffer';
-        elementCount = 0;
-        byteLength   = v.byteLength;
-        bufferRef    = v;
-        bufferOffset = 0;
-    } else {
-        typeName     = v.constructor?.name ?? 'TypedArray';
-        elementCount = v.length;
-        byteLength   = v.byteLength;
-        bufferRef    = v.buffer;
-        bufferOffset = v.byteOffset;
-    }
+function _measureTypedArray({typeName, elementCount, byteLength, bufferRef, bufferOffset}) {
     // 截取前 64 字节做 hex 摘要（128 个 hex 字符）
     const previewBytes  = Math.min(byteLength, 64);
     const hexStr        = _bufToHex(bufferRef, bufferOffset, previewBytes);
@@ -338,10 +343,10 @@ function _measureTypedArray(v) {
  */
 function _bufToHex(buf, byteOffset, length) {
     try {
-        const view = new Uint8Array(buf, byteOffset, length);
+        const view = new _Uint8Array(buf, byteOffset, length);
         let hex = '';
         for (let i = 0; i < view.length; i++) {
-            hex += view[i].toString(16).padStart(2, '0');
+            hex += _hex[view[i]];
         }
         return hex;
     } catch { return ''; }
@@ -555,12 +560,22 @@ function readStr(view, offset) {
  * @param {object} event  标准化事件对象（字段见各 EVENT_TYPE 说明）
  * @returns {{ payloadSize: number, _m: object }}  _m 为中间测量结果（供 writeEventPayload 使用）
  */
+function metadataTree(value, depth = 0) {
+    if(value==null || typeof value!=='object')return value;
+    if(depth>8)throw new RangeError('Trace analysis metadata is too deep');
+    const copy=_arrayIsArray(value) ? [] : _objCreate(null);
+    _objDefineProperty(copy,'toJSON',{value:undefined});
+    for(const key of _objKeys(value))copy[key]=metadataTree(value[key],depth+1);
+    return copy;
+}
+
 function measureEvent(event) {
     const result = measureEventPayload(event);
     const metadata = { scriptId: event.scriptId, callId: event.callId,
         parentCallId: event.parentCallId, contextId: event.contextId, callPairId: event.callPairId,
         writeBindings: event.writes?.map(w => w.bindingId ?? null),
-        readBindings: event.reads?.map(r => r.bindingId ?? null) };
+        readBindings: event.reads?.map(r => r.bindingId ?? null),
+        analysis: metadataTree(event.analysis) };
     _objDefineProperty(metadata, 'toJSON', { value: undefined });
     if (metadata.writeBindings) _objDefineProperty(metadata.writeBindings, 'toJSON', { value: undefined });
     if (metadata.readBindings) _objDefineProperty(metadata.readBindings, 'toJSON', { value: undefined });
@@ -1105,7 +1120,7 @@ export function deserializeEvent(view, offset, version = FORMAT_VERSION) {
         const metadata = readStr(view, pos);
         pos = metadata.end;
         const meta = JSON.parse(metadata.str);
-        for (const key of ['scriptId', 'callId', 'parentCallId', 'contextId', 'callPairId']) {
+        for (const key of ['scriptId', 'callId', 'parentCallId', 'contextId', 'callPairId', 'analysis']) {
             if (meta[key] !== undefined) event[key] = meta[key];
         }
         event.writes?.forEach((w, i) => { if (meta.writeBindings?.[i] != null) w.bindingId = meta.writeBindings[i]; });

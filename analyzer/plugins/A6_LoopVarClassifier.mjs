@@ -151,7 +151,9 @@ export default class A6LoopVarClassifier extends BasePlugin {
              WHERE session_id = ? AND iteration_count >= ?
              ORDER BY iteration_count DESC
              LIMIT ?`
-        ).all(sessionId, _minIters, _maxLoops);
+        ).all(sessionId, _minIters, _maxLoops+1);
+        const truncated=loops.length>_maxLoops;
+        if(truncated)loops.pop();
 
         if (loops.length === 0) {
             this.emitProgress(ctx, '无可分析循环', 100);
@@ -270,6 +272,7 @@ export default class A6LoopVarClassifier extends BasePlugin {
 
         this.emitProgress(ctx, `完成，分析 ${loops.length} 个循环，得 ${totalRoles} 个变量角色`, 100);
         this.emitDone(ctx, {
+            precision: 'heuristic', truncated,
             loopCount:    loops.length,
             varRoleCount: totalRoles,
         });

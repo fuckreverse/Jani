@@ -27,10 +27,24 @@ import {
     $strSplit,
 } from './NativeProxy.js';
 
+import { registerLiteralFunction, registerPropertyFunction, functionName } from './ValueMetadata.js';
+
 // ── 模块级常量 ───────────────────────────────────────────────────────────────
 
 // 在模块加载时捕获原生 eval，防止被插桩代码污染
+const _reflectSet = Reflect.set;
+const _reflectDelete = Reflect.deleteProperty;
+const _Object = Object;
+const _sameValue = Object.is;
 const EVAL_ORG = eval; // eslint-disable-line no-eval
+// Identity-based support only: a user function named "then" is not a scheduler.
+const ASYNC_CALLBACKS = new Map([
+    [globalThis.setTimeout,[0]], [globalThis.setInterval,[0]], [globalThis.setImmediate,[0]],
+    [globalThis.queueMicrotask,[0]], [Promise.prototype.then,[0,1]],
+    [Promise.prototype.catch,[0]], [Promise.prototype.finally,[0]],
+].filter(([fn])=>typeof fn==='function'));
+const PROMISE_OPERATIONS=new Map([[Promise.prototype.then,'then'],[Promise.prototype.catch,'catch'],[Promise.prototype.finally,'finally'],[Promise.resolve,'resolve'],[Promise.reject,'reject']]);
+const PROMISE_CALLBACK_RESULTS = new Set([Promise.prototype.then,Promise.prototype.catch]);
 
 /**
  * Shadow Frame 缺失哨兵（Sentinel）。
@@ -46,10 +60,6 @@ const _SHADOW_MISS = $freeze({ __jalangiShadowMiss: true });
 
 // ── 模块级无状态工具函数 ─────────────────────────────────────────────────────
 
-function getPropSafe(base, prop) {
-    if (base === null || base === undefined) return undefined;
-    return base[prop];
-}
 
 function decodeBitPattern(i, len) {
     const ret = new Array(len);
@@ -626,7 +636,7 @@ export class JalangiRuntime {
         $push(this.#sidStack, this.sid);
         // 从 WeakMap 读取，兼容旧式 SPECIAL_PROP_SID 属性（外部代码可能直接写）
         const entry = (typeof f === 'function') ? this.#funcSidIidMap.get(f) : undefined;
-        this.sid = entry ? entry.sid : getPropSafe(f, this.Constants.SPECIAL_PROP_SID);
+        this.sid = entry?.sid;
     }
 
     // ── 私有调用辅助 ─────────────────────────────────────────────────────────
@@ -717,7 +727,7 @@ export class JalangiRuntime {
     #getFuncIid(f) {
         if (typeof f !== 'function') return undefined;
         const entry = this.#funcSidIidMap.get(f);
-        return entry ? entry.iid : getPropSafe(f, this.Constants.SPECIAL_PROP_IID);
+        return entry?.iid;
     }
 
     /**
@@ -728,7 +738,7 @@ export class JalangiRuntime {
     #getFuncSid(f) {
         if (typeof f !== 'function') return undefined;
         const entry = this.#funcSidIidMap.get(f);
-        return entry ? entry.sid : getPropSafe(f, this.Constants.SPECIAL_PROP_SID);
+        return entry?.sid;
     }
 
     #callFn(iid, base, f, args, isConstructor, isMethod) {
@@ -738,7 +748,7 @@ export class JalangiRuntime {
         if (analysis?.callPre) {
             // P3: 调用 pre 钩子时保护 #lastComputedValue
             const _fIid = this.#getFuncIid(f), _fSid = this.#getFuncSid(f);
-            aret = this.#callHook(() => analysis.callPre(iid, f, base, args, isConstructor, isMethod, _fIid, _fSid));
+            aret = this.#callHook(() => analysis.callPre(iid, f, base, args, isConstructor, isMethod, _fIid, _fSid, PROMISE_OPERATIONS.get(f)));
             if (aret) {
                 f    = aret.f;
                 base = aret.base;
@@ -755,9 +765,42 @@ export class JalangiRuntime {
             this.#pendingCapturedOuterCallId = typeof f === 'function'
                 ? (this.#funcClosureCallId.get(f) ?? null)
                 : null;
-            result = this.#callFun(f, base, args, isConstructor, iid);
-            // 函数执行完毕后清空（防止非预期的跨调用泄漏）
-            this.#pendingCapturedOuterCallId = null;
+            let invocationArgs=args;
+            const callbackPositions=!isConstructor && analysis?.callbackSchedule && (!analysis.hasHook || analysis.hasHook('callbackSchedule')) ? ASYNC_CALLBACKS.get(f) : null;
+            if(callbackPositions) {
+                invocationArgs=$slice(args);
+                for(const position of callbackPositions) {
+                    const callback=args[position];
+                    if(typeof callback!=='function')continue;
+                    const registrationId=this.newAsyncContext();
+                    const registration={};
+                    analysis.callbackSchedule(iid,registrationId,base,position,PROMISE_CALLBACK_RESULTS.has(f),registration);
+                    const runtime=this;
+                    invocationArgs[position]=function(...values) {
+                        const previousContext=runtime.#currentContextId;
+                        const previousCaptured=runtime.#pendingCapturedOuterCallId;
+                        const contextId=runtime.newAsyncContext();
+                        runtime.#currentContextId=contextId;
+                        runtime.#pendingCapturedOuterCallId=runtime.#funcClosureCallId.get(callback) ?? null;
+                        analysis.callbackEnter?.(iid,registrationId,contextId,values,registration);
+                        try {
+                            const value=$apply(callback,this,values);
+                            analysis.callbackResult?.(iid,contextId,value);
+                            return value;
+                        } catch(error) {
+                            analysis.callbackThrow?.(iid,contextId,error);
+                            throw error;
+                        } finally {
+                            analysis.callbackExit?.(iid,contextId);
+                            runtime.#currentContextId=previousContext;
+                            runtime.#pendingCapturedOuterCallId=previousCaptured;
+                        }
+                    };
+                }
+            }
+            try { result = this.#callFun(f, base, invocationArgs, isConstructor, iid); }
+            catch(error) { analysis?.callException?.(iid,error); throw error; }
+            finally { this.#pendingCapturedOuterCallId = null; }
         }
 
         if (analysis?.call) {
@@ -776,6 +819,7 @@ export class JalangiRuntime {
     /** 函数调用（F(iid, f, flags)(...args)） — Function call */
     F(iid, f, flags) {
         const [isConstructor] = decodeBitPattern(flags, 1);
+        this.analysis?.argumentsBegin?.(iid);
         return (...callArgs) => {
             // 独立函数调用（非方法调用）时，base 应为 undefined，
             // 等价于 f() 的原始语义（非严格模式下运行时会自动补全为 globalThis）。
@@ -785,10 +829,16 @@ export class JalangiRuntime {
         };
     }
 
+    Fl(value) { registerLiteralFunction(value); return value; }
+
+    functionName(value) { return functionName(value); }
+
     /** 方法调用（M(iid, base, offset, flags)(...args)） — Method call */
-    M(iid, base, offset, flags) {
+    M(iid, base, offset, flags, nativeRead) {
         const [isConstructor, isComputed] = decodeBitPattern(flags, 2);
-        const f = this.G(iid + 2, base, offset, createBitPattern(isComputed, false, true));
+        const f = this.G(iid + 2, base, offset, createBitPattern(isComputed, false, true, false), nativeRead);
+        if (typeof f === 'function') registerPropertyFunction(f, offset);
+        this.analysis?.argumentsBegin?.(iid);
         return (...callArgs) => {
             return (this.#lastComputedValue = this.#callFn(iid, base, f, callArgs, isConstructor, true));
         };
@@ -806,7 +856,7 @@ export class JalangiRuntime {
         this.#associateSidWithFunction(val, internalIid);
 
         if (hasGetterSetter) {
-            for (const offset in val) {
+            for (const offset of [...$getOwnPropertyNames(val), ...$getOwnPropertySymbols(val)]) {
                 if ($hasOwn(val, offset)) {
                     const desc = $getOwnPropertyDescriptor(val, offset);
                     if (desc !== undefined) {
@@ -825,6 +875,7 @@ export class JalangiRuntime {
         // 同时将外层帧的 (defScopeId:callId) 注册到 #closureFrameSet，
         // 告知 Fx() "该帧有闭包引用，退出时不要立即清除 Shadow Frame"。
         if (typeof val === 'function') {
+            registerLiteralFunction(val);
             this.#funcClosureCallId.set(val, this.#currentCallId);
             // 当前正在某函数帧内（而非顶层脚本）才需要注册
             if (this.#currentFunDefScopeId !== undefined) {
@@ -847,14 +898,17 @@ export class JalangiRuntime {
             const capturedScopeId = this.#currentFunDefScopeId;
             // 遍历所有可枚举的字符串 key 属性
             for (const k of $getOwnPropertyNames(val)) {
-                const v = val[k];
+                // Inspect data descriptors without invoking user getters.
+                const v = $getOwnPropertyDescriptor(val, k)?.value;
+                if (typeof v === 'function') registerPropertyFunction(v, k);
                 if (typeof v === 'function' && !this.#funcClosureCallId.has(v)) {
                     this.#funcClosureCallId.set(v, capturedCallId);
                 }
             }
             // 遍历 Symbol 属性（如 [Symbol.iterator]）
             for (const s of $getOwnPropertySymbols(val)) {
-                const v = val[s];
+                const v = $getOwnPropertyDescriptor(val, s)?.value;
+                if (typeof v === 'function') registerPropertyFunction(v, s);
                 if (typeof v === 'function' && !this.#funcClosureCallId.has(v)) {
                     this.#funcClosureCallId.set(v, capturedCallId);
                 }
@@ -886,15 +940,15 @@ export class JalangiRuntime {
     }
 
     /** 变量声明初始化 — Declare（J$.Dc）*/
-    Dc(iid, name, val, flags, defScopeId, bindingId) {
+    Dc(iid, name, val, flags, defScopeId, bindingId, parameterIndex, parameterKind) {
         const [isArgument, isLocalSync, isCatchParam] = decodeBitPattern(flags, 3);
         const analysis = this.analysis;
 
         if (isArgument) this.#argIndex++;
 
         if (!isLocalSync && analysis?.declareVar) {
-            const idx  = (isArgument && this.#argIndex > 1) ? this.#argIndex - 2 : -1;
-            const aret = analysis.declareVar(iid, name, val, isArgument, idx, isCatchParam, defScopeId, bindingId);
+            const idx = parameterIndex ?? ((isArgument && this.#argIndex > 1) ? this.#argIndex - 2 : -1);
+            const aret = analysis.declareVar(iid, name, val, isArgument, idx, isCatchParam, defScopeId, bindingId, parameterKind);
             if (aret) val = aret.result;
         }
 
@@ -909,7 +963,7 @@ export class JalangiRuntime {
     }
 
     /** 属性读取 */
-    G(iid, base, offset, flags) {
+    G(iid, base, offset, flags, nativeRead) {
         const [isComputed, isOpAssign, isMethodCall, isOptional] = decodeBitPattern(flags, 4);
         const analysis = this.analysis;
         let aret, skip = false, val;
@@ -929,7 +983,7 @@ export class JalangiRuntime {
             }
         }
 
-        if (!skip) val = base[offset];
+        if (!skip) val = nativeRead ? nativeRead(base, offset) : base[offset];
 
         if (analysis?.getField) {
             aret = this.#callHook(() => analysis.getField(iid, base, offset, val, isComputed, isOpAssign, isMethodCall));
@@ -940,7 +994,7 @@ export class JalangiRuntime {
     }
 
     /** 属性写入 */
-    P(iid, base, offset, val, flags) {
+    P(iid, base, offset, val, flags, strict = true, nativeWrite) {
         const [isComputed, isOpAssign] = decodeBitPattern(flags, 2);
         const analysis = this.analysis;
         let aret, skip = false;
@@ -956,7 +1010,15 @@ export class JalangiRuntime {
             }
         }
 
-        if (!skip) base[offset] = val;
+        if (!skip) {
+            if (nativeWrite) nativeWrite(base, offset, val);
+            else if (strict) base[offset] = val;
+            else {
+                if (base == null) throw new TypeError('Cannot set properties of null or undefined');
+                // Reflect.set preserves setter/Proxy exceptions and the primitive receiver.
+                _reflectSet(_Object(base), offset, val, base);
+            }
+        }
 
         // OID 版本：属性写入时递增对象版本号（使分析器能检测到对象结构变化）
         const oid = this.#getOrCreateOid(base);
@@ -1234,6 +1296,31 @@ export class JalangiRuntime {
         return isBacktrack;
     }
 
+    #failScriptBoundary(error, depth) {
+        while (this.#sidStack.length > depth) {
+            this.Ex(0, error);
+            try { this.Sr(0); } catch (exitError) {
+                // Sr deliberately propagates the same program exception.
+                if (!_sameValue(exitError, error)) throw exitError;
+            }
+        }
+        throw error;
+    }
+
+    /** Synchronous host boundary; leaves the program's declaration environment intact. */
+    runScript(execute) {
+        const depth = this.#sidStack.length;
+        try { return execute(); }
+        catch (error) { return this.#failScriptBoundary(error, depth); }
+    }
+
+    /** Async loader boundary, including rejection from top-level await. */
+    async runModule(execute) {
+        const depth = this.#sidStack.length;
+        try { return await execute(); }
+        catch (error) { return this.#failScriptBoundary(error, depth); }
+    }
+
     /** 脚本进入 — Script Enter（J$.Se）*/
     Se(iid, val, origFileName) {
         this.#createAndAssignNewSid();
@@ -1269,19 +1356,50 @@ export class JalangiRuntime {
         return isBacktrack;
     }
 
+    /** Lexical variable reference; the native update expression owns ToNumeric. */
+    Ar(read, write) {
+        return { get value() { return read(); }, set value(value) { write(value); } };
+    }
+
+    /** Result-only observation where extracting the callee would lose its Reference. */
+    No(iid, value, kind) {
+        this.#callHook(() => this.analysis?.nativeOperation?.(iid, kind, value));
+        return this.#lastComputedValue = value;
+    }
+
+    /** Per-evaluation reference for native logical assignment short-circuiting. */
+    Lr(iid, base, key, computed, strict, read = true, write = true, nativeRead, nativeWrite) {
+        const runtime = this;
+        return {
+            get value() {
+                return read ? runtime.G(iid, base, key, createBitPattern(computed, true, false, false), nativeRead)
+                    : nativeRead ? nativeRead(base, key) : base[key];
+            },
+            set value(value) {
+                if (write) runtime.P(iid, base, key, value, createBitPattern(computed, true), strict, nativeWrite);
+                else if (nativeWrite) nativeWrite(base, key, value);
+                else if (strict) base[key] = value;
+                else {
+                    if (base == null) throw new TypeError('Cannot set properties of null or undefined');
+                    _reflectSet(_Object(base), key, value, base);
+                }
+            },
+        };
+    }
+
     /** 复合赋值 — Compound Assign（J$.Ca）：+=、-= 等 */
-    Ca(iid, base, offset, op, flags) {
+    Ca(iid, base, offset, op, flags, strict = true) {
         const [isComputed, isNumber] = decodeBitPattern(flags, 2);
-        let oprnd1 = this.G(iid + 2, base, offset, createBitPattern(isComputed, true, false));
+        let oprnd1 = this.G(iid + 2, base, offset, createBitPattern(isComputed, true, false, false));
         if (isNumber) oprnd1 = +oprnd1;
         return (oprnd2) => {
             const val = this.B(iid, op, oprnd1, oprnd2, createBitPattern(false, true, false));
-            return this.P(iid, base, offset, val, createBitPattern(isComputed, true));
+            return this.P(iid, base, offset, val, createBitPattern(isComputed, true), strict);
         };
     }
 
     /** 二元运算 — Binary op（J$.B）*/
-    B(iid, op, left, right, flags) {
+    B(iid, op, left, right, flags, strict = true) {
         const [isComputed, isOpAssign, isSwitchCaseComparison] = decodeBitPattern(flags, 3);
         const analysis = this.analysis;
         let result, aret, skip = false;
@@ -1319,7 +1437,13 @@ export class JalangiRuntime {
                 case '&':          result = left &   right; break;
                 case '|':          result = left |   right; break;
                 case '^':          result = left ^   right; break;
-                case 'delete':     result = delete left[right]; break;
+                case 'delete':
+                    if (strict) result = delete left[right];
+                    else {
+                        if (left == null) throw new TypeError('Cannot convert undefined or null to object');
+                        result = _reflectDelete(_Object(left), right);
+                    }
+                    break;
                 case 'instanceof': result = left instanceof right; break;
                 case 'in':         result = left in  right; break;
                 default:
@@ -1422,10 +1546,10 @@ export class JalangiRuntime {
     }
 
     /** 条件表达式 */
-    C(iid, left) {
+    C(iid, left, controlRanges, expression) {
         const analysis = this.analysis;
         if (analysis?.evalCond) {
-            const aret = analysis.evalCond(iid, left);
+            const aret = analysis.evalCond(iid, left, controlRanges, expression);
             if (aret) left = aret.result;
         }
         this.#lastVal = left;
@@ -1541,6 +1665,37 @@ export class JalangiRuntime {
      * @param {number} [ctxId] 本次 async 函数调用的 callId（由插桩注入，可选）
      * @returns {*}           透传 val（保持语义不变）
      */
+    Db(iid,index,names,inputs) { this.analysis?.defaultBegin?.(iid,index,names,inputs); }
+    De(iid,index,value) { this.analysis?.defaultEnd?.(iid,index,value);return value; }
+    Sd(iid) { this.analysis?.declarationsEnd?.(iid); }
+    Sc(frameId) { this.analysis?.scopeEnter?.(frameId); }
+    Tc(frameId,caught) { this.analysis?.catchEnter?.(frameId,caught); }
+    Ab(iid,index) { this.analysis?.argumentBegin?.(iid,index); }
+    Ae(iid,index,value) { this.analysis?.argumentEnd?.(iid,index,value,false);return value; }
+    Asp(iid,index,iterable) {
+        const analysis=this.analysis;
+        return (function*(){
+            try {
+                for(const value of iterable) {
+                    analysis?.argumentEnd?.(iid,index,value,true);
+                    yield value;
+                }
+            } finally { analysis?.argumentSpreadEnd?.(iid,index); }
+        })();
+    }
+
+    Tb(iid, contextId, arrow) {
+        const token=contextId ?? this.newAsyncContext();
+        this.analysis?.traceBegin?.(iid,token,arrow);
+        return token;
+    }
+    Tx(iid,contextId) { this.analysis?.traceFinish?.(iid,contextId); }
+    Txe(contextId,error) { this.analysis?.traceError?.(contextId,error); }
+    Rta(iid,val) {
+        const result=this.analysis?.returnStmt?.(iid,val);
+        return this.#lastComputedValue=result ? result.result : val;
+    }
+
     As(iid, val, ctxId) {
         this.analysis?.awaitSuspend?.(iid, ctxId, val);
         return val;
@@ -1586,6 +1741,7 @@ export class JalangiRuntime {
      */
     activateContext(contextId) {
         this.#currentContextId = contextId;
+        this.analysis?.contextResume?.(contextId);
     }
 
     /**

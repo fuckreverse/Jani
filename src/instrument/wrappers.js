@@ -194,7 +194,7 @@ function wrapPutField(node, base, offset, rvalue, isComputed) {
         IID.printIidToLoc(node);
         const ret = jalangiCall('P',
             IID.getIid(), base, offset, rvalue,
-            t.numericLiteral(createBitPattern(isComputed, false))
+            t.numericLiteral(createBitPattern(isComputed, false)), t.booleanLiteral(node.__j_strict ?? true)
         );
         transferLoc(ret, node);
         return ret;
@@ -207,7 +207,7 @@ function wrapModAssign(node, base, offset, op, rvalue, isComputed, isNumber) {
         IID.printModIidToLoc(node);
         const innerCall = jalangiCall('Ca',
             IID.getIid(), base, offset, createLiteralAst(op),
-            t.numericLiteral(createBitPattern(isComputed, isNumber))
+            t.numericLiteral(createBitPattern(isComputed, isNumber)), t.booleanLiteral(node.__j_strict ?? true)
         );
         const ret = t.callExpression(innerCall, [rvalue]);
         transferLoc(ret, node);
@@ -216,20 +216,34 @@ function wrapModAssign(node, base, offset, op, rvalue, isComputed, isNumber) {
     return node;
 }
 
-function wrapMethodCall(node, base, offset, isCtor, isComputed) {
+function instrumentArguments(node, iid) {
+    node.arguments=(node.arguments ?? []).map((argument,index)=>{
+        const begin=jalangiCall('Ab',t.cloneNode(iid),t.numericLiteral(index));
+        const spread=argument.type==='SpreadElement';
+        const end=jalangiCall(spread ? 'Asp' : 'Ae',t.cloneNode(iid),t.numericLiteral(index),spread ? argument.argument : argument);
+        const expression=t.sequenceExpression([begin,end]);
+        transferLoc(expression,argument);
+        return spread ? t.spreadElement(expression) : expression;
+    });
+}
+
+function wrapMethodCall(node, base, offset, isCtor, isComputed, nativeRead) {
     assertAstNode(node,   'wrapMethodCall/node');
     assertAstNode(base,   'wrapMethodCall/base');
     assertAstNode(offset, 'wrapMethodCall/offset');
     if (!Config.INSTR_INVOKE || Config.INSTR_INVOKE(node)) {
         IID.printIidToLoc(node);
         IID.printSpecialIidToLoc(node.callee);
+        const callIid=IID.getIid();
+        instrumentArguments(node,callIid);
         const ret = jalangiCall('M',
-            IID.getIid(), base, offset,
-            t.numericLiteral(createBitPattern(isCtor, isComputed))
+            callIid, base, offset,
+            t.numericLiteral(createBitPattern(isCtor, isComputed)), ...(nativeRead ? [nativeRead] : [])
         );
         transferLoc(ret, node.callee);
         return ret;
     }
+    if (nativeRead) return node.callee;
     // INSTR_INVOKE 禁用时：退回原始 callee，保留语义正确性
     if (base.type) {
         if (isComputed) {
@@ -248,8 +262,10 @@ function wrapMethodCall(node, base, offset, isCtor, isComputed) {
 function wrapFunCall(node, ast, isCtor) {
     if (!Config.INSTR_INVOKE || Config.INSTR_INVOKE(node)) {
         IID.printIidToLoc(node);
+        const callIid=IID.getIid();
+        instrumentArguments(node,callIid);
         const ret = jalangiCall('F',
-            IID.getIid(), ast,
+            callIid, ast,
             t.numericLiteral(createBitPattern(isCtor))
         );
         transferLoc(ret, node.callee);
@@ -258,7 +274,7 @@ function wrapFunCall(node, ast, isCtor) {
     return ast;
 }
 
-function wrapGetField(node, base, offset, isComputed, isOptional) {
+function wrapGetField(node, base, offset, isComputed, isOptional, nativeRead) {
     assertAstNode(node,   'wrapGetField/node');
     assertAstNode(base,   'wrapGetField/base');
     assertAstNode(offset, 'wrapGetField/offset');
@@ -266,7 +282,8 @@ function wrapGetField(node, base, offset, isComputed, isOptional) {
         IID.printIidToLoc(node);
         const ret = jalangiCall('G',
             IID.getIid(), base, offset,
-            t.numericLiteral(createBitPattern(isComputed, false, false, !!isOptional))
+            t.numericLiteral(createBitPattern(isComputed, false, false, !!isOptional)),
+            ...(nativeRead ? [nativeRead] : [])
         );
         transferLoc(ret, node);
         return ret;
@@ -292,7 +309,8 @@ function bindingIdentity(scopeId) {
 function bindingFrameDeclaration(scope) {
     if (!scope?.frameName) return [];
     return [t.variableDeclaration('var', [t.variableDeclarator(t.identifier(scope.frameName),
-        callExpr(memberExpr(_jalangiVar, 'newBindingFrame'), []))])];
+        callExpr(memberExpr(_jalangiVar, 'newBindingFrame'), []))]),
+        t.expressionStatement(callExpr(memberExpr(_jalangiVar,'Sc'),[t.identifier(scope.frameName)]))];
 }
 
 function wrapRead(node, name, val, isReUseIid, isGlobal, isScriptLocal, scopeId) {
@@ -485,7 +503,9 @@ function wrapReturn(node, expr) {
         const lid = expr ?? node;
         IID.printIidToLoc(lid);
         const actualExpr = expr ?? t.identifier('undefined');
-        const ret = jalangiCall('Rt', IID.getIid(), actualExpr);
+        let scope=_scope;
+        while(scope?.isCatch)scope=scope.parent;
+        const ret = jalangiCall(scope?.isArrow ? 'Rta' : 'Rt', IID.getIid(), actualExpr);
         transferLoc(ret, lid);
         return ret;
     }
@@ -564,7 +584,7 @@ function wrapBinaryOp(node, left, right, operator, isComputed) {
         IID.printOpIidToLoc(node);
         const ret = jalangiCall('B',
             IID.getOpIid(), createLiteralAst(operator), left, right,
-            t.numericLiteral(createBitPattern(isComputed, false, false))
+            t.numericLiteral(createBitPattern(isComputed, false, false)), t.booleanLiteral(node.__j_strict ?? true)
         );
         transferLoc(ret, node);
         return ret;
@@ -576,7 +596,7 @@ function wrapLogicalAnd(node, left, right) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('&&', node)) {
         IID.printCondIidToLoc(node);
         // J$.C(iid, left) ? right : J$.Lv()
-        const test = jalangiCall('C', IID.getCondIid(), left);
+        const test = jalangiCall('C', IID.getCondIid(), left, t.nullLiteral(), t.booleanLiteral(true));
         const last = callExpr(memberExpr(_jalangiVar, 'Lv'), []);
         const ret = t.conditionalExpression(test, right, last);
         transferLoc(ret, node);
@@ -589,7 +609,7 @@ function wrapLogicalOr(node, left, right) {
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('||', node)) {
         IID.printCondIidToLoc(node);
         // J$.C(iid, left) ? J$.Lv() : right
-        const test = jalangiCall('C', IID.getCondIid(), left);
+        const test = jalangiCall('C', IID.getCondIid(), left, t.nullLiteral(), t.booleanLiteral(true));
         const last = callExpr(memberExpr(_jalangiVar, 'Lv'), []);
         const ret = t.conditionalExpression(test, last, right);
         transferLoc(ret, node);
@@ -615,8 +635,8 @@ function wrapLogicalNullish(node, left, right) {
 
         const assign = t.assignmentExpression('=', tmpExpr, left);
         const notNull = t.binaryExpression('!=', tmpExpr, t.nullLiteral());
-        const condCall = jalangiCall('C', condIid, notNull);
-        const last = callExpr(memberExpr(_jalangiVar, 'Lv'), []);
+        const condCall = jalangiCall('C', condIid, notNull, t.nullLiteral(), t.booleanLiteral(true));
+        const last = t.cloneNode(tmpExpr);
         const ternary = t.conditionalExpression(condCall, last, right);
         const ret = t.sequenceExpression([assign, ternary]);
         transferLoc(ret, node);
@@ -655,11 +675,12 @@ function wrapWith(node) {
     return node;
 }
 
-function wrapConditional(node, test) {
+function wrapConditional(node, test, truthy = [], falsy = [], expression = false) {
     if (node === null) return node;  // for(;;) 的空条件
     if (!Config.INSTR_CONDITIONAL || Config.INSTR_CONDITIONAL('other', node)) {
         IID.printCondIidToLoc(node);
-        const ret = jalangiCall('C', IID.getCondIid(), test);
+        const ranges = nodes => nodes.filter(n => n?.loc).map(n => [n.loc.start.line,n.loc.start.column + 1,n.loc.end.line,n.loc.end.column + 1]);
+        const ret = jalangiCall('C', IID.getCondIid(), test, t.valueToNode([ranges(truthy), ranges(falsy)]), t.booleanLiteral(expression));
         transferLoc(ret, node);
         return ret;
     }
@@ -738,7 +759,7 @@ function wrapLiteral(node, ast, funId) {
             if (node.type === 'FunctionExpression') {
                 internalFunId = getFnIdFromAst(node);
             } else if (node.type === 'ArrowFunctionExpression') {
-                internalFunId = undefined;
+                internalFunId = node.__traceEntryIid;
             } else {
                 if (node.type !== 'Identifier') throw new Error('IllegalStateException');
                 internalFunId = getFnIdFromAst(_scope.funNodes[node.name]);
@@ -754,7 +775,9 @@ function wrapLiteral(node, ast, funId) {
         transferLoc(ret, node);
         return ret;
     }
-    return node;
+    // Function identity metadata is needed by call tracing even when literal
+    // observation is disabled by the on-demand configuration.
+    return funId === N_LOG_FUNCTION_LIT ? jalangiCall('Fl', ast) : ast;
 }
 
 // ─── 语句级 wrap ──────────────────────────────────────────────────────────────
@@ -785,7 +808,9 @@ function createCallInitAsStatement(node, name, val, isArgumentSync, lhs, isCatch
     const bitsNode = t.numericLiteral(createBitPattern(isArgumentSync, false, isCatchParam));
     const def = _findDefScope(_scope, name.value);
     const callN = jalangiCall('Dc', IID.getIid(), name, val, bitsNode,
-        def ? t.numericLiteral(def.id) : t.nullLiteral(), def ? bindingIdentity(def.id) : t.nullLiteral());
+        def ? t.numericLiteral(def.id) : t.nullLiteral(), def ? bindingIdentity(def.id) : t.nullLiteral(),
+        t.numericLiteral(isArgumentSync ? (node.params ?? []).findIndex(param => Object.hasOwn(t.getBindingIdentifiers(param), name.value)) : -1),
+        t.stringLiteral((node.params ?? []).find(param=>Object.hasOwn(t.getBindingIdentifiers(param),name.value))?.type ?? '')) ;
     let exprStmt;
     if (isAssign) {
         const assign = t.assignmentExpression('=', lhs, callN);
@@ -911,6 +936,12 @@ function ensureBlockBody(body) {
     return [body];
 }
 
+function restoreTraceScope(body, caught = false) {
+    let scope=_scope;
+    while(scope && !scope.frameName)scope=scope.parent;
+    if(scope)body.unshift(t.expressionStatement(callExpr(memberExpr(_jalangiVar,'Tc'),[t.identifier(scope.frameName),t.booleanLiteral(caught)])));
+}
+
 function wrapCatchClause(node, body, name) {
     if (!Config.INSTR_INIT || Config.INSTR_INIT(node)) {
         body.unshift(createCallInitAsStatement(
@@ -988,61 +1019,14 @@ function _buildTryCatchWrapper(node, bodyStmts, isScript) {
     return [labeled];
 }
 
-/**
- * 判断节点是否为 ES Module 的 import/export 语句。
- * 这些语句必须在模块顶层，不能被 try-catch 包裹。
- */
-function _isModuleDeclaration(node) {
-    const type = node?.type;
-    return type === 'ImportDeclaration'
-        || type === 'ExportNamedDeclaration'
-        || type === 'ExportDefaultDeclaration'
-        || type === 'ExportAllDeclaration';
-}
-
-/**
- * 将脚本/模块体包裹在 try-catch 中。
- *
- * 对于 ES Module（sourceType: 'module'），import/export 语句必须保持在顶层，
- * 不能被 try-catch 包裹。因此需要：
- *   1. 提取所有 import/export 语句
- *   2. 将剩余语句包裹在 try-catch 中
- *   3. 返回 [import/export 语句, try-catch 包裹的剩余语句]
- *
- * @param {object} node - Program 节点
- * @param {Array} body - Program.body 数组
- * @returns {Array} 处理后的语句数组
- */
+/** Keep Program declarations in their original lexical environment and order. */
 function wrapScriptBodyWithTryCatch(node, body) {
-    if (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node)) {
-        const bodyStmts = Array.isArray(body) ? body : [body];
-
-        // 检查是否有 import/export 语句（ES Module）
-        const moduleDecls = [];
-        const otherStmts = [];
-
-        for (const stmt of bodyStmts) {
-            if (_isModuleDeclaration(stmt)) {
-                moduleDecls.push(stmt);
-            } else {
-                otherStmts.push(stmt);
-            }
-        }
-
-        // 如果有 import/export 语句，需要分离处理
-        if (moduleDecls.length > 0) {
-            // 只对非 import/export 语句应用 try-catch 包裹
-            const wrappedStmts = otherStmts.length > 0
-                ? _buildTryCatchWrapper(node, otherStmts, true)
-                : [];
-            // import/export 语句在前，try-catch 包裹的代码在后
-            return [...moduleDecls, ...wrappedStmts];
-        }
-
-        // 非 ES Module，正常包裹
-        return _buildTryCatchWrapper(node, bodyStmts, true);
-    }
-    return body;
+    if (Config.INSTR_TRY_CATCH_ARGUMENTS && !Config.INSTR_TRY_CATCH_ARGUMENTS(node)) return body;
+    // Every Program must retain its global/module declaration environment,
+    // including strict-mode function declarations. Exceptional exit is observed
+    // by the host's runScript boundary, not a new lexical block in user code.
+    IID.printIidToLoc(node);
+    return [...body, t.expressionStatement(jalangiCall('Sr', IID.getIid()))];
 }
 
 function wrapFunBodyWithTryCatch(node, body) {
@@ -1152,7 +1136,33 @@ function syncDefuns(node, scopeArg, isScript) {
     return ret;
 }
 
+function instrumentParameterDefaults(node) {
+    const inputs=(node.params ?? []).flatMap((param,index)=>Object.keys(t.getBindingIdentifiers(param)).map(name=>[name,index]));
+    const visit=(pattern,index)=>{
+        if(!pattern)return;
+        if(pattern.type==='AssignmentPattern') {
+            IID.printIidToLoc(pattern);
+            const iid=IID.getIid();
+            const names=Object.keys(t.getBindingIdentifiers(pattern.left));
+            pattern.right=t.sequenceExpression([
+                jalangiCall('Db',t.cloneNode(iid),t.numericLiteral(index),t.valueToNode(names),t.valueToNode(inputs)),
+                jalangiCall('De',t.cloneNode(iid),t.numericLiteral(index),pattern.right),
+            ]);
+            visit(pattern.left,index);
+        } else if(pattern.type==='ObjectPattern')for(const property of pattern.properties)visit(property.type==='RestElement' ? property.argument : property.value,index);
+        else if(pattern.type==='ArrayPattern')for(const element of pattern.elements)visit(element,index);
+        else if(pattern.type==='RestElement')visit(pattern.argument,index);
+    };
+    (node.params ?? []).forEach(visit);
+}
+
+function declarationBoundary(node) {
+    IID.printIidToLoc(node);
+    return t.expressionStatement(jalangiCall('Sd',IID.getIid()));
+}
+
 function instrumentFunctionEntryExit(node, ast, omitThis = false) {
+    instrumentParameterDefaults(node);
     const scopeId = _scope?.id;
     const body = (!Config.INSTR_TRY_CATCH_ARGUMENTS || Config.INSTR_TRY_CATCH_ARGUMENTS(node))
         ? createCallAsFunEnterStatement(node, scopeId, omitThis)
@@ -1173,7 +1183,9 @@ function instrumentFunctionEntryExit(node, ast, omitThis = false) {
         ? [_createAsyncCtxCaptureStatement()]
         : [];
 
-    return [...body, ...bindingFrameDeclaration(_scope), ...asyncCtxCapture, ...syncDefuns(node, _scope, false), ...ast];
+    if(node.async)return [...body,...bindingFrameDeclaration(_scope),
+        ...traceFunctionScope(node,[...syncDefuns(node,_scope,false),declarationBoundary(node),...ast],false)];
+    return [...body, ...bindingFrameDeclaration(_scope), ...asyncCtxCapture, ...syncDefuns(node, _scope, false), declarationBoundary(node), ...ast];
 }
 
 /**
@@ -1192,10 +1204,30 @@ function _createAsyncCtxCaptureStatement(arrow = false) {
  * 仅对箭头函数（ArrowFunctionExpression）的块体执行参数/var 同步。
  * 箭头函数没有独立的 arguments 绑定，不注入 arguments 初始化钩子。
  */
+function traceFunctionScope(node, body, arrow) {
+    IID.printIidToLoc(node);
+    const iid=IID.getIid();
+    if(arrow)node.__traceEntryIid=iid.value;
+    const context=t.identifier(`${_jalangiVar}__ctx`);
+    const error=t.identifier(`${_jalangiVar}__trace_error`);
+    const begin=t.variableDeclaration('var',[t.variableDeclarator(t.cloneNode(context),
+        jalangiCall('Tb',t.cloneNode(iid),arrow ? t.nullLiteral() : memberExpr(_jalangiVar,'currentCallId'),t.booleanLiteral(arrow)))]);
+    const handler=t.catchClause(error,t.blockStatement([
+        t.expressionStatement(callExpr(memberExpr(_jalangiVar,'Txe'),[t.cloneNode(context),t.cloneNode(error)])),
+        t.throwStatement(t.cloneNode(error)),
+    ]));
+    const finalizer=t.blockStatement([t.expressionStatement(jalangiCall('Tx',t.cloneNode(iid),t.cloneNode(context)))]);
+    return [begin,t.tryStatement(t.blockStatement(body),handler,finalizer)];
+}
+
 function instrumentArrowFunctionBody(node) {
-    if (node.body.type !== 'BlockStatement') node.body = t.blockStatement([t.returnStatement(node.body)]);
-    const capture = node.async ? [_createAsyncCtxCaptureStatement(true)] : [];
-    node.body.body = [...bindingFrameDeclaration(_scope), ...capture, ...syncArrowDefuns(node, _scope), ...node.body.body];
+    instrumentParameterDefaults(node);
+    if(node.body.type!=='BlockStatement') {
+        const expression=node.body;
+        node.body=t.blockStatement([t.returnStatement(wrapReturn(expression,expression))]);
+    }
+    node.body.body=[...bindingFrameDeclaration(_scope),
+        ...traceFunctionScope(node,[...syncArrowDefuns(node,_scope),declarationBoundary(node),...node.body.body],true)];
 }
 
 /**
@@ -1210,7 +1242,7 @@ function instrumentScriptEntryExit(node, body0, instFile, origFile) {
         ? createCallAsScriptEnterStatement(node, instFile, origFile)
         : [];
     return [...body, ...bindingFrameDeclaration(_scope), _createAsyncCtxCaptureStatement(true),
-        ...syncDefuns(node, _scope, true), ...body0];
+        ...syncDefuns(node, _scope, true), declarationBoundary(node), ...body0];
 }
 
 // ─── instrumentStore / instrumentLoad / instrumentLoadModStore / instrumentPreIncDec
@@ -1269,7 +1301,10 @@ function instrumentLoad(ast, isTypeof) {
             const decisionStr = (decision && typeof decision === 'object') ? decision.decision : decision;
             const defLocKey   = (decision && typeof decision === 'object') ? decision.defLocKey : undefined;
 
-            if (decisionStr === 'lightweight' && isSafeForLightweight) {
+            // Cached reads require complete writes, initialization and activation tracking.
+            const completeShadow = Config.INSTR_WRITE == null && Config.INSTR_INIT == null
+                && Config.INSTR_TRY_CATCH_ARGUMENTS == null;
+            if (decisionStr === 'lightweight' && isSafeForLightweight && completeShadow) {
                 return wrapReadLightweight(ast, createLiteralAst(ast.name), defScope.id, defLocKey);
             }
 
@@ -1290,6 +1325,37 @@ function instrumentLoad(ast, isTypeof) {
 }
 
 function instrumentLoadModStore(node, isNumber) {
+    if (_LOGICAL_OPS.has(node.operator.slice(0, -1))) {
+        if (node.left.type === 'Identifier') {
+            // PutValue and its write hook belong exclusively to the taken branch.
+            const name = node.left.name;
+            const def = _findDefScope(_scope, name);
+            const value = wrapWrite(node, createLiteralAst(name), node.right, undefined,
+                !def, _scope.isGlobal(name), false, def?.id);
+            const write = t.assignmentExpression('=', node.left, value);
+            const read = instrumentLoad(node.left, false);
+            const operator = node.operator.slice(0, -1);
+            const logical = t.logicalExpression(operator, read, write);
+            transferLoc(logical, node);
+            if (operator === '||') return wrapLogicalOr(logical, read, write);
+            if (operator === '&&') return wrapLogicalAnd(logical, read, write);
+            return wrapLogicalNullish(logical, read, write);
+        } else {
+            // A fresh accessor reference keeps base/key alive across await/yield,
+            // recursion and reentrancy without shared temporary storage.
+            IID.printIidToLoc(node);
+            const computed = !!node.left.computed;
+            const key = getPropertyAsAst(node.left);
+            const read = !Config.INSTR_GETFIELD || Config.INSTR_GETFIELD(computed ? null : key.value, node);
+            const write = !Config.INSTR_PUTFIELD || Config.INSTR_PUTFIELD(computed ? null : key.value, node);
+            if (read || write) node.left = t.memberExpression(jalangiCall('Lr', IID.getIid(),
+                node.left.object, key, t.booleanLiteral(computed),
+                t.booleanLiteral(node.__j_strict ?? true), t.booleanLiteral(read), t.booleanLiteral(write)),
+                t.identifier('value'));
+        }
+        return node;
+    }
+
     if (node.left.type === 'Identifier') {
         let tmp0 = instrumentLoad(node.left, false);
         if (isNumber) tmp0 = makeNumber(node, instrumentLoad(tmp0, false));
@@ -1313,6 +1379,63 @@ function instrumentLoadModStore(node, isNumber) {
         node.right, node.left.computed, !!isNumber);
 }
 
+/** Native property access in a lexical super/private environment. */
+function nativeAccess(member, write = false) {
+    const base = t.identifier('__janiBase');
+    const key = t.identifier('__janiKey');
+    const value = t.identifier('__janiValue');
+    const target = member.object.type === 'Super'
+        ? t.memberExpression(t.super(), t.cloneNode(key), true)
+        : t.memberExpression(t.cloneNode(base), t.cloneNode(member.property), false);
+    return t.arrowFunctionExpression(write ? [base, key, value] : [base, key],
+        write ? t.assignmentExpression('=', target, t.cloneNode(value)) : target);
+}
+
+function nativeBase(member) {
+    return member.object.type === 'Super' ? t.thisExpression() : member.object;
+}
+
+function instrumentNativeLoad(member) {
+    return wrapGetField(member, nativeBase(member), getPropertyAsAst(member),
+        !!member.computed, false, nativeAccess(member));
+}
+
+/** An accessor reference lets the engine perform ToNumeric and postfix itself. */
+function instrumentReference(node, target) {
+    if (target.type === 'Identifier') {
+        const name = target.name;
+        if (Config.INSTR_READ && !Config.INSTR_READ(name, node)
+                && Config.INSTR_WRITE && !Config.INSTR_WRITE(name, node)) return target;
+        const def = _findDefScope(_scope, name);
+        let paramName = `${_jalangiVar}__updateValue`;
+        while (paramName === name) paramName += '_';
+        const value = t.identifier(paramName);
+        const read = wrapRead(target, createLiteralAst(name), t.cloneNode(target),
+            false, !def, def ? _scope.isGlobal(name) : false, def?.id);
+        const stored = wrapWrite(node, createLiteralAst(name), t.cloneNode(value), undefined,
+            !def, def ? _scope.isGlobal(name) : false, false, def?.id);
+        const write = t.assignmentExpression('=', t.cloneNode(target), stored);
+        return t.memberExpression(jalangiCall('Ar', t.arrowFunctionExpression([], read),
+            t.arrowFunctionExpression([value], write)), t.identifier('value'));
+    }
+    const key = getPropertyAsAst(target);
+    const computed = !!target.computed;
+    const read = !Config.INSTR_GETFIELD || Config.INSTR_GETFIELD(computed ? null : key.value, node);
+    const write = !Config.INSTR_PUTFIELD || Config.INSTR_PUTFIELD(computed ? null : key.value, node);
+    if (!read && !write) return target;
+    IID.printIidToLoc(node);
+    const args = [IID.getIid(), nativeBase(target), key, t.booleanLiteral(computed),
+        t.booleanLiteral(node.__j_strict ?? true), t.booleanLiteral(read), t.booleanLiteral(write)];
+    if (target.object.type === 'Super' || target.property.type === 'PrivateName')
+        args.push(nativeAccess(target), nativeAccess(target, true));
+    return t.memberExpression(jalangiCall('Lr', ...args), t.identifier('value'));
+}
+
+function observeNative(node, kind) {
+    IID.printIidToLoc(node);
+    return jalangiCall('No', IID.getIid(), node, t.stringLiteral(kind));
+}
+
 function instrumentPreIncDec(node) {
     let right = createLiteralAst(1);
     right = wrapLiteral(right, right, N_LOG_NUMBER_LIT);
@@ -1329,7 +1452,9 @@ function adjustIncDec(op, ast) {
 
 function instrumentCall(callAst, isCtor) {
     const ast = callAst.callee;
-    if (ast.type === 'MemberExpression') {
+    if (ast.type === 'MemberExpression' && (ast.object.type === 'Super' || ast.property.type === 'PrivateName')) {
+        return wrapMethodCall(callAst, nativeBase(ast), getPropertyAsAst(ast), isCtor, ast.computed, nativeAccess(ast));
+    } else if (ast.type === 'MemberExpression') {
         return wrapMethodCall(callAst, ast.object, getPropertyAsAst(ast), isCtor, ast.computed);
     } else if (ast.type === 'OptionalMemberExpression') {
         return wrapMethodCall(callAst, ast.object, getPropertyAsAst(ast), isCtor, ast.computed);
@@ -1438,11 +1563,12 @@ export {
     wrapReturn, wrapThrow, wrapWithX1, wrapHash, wrapEvalArg,
     wrapUnaryOp, wrapBinaryOp, wrapLogicalAnd, wrapLogicalOr, wrapLogicalNullish,
     wrapSwitchDiscriminant, wrapSwitchTest, wrapWith, wrapConditional,
-    wrapLiteral, wrapForIn, wrapCatchClause, wrapAwait, restoreAsyncContext,
+    wrapLiteral, wrapForIn, wrapCatchClause, wrapAwait, restoreAsyncContext, restoreTraceScope,
     wrapScriptBodyWithTryCatch, wrapFunBodyWithTryCatch,
     // 高级函数
     instrumentStore, instrumentLoad, instrumentLoadModStore,
     instrumentPreIncDec, adjustIncDec, instrumentCall,
+    instrumentReference, instrumentNativeLoad, observeNative,
     instrumentFunctionEntryExit, instrumentArrowFunctionBody, instrumentScriptEntryExit,
     createCallAsFunEnterStatement, createCallAsScriptEnterStatement,
     // 内部工具（测试用）

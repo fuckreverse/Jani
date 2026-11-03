@@ -132,6 +132,9 @@ export default class F1EventIndex extends BasePlugin {
         log.info({ sessionId, fileVersion }, `Trace 文件格式版本: v${fileVersion}`);
 
         this.emitProgress(ctx, '清理旧数据...', 2);
+        db.run('DELETE FROM event_dependencies WHERE session_id = ?', sessionId);
+        db.run('DELETE FROM event_analysis WHERE session_id = ?', sessionId);
+        db.run('DELETE FROM control_regions WHERE session_id = ?', sessionId);
         db.run('DELETE FROM oid_aliases  WHERE session_id = ?', sessionId);
         db.run('DELETE FROM value_index WHERE session_id = ?', sessionId);
         db.run('DELETE FROM value_dict  WHERE session_id = ?', sessionId);
@@ -151,6 +154,9 @@ export default class F1EventIndex extends BasePlugin {
             'INSERT INTO events (id, session_id, type, iid, script_id, call_id, parent_call_id, context_id, call_pair_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
         // value_dict：INSERT OR IGNORE，id 由内存计数器分配，避免 N+1 查询
+        const stmtDependency = rawDb.prepare('INSERT INTO event_dependencies(session_id,from_event_id,to_event_id,from_var,to_var,edge_type) VALUES (?,?,?,?,?,?)');
+        const stmtAnalysis = rawDb.prepare('INSERT INTO event_analysis(session_id,event_id,kind,metadata) VALUES (?,?,?,?)');
+        const stmtControl = rawDb.prepare('INSERT INTO control_regions(session_id,event_id,sl,sc,el,ec) VALUES (?,?,?,?,?,?)');
         const stmtVD = rawDb.prepare(
             'INSERT OR IGNORE INTO value_dict (id, session_id, val_text, val_type, val_num) VALUES (?, ?, ?, ?, ?)'
         );
@@ -226,6 +232,20 @@ export default class F1EventIndex extends BasePlugin {
             // value_dict 必须先写，writes/reads/fields 引用其 id（外键关系，此处不启用约束）
             for (const v of vds)  stmtVD.run(...v);
             for (const e of evts) stmtEvent.run(...e);
+            for (const [eventId, analysis] of analysisBatch) {
+                stmtAnalysis.run(sessionId,eventId,analysis.kind ?? 'statement',JSON.stringify(analysis));
+                for (const dep of analysis.dependencies ?? []) {
+                    if (!Number.isSafeInteger(dep.eventId) || dep.eventId < 1 || dep.eventId >= eventId)
+                        throw new Error('Invalid dependency event reference');
+                    if (!['call_arg','call_ret','call_input','return_value','await_resume','async_schedule','control','field_delete','exception_value','native_result'].includes(dep.type))
+                        throw new Error('Invalid dependency type');
+                    stmtDependency.run(sessionId,dep.eventId,eventId,dep.fromVar ?? null,dep.toVar ?? null,dep.type);
+                }
+                for (const range of analysis.controlRanges ?? []) {
+                    if (!Array.isArray(range) || range.length!==4 || !range.every(Number.isSafeInteger)) throw new Error('Invalid control range');
+                    stmtControl.run(sessionId,eventId,...range);
+                }
+            }
             for (const w of wrs)  stmtWrite.run(...w);
             for (const r of rds)  stmtRead.run(...r);
             for (const f of flds) stmtField.run(...f);
@@ -251,6 +271,7 @@ export default class F1EventIndex extends BasePlugin {
         let view = new DataView(window.buffer, window.byteOffset, windowLen);
 
         // ── 批次缓冲 ──────────────────────────────────────────────────────────
+        let analysisBatch = [];
         let eventBatch = [];
         let writeBatch = [];
         let readBatch  = [];
@@ -270,6 +291,7 @@ export default class F1EventIndex extends BasePlugin {
         const flush = () => {
             if (eventBatch.length === 0 && vdBatch.length === 0) return;
             flushTx(eventBatch, writeBatch, readBatch, fieldBatch, viBatch, oidAliasBatch, vdBatch);
+            analysisBatch = [];
             eventBatch    = [];
             writeBatch    = [];
             readBatch     = [];
@@ -366,6 +388,7 @@ export default class F1EventIndex extends BasePlugin {
             if (eventId !== previousSeq + 1) sequenceGaps++;
             previousSeq = eventId;
 
+            if (event.analysis) analysisBatch.push([eventId,event.analysis]);
             eventBatch.push([
                 eventId,
                 sessionId,
@@ -415,7 +438,7 @@ export default class F1EventIndex extends BasePlugin {
                 }
                 // 把参数列表写入 writes 表（name='arg0','arg1',...），F3 读取 args 时依赖此数据
                 if (event.args?.length > 0) {
-                    const argc = Math.min(event.args.length, 8);
+                    const argc = event.args.length;
                     for (let i = 0; i < argc; i++) {
                         const v = event.args[i];
                         const sv = serializeValue(v);
@@ -435,13 +458,13 @@ export default class F1EventIndex extends BasePlugin {
                 writeBatch.push([eventId, sessionId, 'return', vid, omitted, null, null]);
             }
             if (event.fields?.length > 0) {
-                for (const f of event.fields) {
+                for (const [fieldIndex,f] of event.fields.entries()) {
                     const sv = serializeValue(f.value);
                     const vid = internValue(sv, vdBatch);
                     fieldBatch.push([
                         eventId, sessionId,
                         f.offset ?? null,
-                        f.isWrite ? 1 : 0,
+                        event.analysis?.deletedFieldIndexes?.includes(fieldIndex) ? 2 : f.isWrite ? 1 : 0,
                         vid,
                         f.omitted ? 1 : 0,
                         f.baseOid ?? null,

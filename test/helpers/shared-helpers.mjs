@@ -87,7 +87,9 @@ export function runInSandbox(instrCode, J$instance, extraGlobals = {}, timeoutMs
         Infinity,
         ...extraGlobals,
     });
-    vm.runInContext(instrCode, sandbox, { timeout: timeoutMs });
+    const execute = () => vm.runInContext(instrCode, sandbox, { timeout: timeoutMs });
+    if (typeof J$instance.runScript === 'function') J$instance.runScript(execute);
+    else execute();
     return sandbox;
 }
 

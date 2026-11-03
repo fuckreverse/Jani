@@ -32,6 +32,7 @@
  *  - @babel/generator  (npm，从 Babel AST 生成代码)
  */
 
+import * as t from '@babel/types';
 import * as babelParser from '@babel/parser';
 // @ts-ignore — @babel/generator 是 CJS 模块，ESM 导入需取 .default
 import _babelGenerate   from '@babel/generator';
@@ -167,6 +168,11 @@ function getContext(path) {
             key === 'callee' &&
             (parent.callee.type === 'MemberExpression' ||
              (parent.callee.type === 'Identifier' && parent.callee.name === 'eval'))) ||
+        (pt === 'TaggedTemplateExpression' && key === 'tag'
+            && parent.tag.type === 'MemberExpression') ||
+        ((pt === 'CallExpression' || pt === 'OptionalCallExpression' || pt === 'TaggedTemplateExpression')
+            && (key === 'callee' || key === 'tag') && path.node.type === 'Identifier'
+            && path.findParent(p => p.isWithStatement())) ||
         (pt === 'OptionalCallExpression' &&
             key === 'callee' &&
             (parent.callee.type === 'OptionalMemberExpression' ||
@@ -326,6 +332,34 @@ function replaceAndMark(path, newNode) {
     path.replaceWith(newNode);
 }
 
+/** Preserve native NamedEvaluation without adding a lexical function binding. */
+function preserveInferredName(path) {
+    const node = path.node;
+    if (node.id) return node;
+    const parent = path.parent;
+    let name;
+    if (parent.type === 'VariableDeclarator' && path.key === 'init' && parent.id.type === 'Identifier') name = parent.id.name;
+    else if ((parent.type === 'AssignmentExpression' || parent.type === 'AssignmentPattern')
+            && path.key === 'right' && parent.left.type === 'Identifier') name = parent.left.name;
+    else if (parent.type === 'ObjectProperty' && path.key === 'value' && !parent.computed) {
+        name = parent.key.name ?? String(parent.key.value);
+    } else if ((parent.type === 'ClassProperty' || parent.type === 'ClassPrivateProperty')
+            && path.key === 'value' && !parent.computed) {
+        name = parent.key.type === 'PrivateName' ? `#${parent.key.id.name}` : parent.key.name ?? String(parent.key.value);
+    } else if (parent.type === 'ExportDefaultDeclaration') name = 'default';
+    if (name === undefined) return node;
+    // Object property evaluation performs SetFunctionName, including arrows and
+    // anonymous classes. It introduces no identifier into the function's scope.
+    return t.memberExpression(t.objectExpression([
+        t.objectProperty(t.stringLiteral(name), node, true),
+    ]), t.stringLiteral(name), true);
+}
+
+function deferredComputedFunction(path) {
+    return !path.node.id && ['ObjectProperty', 'ClassProperty'].includes(path.parent.type)
+        && path.key === 'value' && path.parent.computed;
+}
+
 // ─── 主插桩变换（单一 babelTraverse pass）────────────────────────────────────
 
 /**
@@ -347,6 +381,9 @@ function runInstrumentPass(file) {
         // 全局 enter：跳过已被 replaceAndMark 标记的节点子树
         enter(path) {
             if (path.node.__j_instrumented) path.skip();
+            if (path.isAssignmentExpression() || path.isUnaryExpression() || path.isUpdateExpression()) {
+                path.node.__j_strict = path.isInStrictMode();
+            }
         },
 
         Program: {
@@ -388,7 +425,8 @@ function runInstrumentPass(file) {
                 if (!node.generator && !node.async && !node.__j_probe) {
                     node.body.body = W.wrapFunBodyWithTryCatch(node, node.body.body);
                 }
-                const ret = shouldWrapAsLiteral ? W.wrapLiteral(node, node, N_LOG_FUNCTION_LIT) : node;
+                const ret = shouldWrapAsLiteral && !deferredComputedFunction(path)
+                    ? W.wrapLiteral(node, preserveInferredName(path), N_LOG_FUNCTION_LIT) : node;
                 if (ret !== node) replaceAndMark(path, ret);
             },
         },
@@ -397,12 +435,11 @@ function runInstrumentPass(file) {
             enter(path) { W.setScope(path.node); },
             exit(path) {
                 const node = path.node;
-                // 箭头函数没有独立的 arguments / this / callee，不注入 J$.Fe/J$.Fr，
-                // 也不添加 try-catch 包裹（会改变表达式体箭头函数的 return 语义）。
-                // 代价：箭头函数内的异常不会被 J$.Ex 捕获，分析插件不会收到 functionEnter/Exit 回调。
+                // Observation-only lifecycle preserves lexical this/arguments and native returns.
                 instrumentArrowFunctionBody(node);
                 W.popScope();
-                const ret = W.wrapLiteral(node, node, N_LOG_FUNCTION_LIT);
+                if (deferredComputedFunction(path)) return;
+                const ret = W.wrapLiteral(node, preserveInferredName(path), N_LOG_FUNCTION_LIT);
                 replaceAndMark(path, ret);
             },
         },
@@ -456,11 +493,14 @@ function runInstrumentPass(file) {
             },
             exit(path) {
                 if (path.node.scope) W.popScope();
+                const named = preserveInferredName(path);
+                if (named !== path.node) replaceAndMark(path, named);
             },
         },
 
         TryStatement: {
             exit(path) {
+                if(path.node.finalizer)W.restoreTraceScope(path.node.finalizer.body);
                 if (path.node.finalizer && path.getFunctionParent()?.node.async) {
                     W.restoreAsyncContext(path.node.finalizer.body, path.getFunctionParent().node);
                 }
@@ -476,6 +516,7 @@ function runInstrumentPass(file) {
                 if (node.param?.type === 'Identifier') {
                     W.wrapCatchClause(node, node.body.body, node.param.name);
                 }
+                W.restoreTraceScope(node.body.body,true);
                 if (fn?.node.async) W.restoreAsyncContext(node.body.body, fn.node);
                 W.popScope();
             },
@@ -572,6 +613,7 @@ function runInstrumentPass(file) {
             exit(path) {
                 if (ignoreSubAst(path.node)) return;
                 const node = path.node;
+                if (_config.INSTR_INVOKE && !_config.INSTR_INVOKE(node)) return;
                 const ret = {
                     type:      'CallExpression',
                     callee:    W.instrumentCall(node, true),
@@ -589,13 +631,42 @@ function runInstrumentPass(file) {
                 const calleeType = node.callee?.type;
                 if ((calleeType === 'MemberExpression' || calleeType === 'OptionalMemberExpression')
                         && node.callee.object?.name === _jalangiVar) return;
-                // super() 调用的 callee 是 Super 节点（关键字），不能传入 J$.F()
-                if (calleeType === 'Super') return;
-                // 私有方法调用（this.#method()）不支持 bracket notation，跳过插桩
-                if (calleeType === 'MemberExpression' && node.callee.property?.type === 'PrivateName') return;
+                // super() initializes the derived receiver and must stay native.
+                if (calleeType === 'Super') {
+                    if (!_config.INSTR_INVOKE || _config.INSTR_INVOKE(node))
+                        replaceAndMark(path, W.observeNative(node, 'super.constructor'));
+                    return;
+                }
+                if (calleeType === 'Identifier' && path.findParent(p => p.isWithStatement())) {
+                    if (!_config.INSTR_INVOKE || _config.INSTR_INVOKE(node))
+                        replaceAndMark(path, W.observeNative(node, 'with.call'));
+                    return;
+                }
                 const isEval = node.callee.type === 'Identifier' && node.callee.name === 'eval';
                 node.callee = W.instrumentCall(node, false);
                 if (isEval) node.arguments = node.arguments.map(W.wrapEvalArg);
+            },
+        },
+
+        OptionalCallExpression: {
+            exit(path) {
+                if (path.node.callee.type === 'Identifier' && path.findParent(p => p.isWithStatement())
+                        && (!_config.INSTR_INVOKE || _config.INSTR_INVOKE(path.node)))
+                    replaceAndMark(path, W.observeNative(path.node, 'with.optional-call-result'));
+            },
+        },
+
+        TaggedTemplateExpression: {
+            exit(path) {
+                const node = path.node;
+                const tag = node.tag;
+                if (tag.type === 'Identifier' && path.findParent(p => p.isWithStatement())) {
+                    if (!_config.INSTR_INVOKE || _config.INSTR_INVOKE(node))
+                        replaceAndMark(path, W.observeNative(node, 'with.tag'));
+                    return;
+                }
+                const call = { ...node, callee: tag, arguments: [] };
+                node.tag = W.instrumentCall(call, false);
             },
         },
 
@@ -605,7 +676,17 @@ function runInstrumentPass(file) {
                 const node = path.node;
                 // 私有字段赋值（this.#n = val）跳过插桩，bracket notation 无法访问私有字段
                 const leftNode = node.left;
-                if (leftNode?.type === 'MemberExpression' && leftNode.property?.type === 'PrivateName') return;
+                // These references require native assignment/receiver semantics.
+                if (leftNode.type === 'ObjectPattern' || leftNode.type === 'ArrayPattern') return;
+                if (leftNode.type === 'MemberExpression' && (leftNode.object.type === 'Super'
+                        || leftNode.property.type === 'PrivateName')) {
+                    const reference = W.instrumentReference(node, leftNode);
+                    if (reference !== leftNode) {
+                        node.left = reference;
+                        replaceAndMark(path, node);
+                    }
+                    return;
+                }
                 const ret = node.operator === '='
                     ? W.instrumentStore(node, false)
                     : W.instrumentLoadModStore(node);
@@ -617,12 +698,18 @@ function runInstrumentPass(file) {
             exit(path) {
                 if (ignoreSubAst(path.node)) return;
                 const node = path.node;
-                // 私有字段（this.#n++）不支持 bracket notation，跳过插桩
-                const arg = node.argument;
-                if (arg?.type === 'MemberExpression' && arg.property?.type === 'PrivateName') return;
-                let ret = W.instrumentPreIncDec(node);
-                if (!node.prefix) ret = W.adjustIncDec(node.operator, ret);
-                if (ret !== node) replaceAndMark(path, ret);
+                const target = node.argument;
+                if (target.type === 'Identifier' && path.findParent(p => p.isWithStatement())) {
+                    if (!_config.INSTR_READ || _config.INSTR_READ(target.name, node)
+                            || !_config.INSTR_WRITE || _config.INSTR_WRITE(target.name, node))
+                        replaceAndMark(path, W.observeNative(node, 'with.update'));
+                    return;
+                }
+                const reference = W.instrumentReference(node, target);
+                if (reference !== target) {
+                    node.argument = reference;
+                    replaceAndMark(path, node);
+                }
             },
         },
 
@@ -667,7 +754,11 @@ function runInstrumentPass(file) {
                 if (ignoreSubAst(path.node)) return;
                 if (getContext(path) !== CONTEXT.RHS) return;
                 // 私有字段（this.#n）不支持 bracket notation，J$.G 会返回 undefined
-                if (path.node.property?.type === 'PrivateName') return;
+                if (path.node.property?.type === 'PrivateName' || path.node.object?.type === 'Super') {
+                    const result = W.instrumentNativeLoad(path.node);
+                    if (result !== path.node) replaceAndMark(path, result);
+                    return;
+                }
                 const ret = W.instrumentLoad(path.node, false);
                 if (ret !== path.node) replaceAndMark(path, ret);
             },
@@ -787,6 +878,8 @@ function runInstrumentPass(file) {
                 if (node.operator === 'void') return;
                 let ret = node;
                 if (node.operator === 'delete') {
+                    if (node.argument.type === 'OptionalMemberExpression'
+                            || node.argument.object?.type === 'Super') return;
                     if (node.argument.object) {
                         ret = W.wrapBinaryOp(node, node.argument.object,
                             W.getPropertyAsAst(node.argument), node.operator, node.argument.computed);
@@ -828,8 +921,8 @@ function runInstrumentPass(file) {
             exit(path) {
                 if (ignoreSubAst(path.node)) return;
                 const node = path.node;
-                node.test   = W.wrapConditional(node.test, node.test);
-                node.test   = W.wrapWithX1(node, node.test);
+                node.test   = W.wrapConditional(node.test, node.test, [node.consequent], [node.alternate], true);
+
             },
         },
 
@@ -837,7 +930,7 @@ function runInstrumentPass(file) {
             exit(path) {
                 if (ignoreSubAst(path.node)) return;
                 const node = path.node;
-                node.test   = W.wrapConditional(node.test, node.test);
+                node.test   = W.wrapConditional(node.test, node.test, [node.consequent], [node.alternate]);
                 node.test   = W.wrapWithX1(node, node.test);
             },
         },
@@ -846,7 +939,7 @@ function runInstrumentPass(file) {
             exit(path) {
                 if (ignoreSubAst(path.node)) return;
                 const node = path.node;
-                node.test   = W.wrapConditional(node.test, node.test);
+                node.test   = W.wrapConditional(node.test, node.test, [node.body, node.update]);
                 node.test   = W.wrapWithX1(node, node.test);
             },
         },
@@ -855,7 +948,7 @@ function runInstrumentPass(file) {
             exit(path) {
                 if (ignoreSubAst(path.node)) return;
                 const node = path.node;
-                node.test   = W.wrapConditional(node.test, node.test);
+                node.test   = W.wrapConditional(node.test, node.test, [node.body, node.update]);
                 node.test   = W.wrapWithX1(node, node.test);
             },
         },
@@ -864,7 +957,7 @@ function runInstrumentPass(file) {
             exit(path) {
                 if (ignoreSubAst(path.node)) return;
                 const node = path.node;
-                node.test   = W.wrapConditional(node.test, node.test);
+                node.test   = W.wrapConditional(node.test, node.test, [node.body, node.update]);
                 node.test   = W.wrapWithX1(node, node.test);
                 node.init   = W.wrapWithX1(node, node.init);
                 node.update = W.wrapWithX1(node, node.update);
@@ -1177,6 +1270,11 @@ function instrumentCode(options) {
     let instCode = options.inlineSourceMap
         ? `(globalThis.${jv}=globalThis.${jv}||{});${jv}.smap=${jv}.smap||{};${jv}.smap[${smapKey}]=${sourceMapString};${jv}.iids=${sourceMapString};\n${code}`
         : `(globalThis.${jv}=globalThis.${jv}||{});${jv}.smap=${jv}.smap||{};${jv}.smap[${smapKey}]=${JSON.stringify(tmp)};${jv}.iids=${JSON.stringify(tmp)};\n${code}`;
+
+    // The metadata header must not terminate the source's strict directive prologue.
+    if (newAst?.directives?.some(d => d.value.value === 'use strict')) {
+        instCode = `'use strict';${instCode}`;
+    }
 
     if (isEval && _analysis?.instrumentCode) {
         const aret = _analysis.instrumentCode(/** @type {number} */ (thisIid), instCode, newAst, isDirect);

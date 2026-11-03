@@ -472,6 +472,6 @@ export default class I3ObfuscationDetector extends BasePlugin {
             ? Math.round(hints.reduce((s, h) => s + (h[5] ?? 0), 0) / hints.length * 100)
             : 0;
 
-        this.emitDone(ctx, { hintCount: hints.length, obfuscationScore });
+        this.emitDone(ctx, { precision:'heuristic', confidenceMeaning:'uncalibrated-evidence-score', hintCount: hints.length, obfuscationScore });
     }
 }

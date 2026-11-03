@@ -38,18 +38,20 @@ const log = createDiagLogger(DOMAIN.FRAMEWORK);
 
 /** 所有可能的钩子名称（与 JalangiRuntime.js 运行时保持一致）。 */
 const HOOKS = $freeze([
-    'returnStmt', 'throwStmt', 'withStmt',
+    'returnStmt', 'throwStmt', 'withStmt', 'nativeOperation',
     'binaryPre', 'binary', 'evalCond',
     'declareVar', 'endExecution', 'endExpression',
     'forInStmt', 'functionEnter', 'functionExit',
     'getFieldPre', 'getField', 'instrumentCodePre',
-    'instrumentCode', 'callPre', 'call',
+    'instrumentCode', 'callPre', 'call', 'callException',
     'evalLiteral', 'onReady', 'putFieldPre',
     'putField', 'readVar', 'shouldInstrumentFn',
     'scriptEnter', 'scriptExit', 'unaryPre',
     'unary', 'writeVar',
     // async/await 恢复点钩子（J$.Aw 触发）
-    'awaitResume', 'awaitSuspend',
+    'awaitResume', 'awaitSuspend', 'contextResume',
+    'callbackSchedule', 'callbackEnter', 'callbackExit', 'callbackResult', 'callbackThrow', 'traceBegin', 'traceFinish', 'traceError',
+    'scopeEnter', 'catchEnter', 'declarationsEnd', 'defaultBegin', 'defaultEnd', 'argumentsBegin', 'argumentBegin', 'argumentEnd', 'argumentSpreadEnd',
 ]);
 
 /**
@@ -142,6 +144,8 @@ class HookDispatcher {
         }
         return this;
     }
+
+    hasHook(name) { return (this._chains[name]?.fns.length ?? 0)>0; }
 
     /** @private 为指定 hook 名生成分发函数 */
     _makeDispatcher(name) {

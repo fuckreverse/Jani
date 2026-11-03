@@ -27,7 +27,10 @@ export function traverseGraph(graph, options = {}) {
     }
     for (let i=0;i<queue.length;i++) {
         const current = queue[i];
-        if (current.hop >= hops) continue;
+        if (current.hop >= hops) {
+            if(graph.neighbors(current.kind,current.key,direction,1).some(edge=>!edges.has(edge.id)))truncated=true;
+            continue;
+        }
         const key = current.kind === 'var' ? 'Vars' : 'Event';
         const forward = cfg(`api.dataflow${key}FwdLimit`), backward = cfg(`api.dataflow${key}BwdLimit`);
         const rows = direction === 'both'

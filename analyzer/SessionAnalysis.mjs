@@ -5,7 +5,7 @@ import { autoDiscover, schedule } from './PluginEngine.mjs';
 
 export const PHASE1_PLUGINS = Object.freeze(['F1-EventIndex']);
 export const PHASE2_PLUGINS = Object.freeze(['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A3-HotPathAnalyzer']);
-export const PHASE3_PLUGINS = Object.freeze(['A5-LoopDetector', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer']);
+export const PHASE3_PLUGINS = Object.freeze(['A5-LoopDetector', 'A6-LoopVarClassifier', 'A8-ValuePatternDetector', 'I1-CryptoDetector', 'I2-SignatureAnalyzer']);
 export const PHASE4_PLUGINS = Object.freeze(['A2-DataFlowGraph', 'A7-ObjectMutationTracker', 'I3-ObfuscationDetector', 'I4-AlgorithmSummarizer', 'I5-WebApiDetector']);
 
 // Progress is observational. Only the settled job promise advances the workflow.

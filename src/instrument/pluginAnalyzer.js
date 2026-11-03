@@ -120,6 +120,8 @@ const HOOK_TO_CONFIG_FIELDS = {
     unary:          ['INSTR_UNARY'],
     evalCond:       ['INSTR_CONDITIONAL'],
 
+    nativeOperation: ['INSTR_INVOKE', 'INSTR_READ', 'INSTR_WRITE'],
+
     // eval 插桩（instrumentCodePre/Code 始终由 eval 调用触发，不受 Config 控制，此处不映射）
     instrumentCodePre: [],
     instrumentCode:    [],

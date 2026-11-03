@@ -302,7 +302,7 @@ describe('全流程集成测试（Node.js 后端）', () => {
             // 等待所有 async 任务完成（样例中有 async 部分）
             try { await sandbox.$__results?._asyncPromises; } catch { /* vm Promise 可能部分失败 */ }
 
-            // close() 内部会 flush + 关闭后端（TraceLogger 无公开 flush() 方法）
+            // close() 内部会 flush 并关闭后端
             await logger.close();
 
             // 保存 API 生成的 smap 文件，供 Step 4 trace-parse --smap 使用

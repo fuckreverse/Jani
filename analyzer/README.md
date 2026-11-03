@@ -2,6 +2,8 @@
 
 本地 Web 分析平台，用于分析 Jani 动态插桩生成的 `.bin` trace 文件。
 
+分析结果的精度、证据类型、截断标记和兼容范围见 [分析语义与质量](docs/Analysis-Semantics.md)。
+
 ## 技术栈
 
 - **后端**：Node.js + Express + better-sqlite3（SQLite WAL）+ ws

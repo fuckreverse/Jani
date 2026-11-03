@@ -8,11 +8,12 @@ import * as db from '../db/Database.mjs';
 import { decodeType } from '../db/EventTypeCode.mjs';
 import { cfg } from '../Config.mjs';
 import { withGraph } from '../GraphStore.mjs';
+import { analysisQuality } from '../AnalysisQuality.mjs';
 
 export default class I4AlgorithmSummarizer extends BasePlugin {
     static id = 'I4-AlgorithmSummarizer';
     static observes = ['F3-CallGraphBuilder', 'F4-VariableLifetime', 'A5-LoopDetector',
-        'A7-ObjectMutationTracker', 'A2-DataFlowGraph', 'I1-CryptoDetector'];
+        'A7-ObjectMutationTracker', 'A2-DataFlowGraph', 'I1-CryptoDetector', 'A6-LoopVarClassifier'];
     static deps = [
         'A3-HotPathAnalyzer',
         'I3-ObfuscationDetector',
@@ -133,6 +134,7 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
         if (loops.length > 0) algorithmTags.push('循环密集型');
         if (isObfuscated) algorithmTags.push('混淆代码');
         const report = {
+            quality: analysisQuality(db.raw(),sessionId),
             sessionId,
             sessionName: session ? session.name : null,
             generatedAt: Date.now(),
@@ -163,6 +165,7 @@ export default class I4AlgorithmSummarizer extends BasePlugin {
                 totalMutations: objMutStats ? objMutStats.total : 0,
                 topMutatedObjects,
             },
+            loopVariableRoles: db.all('SELECT role,COUNT(*) count FROM loop_var_roles WHERE session_id=? GROUP BY role',sessionId),
             cryptoHints,
             obfuscationHints: obfHints,
             keyVariables: keyVars,
@@ -196,6 +199,10 @@ function generateMarkdown(report) {
     lines.push(`# JTA 算法分析报告`);
     lines.push(`\n**会话：** ${report.sessionName || report.sessionId}`);
     lines.push(`**生成时间：** ${new Date(report.generatedAt).toLocaleString('zh-CN')}`);
+    lines.push(`\n## 分析质量`);
+    lines.push(`- Trace 完整性：${report.quality.traceIntegrity}；依赖精度：语句级。`);
+    if(report.quality.truncatedPlugins.length)lines.push(`- 已截断的分析：${report.quality.truncatedPlugins.join(', ')}。`);
+    for(const limitation of report.quality.limitations)lines.push(`- ${limitation}`);
 
     // 概览
     lines.push(`\n## 📊 概览`);

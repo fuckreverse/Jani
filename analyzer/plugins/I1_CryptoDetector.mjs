@@ -1129,6 +1129,7 @@ export default class I1CryptoDetector extends BasePlugin {
         const uniqueAlgos = [...new Set(hints.map(h => h.algorithm).filter(Boolean))];
 
         this.emitDone(ctx, {
+            precision: 'heuristic', confidenceMeaning: 'uncalibrated-evidence-score',
             hintCount:     hints.length,
             algCount:      uniqueAlgos.length,
             topConf,

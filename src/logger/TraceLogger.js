@@ -54,6 +54,7 @@
  *   await logger.close();
  */
 
+import { snapshotEvent } from '../encoding/EventSerializer.js';
 import { createDiagLogger, DOMAIN } from './diagnostics.js';
 
 // ── 运行环境检测 ────────────────────────────────────────────────────────────────
@@ -316,11 +317,19 @@ export class TraceLogger {
      * @param {object} event
      */
     trace(event) {
+        // Never hand business objects to JSON, structured clone or delayed backends.
+        event = snapshotEvent(event);
         if (this._mgr) {
             this._mgr.push(event);
         } else if (this._preInitQueue !== null) {
             this._preInitQueue.push({ kind: 'trace', event });
         }
+    }
+
+    /** Flush queued events through every configured backend without closing it. */
+    async flush() {
+        await this.init();
+        await this._mgr?.flush();
     }
 
     /**

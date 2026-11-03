@@ -396,6 +396,9 @@ export interface SerializedRegisterEntry extends Omit<RegisterEntry, 'sources'> 
  * }
  */
 export interface IAnalysisPlugin {
+    /** Successful native operation; callee/arguments may be unavailable without changing Reference semantics. */
+    nativeOperation?(iid: number, operation: string, value: unknown): void;
+
     /** 函数/方法/构造器调用之前 */
     invokeFunPre?(
         iid: number,
@@ -604,8 +607,34 @@ export interface IAnalysisPlugin {
      */
     onReady?(cb: () => void): void;
 
-    /** await 恢复点（J$.Aw，TODO-15） */
-    awaitResume?(iid: number, contextId: number): void;
+    /** await 挂起和恢复；返回值不改变原程序。 */
+    awaitSuspend?(iid: number, contextId: number, value: unknown): void;
+    awaitResume?(iid: number, contextId: number, value?: unknown): void;
+    contextResume?(contextId: number): void;
+
+    /** 原生调用抛错；对应 callPre，不产生成功的 call 返回事件。 */
+    callException?(iid: number, error: unknown): void;
+
+    /** 已知原生调度器的回调注册、执行和退出。 */
+    callbackSchedule?(iid: number, registrationId: number, receiver: unknown, position: number, propagatesReturn: boolean, registration: object): void;
+    callbackEnter?(iid: number, registrationId: number, contextId: number, args: unknown[], registration: object): void;
+    callbackExit?(iid: number, contextId: number): void;
+    callbackResult?(iid: number, contextId: number, value: unknown): void;
+    callbackThrow?(iid: number, contextId: number, error: unknown): void;
+
+    /** Observation scopes preserve native arrow and async return/exception semantics. */
+    traceBegin?(iid: number, contextId: number, arrow: boolean): void;
+    traceFinish?(iid: number, contextId: number): void;
+    traceError?(contextId: number, error: unknown): void;
+    scopeEnter?(frameId: number): void;
+    catchEnter?(frameId: number, caught?: boolean): void;
+    declarationsEnd?(iid: number): void;
+    argumentsBegin?(iid: number): void;
+    argumentBegin?(iid: number, index: number): void;
+    argumentEnd?(iid: number, index: number, value: unknown, spread: boolean): void;
+    argumentSpreadEnd?(iid: number, index: number): void;
+    defaultBegin?(iid: number, index: number, names: string[], inputs: [string, number][]): void;
+    defaultEnd?(iid: number, index: number, value: unknown): void;
 
     /** 允许插件定义 usedHooks 静态声明，供 pluginAnalyzer 使用 */
     usedHooks?: string[];

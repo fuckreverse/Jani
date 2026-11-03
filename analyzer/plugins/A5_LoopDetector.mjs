@@ -26,6 +26,8 @@
 import BasePlugin from './BasePlugin.mjs';
 import * as db from '../db/Database.mjs';
 import { cfg } from '../Config.mjs';
+import { synthetic } from '../DependencyIndex.mjs';
+import { executionEventSql } from '../db/EventTypeCode.mjs';
 
 // 二分查找第一个 >= target 的位置
 function lowerBound(arr, target) {
@@ -108,15 +110,15 @@ export default class A5LoopDetector extends BasePlugin {
         // ── 预编译语句 ────────────────────────────────────────────────────────
         // 查循环 iid 在 [start_seq, end_seq] 内的所有 event id（用于确定迭代分割点）
         const stmtEvents = rawDb.prepare(
-            'SELECT id FROM events WHERE session_id = ? AND iid = ? AND id >= ? AND id <= ? ORDER BY id ASC'
+            `SELECT id FROM events e WHERE session_id = ? AND iid = ? AND id >= ? AND id <= ? AND (? IS NULL OR call_id=?) AND ${executionEventSql()} ORDER BY id ASC`
         );
         // 查写操作（不做 JOIN——完整值通过 vdMap 内存查找）
         const stmtWrites = rawDb.prepare(
-            'SELECT event_id, name, value_id FROM writes WHERE session_id = ? AND event_id >= ? AND event_id <= ? AND name IS NOT NULL ORDER BY event_id ASC'
+            `SELECT w.event_id,w.name,w.value_id,w.binding_id,w.scope_id,e.type AS event_type FROM writes w LEFT JOIN events e ON e.session_id=w.session_id AND e.id=w.event_id WHERE w.session_id=? AND w.event_id>=? AND w.event_id<=? AND w.name IS NOT NULL AND (? IS NULL OR e.call_id=?) ORDER BY w.event_id,w.id`
         );
         // 查读操作（v2 新增）
         const stmtReads = rawDb.prepare(
-            'SELECT event_id, name, value_id FROM reads WHERE session_id = ? AND event_id >= ? AND event_id <= ? AND name IS NOT NULL ORDER BY event_id ASC'
+            `SELECT r.event_id,r.name,r.value_id,r.binding_id,r.scope_id,e.type AS event_type FROM reads r LEFT JOIN events e ON e.session_id=r.session_id AND e.id=r.event_id WHERE r.session_id=? AND r.event_id>=? AND r.event_id<=? AND r.name IS NOT NULL AND (? IS NULL OR e.call_id=?) ORDER BY r.event_id,r.id`
         );
 
         const stmtInsert = rawDb.prepare(
@@ -127,6 +129,7 @@ export default class A5LoopDetector extends BasePlugin {
         });
 
         let totalIter = 0;
+        let truncated=skipped>0;
         let pending   = [];
 
         const flushBatch = () => {
@@ -147,9 +150,10 @@ export default class A5LoopDetector extends BasePlugin {
             }
 
             const loop = loops[i];
+            const callId=rawDb.prepare('SELECT call_id FROM events WHERE session_id=? AND id=?').get(sessionId,loop.start_seq)?.call_id ?? null;
 
             // ── 2a: 取 iid 命中序列（迭代分割点）───────────────────────────
-            const iidEventRows = stmtEvents.all(sessionId, loop.iid, loop.start_seq, loop.end_seq);
+            const iidEventRows = stmtEvents.all(sessionId, loop.iid, loop.start_seq, loop.end_seq,callId,callId);
             if (iidEventRows.length < 2) continue;
 
             const iidHits = iidEventRows.map(r => r.id); // iid 命中时刻（event_id）
@@ -157,8 +161,9 @@ export default class A5LoopDetector extends BasePlugin {
             // ── 2b: 取循环范围内的写操作和读操作 ───────────────────────────
             const writesByEventId = new Map(); // event_id → [{name, value_id}]
             {
-                const rows = stmtWrites.all(sessionId, loop.start_seq, loop.end_seq);
+                const rows = stmtWrites.all(sessionId, loop.start_seq, loop.end_seq,callId,callId);
                 for (const r of rows) {
+                    if(synthetic(r.name,r.event_type))continue;
                     let arr = writesByEventId.get(r.event_id);
                     if (!arr) { arr = []; writesByEventId.set(r.event_id, arr); }
                     arr.push(r);
@@ -169,8 +174,9 @@ export default class A5LoopDetector extends BasePlugin {
             // v2：同时加载读操作
             const readsByEventId = new Map(); // event_id → [{name, value_id}]
             {
-                const rows = stmtReads.all(sessionId, loop.start_seq, loop.end_seq);
+                const rows = stmtReads.all(sessionId, loop.start_seq, loop.end_seq,callId,callId);
                 for (const r of rows) {
+                    if(synthetic(r.name,r.event_type))continue;
                     let arr = readsByEventId.get(r.event_id);
                     if (!arr) { arr = []; readsByEventId.set(r.event_id, arr); }
                     arr.push(r);
@@ -178,56 +184,39 @@ export default class A5LoopDetector extends BasePlugin {
             }
             const readEventIds = [...readsByEventId.keys()].sort((a, b) => a - b);
 
-            // ── 2c: 确定每次迭代的 [startSeq, endSeq] ──────────────────────
-            //
-            // v2 修正（不足2）：
-            //   旧逻辑：iter[j].start = iidHits[j]，这会遗漏循环头之前的代码。
-            //   新逻辑：iter[j].start = 上次迭代结束的下一个 event（即前一次 iid 命中点 + 1），
-            //           iter[0].start = loop.start_seq（覆盖第一次迭代从循环入口到 iid 首次命中前的代码）
-            //
-            // 示意（for(let i=0; i<n; i++) { ... }）：
-            //   loop.start_seq ──→ [初始化 i=0] ──→ [条件判断 iid=100 命中] ──→ [循环体]
-            //                      ↑ iter0.start                                  ──→ [条件判断 iid=100 命中]
-            //                                                                          ↑ iter1.start-1 (即 iidHits[0])
-            //
-            // 分割方式：
-            //   iter[0].start = loop.start_seq
-            //   iter[0].end   = iidHits[1] - 1  （下次 iid 命中之前）
-            //   iter[j].start = iidHits[j-1]     （从本次 iid 命中开始，包含条件/循环头判断）
-            //   iter[j].end   = iidHits[j] - 1   （下次命中之前结束）
-            //   iter[last].start = iidHits[last-1]
-            //   iter[last].end   = loop.end_seq
+            const identities=new Map();
+            for(const entries of [writesByEventId,readsByEventId])for(const rows of entries.values())for(const row of rows) {
+                if(!identities.has(row.name))identities.set(row.name,new Set());
+                identities.get(row.name).add(row.binding_id ?? `scope:${row.scope_id ?? 'unknown'}`);
+            }
+            const snapshotName=row=>identities.get(row.name)?.size>1
+                ? `${row.name}@${row.binding_id ?? `scope:${row.scope_id ?? 'unknown'}`}` : row.name;
 
+            // Each candidate hit starts one estimated iteration. These intervals
+            // partition the observed range without an empty first interval or a
+            // doubled final interval; they do not prove source-level loop counts.
             const iterLimit = Math.min(iidHits.length, _maxIterPerLoop);
+            truncated ||= iidHits.length > iterLimit;
 
             for (let j = 0; j < iterLimit; j++) {
-                // 迭代起点：
-                //   j=0 → loop.start_seq（覆盖第一次迭代进入循环前的所有代码）
-                //   j>0 → iidHits[j-1]  （从上次 iid 命中开始，包含本次循环头判断）
-                const startSeq = j === 0 ? loop.start_seq : iidHits[j - 1];
-
-                // 迭代终点：
-                //   j < last → iidHits[j] - 1（到下次 iid 命中之前）
-                //   j = last → loop.end_seq
-                const endSeq = j + 1 < iidHits.length
-                    ? iidHits[j] - 1
-                    : loop.end_seq;
+                const startSeq = iidHits[j];
+                const endSeq = j + 1 < iidHits.length ? iidHits[j + 1] - 1 : loop.end_seq;
 
                 // ── 写快照：[startSeq, endSeq] 内所有 writes，取每个变量的最终写入值 ──
-                const wSnap = {};
+                const wSnap = Object.create(null);
                 {
                     const wStart = lowerBound(writeEventIds, startSeq);
                     for (let k = wStart; k < writeEventIds.length && writeEventIds[k] <= endSeq; k++) {
                         const wrs = writesByEventId.get(writeEventIds[k]);
                         if (wrs) {
-                            for (const w of wrs) wSnap[w.name] = vdMap.get(w.value_id) ?? null;
+                            for (const w of wrs) wSnap[snapshotName(w)] = vdMap.get(w.value_id) ?? null;
                         }
                     }
                 }
 
                 // ── 读快照：[startSeq, endSeq] 内所有 reads，取每个变量最后一次读到的值 ──
                 // 限制变量数防止爆炸（数组高频读取场景）
-                const rSnap = {};
+                const rSnap = Object.create(null);
                 {
                     const rStart = lowerBound(readEventIds, startSeq);
                     let readVarCount = 0;
@@ -235,10 +224,10 @@ export default class A5LoopDetector extends BasePlugin {
                         const rds = readsByEventId.get(readEventIds[k]);
                         if (rds) {
                             for (const r of rds) {
-                                if (!(r.name in rSnap) && readVarCount >= _maxReadVarsPerIter) continue;
-                                if (!(r.name in rSnap)) readVarCount++;
+                                if (!(snapshotName(r) in rSnap) && readVarCount >= _maxReadVarsPerIter) { truncated=true; continue; }
+                                if (!(snapshotName(r) in rSnap)) readVarCount++;
                                 // 使用最后一次读取的值（后覆盖前）
-                                rSnap[r.name] = vdMap.get(r.value_id) ?? null;
+                                rSnap[snapshotName(r)] = vdMap.get(r.value_id) ?? null;
                             }
                         }
                     }
@@ -283,6 +272,7 @@ export default class A5LoopDetector extends BasePlugin {
         } catch { /* 非致命 */ }
 
         this.emitDone(ctx, {
+            precision: 'heuristic-hit-intervals', truncated,
             loopCount:      loops.length,
             skippedLoops:   skipped,
             iterationCount: totalIter,
